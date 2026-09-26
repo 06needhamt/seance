@@ -16,7 +16,7 @@ The goal is to load and run arbitrary 32-bit Video for Windows (VfW / ICM) codec
 | `README.md` | Title only. |
 | `LICENSE` | GPLv2. |
 | `.gitignore` | Stock C template. It ignores `*.dll`/`*.exe`. |
-| `vcmimm6 (2).dll` | A third-party codec that was uploaded. It is **not** a design input or a required test; at most it is an optional smoke-test sample. |
+| `vcmimm6 (2).dll` | A third-party codec that was uploaded. It was not a design input and has since been removed from the repo (Phase 0). |
 
 **Everything is still missing:** the PE loader, the Win32 runtime, the ICM layer, AVI I/O, output writers, the CLI, tests, CI and docs.
 
@@ -134,7 +134,8 @@ All milestones are checked against **test fixtures built in the repo**, never ag
 0. **Skeleton.**
    - Makefile (i386 build, `make test`), `include/win32.h` (types, structs, DRV_*/ICM_* constants modelled on Wine headers).
    - README with prerequisites and usage.
-   - Move the uploaded DLL to `samples/` (with a `.gitignore` exception), or delete it if the user prefers.
+   - Remove the uploaded third-party DLL.
+   - `make test` runs unit tests, an ABI cross-check of `include/win32` against the mingw-w64 headers, and a CLI smoke test.
 1. **PE loader and `info`.** Fixtures are mingw-built DLLs under `tests/fixtures/`:
    - `pe_basic.dll`: exports by name and by ordinal, plus a forwarder.
    - `pe_reloc.dll`: loaded with `VFW_FORCE_RELOC=1`.
