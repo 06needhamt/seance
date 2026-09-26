@@ -153,6 +153,7 @@ struct pe_resource {
 	DWORD data_rva;
 	DWORD size;
 	DWORD codepage;
+	DWORD entry_rva;		/* its IMAGE_RESOURCE_DATA_ENTRY */
 };
 
 typedef int (*pe_resource_fn)(void *ctx, const struct pe_resource *res);

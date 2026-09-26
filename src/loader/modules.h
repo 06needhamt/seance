@@ -21,6 +21,8 @@ struct module {
 	const struct builtin_dll *builtin;	/* NULL for a PE module */
 	int refcount;
 	int attached;		/* DllMain(PROCESS_ATTACH) succeeded */
+	int no_thread_calls;	/* DisableThreadLibraryCalls */
+	int pinned;		/* never unloaded */
 
 	/* Modules this one holds a reference on (imports and forwarders). */
 	struct module **deps;
@@ -58,6 +60,12 @@ struct module *mod_main(void);
  */
 void *mod_get_proc(struct module *mod, const char *name);
 void *mod_get_ordinal(struct module *mod, WORD ordinal);
+
+/* Adds a reference (GetModuleHandleEx without UNCHANGED_REFCOUNT). */
+void mod_addref(struct module *mod);
+
+/* Keeps mod loaded for good (GET_MODULE_HANDLE_EX_FLAG_PIN). */
+void mod_pin(struct module *mod);
 
 /* Drops a reference; at zero, detaches and unloads it and its dependencies. */
 void mod_free(struct module *mod);

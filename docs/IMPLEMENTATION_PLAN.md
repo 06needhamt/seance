@@ -155,6 +155,7 @@ All milestones are checked against **test fixtures built in the repo**, never ag
    Milestone: `probe` lists the correct ICINFO, accepted formats and state size.
 4. **AVI and Y4M I/O, `decode` and `encode`.** Milestone: encoding a Y4M clip to AVI with `testcodec` and decoding it back gives a byte-exact result. The AVI output is validated with `ffprobe` when it is installed. The OpenDML path is tested with a large synthetic file.
 5. **Hardening and CI.**
+   - Keep DLL-visible memory below 2 GB. On a 64-bit kernel a 32-bit process gets addresses up to 4 GB, and glibc's heap and `mmap` live near `0xf7000000`. Windows code without `LARGE_ADDRESS_AWARE` may treat pointers as signed. Options: an `ADDR_LIMIT_3GB`/low-memory personality with a re-exec, or serving Win32 heaps from a low reservation.
    - Build a matrix of fixtures, including 16-byte alignment and SSE use in the codec and C++ exceptions across a codec boundary.
    - A fuzz-style AVI parser test.
    - A GitHub Actions workflow installs `gcc-multilib` and `mingw-w64` and runs `make test`.

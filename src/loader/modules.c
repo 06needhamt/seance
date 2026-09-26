@@ -506,9 +506,27 @@ struct module *mod_main(void)
 	return main_module;
 }
 
-void mod_free(struct module *mod)
+void mod_addref(struct module *mod)
 {
 	if (!mod || mod == main_module)
+		return;
+	LOCK();
+	mod->refcount++;
+	UNLOCK();
+}
+
+void mod_pin(struct module *mod)
+{
+	if (!mod || mod == main_module)
+		return;
+	LOCK();
+	mod->pinned = 1;
+	UNLOCK();
+}
+
+void mod_free(struct module *mod)
+{
+	if (!mod || mod == main_module || mod->pinned)
 		return;
 	LOCK();
 	if (--mod->refcount <= 0) {

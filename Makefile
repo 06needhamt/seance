@@ -63,7 +63,7 @@ FIXTURE_CFLAGS := -O2 -Wall -nostdlib -ffreestanding -fno-stack-protector \
 	-Wl,--image-base,0x10000000 -Wl,-e,_DllMain@12
 FIXTURES := $(addprefix $(FIXTURE_DIR)/,pe_basic.dll pe_reloc.dll \
 	pe_noreloc.dll pe_tls.dll pe_dep.dll pe_fail.dll pe_missing.dll \
-	pe_runtime.dll)
+	pe_runtime.dll pe_k32.dll)
 
 fixtures: $(FIXTURES)
 
@@ -94,6 +94,12 @@ $(FIXTURE_DIR)/pe_runtime.dll: $(FIXTURE_SRC)/pe_runtime.c \
 		$(FIXTURE_DIR)/libvfw_missing.a $(FIXTURE_SRC)/fixture.h
 	$(MINGW_CC) $(FIXTURE_CFLAGS) -o $@ $< $(FIXTURE_DIR)/libvfw_missing.a \
 		-lkernel32
+
+# Calls into kernel32 with a 4-byte-aligned stack, as MSVC code does.
+$(FIXTURE_DIR)/pe_k32.dll: $(FIXTURE_SRC)/pe_k32.c $(FIXTURE_DIR)/pe_k32.res.o \
+		$(FIXTURE_SRC)/fixture.h
+	$(MINGW_CC) $(FIXTURE_CFLAGS) -mpreferred-stack-boundary=2 -o $@ \
+		$(filter-out %.h,$^) -lkernel32
 
 # The same image as pe_reloc.dll with its relocations stripped.
 $(FIXTURE_DIR)/pe_noreloc.dll: $(FIXTURE_DIR)/pe_reloc.dll

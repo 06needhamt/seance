@@ -30,6 +30,7 @@
 #define ERROR_CANNOT_MAKE              82
 #define ERROR_INVALID_PARAMETER        87
 #define ERROR_BROKEN_PIPE              109
+#define ERROR_BUFFER_OVERFLOW          111
 #define ERROR_DISK_FULL                112
 #define ERROR_CALL_NOT_IMPLEMENTED     120
 #define ERROR_SEM_TIMEOUT              121
