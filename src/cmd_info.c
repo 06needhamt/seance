@@ -8,6 +8,7 @@
 #include "commands.h"
 #include "common/error.h"
 #include "loader/pe.h"
+#include "runtime/builtin.h"
 
 struct flag_name {
 	DWORD bit;
@@ -176,27 +177,40 @@ static void print_exports(const struct pe_image *img)
 
 struct import_state {
 	const char *dll;	/* DLL of the previous import */
-	int count;
+	const struct builtin_dll *builtin;
+	int count, missing;
 };
 
 static int print_import(void *ctx, const struct pe_import *imp)
 {
 	struct import_state *st = ctx;
 
-	if (!st->dll || strcmp(st->dll, imp->dll))
-		printf("  %s\n", imp->dll);
+	if (!st->dll || strcmp(st->dll, imp->dll)) {
+		st->builtin = builtin_find(imp->dll);
+		printf("  %s%s\n", imp->dll,
+		       st->builtin ? " (built-in)" : " (loaded from disk)");
+	}
 	st->dll = imp->dll;
+
+	/* Whether the harness implements it; only known for built-in DLLs. */
+	const char *note = "";
+	if (st->builtin &&
+	    !(imp->name ? builtin_export(st->builtin, imp->name) :
+			  builtin_export_ordinal(st->builtin, imp->ordinal))) {
+		note = "  [not implemented]";
+		st->missing++;
+	}
 	if (imp->name)
-		printf("    %s\n", imp->name);
+		printf("    %s%s\n", imp->name, note);
 	else
-		printf("    #%u\n", imp->ordinal);
+		printf("    #%u%s\n", imp->ordinal, note);
 	st->count++;
 	return 0;
 }
 
 static void print_imports(const struct pe_image *img, int delayed)
 {
-	struct import_state st = { NULL, 0 };
+	struct import_state st = { NULL, NULL, 0, 0 };
 	int r;
 
 	printf("\n%s:\n", delayed ? "delay imports" : "imports");
@@ -206,6 +220,9 @@ static void print_imports(const struct pe_image *img, int delayed)
 		report_error();
 	else if (!st.count)
 		printf("  none\n");
+	else if (st.missing)
+		printf("  %d of %d not implemented by the harness\n",
+		       st.missing, st.count);
 }
 
 static int print_tls_callback(void *ctx, DWORD rva)

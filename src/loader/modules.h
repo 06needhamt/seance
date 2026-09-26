@@ -1,19 +1,24 @@
 /*
  * The module table: loads PE DLLs together with their dependencies, the
- * way LoadLibrary / GetProcAddress / FreeLibrary do.
+ * way LoadLibrary / GetProcAddress / FreeLibrary do. Names that match a
+ * built-in DLL (kernel32, msvcrt, ...) are served by the harness itself.
  *
- * Not thread-safe yet; Phase 2 adds a loader lock with the thread support.
+ * All functions take the loader lock, which is recursive, so DllMain and
+ * the stubs it calls may load and free modules too.
  */
 #ifndef VFW_LOADER_MODULES_H
 #define VFW_LOADER_MODULES_H
 
 #include "loader/pe.h"
+#include "runtime/builtin.h"
 
 struct module {
 	struct module *next;
-	char *name;		/* file name as found on disk, e.g. "pe_basic.dll" */
-	char *path;
-	struct pe_image *img;
+	char *name;		/* file name, e.g. "pe_basic.dll" */
+	char *path;		/* NULL for a built-in module */
+	BYTE *base;		/* the HMODULE */
+	struct pe_image *img;	/* NULL for a built-in module */
+	const struct builtin_dll *builtin;	/* NULL for a PE module */
 	int refcount;
 	int attached;		/* DllMain(PROCESS_ATTACH) succeeded */
 
@@ -25,9 +30,10 @@ struct module {
 /*
  * Loads a DLL, or adds a reference if it is already loaded. name is a path
  * (anything containing '/') or a bare file name, matched case-insensitively
- * and given ".dll" if it has no extension. A bare name is searched for in
- * the importer's directory (when importer is not NULL), then each directory
- * in $VFW_PATH (':'-separated), then the current directory.
+ * and given ".dll" if it has no extension. A bare name is first matched
+ * against the built-in DLLs, then searched for in the importer's directory
+ * (when importer is not NULL), each directory in $VFW_PATH (':'-separated),
+ * and the current directory.
  *
  * Set VFW_FORCE_RELOC=1 to load every image away from its preferred base.
  */
@@ -36,11 +42,27 @@ struct module *mod_load(const char *name, struct module *importer);
 /* A loaded module by file name, without adding a reference. */
 struct module *mod_find(const char *name);
 
-/* Exported addresses, following forwarders. NULL (with vfw_error()) if none. */
+/* The loaded module whose HMODULE is base, or that contains addr. */
+struct module *mod_from_base(const void *base);
+struct module *mod_from_address(const void *addr);
+
+/*
+ * The stand-in for the executable (GetModuleHandle(NULL)): a module with
+ * no exports, created on first use.
+ */
+struct module *mod_main(void);
+
+/*
+ * Exported addresses, following forwarders; GetProcAddress semantics, so
+ * an unimplemented built-in function is NULL (with vfw_error()).
+ */
 void *mod_get_proc(struct module *mod, const char *name);
 void *mod_get_ordinal(struct module *mod, WORD ordinal);
 
 /* Drops a reference; at zero, detaches and unloads it and its dependencies. */
 void mod_free(struct module *mod);
+
+/* Formats addr as "module+0xrva", or just the address if not in a module. */
+void mod_describe_address(const void *addr, char *out, size_t outsz);
 
 #endif /* VFW_LOADER_MODULES_H */

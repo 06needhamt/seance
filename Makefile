@@ -62,7 +62,8 @@ FIXTURE_CFLAGS := -O2 -Wall -nostdlib -ffreestanding -fno-stack-protector \
 	-mno-stack-arg-probe -fno-asynchronous-unwind-tables -shared \
 	-Wl,--image-base,0x10000000 -Wl,-e,_DllMain@12
 FIXTURES := $(addprefix $(FIXTURE_DIR)/,pe_basic.dll pe_reloc.dll \
-	pe_noreloc.dll pe_tls.dll pe_dep.dll pe_fail.dll pe_missing.dll)
+	pe_noreloc.dll pe_tls.dll pe_dep.dll pe_fail.dll pe_missing.dll \
+	pe_runtime.dll)
 
 fixtures: $(FIXTURES)
 
@@ -72,7 +73,7 @@ $(FIXTURE_DIR)/%.res.o: $(FIXTURE_SRC)/%.rc
 
 $(FIXTURE_DIR)/lib%.a: $(FIXTURE_SRC)/%.def
 	@mkdir -p $(dir $@)
-	$(DLLTOOL) -d $< -l $@
+	$(DLLTOOL) -k -d $< -l $@
 
 $(FIXTURE_DIR)/pe_basic.dll: $(FIXTURE_SRC)/pe_basic.c \
 		$(FIXTURE_SRC)/pe_basic.def $(FIXTURE_DIR)/pe_basic.res.o \
@@ -87,6 +88,12 @@ $(FIXTURE_DIR)/pe_missing.dll: $(FIXTURE_SRC)/pe_missing.c \
 		$(FIXTURE_DIR)/libzz_nosuch.a $(FIXTURE_DIR)/libpe_basic.a \
 		$(FIXTURE_SRC)/fixture.h
 	$(MINGW_CC) $(FIXTURE_CFLAGS) -o $@ $(filter-out %.h,$^)
+
+# Links against kernel32 (the mingw import library) and a made-up function.
+$(FIXTURE_DIR)/pe_runtime.dll: $(FIXTURE_SRC)/pe_runtime.c \
+		$(FIXTURE_DIR)/libvfw_missing.a $(FIXTURE_SRC)/fixture.h
+	$(MINGW_CC) $(FIXTURE_CFLAGS) -o $@ $< $(FIXTURE_DIR)/libvfw_missing.a \
+		-lkernel32
 
 # The same image as pe_reloc.dll with its relocations stripped.
 $(FIXTURE_DIR)/pe_noreloc.dll: $(FIXTURE_DIR)/pe_reloc.dll
