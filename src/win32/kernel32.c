@@ -63,16 +63,19 @@ K32(void) k32_Sleep(DWORD ms)
 
 #define E(name) { #name, 0, (void *)k32_##name }
 
-/* Sorted by name. */
-static const struct builtin_export exports[] = {
+static const struct builtin_export core_exports[] = {
 	E(GetCurrentProcessId),
 	E(GetCurrentThreadId),
 	E(GetLastError),
 	E(GetTickCount),
 	E(SetLastError),
 	E(Sleep),
+	BUILTIN_END
 };
 
-const struct builtin_dll builtin_kernel32 = {
-	"kernel32.dll", NULL, BUILTIN_EXPORTS(exports)
+static const struct builtin_export *const tables[] = {
+	core_exports,
+	NULL
 };
+
+const struct builtin_dll builtin_kernel32 = { "kernel32.dll", NULL, tables };

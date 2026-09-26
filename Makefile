@@ -103,9 +103,17 @@ $(FIXTURE_DIR)/%.dll: $(FIXTURE_SRC)/%.c $(FIXTURE_SRC)/fixture.h
 	@mkdir -p $(dir $@)
 	$(MINGW_CC) $(FIXTURE_CFLAGS) -o $@ $<
 
-$(ABI_GEN): tests/abi/gen_abi_checks.c
+# Every constant in include/win32, checked by value against mingw-w64.
+ABI_CONSTANTS := $(BUILD)/tests/abi_constants.h
+$(ABI_CONSTANTS): tests/abi/constants.sh tests/abi/constants_skip.txt \
+		$(wildcard include/win32/*.h)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) -Itests/abi $(CFLAGS) -MMD -MP $(LDFLAGS) -o $@ $<
+	sh tests/abi/constants.sh include/win32/*.h > $@
+
+$(ABI_GEN): tests/abi/gen_abi_checks.c $(ABI_CONSTANTS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -Itests/abi -I$(BUILD)/tests $(CFLAGS) -MMD -MP \
+		$(LDFLAGS) -o $@ $<
 
 $(ABI_INC): $(ABI_GEN)
 	$(ABI_GEN) > $@

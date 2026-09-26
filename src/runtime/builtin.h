@@ -24,16 +24,24 @@ struct builtin_export {
 	void *addr;		/* a function, or data for data exports */
 };
 
+/*
+ * A DLL's exports come from one or more tables (a big DLL spreads them over
+ * several source files), each ended by an entry with a NULL addr. They are
+ * merged and sorted on first use; names must be unique across them.
+ */
 struct builtin_dll {
 	const char *name;	/* lower case, with extension */
 	/* Other names it answers to, as fnmatch() patterns; NULL-terminated. */
 	const char *const *aliases;
-	/* Sorted by name (strcmp), so lookups can bisect. */
-	const struct builtin_export *exports;
-	size_t nexports;
+	const struct builtin_export *const *tables;	/* NULL-terminated */
 };
 
-#define BUILTIN_EXPORTS(table) (table), (sizeof(table) / sizeof((table)[0]))
+#define BUILTIN_END { NULL, 0, NULL }
+
+/* The DLL's named exports in sorted order: count, and the i-th one. */
+size_t builtin_count(const struct builtin_dll *dll);
+const struct builtin_export *builtin_entry(const struct builtin_dll *dll,
+					   size_t i);
 
 /* The built-in DLL serving name (e.g. "KERNEL32.dll"), or NULL. */
 const struct builtin_dll *builtin_find(const char *name);

@@ -1,4 +1,5 @@
 #include <fnmatch.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -7,11 +8,25 @@
 #include "runtime/builtin.h"
 
 extern const struct builtin_dll builtin_kernel32;
+extern const struct builtin_dll builtin_ntdll;
 
 const struct builtin_dll *const builtin_dlls[] = {
 	&builtin_kernel32,
+	&builtin_ntdll,
 	NULL
 };
+
+#define MAX_DLLS 32
+
+/* Sorted views of each DLL's named exports, built on first use. */
+struct export_index {
+	const struct builtin_dll *dll;
+	const struct builtin_export **sorted;
+	size_t n;
+};
+
+static struct export_index indices[MAX_DLLS];
+static pthread_mutex_t index_lock = PTHREAD_MUTEX_INITIALIZER;
 
 const struct builtin_dll *builtin_find(const char *name)
 {
@@ -25,26 +40,85 @@ const struct builtin_dll *builtin_find(const char *name)
 	return NULL;
 }
 
-static int compare_export(const void *key, const void *elem)
+static int compare_entries(const void *a, const void *b)
 {
-	const struct builtin_export *e = elem;
-	return strcmp(key, e->name ? e->name : "");
+	const struct builtin_export *x = *(const struct builtin_export *const *)a;
+	const struct builtin_export *y = *(const struct builtin_export *const *)b;
+	return strcmp(x->name, y->name);
+}
+
+static const struct export_index *get_index(const struct builtin_dll *dll)
+{
+	struct export_index *ix = NULL;
+
+	pthread_mutex_lock(&index_lock);
+	for (int i = 0; i < MAX_DLLS && !ix; i++) {
+		if (indices[i].dll == dll) {
+			ix = &indices[i];
+		} else if (!indices[i].dll) {
+			ix = &indices[i];
+			size_t n = 0;
+			for (const struct builtin_export *const *t = dll->tables; *t; t++)
+				for (const struct builtin_export *e = *t; e->addr; e++)
+					n += e->name != NULL;
+			ix->sorted = malloc((n ? n : 1) * sizeof(*ix->sorted));
+			if (!ix->sorted) {
+				ix = NULL;
+				break;
+			}
+			n = 0;
+			for (const struct builtin_export *const *t = dll->tables; *t; t++)
+				for (const struct builtin_export *e = *t; e->addr; e++)
+					if (e->name)
+						ix->sorted[n++] = e;
+			qsort(ix->sorted, n, sizeof(*ix->sorted), compare_entries);
+			ix->n = n;
+			ix->dll = dll;
+		}
+	}
+	pthread_mutex_unlock(&index_lock);
+	return ix;
+}
+
+static int compare_key(const void *key, const void *elem)
+{
+	const struct builtin_export *e = *(const struct builtin_export *const *)elem;
+	return strcmp(key, e->name);
 }
 
 void *builtin_export(const struct builtin_dll *dll, const char *name)
 {
-	const struct builtin_export *e =
-		bsearch(name, dll->exports, dll->nexports, sizeof(*e),
-			compare_export);
-	return e ? e->addr : NULL;
+	const struct export_index *ix = get_index(dll);
+	const struct builtin_export *const *e;
+
+	if (!ix)
+		return NULL;
+	e = bsearch(name, ix->sorted, ix->n, sizeof(*ix->sorted), compare_key);
+	return e ? (*e)->addr : NULL;
 }
 
 void *builtin_export_ordinal(const struct builtin_dll *dll, WORD ordinal)
 {
-	for (size_t i = 0; i < dll->nexports && ordinal; i++)
-		if (dll->exports[i].ordinal == ordinal)
-			return dll->exports[i].addr;
+	if (!ordinal)
+		return NULL;
+	for (const struct builtin_export *const *t = dll->tables; *t; t++)
+		for (const struct builtin_export *e = *t; e->addr; e++)
+			if (e->ordinal == ordinal)
+				return e->addr;
 	return NULL;
+}
+
+size_t builtin_count(const struct builtin_dll *dll)
+{
+	const struct export_index *ix = get_index(dll);
+	return ix ? ix->n : 0;
+}
+
+const struct builtin_export *builtin_entry(const struct builtin_dll *dll,
+					   size_t i)
+{
+	const struct export_index *ix = get_index(dll);
+	return ix && i < ix->n ? ix->sorted[i] : NULL;
 }
 
 BYTE *builtin_fake_image(void)

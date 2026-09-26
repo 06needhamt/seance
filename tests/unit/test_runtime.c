@@ -120,27 +120,31 @@ static void test_threads_and_tls(void)
 
 static void test_builtin_tables(void)
 {
-	/* Every table must be sorted and free of duplicates for bsearch. */
+	/* Names must be unique within each DLL, and all findable. */
 	for (const struct builtin_dll *const *d = builtin_dlls; *d; d++) {
 		const struct builtin_dll *dll = *d;
-		int sorted = 1;
-		for (size_t i = 1; i < dll->nexports; i++) {
-			const char *a = dll->exports[i - 1].name;
-			const char *b = dll->exports[i].name;
-			if (a && b && strcmp(a, b) >= 0) {
-				fprintf(stderr, "%s: %s is not before %s\n",
-					dll->name, a, b);
-				sorted = 0;
+		size_t n = builtin_count(dll);
+		int unique = 1;
+
+		CHECK(n > 0);
+		for (size_t i = 0; i < n; i++) {
+			const struct builtin_export *e = builtin_entry(dll, i);
+			const struct builtin_export *prev =
+				i ? builtin_entry(dll, i - 1) : NULL;
+			if (prev && !strcmp(prev->name, e->name)) {
+				fprintf(stderr, "%s exports %s twice\n",
+					dll->name, e->name);
+				unique = 0;
 			}
+			CHECK(e->addr != NULL);
 		}
-		CHECK(sorted);
-		for (size_t i = 0; i < dll->nexports; i++) {
-			CHECK(dll->exports[i].addr != NULL);
-			if (dll->exports[i].name)
-				CHECK(builtin_export(dll, dll->exports[i].name) ==
-				      dll->exports[i].addr);
+		CHECK(unique);
+		for (size_t i = 0; i < n && unique; i++) {
+			const struct builtin_export *e = builtin_entry(dll, i);
+			CHECK(builtin_export(dll, e->name) == e->addr);
 		}
 	}
+	CHECK(builtin_entry(builtin_dlls[0], builtin_count(builtin_dlls[0])) == NULL);
 
 	CHECK(builtin_find("KERNEL32.DLL") != NULL);
 	CHECK(builtin_find("kernel32.dll") == builtin_find("Kernel32.Dll"));

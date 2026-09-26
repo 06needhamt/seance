@@ -1,0 +1,4 @@
+# Harness-only names, and aliases of calling-convention attributes.
+IMAGE_DELAYLOAD_RVA_BASED
+CALLBACK
+WINAPIV
