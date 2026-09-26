@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "win32.h"
+#include "commands.h"
 
 #define VFW_HARNESS_VERSION "0.1.0-dev"
 
@@ -17,7 +17,8 @@ struct command {
 
 static const struct command commands[] = {
 	{ "info", "<dll>",
-	  "show PE headers, exports and import coverage", NULL },
+	  "show PE headers, sections, exports, imports and resources",
+	  cmd_info },
 	{ "list", "",
 	  "list the codecs registered in vfw.ini", NULL },
 	{ "probe", "<dll|fourcc> [in.avi]",

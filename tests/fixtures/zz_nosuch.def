@@ -1,0 +1,3 @@
+LIBRARY zz_nosuch.dll
+EXPORTS
+	nosuch_function
