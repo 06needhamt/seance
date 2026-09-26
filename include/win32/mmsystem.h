@@ -28,11 +28,14 @@
 #define DRVCNF_OK      0x0001
 #define DRVCNF_RESTART 0x0002
 
+/* The Windows SDK's mmsystem.h is byte-packed throughout (pshpack1.h). */
+#pragma pack(push, 1)
 typedef struct tagDRVCONFIGINFO {
 	DWORD dwDCISize;
 	LPCWSTR lpszDCISectionName;
 	LPCWSTR lpszDCIAliasName;
 } DRVCONFIGINFO, *PDRVCONFIGINFO, *LPDRVCONFIGINFO;
+#pragma pack(pop)
 
 /* The DriverProc export of an installable driver. */
 typedef LRESULT (CALLBACK *DRIVERPROC)(DWORD_PTR dwDriverId, HDRVR hdrvr,

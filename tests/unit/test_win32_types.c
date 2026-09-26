@@ -21,6 +21,19 @@ _Static_assert(sizeof(ICDECOMPRESS) == 24, "ICDECOMPRESS");
 _Static_assert(sizeof(ICDECOMPRESSEX) == 52, "ICDECOMPRESSEX");
 _Static_assert(sizeof(ICCOMPRESSFRAMES) == 64, "ICCOMPRESSFRAMES");
 
+/* 64-bit members are 8-byte aligned, as on Windows (not 4, as on Linux). */
+struct align_probe {
+	BYTE tag;
+	LONGLONG value;
+};
+_Static_assert(offsetof(struct align_probe, value) == 8, "LONGLONG alignment");
+_Static_assert(sizeof(struct align_probe) == 16, "LONGLONG struct padding");
+struct union_probe {
+	DWORD tag;
+	LARGE_INTEGER value;
+};
+_Static_assert(offsetof(struct union_probe, value) == 8, "LARGE_INTEGER alignment");
+
 int main(void)
 {
 	/* A FOURCC stores its characters in file order. */

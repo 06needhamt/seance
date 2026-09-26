@@ -34,9 +34,16 @@ typedef uint32_t UINT;
 typedef int32_t  BOOL;
 typedef char     CHAR;
 typedef uint16_t WCHAR;
-typedef int64_t  LONGLONG;
-typedef uint64_t ULONGLONG;
-typedef uint64_t DWORDLONG;
+
+/*
+ * 32-bit Windows aligns 64-bit integers to 8 bytes inside structures, but
+ * the Linux i386 ABI only to 4, so ask for it explicitly. Win32-facing
+ * structures must use these types (not int64_t or long long) for 64-bit
+ * members.
+ */
+typedef int64_t  LONGLONG __attribute__((aligned(8)));
+typedef uint64_t ULONGLONG __attribute__((aligned(8)));
+typedef uint64_t DWORDLONG __attribute__((aligned(8)));
 
 typedef intptr_t  INT_PTR, LONG_PTR;
 typedef uintptr_t UINT_PTR, ULONG_PTR, DWORD_PTR;

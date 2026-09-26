@@ -111,6 +111,8 @@
 #define RT_HTML         23
 #define RT_MANIFEST     24
 
+/* Windows packs the DOS header to 2 bytes (pshpack2.h). */
+#pragma pack(push, 2)
 typedef struct _IMAGE_DOS_HEADER {
 	WORD e_magic;
 	WORD e_cblp;
@@ -132,6 +134,7 @@ typedef struct _IMAGE_DOS_HEADER {
 	WORD e_res2[10];
 	LONG e_lfanew;
 } IMAGE_DOS_HEADER;
+#pragma pack(pop)
 
 typedef struct _IMAGE_FILE_HEADER {
 	WORD Machine;
