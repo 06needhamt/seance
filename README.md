@@ -1,5 +1,7 @@
 # vfw-harness
 
+[![CI](https://github.com/06needhamt/vfw-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/06needhamt/vfw-harness/actions/workflows/ci.yml)
+
 A harness for loading and running 32-bit Video for Windows (VfW / ICM) codec
 DLLs natively on Linux, without Wine. It maps the PE image itself, provides a
 small Win32 runtime, and drives the codec's `DriverProc` through a minimal
@@ -48,6 +50,11 @@ make asan     # the unit tests again under AddressSanitizer and UBSan
 The loader tests use small DLLs from `tests/fixtures/`, built with
 mingw-w64 into `build/fixtures/`. They are built without a C runtime, so
 they import only from each other until the Win32 runtime exists (Phase 2).
+
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on every
+push and pull request: the full `make test REQUIRE_MINGW=1`, `make asan`,
+and a build with only `gcc-multilib` installed to check that the fixture
+tests skip cleanly.
 
 `make check-abi` compiles every struct size, field offset and constant in
 `include/win32/` against the mingw-w64 Windows headers and fails if any of
