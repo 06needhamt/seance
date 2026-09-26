@@ -1,0 +1,9 @@
+LIBRARY PE_BASIC.DLL
+EXPORTS
+	basic_add @1
+	basic_mul @2
+	basic_secret @7 NONAME
+	basic_data @8 DATA
+	basic_attach_count @10
+	basic_detach_count @11
+	basic_on_detach @12

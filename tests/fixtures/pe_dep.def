@@ -1,0 +1,5 @@
+LIBRARY pe_dep.dll
+EXPORTS
+	dep_compute @1
+	dep_secret @2
+	fwd_add = PE_BASIC.basic_add @3
