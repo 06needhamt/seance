@@ -23,6 +23,7 @@ HANDLE heap_process(void);
 void *heap_alloc(HANDLE heap, DWORD flags, SIZE_T size);
 BOOL heap_free(HANDLE heap, DWORD flags, void *p);
 SIZE_T heap_size(HANDLE heap, DWORD flags, const void *p);
+void *heap_realloc(HANDLE heap, DWORD flags, void *p, SIZE_T size);
 
 /* The Unix fd behind a file handle, or -1. */
 int file_handle_fd(HANDLE h);

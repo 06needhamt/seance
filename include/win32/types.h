@@ -64,6 +64,7 @@ typedef WORD        *LPWORD, *PWORD;
 typedef DWORD       *LPDWORD, *PDWORD;
 typedef LONG        *LPLONG, *PLONG;
 typedef BOOL        *LPBOOL, *PBOOL;
+typedef UINT        *LPUINT, *PUINT;
 typedef CHAR        *LPSTR, *PSTR;
 typedef const CHAR  *LPCSTR, *PCSTR;
 typedef WCHAR       *LPWSTR, *PWSTR;

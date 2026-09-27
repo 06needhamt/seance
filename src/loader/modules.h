@@ -41,6 +41,14 @@ struct module {
  */
 struct module *mod_load(const char *name, struct module *importer);
 
+/*
+ * Looks for the file name (a bare file name, matched case-insensitively)
+ * where mod_load() would, without loading it: 0 with its path in out, or
+ * -1 if there is none.
+ */
+int mod_search(const char *name, const struct module *importer,
+	       char *out, size_t outsz);
+
 /* A loaded module by file name, without adding a reference. */
 struct module *mod_find(const char *name);
 

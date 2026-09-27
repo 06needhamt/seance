@@ -281,7 +281,7 @@ SIZE_T heap_size(HANDLE handle, DWORD flags, const void *p)
 	return size;
 }
 
-static void *heap_realloc(HANDLE handle, DWORD flags, void *p, SIZE_T size)
+void *heap_realloc(HANDLE handle, DWORD flags, void *p, SIZE_T size)
 {
 	struct heap *h = heap_get(handle);
 

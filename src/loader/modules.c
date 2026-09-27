@@ -178,6 +178,12 @@ static int search(const char *name, const struct module *importer,
 	return find_in_dir(".", name, out, outsz);
 }
 
+int mod_search(const char *name, const struct module *importer,
+	       char *out, size_t outsz)
+{
+	return search(name, importer, out, outsz);
+}
+
 static int force_reloc(void)
 {
 	const char *v = getenv("VFW_FORCE_RELOC");
