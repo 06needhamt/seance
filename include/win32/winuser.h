@@ -121,6 +121,13 @@ typedef struct tagUSEROBJECTFLAGS {
 	DWORD dwFlags;
 } USEROBJECTFLAGS, *PUSEROBJECTFLAGS;
 
+typedef struct tagMONITORINFO {
+	DWORD cbSize;
+	RECT rcMonitor;
+	RECT rcWork;
+	DWORD dwFlags;
+} MONITORINFO, *LPMONITORINFO;
+
 /* MessageBox. */
 #define MB_OK                0x00000000
 #define MB_OKCANCEL          0x00000001
@@ -270,12 +277,38 @@ typedef struct tagUSEROBJECTFLAGS {
 #define SW_SHOWNOACTIVATE 4
 #define SW_SHOW           5
 
+/* SetWindowPos. */
+#define SWP_NOSIZE       0x0001
+#define SWP_NOMOVE       0x0002
+#define SWP_NOZORDER     0x0004
+#define SWP_NOACTIVATE   0x0010
+#define SWP_SHOWWINDOW   0x0040
+#define SWP_HIDEWINDOW   0x0080
+
+/* Monitors. */
+#define MONITOR_DEFAULTTONULL    0
+#define MONITOR_DEFAULTTOPRIMARY 1
+#define MONITOR_DEFAULTTONEAREST 2
+#define MONITORINFOF_PRIMARY     1
+
+/* SystemParametersInfo. */
+#define SPI_GETWORKAREA 0x0030
+
+/* LoadImage. */
+#define IMAGE_BITMAP        0
+#define IMAGE_ICON          1
+#define IMAGE_CURSOR        2
+#define LR_LOADFROMFILE     0x0010
+#define LR_CREATEDIBSECTION 0x2000
+
 /* PeekMessage. */
 #define PM_NOREMOVE 0x0000
 #define PM_REMOVE   0x0001
 #define PM_NOYIELD  0x0002
 
 /* Dialog buttons. */
+#define BM_GETCHECK       0x00f0
+#define BM_SETCHECK       0x00f1
 #define BST_UNCHECKED     0
 #define BST_CHECKED       1
 #define BST_INDETERMINATE 2

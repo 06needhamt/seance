@@ -490,4 +490,6 @@
 	O(TEXTMETRICW, tmLastChar) O(TEXTMETRICW, tmDefaultChar) \
 	O(TEXTMETRICW, tmBreakChar) O(TEXTMETRICW, tmItalic) \
 	O(TEXTMETRICW, tmUnderlined) O(TEXTMETRICW, tmStruckOut) \
-	O(TEXTMETRICW, tmPitchAndFamily) O(TEXTMETRICW, tmCharSet)
+	O(TEXTMETRICW, tmPitchAndFamily) O(TEXTMETRICW, tmCharSet) \
+	S(HMONITOR) A(MONITORINFO) S(MONITORINFO) O(MONITORINFO, cbSize) \
+	O(MONITORINFO, rcMonitor) O(MONITORINFO, rcWork) O(MONITORINFO, dwFlags)

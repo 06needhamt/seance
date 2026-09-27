@@ -7,6 +7,14 @@
 
 #include "win32.h"
 
+/* Case mapping and CT_CTYPE1 classes (Latin-1; others unmapped). */
+WCHAR k32_toupper_w(WCHAR c);
+WCHAR k32_tolower_w(WCHAR c);
+WORD k32_ctype1(WCHAR c);
+
+/* GetCurrentThreadId. */
+DWORD thread_current_id(void);
+
 /* A new real handle to the calling thread (DuplicateHandle of -2). */
 HANDLE thread_handle_current(void);
 
