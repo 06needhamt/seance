@@ -19,8 +19,10 @@ int main(void)
 	if (m) {
 		double (*math_check)(void) = mod_get_proc(m, "crt_math_check");
 		int (*string_check)(void) = mod_get_proc(m, "crt_string_check");
+		int (*stdio_check)(void) = mod_get_proc(m, "crt_stdio_check");
 		CHECK(math_check != NULL);
 		CHECK(string_check != NULL);
+		CHECK(stdio_check != NULL);
 		if (math_check) {
 			double want = sin(0.0) + cos(0.0) + sqrt(4.0) +
 				      pow(2.0, 10.0) + fabs(-3.5) + floor(2.7) +
@@ -32,6 +34,12 @@ int main(void)
 			int r = string_check();
 			if (r)
 				fprintf(stderr, "crt_string_check failed at %d\n", r);
+			CHECK_EQ(r, 0);
+		}
+		if (stdio_check) {
+			int r = stdio_check();
+			if (r)
+				fprintf(stderr, "crt_stdio_check failed at %d\n", r);
 			CHECK_EQ(r, 0);
 		}
 		mod_free(m);

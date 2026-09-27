@@ -2,7 +2,13 @@
  * Exercises msvcrt's math and string functions, imported the way a codec
  * built with a dynamic CRT (/MD) would.
  */
+/* Plain msvcrt.dll printf entry points, not mingw's own __mingw_* wrappers
+ * (its default; those come from libmingwex.a, which -nostdlib doesn't link). */
+#define __USE_MINGW_ANSI_STDIO 0
+
 #include "fixture.h"
+#include <ctype.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -85,6 +91,50 @@ static int qsort_check(void)
 			return 1;
 	int key = 4, *found = bsearch(&key, a, 5, sizeof(a[0]), int_cmp);
 	return found && *found == 4 ? 0 : 1;
+}
+
+/*
+ * fprintf/sprintf through _iob, a round trip through fopen/fwrite/fread/
+ * fclose in the harness's sandboxed C:\, and _pctype (isalpha/isdigit are
+ * table lookups through it in real msvcrt headers, not function calls).
+ * Returns 0, or the number of the first check that failed.
+ */
+EXPORT int crt_stdio_check(void)
+{
+	char buf[64];
+	int n = sprintf(buf, "n=%d s=%s", 42, "ok");
+	if (n != 9 || strcmp(buf, "n=42 s=ok") != 0)
+		return 1;
+
+	if (fprintf(stdout, "%s", "") < 0 || fprintf(stderr, "%s", "") < 0)
+		return 2;
+
+	if (!isupper('A') || isupper('a') || !isdigit('5') || isdigit('x') ||
+	    !isalpha('Q') || toupper('q') != 'Q' || tolower('Q') != 'q')
+		return 3;
+
+	FILE *f = fopen("C:\\WINDOWS\\TEMP\\pe_crt.tmp", "wb");
+	if (!f)
+		return 4;
+	const char data[] = "hello crt";
+	if (fwrite(data, 1, sizeof(data), f) != sizeof(data)) {
+		fclose(f);
+		return 5;
+	}
+	fclose(f);
+
+	f = fopen("C:\\WINDOWS\\TEMP\\pe_crt.tmp", "rb");
+	if (!f)
+		return 6;
+	char back[sizeof(data)];
+	size_t got = fread(back, 1, sizeof(back), f);
+	int eof_now = feof(f);
+	fclose(f);
+	remove("C:\\WINDOWS\\TEMP\\pe_crt.tmp");
+	if (got != sizeof(data) || memcmp(back, data, sizeof(data)) != 0)
+		return 7;
+	(void)eof_now;
+	return 0;
 }
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)

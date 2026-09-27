@@ -13,10 +13,12 @@
 
 extern const struct builtin_export crt_math_exports[];
 extern const struct builtin_export crt_string_exports[];
+extern const struct builtin_export crt_stdio_exports[];
 
 static const struct builtin_export *const tables[] = {
 	crt_math_exports,
 	crt_string_exports,
+	crt_stdio_exports,
 	NULL
 };
 
