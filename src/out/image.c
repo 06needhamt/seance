@@ -633,3 +633,109 @@ void image_i420_to_bgr24(const BYTE *yuv, int w, int h, BYTE *d)
 			p[2] = clamp8((298 * C + 409 * E + 128) >> 8);
 		}
 }
+
+/* Packing: the inverse of the conversions above. */
+
+int image_can_pack(const struct image_conv *c)
+{
+	return c->kind != K_PAL && c->kind != K_RLE;
+}
+
+int image_pack_wants_i420(const struct image_conv *c)
+{
+	return !is_rgb(c);
+}
+
+/* An 8-bit channel value in `bits` bits, the inverse of expand(). */
+static DWORD narrow(int v, int bits)
+{
+	if (bits >= 8)
+		return (DWORD)v << (bits - 8) | (DWORD)v >> (16 - bits);
+	DWORD max = (1u << bits) - 1;
+	return ((DWORD)v * max + 127) / 255;
+}
+
+static void pack_rgb(const struct image_conv *c, const BYTE *bgr, BYTE *dst)
+{
+	int w = c->w, h = c->h;
+
+	memset(dst, 0, c->frame_size);
+	for (int y = 0; y < h; y++) {
+		const BYTE *s = bgr + (size_t)(c->bottom_up ? h - 1 - y : y) * w * 3;
+		BYTE *d = dst + (size_t)y * c->stride;
+		for (int x = 0; x < w; x++, s += 3) {
+			switch (c->kind) {
+			case K_RGB24:
+				memcpy(d + 3 * x, s, 3);
+				break;
+			case K_RGB32:
+				memcpy(d + 4 * x, s, 3);
+				break;
+			default: {
+				DWORD px = 0;
+				for (int i = 0; i < 3; i++)
+					px |= narrow(s[2 - i], c->bits[i]) << c->shift[i];
+				int n = c->bpp / 8;
+				for (int k = 0; k < n; k++)
+					d[n * x + k] = (BYTE)(px >> (8 * k));
+			}
+			}
+		}
+	}
+}
+
+static void pack_yuv(const struct image_conv *c, const BYTE *yuv, BYTE *d)
+{
+	int w = c->w, h = c->h, cw = (w + 1) / 2, ch = (h + 1) / 2;
+	const BYTE *sy = yuv, *su = yuv + (size_t)w * h, *sv = su + (size_t)cw * ch;
+
+	switch (c->kind) {
+	case K_PACKED:
+		for (int y = 0; y < h; y++) {
+			BYTE *row = d + (size_t)y * c->stride;
+			const BYTE *ly = sy + (size_t)y * w;
+			for (int x = 0; x < cw; x++) {
+				BYTE *g = row + 4 * x;
+				g[c->y0] = ly[2 * x];
+				g[c->y1] = 2 * x + 1 < w ? ly[2 * x + 1] : ly[2 * x];
+				g[c->u] = su[(size_t)(y / 2) * cw + x];
+				g[c->v] = sv[(size_t)(y / 2) * cw + x];
+			}
+		}
+		break;
+	case K_PLANAR: {
+		BYTE *du = d + (size_t)w * h, *dv = du + (size_t)cw * ch;
+		memcpy(d, sy, (size_t)w * h);
+		memcpy(c->swap_uv ? dv : du, su, (size_t)cw * ch);
+		memcpy(c->swap_uv ? du : dv, sv, (size_t)cw * ch);
+		break;
+	}
+	case K_NV: {
+		BYTE *uv = d + (size_t)w * h;
+		memcpy(d, sy, (size_t)w * h);
+		for (size_t i = 0; i < (size_t)cw * ch; i++) {
+			uv[2 * i + c->swap_uv] = su[i];
+			uv[2 * i + !c->swap_uv] = sv[i];
+		}
+		break;
+	}
+	case K_GREY:
+		memcpy(d, sy, (size_t)w * h);
+		break;
+	default:
+		break;
+	}
+}
+
+int image_pack(const struct image_conv *c, const BYTE *src, BYTE *dst)
+{
+	if (!image_can_pack(c)) {
+		vfw_set_error("can't write frames as %s", c->name);
+		return -1;
+	}
+	if (is_rgb(c))
+		pack_rgb(c, src, dst);
+	else
+		pack_yuv(c, src, dst);
+	return 0;
+}

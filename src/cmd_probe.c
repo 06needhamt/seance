@@ -5,17 +5,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
-#include <unistd.h>
 
 #include "avi/avi.h"
+#include "cmd_util.h"
 #include "commands.h"
 #include "common/error.h"
 #include "common/fourcc.h"
 #include "common/unicode.h"
-#include "runtime/runtime.h"
 #include "vfw/icm.h"
-#include "vfw/registry.h"
 
 static int usage(void)
 {
@@ -39,29 +36,6 @@ static const char *wide(const WCHAR *s, size_t max, char *buf, size_t size)
 	return buf;
 }
 
-static const char *format_desc(const BITMAPINFOHEADER *b, char *buf,
-			       size_t size)
-{
-	char fcc[FOURCC_STR_SIZE], comp[32];
-
-	switch (b->biCompression) {
-	case BI_RGB:       snprintf(comp, sizeof(comp), "BI_RGB"); break;
-	case BI_BITFIELDS: snprintf(comp, sizeof(comp), "BI_BITFIELDS"); break;
-	case BI_RLE8:      snprintf(comp, sizeof(comp), "BI_RLE8"); break;
-	case BI_RLE4:      snprintf(comp, sizeof(comp), "BI_RLE4"); break;
-	default:
-		snprintf(comp, sizeof(comp), "'%s'",
-			 fourcc_str(b->biCompression, fcc));
-	}
-	int n = snprintf(buf, size, "%ldx%ld, %u bits, %s, image %lu bytes",
-			 (long)b->biWidth, (long)b->biHeight, b->biBitCount, comp,
-			 (unsigned long)b->biSizeImage);
-	if (b->biSize > sizeof(*b) && n > 0 && (size_t)n < size)
-		snprintf(buf + n, size - n, ", %lu bytes of extra data",
-			 (unsigned long)(b->biSize - sizeof(*b)));
-	return buf;
-}
-
 static void print_flags(DWORD flags)
 {
 	static const struct {
@@ -81,15 +55,6 @@ static void print_flags(DWORD flags)
 		if (flags & names[i].bit)
 			printf(" %s", names[i].name);
 	printf("\n");
-}
-
-static int looks_like_dll(const char *s)
-{
-	size_t n = strlen(s);
-	return strchr(s, '/') || !access(s, F_OK) ||
-	       (n > 4 && (!strcasecmp(s + n - 4, ".dll") ||
-			  !strcasecmp(s + n - 4, ".drv") ||
-			  !strcasecmp(s + n - 3, ".ax")));
 }
 
 /* The standard formats a decompressor accepts for `in`, on one line. */
@@ -121,14 +86,14 @@ static void probe_decompress(HIC hic, const BITMAPINFOHEADER *in)
 		return;
 	BITMAPINFOHEADER *out = ic_decompress_get_format(hic, in, &r);
 	if (out)
-		printf("    suggested output: %s\n", format_desc(out, buf, sizeof(buf)));
+		printf("    suggested output: %s\n", cli_format_desc(out, buf, sizeof(buf)));
 	else
 		printf("    suggested output: none (%s)\n", icerr_name(r, err));
 	free(out);
 	print_outputs(hic, in);
 	out = ic_negotiate_output(hic, in, &r);
 	if (out)
-		printf("    negotiated output: %s\n", format_desc(out, buf, sizeof(buf)));
+		printf("    negotiated output: %s\n", cli_format_desc(out, buf, sizeof(buf)));
 	else
 		printf("    negotiated output: none (%s)\n", icerr_name(r, err));
 	free(out);
@@ -154,7 +119,7 @@ static void probe_compress(HIC hic, LONG w, LONG h)
 			printf("    output format: none (%s)\n", icerr_name(r, err));
 			continue;
 		}
-		printf("    output format: %s\n", format_desc(out, buf, sizeof(buf)));
+		printf("    output format: %s\n", cli_format_desc(out, buf, sizeof(buf)));
 		LRESULT size = ic_send(hic, ICM_COMPRESS_GET_SIZE, (DWORD_PTR)&f.bih,
 				       (DWORD_PTR)out);
 		if (size > 0)
@@ -169,21 +134,10 @@ static void probe_compress(HIC hic, LONG w, LONG h)
 		printf("  no standard input format accepted\n");
 }
 
-/* Opens the codec, trying the query mode first, then decompress, compress. */
-static HIC open_codec(const char *target, int is_dll, FOURCC handler)
+int cmd_probe(int argc, char **argv)
 {
 	static const UINT modes[] = { ICMODE_QUERY, ICMODE_DECOMPRESS,
 				      ICMODE_COMPRESS };
-	HIC hic = NULL;
-
-	for (size_t i = 0; i < 3 && !hic; i++)
-		hic = is_dll ? ic_open_dll(target, ICTYPE_VIDEO, handler, modes[i]) :
-			       ic_open(ICTYPE_VIDEO, handler, modes[i]);
-	return hic;
-}
-
-int cmd_probe(int argc, char **argv)
-{
 	const char *target = NULL, *avi_path = NULL, *fourcc = NULL;
 	LONG w = 320, h = 240;
 	int have_size = 0;
@@ -193,15 +147,8 @@ int cmd_probe(int argc, char **argv)
 		if (!strcmp(a, "--fourcc") && i + 1 < argc) {
 			fourcc = argv[++i];
 		} else if (!strcmp(a, "--size") && i + 1 < argc) {
-			long x, y;
-			char end;
-			if (sscanf(argv[++i], "%ldx%ld%c", &x, &y, &end) != 2 ||
-			    x <= 0 || y <= 0 || x > 16384 || y > 16384) {
-				fprintf(stderr, "vfw-harness: --size wants WxH\n");
+			if (cli_parse_size(a, argv[++i], &w, &h))
 				return 2;
-			}
-			w = x;
-			h = y;
 			have_size = 1;
 		} else if (a[0] == '-' || (target && avi_path)) {
 			return usage();
@@ -213,33 +160,6 @@ int cmd_probe(int argc, char **argv)
 	}
 	if (!target)
 		return usage();
-	/* An existing file named without a directory is a path, not a name. */
-	char local[4096];
-	if (!strchr(target, '/') && !access(target, F_OK)) {
-		snprintf(local, sizeof(local), "./%s", target);
-		target = local;
-	}
-	if (runtime_enter()) {
-		fprintf(stderr, "vfw-harness: %s\n", vfw_error());
-		return 1;
-	}
-
-	FOURCC type = ICTYPE_VIDEO, handler = 0;
-	int is_dll = looks_like_dll(target);
-	if (fourcc && vfw_parse_fourcc(fourcc, &type, &handler)) {
-		fprintf(stderr, "vfw-harness: bad FOURCC '%s'\n", fourcc);
-		return 2;
-	}
-	if (!is_dll && vfw_parse_fourcc(target, &type, &handler)) {
-		fprintf(stderr, "vfw-harness: '%s' is neither a DLL nor a FOURCC\n",
-			target);
-		return 2;
-	}
-	if (is_dll && !fourcc) {
-		const struct vfw_codec *c = vfw_find_path(target);
-		if (c)
-			handler = c->handler;
-	}
 
 	struct avi_file *avi = NULL;
 	const BITMAPINFOHEADER *in = NULL;
@@ -256,39 +176,19 @@ int cmd_probe(int argc, char **argv)
 		}
 	}
 
-	HIC hic = open_codec(target, is_dll, handler);
-	if (!hic) {
-		char fcc[FOURCC_STR_SIZE];
-		fprintf(stderr, "vfw-harness: %s\n", vfw_error());
-		if (is_dll && !handler && strstr(vfw_error(), "DRV_OPEN"))
-			fprintf(stderr, "vfw-harness: some codecs only open under their "
-				"FOURCC; try --fourcc\n");
-		else if (!is_dll && strstr(vfw_error(), "no codec is registered"))
-			fprintf(stderr, "vfw-harness: codecs are registered in %s, "
-				"as vidc.%s=<path to the DLL>\n", vfw_ini_path(),
-				fourcc_str(handler, fcc));
+	struct cli_codec codec;
+	int rc = cli_open_codec(target, fourcc, 0, modes, 3, &codec);
+	if (rc) {
 		avi_close(avi);
-		return 1;
+		return rc;
 	}
-
-	ICINFO info;
-	memset(&info, 0, sizeof(info));
-	LRESULT got = ic_get_info(hic, &info, sizeof(info));
-
-	/* Reopen under the codec's own FOURCC if it was opened without one. */
-	if (is_dll && got && !handler && info.fccHandler) {
-		handler = info.fccHandler;
-		HIC again = open_codec(target, 1, handler);
-		if (again) {
-			ic_close(hic);
-			hic = again;
-		}
-	}
-	if (is_dll && handler && !vfw_find(ICTYPE_VIDEO, handler))
-		vfw_register(ICTYPE_VIDEO, handler, target);
+	HIC hic = codec.hic;
+	ICINFO info = codec.info;
+	LRESULT got = codec.have_info;
+	FOURCC handler = codec.handler;
 
 	char a[FOURCC_STR_SIZE], b[FOURCC_STR_SIZE], s[512];
-	printf("Codec: %s\n", is_dll ? target : ic_driver_name(hic));
+	printf("Codec: %s\n", cli_codec_name(&codec));
 	if (!got) {
 		printf("  ICM_GETINFO: no answer\n");
 	} else {
@@ -326,7 +226,7 @@ int cmd_probe(int argc, char **argv)
 
 	if (in) {
 		printf("\nDecompression of %s:\n", avi_path);
-		printf("  input: %s\n", format_desc(in, s, sizeof(s)));
+		printf("  input: %s\n", cli_format_desc(in, s, sizeof(s)));
 		probe_decompress(hic, in);
 	} else if (handler) {
 		/* The codec's own FOURCC as input, without a sample. */

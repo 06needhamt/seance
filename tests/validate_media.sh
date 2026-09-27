@@ -4,7 +4,10 @@
 #   - FFmpeg reads the AVIs our writer produced (AVI 1.0 and OpenDML) and
 #     the Y4M and BMP files the output writers produced;
 #   - `vfw-harness convert` on AVIs FFmpeg wrote in each uncompressed format
-#     gives the same pictures FFmpeg's own decoding does.
+#     gives the same pictures FFmpeg's own decoding does;
+#   - with the fixture DLLs built, `encode` with testcodec.dll takes what
+#     FFmpeg writes (Y4M, BMP files, AVI) and writes AVIs FFmpeg reads, and
+#     `decode` gives back FFmpeg's pictures exactly.
 #
 # usage: tests/validate_media.sh <build dir> <work dir>
 set -eu
@@ -176,6 +179,45 @@ if grep -q "Index: OpenDML" $f/odml.txt && grep -q "150 frames" $f/odml.txt; the
 	pass "vfw-harness avi odml.avi"
 else
 	fail "vfw-harness avi odml.avi"
+fi
+
+codec=$build/fixtures/testcodec.dll
+if [ -f "$codec" ]; then
+	echo "== encode and decode with testcodec.dll"
+	e=$work/enc
+	mkdir -p $e
+	ffmpeg -v error -y -f lavfi -i "$src" -pix_fmt yuv420p $e/in.y4m
+	"$harness" encode $codec $e/in.y4m -o $e/t.avi --keyint 5 2>/dev/null ||
+		fail "encode Y4M"
+	expect "encoded AVI: packets and keyframes" \
+		"$(packets $e/t.avi | cut -d' ' -f1-2)" "10 2"
+	expect "encoded AVI: size" "$(size $e/t.avi)" 64x48
+	expect "encoded AVI: FOURCC" "$(ffprobe -v error -select_streams v:0 \
+		-show_entries stream=codec_tag_string -of csv=p=0 $e/t.avi)" TST0
+	"$harness" decode $codec $e/t.avi -o $e/out.y4m 2>/dev/null || fail "decode"
+	at_least "Y4M -> TST0 -> Y4M" "$(psnr $e/out.y4m $e/in.y4m)" inf
+	"$harness" encode $codec - -o $e/stdin.avi <$e/in.y4m 2>/dev/null
+	expect "Y4M from stdin" "$(packets $e/stdin.avi | cut -d' ' -f1)" 10
+	"$harness" encode $codec $e/in.y4m -o $e/odml.avi --odml 2>/dev/null
+	expect "OpenDML output" "$(packets $e/odml.avi | cut -d' ' -f1)" 10
+
+	# BMP files numbered from 1, and an AVI, both BGR24: exact.
+	ffmpeg -v error -y -f lavfi -i "$src" -pix_fmt bgr24 "$e/f%03d.bmp"
+	ffmpeg -v error -y -f lavfi -i "$src" -f rawvideo -pix_fmt bgr24 $e/ref.bgr
+	"$harness" encode $codec "$e/f%03d.bmp" -o $e/bmp.avi 2>/dev/null
+	"$harness" decode $codec $e/bmp.avi -o $e/bmp.bgr 2>/dev/null
+	if cmp -s $e/bmp.bgr $e/ref.bgr; then
+		pass "BMP files -> TST0 -> BGR24 identical"
+	else
+		fail "BMP files -> TST0 -> BGR24 differ"
+	fi
+	"$harness" encode $codec $f/bgr24_odd.avi -o $e/odd.avi 2>/dev/null
+	"$harness" decode $codec $e/odd.avi -o $e/odd.bgr 2>/dev/null
+	if cmp -s $e/odd.bgr $f/bgr24_odd.ref.bgr; then
+		pass "odd-sized BGR24 AVI -> TST0 -> BGR24 identical"
+	else
+		fail "odd-sized BGR24 AVI -> TST0 -> BGR24 differs"
+	fi
 fi
 
 echo

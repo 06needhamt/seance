@@ -25,9 +25,15 @@ fails "$harness" probe "$junk"
 VFW_INI=/nonexistent "$harness" list >/dev/null
 fails "$harness" avi "$junk"
 fails "$harness" convert "$junk" -o /dev/null --format raw
+fails "$harness" decode
+fails "$harness" encode
+fails "$harness" decode TST0 "$junk" -o /dev/null --format raw
+fails "$harness" encode TST0 "$junk" -o /dev/null
 
 if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	"$harness" info "$fixtures/pe_dep.dll" >/dev/null
 	"$harness" probe "$fixtures/testcodec.dll" | grep -q "handler 'TST0'"
+	fails "$harness" decode "$fixtures/testcodec.dll" "$junk" -o /dev/null \
+		--format raw
 fi
 echo "smoke: CLI ok"

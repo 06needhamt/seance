@@ -616,6 +616,315 @@ static void test_probe_cli(const char *codec)
 	CHECK_EQ(codec_opens(), 0);
 }
 
+static char seq_avi[4200];
+
+/* ICSeqCompressFrame*: keyframes, forced keyframes, and the output. */
+static void test_seq(void)
+{
+	const LONG w = 33, h = 17;
+	BITMAPINFOHEADER in = rgb(w, h, 24);
+	BYTE *src = malloc(in.biSizeImage), *dst = malloc(in.biSizeImage);
+	COMPVARS cv;
+	BOOL key = 7;
+	LONG size = 0;
+
+	memset(&cv, 0, sizeof(cv));
+	picture(src, w, h, 0);
+	CHECK(!ic_seq_frame(&cv, 0, src, &key, &size));
+	CHECK(!ic_seq_start(&cv, (BITMAPINFO *)&in));	/* no cbSize, no codec */
+	cv.cbSize = sizeof(cv);
+	CHECK(!ic_seq_start(&cv, (BITMAPINFO *)&in));
+	cv.hic = ic_open(ICTYPE_VIDEO, TST0, ICMODE_COMPRESS);
+	CHECK(cv.hic != NULL);
+	if (!cv.hic)
+		goto done;
+	HIC hic = cv.hic;
+	BITMAPINFOHEADER yuy2 = rgb(w, h, 16);
+	yuy2.biCompression = FCC('Y', 'U', 'Y', '2');
+	CHECK(!ic_seq_start(&cv, (BITMAPINFO *)&yuy2));
+	CHECK(strstr(vfw_error(), "ICERR_BADFORMAT") != NULL);
+	CHECK(!cv.lpbiIn && !cv.lpbiOut);
+
+	cv.lKey = 3;
+	cv.lQ = ICQUALITY_DEFAULT;
+	CHECK(ic_seq_start(&cv, (BITMAPINFO *)&in));
+	CHECK(cv.lpbiIn && cv.lpbiOut && cv.lpBitsOut && !cv.lpBitsPrev);
+	CHECK_EQ(cv.lpbiOut->bmiHeader.biCompression, TST0);
+	CHECK_EQ(ic_seq_format_size(&cv), sizeof(BITMAPINFOHEADER));
+
+	/* Decompress each frame again as it comes. */
+	BITMAPINFOHEADER cf = cv.lpbiOut->bmiHeader, of = rgb(w, h, 24);
+	HIC dec = ic_open(ICTYPE_VIDEO, TST0, ICMODE_DECOMPRESS);
+	CHECK(dec && ic_send(dec, ICM_DECOMPRESS_BEGIN, (DWORD_PTR)&cf,
+			     (DWORD_PTR)&of) == ICERR_OK);
+	snprintf(seq_avi, sizeof(seq_avi), "%s/seq.avi", root);
+	struct avi_writer *aw = avi_writer_open(seq_avi, &cf, sizeof(cf), TST0,
+						25, 1, NULL);
+	CHECK(aw != NULL);
+	/*
+	 * Keyframes every 3rd frame, and frame 4 is asked to be one. The codec
+	 * also counts from its own start (ICM_COMPRESS_FRAMES_INFO gave it the
+	 * rate), so it makes frame 6 a keyframe too, and 7 then isn't.
+	 */
+	static const int want[8] = { 1, 0, 0, 1, 1, 0, 1, 0 };
+	for (int i = 0; i < 8; i++) {
+		picture(src, w, h, i);
+		BYTE *data = ic_seq_frame(&cv, i == 4 ? ICCOMPRESS_KEYFRAME : 0, src,
+					  &key, &size);
+		CHECK(data && size > 4 && size <= (LONG)in.biSizeImage + 4 + 64);
+		if (!data)
+			break;
+		CHECK_EQ(!!key, want[i]);
+		CHECK_EQ(cv.lFrame, i + 1);
+		cf.biSizeImage = (DWORD)size;
+		memset(dst, 0, in.biSizeImage);
+		CHECK_EQ(ic_decompress(dec, key ? 0 : ICDECOMPRESS_NOTKEYFRAME, &cf,
+				       data, &of, dst), ICERR_OK);
+		CHECK(!memcmp(dst, src, in.biSizeImage));
+		/* For --keep-going: frame 2 is damaged in the file. */
+		if (i == 2)
+			data[0] = 'X';
+		if (aw)
+			avi_writer_add(aw, data, (DWORD)size, key);
+	}
+	CHECK(aw && avi_writer_close(aw) == 0);
+	if (dec) {
+		ic_send(dec, ICM_DECOMPRESS_END, 0, 0);
+		ic_close(dec);
+	}
+
+	ic_seq_end(&cv);
+	CHECK(!cv.lpbiIn && !cv.lpbiOut && !cv.lpBitsOut);
+	CHECK(!ic_seq_frame(&cv, 0, src, &key, &size));
+	CHECK_EQ(ic_seq_format_size(&cv), 0);
+	ic_seq_end(&cv);	/* twice is harmless */
+	ic_compressor_free(&cv);
+	CHECK(!cv.hic && !ic_valid(hic));
+
+	/* The same functions are what msvfw32.dll exports. */
+	struct module *mv = mod_load("MSVFW32.DLL", NULL);
+	CHECK(mv && mod_get_proc(mv, "ICSeqCompressFrame") == (void *)ic_seq_frame);
+	CHECK(mv && mod_get_proc(mv, "ICSeqCompressFrameStart") == (void *)ic_seq_start);
+	CHECK(mv && mod_get_proc(mv, "ICCompressorFree") == (void *)ic_compressor_free);
+	mod_free(mv);
+done:
+	free(src);
+	free(dst);
+}
+
+static void *slurp(const char *path, size_t *len)
+{
+	FILE *f = fopen(path, "rb");
+	if (!f)
+		return NULL;
+	fseek(f, 0, SEEK_END);
+	long n = ftell(f);
+	rewind(f);
+	void *p = malloc(n > 0 ? (size_t)n : 1);
+	*len = p && fread(p, 1, (size_t)n, f) == (size_t)n ? (size_t)n : 0;
+	fclose(f);
+	return p;
+}
+
+static int same_files(const char *a, const char *b)
+{
+	size_t na, nb;
+	void *pa = slurp(a, &na), *pb = slurp(b, &nb);
+	int same = pa && pb && na == nb && na && !memcmp(pa, pb, na);
+	free(pa);
+	free(pb);
+	return same;
+}
+
+/* Frame n of a W x H I420 clip. */
+static void clip_frame(BYTE *p, int w, int h, int n)
+{
+	size_t luma = (size_t)w * h, size = luma + 2 * ((w + 1) / 2) * ((h + 1) / 2);
+	for (size_t i = 0; i < size; i++)
+		p[i] = i < luma ? (BYTE)(i % w * 5 + i / w * 3 + n * 4) : (BYTE)(100 + n + i % 7);
+}
+
+static int run(int (*cmd)(int, char **), char **argv)
+{
+	static char out[65536];
+	int argc = 0;
+	while (argv[argc])
+		argc++;
+	return run_captured(cmd, argc, argv, out, sizeof(out));
+}
+
+#define P(name) (snprintf(paths[np], sizeof(paths[0]), "%s/%s", root, name), paths[np++])
+
+/* encode and decode: lossless round trips and the options. */
+static void test_codec_cli(const char *codec)
+{
+	static char paths[24][4200];
+	int np = 0;
+	enum { W = 33, H = 17, N = 10 };
+	size_t fsize = (size_t)W * H + 2 * ((W + 1) / 2) * ((H + 1) / 2);
+	BYTE frame[W * H * 4];
+	char *c = (char *)codec;
+
+	/* A Y4M clip with the header the Y4M writer uses, and the same frames raw. */
+	const char *y4m = P("in.y4m"), *yuv = P("in.yuv");
+	FILE *f = fopen(y4m, "wb"), *g = fopen(yuv, "wb");
+	fprintf(f, "YUV4MPEG2 W%d H%d F15:1 Ip A1:1 C420jpeg\n", W, H);
+	for (int n = 0; n < N; n++) {
+		clip_frame(frame, W, H, n);
+		fprintf(f, "FRAME\n");
+		fwrite(frame, 1, fsize, f);
+		fwrite(frame, 1, fsize, g);
+	}
+	fclose(f);
+	fclose(g);
+
+	const char *avi = P("t.avi"), *out = P("out.y4m");
+	CHECK_EQ(run(cmd_encode, (char *[]){ "encode", c, (char *)y4m, "-o",
+					     (char *)avi, "--keyint", "4", NULL }), 0);
+	struct avi_file *a = avi_open(avi);
+	CHECK(a != NULL);
+	if (a) {
+		const struct avi_stream *s = &a->streams[0];
+		const BITMAPINFOHEADER *b = avi_stream_bih(s);
+		CHECK_EQ(s->frames, N);
+		CHECK(b && b->biCompression == TST0 && b->biBitCount == 12);
+		CHECK_EQ(s->header.fccHandler, TST0);
+		CHECK(s->header.dwRate == 15 && s->header.dwScale == 1);
+		for (size_t i = 0; i < s->nchunks; i++)
+			CHECK_EQ(!!(s->chunks[i].flags & AVIIF_KEYFRAME), i % 4 == 0);
+		avi_close(a);
+	}
+	CHECK_EQ(run(cmd_decode, (char *[]){ "decode", c, (char *)avi, "-o",
+					     (char *)out, NULL }), 0);
+	CHECK(same_files(y4m, out));
+
+	/* From frame 5: decoding starts at the keyframe before it. */
+	const char *part = P("part.yuv");
+	CHECK_EQ(run(cmd_decode, (char *[]){ "decode", c, (char *)avi, "-o",
+					     (char *)part, "--start", "5", "--frames",
+					     "3", NULL }), 0);
+	size_t n, m;
+	BYTE *pp = slurp(part, &n), *all = slurp(yuv, &m);
+	CHECK(pp && all && n == 3 * fsize && !memcmp(pp, all + 5 * fsize, n));
+	free(pp);
+
+	/* "auto" finds TST0 through vfw.ini; raw I420 input gives the same. */
+	const char *autoyuv = P("auto.yuv"), *avi2 = P("raw.avi");
+	CHECK_EQ(run(cmd_decode, (char *[]){ "decode", "auto", (char *)avi, "-o",
+					     (char *)autoyuv, NULL }), 0);
+	CHECK(same_files(autoyuv, yuv));
+	CHECK_EQ(run(cmd_encode, (char *[]){ "encode", "TST0", (char *)yuv, "-o",
+					     (char *)avi2, "--input-format", "I420",
+					     "--size", "33x17", "--rate", "29.97",
+					     NULL }), 0);
+	a = avi_open(avi2);
+	CHECK(a && a->streams[0].frames == N);
+	CHECK(a && a->streams[0].header.dwRate == 30000 &&
+	      a->streams[0].header.dwScale == 1001);
+	/* The codec's default keyframe rate, 15: only frame 0. */
+	CHECK(a && a->streams[0].chunks[0].flags & AVIIF_KEYFRAME);
+	CHECK(a && !(a->streams[0].chunks[9].flags & AVIIF_KEYFRAME));
+	avi_close(a);
+
+	/* BGR24 raw frames (top-down, unpadded rows) and back, exactly. */
+	const char *bgr = P("in.bgr"), *bgr_avi = P("bgr.avi"), *bgr_out = P("out.bgr");
+	f = fopen(bgr, "wb");
+	for (int i = 0; i < 3 * W * H * 3; i++)
+		fputc((i * 31 + i / 99) & 0xff, f);
+	fclose(f);
+	CHECK_EQ(run(cmd_encode, (char *[]){ "encode", c, (char *)bgr, "-o",
+					     (char *)bgr_avi, "--input-format", "BGR24",
+					     "--size", "33x17", NULL }), 0);
+	CHECK_EQ(run(cmd_decode, (char *[]){ "decode", c, (char *)bgr_avi, "-o",
+					     (char *)bgr_out, NULL }), 0);
+	CHECK(same_files(bgr, bgr_out));
+
+	/* Converting to a format the codec takes, and choosing its output. */
+	const char *conv = P("conv.avi"), *conv_out = P("conv.yuv");
+	CHECK_EQ(run(cmd_encode, (char *[]){ "encode", c, (char *)y4m, "-o",
+					     (char *)conv, "--codec-input", "BGR32",
+					     "--frames", "3", "--start", "2", NULL }), 0);
+	a = avi_open(conv);
+	CHECK(a && a->streams[0].frames == 3 &&
+	      avi_stream_bih(&a->streams[0])->biBitCount == 32);
+	avi_close(a);
+	CHECK_EQ(run(cmd_decode, (char *[]){ "decode", c, (char *)conv, "-o",
+					     (char *)conv_out, "--output-format",
+					     "BGR32", NULL }), 0);
+	pp = slurp(conv_out, &n);
+	CHECK(pp && n == 3 * fsize);
+	if (pp && all && n == 3 * fsize) {
+		/*
+		 * I420 -> RGB -> I420 is close, not exact: on average within a
+		 * level or two, more where the made-up chroma is out of gamut.
+		 */
+		long total = 0;
+		for (size_t i = 0; i < n; i++)
+			total += abs(pp[i] - all[2 * fsize + i]);
+		CHECK(total <= (long)n * 2);
+	}
+	free(pp);
+	free(all);
+
+	/* State: the options reach the codec, and --save-state keeps them. */
+	const char *st = P("state.bin"), *q = P("q.avi");
+	CHECK_EQ(run(cmd_encode, (char *[]){ "encode", c, (char *)y4m, "-o",
+					     (char *)q, "--quality", "1234", "--keyint",
+					     "2", "--save-state", (char *)st, NULL }), 0);
+	DWORD *state = (DWORD *)slurp(st, &n);
+	CHECK(state && n == 8 && state[0] == 1234 && state[1] == 2);
+	free(state);
+	CHECK_EQ(run(cmd_encode, (char *[]){ "encode", c, (char *)y4m, "-o",
+					     (char *)q, "--state", (char *)st, NULL }), 0);
+	CHECK_EQ(run(cmd_decode, (char *[]){ "decode", c, (char *)q, "-o",
+					     (char *)P("q.yuv"), "--state", (char *)st,
+					     NULL }), 0);
+
+	/* A damaged frame: an error, unless --keep-going repeats the last one. */
+	const char *kg = P("kg.bgr");
+	CHECK_EQ(run(cmd_decode, (char *[]){ "decode", c, seq_avi, "-o",
+					     (char *)kg, NULL }), 1);
+	CHECK_EQ(run(cmd_decode, (char *[]){ "decode", c, seq_avi, "-o",
+					     (char *)kg, "--keep-going", NULL }), 0);
+	pp = slurp(kg, &n);
+	CHECK(pp && n == 8 * (size_t)W * H * 3);
+	if (pp && n == 8 * (size_t)W * H * 3)
+		CHECK(!memcmp(pp + 1 * W * H * 3, pp + 2 * W * H * 3, (size_t)W * H * 3));
+	free(pp);
+
+	/* Mistakes. */
+	const char *x = P("x.avi");
+	CHECK_EQ(run(cmd_decode, (char *[]){ "decode", c, (char *)avi, "-o",
+					     (char *)P("x.yuv"), "--output-format",
+					     "YUY2", NULL }), 1);
+	CHECK_EQ(run(cmd_decode, (char *[]){ "decode", c, (char *)avi, "-o",
+					     (char *)P("x.yuv"), "--output-format",
+					     "NOPE", NULL }), 1);
+	CHECK_EQ(run(cmd_decode, (char *[]){ "decode", c, (char *)y4m, "-o",
+					     (char *)P("x.yuv"), NULL }), 1);
+	CHECK_EQ(run(cmd_decode, (char *[]){ "decode", "XXXX", (char *)avi, "-o",
+					     (char *)P("x.yuv"), NULL }), 1);
+	CHECK_EQ(run(cmd_decode, (char *[]){ "decode", c, (char *)avi, NULL }), 2);
+	CHECK_EQ(run(cmd_decode, (char *[]){ "decode", c, (char *)avi, "-o",
+					     "x.nope", NULL }), 2);
+	CHECK_EQ(run(cmd_encode, (char *[]){ "encode", c, (char *)y4m, "-o",
+					     (char *)x, "--quality", "20000", NULL }), 2);
+	CHECK_EQ(run(cmd_encode, (char *[]){ "encode", c, (char *)yuv, "-o",
+					     (char *)x, "--input-format", "I420", NULL }), 2);
+	CHECK_EQ(run(cmd_encode, (char *[]){ "encode", c, (char *)yuv, "-o",
+					     (char *)x, "--codec-input", "YUY2", NULL }), 1);
+	CHECK_EQ(run(cmd_encode, (char *[]){ "encode", c, (char *)P("nosuch.y4m"),
+					     "-o", (char *)x, NULL }), 1);
+	CHECK_EQ(run(cmd_encode, (char *[]){ "encode", c, (char *)y4m, "-o",
+					     (char *)x, "--rate", "fast", NULL }), 2);
+
+	CHECK_EQ(drv_open_count(), 0);
+	CHECK_EQ(codec_opens(), 0);
+	for (int i = 0; i < np; i++)
+		unlink(paths[i]);
+	unlink(seq_avi);
+}
+
 int main(void)
 {
 	char codec[4096];
@@ -644,6 +953,8 @@ int main(void)
 		test_icm();
 		test_builtins(m);
 		test_probe_cli(codec);
+		test_seq();
+		test_codec_cli(codec);
 	}
 	mod_free(m);
 

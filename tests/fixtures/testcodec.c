@@ -2,11 +2,12 @@
  * testcodec.dll: a small lossless VfW codec, FOURCC 'TST0', for testing
  * the harness's driver and ICM layers the way a real codec would use them.
  *
- * Input is BI_RGB 24 or 32 bits, either orientation. A compressed frame is
- * a 4-byte header ('K' keyframe or 'D' delta, bits per pixel, 0, 0) and a
- * byte-wise RLE of the DIB: of the frame itself for a keyframe, or of its
- * XOR with the previous frame for a delta. Decompression gives BI_RGB 24 or
- * 32 bits in either orientation.
+ * Input is BI_RGB 24 or 32 bits, either orientation, or I420 (IYUV). A
+ * compressed frame is a 4-byte header ('K' keyframe or 'D' delta, bits per
+ * pixel, 0, 0) and a byte-wise RLE of the frame: of the frame itself for a
+ * keyframe, or of its XOR with the previous frame for a delta. RGB
+ * decompresses to BI_RGB 24 or 32 bits in either orientation, I420 to
+ * I420, so both round trips are lossless.
  *
  * Messages it does not handle go to winmm's DefDriverProc, and
  * testcodec_selftest() calls winmm and msvfw32 from the Win32 side.
@@ -17,6 +18,8 @@
 
 #define TST0 mmioFOURCC('T', 'S', 'T', '0')
 #define VIDC mmioFOURCC('v', 'i', 'd', 'c')
+#define I420 mmioFOURCC('I', '4', '2', '0')
+#define IYUV mmioFOURCC('I', 'Y', 'U', 'V')
 #define MAX_LOG 64
 
 struct state {
@@ -91,7 +94,11 @@ static DWORD stride(LONG w, int bpp)
 
 static DWORD frame_bytes(const BITMAPINFOHEADER *b)
 {
-	return stride(b->biWidth, b->biBitCount) * abs_height(b);
+	LONG w = b->biWidth, h = abs_height(b);
+
+	if (b->biBitCount == 12)
+		return (DWORD)(w * h + 2 * ((w + 1) / 2) * ((h + 1) / 2));
+	return stride(w, b->biBitCount) * h;
 }
 
 /* The worst case of the RLE, plus the header. */
@@ -109,10 +116,26 @@ static int ok_rgb(const BITMAPINFOHEADER *b)
 	       abs_height(b) <= 16384;
 }
 
+static int ok_yuv(const BITMAPINFOHEADER *b)
+{
+	return b && b->biSize >= sizeof(*b) &&
+	       (b->biCompression == I420 || b->biCompression == IYUV) &&
+	       b->biBitCount == 12 &&
+	       b->biWidth > 0 && b->biWidth <= 16384 && b->biHeight != 0 &&
+	       abs_height(b) <= 16384;
+}
+
+/* An input the compressor takes. */
+static int ok_input(const BITMAPINFOHEADER *b)
+{
+	return ok_rgb(b) || ok_yuv(b);
+}
+
 static int ok_tst0(const BITMAPINFOHEADER *b)
 {
 	return b && b->biSize >= sizeof(*b) && b->biCompression == TST0 &&
-	       (b->biBitCount == 24 || b->biBitCount == 32) &&
+	       (b->biBitCount == 12 || b->biBitCount == 24 ||
+		b->biBitCount == 32) &&
 	       b->biWidth > 0 && b->biWidth <= 16384 && b->biHeight != 0 &&
 	       abs_height(b) <= 16384;
 }
@@ -212,7 +235,7 @@ static LRESULT get_info(ICINFO *info, DWORD size)
 static LRESULT compress_query(const BITMAPINFOHEADER *in,
 			      const BITMAPINFOHEADER *out)
 {
-	if (!ok_rgb(in))
+	if (!ok_input(in))
 		return ICERR_BADFORMAT;
 	if (out && (!ok_tst0(out) || !same_size(in, out) ||
 		    out->biBitCount != in->biBitCount))
@@ -223,7 +246,7 @@ static LRESULT compress_query(const BITMAPINFOHEADER *in,
 static LRESULT compress_get_format(const BITMAPINFOHEADER *in,
 				   BITMAPINFOHEADER *out)
 {
-	if (!ok_rgb(in))
+	if (!ok_input(in))
 		return ICERR_BADFORMAT;
 	if (!out)
 		return sizeof(BITMAPINFOHEADER);
@@ -273,7 +296,9 @@ static LRESULT decompress_query(const BITMAPINFOHEADER *in,
 {
 	if (!ok_tst0(in))
 		return ICERR_BADFORMAT;
-	if (out && (!ok_rgb(out) || !same_size(in, out)))
+	if (out && (in->biBitCount == 12 ? !ok_yuv(out) : !ok_rgb(out)))
+		return ICERR_BADFORMAT;
+	if (out && !same_size(in, out))
 		return ICERR_BADFORMAT;
 	return ICERR_OK;
 }
@@ -287,8 +312,8 @@ static LRESULT decompress_get_format(const BITMAPINFOHEADER *in,
 		return sizeof(BITMAPINFOHEADER);
 	*out = *in;
 	out->biSize = sizeof(*out);
-	out->biCompression = BI_RGB;
-	out->biBitCount = 24;
+	out->biCompression = in->biBitCount == 12 ? I420 : BI_RGB;
+	out->biBitCount = in->biBitCount == 12 ? 12 : 24;
 	out->biHeight = abs_height(in);
 	out->biSizeImage = frame_bytes(out);
 	out->biClrUsed = out->biClrImportant = 0;
@@ -315,6 +340,13 @@ static LRESULT decompress(struct instance *inst, ICDECOMPRESS *d)
 			       frame_bytes(in), src[0] == 'D'))
 			return ICERR_BADFORMAT;
 		inst->dvalid = 1;
+	}
+
+	if (in->biBitCount == 12) {
+		DWORD n = frame_bytes(in), i;
+		for (i = 0; i < n; i++)
+			dst[i] = inst->dcur[i];
+		return ICERR_OK;
 	}
 
 	/* Convert to the output's depth and orientation. */
@@ -428,7 +460,7 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		return compress_get_format((BITMAPINFOHEADER *)l1,
 					   (BITMAPINFOHEADER *)l2);
 	case ICM_COMPRESS_GET_SIZE:
-		if (!ok_rgb((BITMAPINFOHEADER *)l1))
+		if (!ok_input((BITMAPINFOHEADER *)l1))
 			return ICERR_BADFORMAT;
 		return max_size((BITMAPINFOHEADER *)l1);
 	case ICM_COMPRESS_FRAMES_INFO: {

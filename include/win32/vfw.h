@@ -314,6 +314,28 @@ typedef struct {
 	LPPALETTEENTRY lppe;
 } ICPALETTE;
 
+/* ICCompressorChoose / ICSeqCompressFrame* state. */
+#define ICMF_COMPVARS_VALID 0x00000001
+
+typedef struct {
+	LONG cbSize;
+	DWORD dwFlags;
+	HIC hic;
+	DWORD fccType;
+	DWORD fccHandler;
+	LPBITMAPINFO lpbiIn;
+	LPBITMAPINFO lpbiOut;
+	LPVOID lpBitsOut;
+	LPVOID lpBitsPrev;
+	LONG lFrame;
+	LONG lKey;
+	LONG lDataRate;
+	LONG lQ;
+	LONG lKeyCount;
+	LPVOID lpState;
+	LONG cbState;
+} COMPVARS, *PCOMPVARS;
+
 /* ICInstall() flags. */
 #define ICINSTALL_UNICODE  0x8000
 #define ICINSTALL_FUNCTION 0x0001

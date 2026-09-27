@@ -29,10 +29,10 @@ static const struct command commands[] = {
 	  "list the codecs registered in vfw.ini", cmd_list },
 	{ "probe", "<dll|fourcc> [in.avi]",
 	  "show codec info and the formats it accepts", cmd_probe },
-	{ "decode", "<dll|fourcc> <in.avi> -o <out>",
-	  "decompress a video to Y4M, BMP or raw frames", NULL },
-	{ "encode", "<dll|fourcc> <in.y4m> -o <out.avi>",
-	  "compress a video to AVI", NULL },
+	{ "decode", "<dll|fourcc|auto> <in.avi> -o <out>",
+	  "decompress a video to Y4M, BMP or raw frames", cmd_decode },
+	{ "encode", "<dll|fourcc> <in.y4m|avi|bmp|raw> -o <out.avi>",
+	  "compress video to an AVI", cmd_encode },
 };
 
 static void usage(FILE *out)

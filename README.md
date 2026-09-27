@@ -20,7 +20,7 @@ Work is split into phases; see [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION
 | 1 | PE loader and `info` | done |
 | 2 | Win32 runtime (TEB, SEH, threads, stub DLLs) | in progress: TEB, built-in DLLs, kernel32 and ntdll done |
 | 3 | VfW layer and `probe` | done: driver lifecycle, ICM API, winmm/msvfw32 built-ins, `probe`, `list` |
-| 4 | AVI / Y4M I/O, `decode` and `encode` | in progress: AVI reader and writer, `avi`, `convert` and the output writers done |
+| 4 | AVI / Y4M I/O, `decode` and `encode` | done: AVI reader and writer, Y4M/BMP/raw input and output, `avi`, `convert`, `decode`, `encode` |
 | 5 | Hardening and CI | not started |
 
 ## Prerequisites
@@ -130,7 +130,7 @@ It accepts these inputs:
 - YUY2, UYVY, YVYU, I420/IYUV, YV12, NV12, NV21 and Y800.
 
 YUV is BT.601 limited range, and empty (dropped) frames repeat the previous one.
-Compressed streams need a codec, which will be the job of `decode`.
+Compressed streams need a codec: see `decode`.
 
 ### Codecs: `probe` and `list`
 
@@ -184,7 +184,60 @@ native DLL of the same name on the search path takes precedence over them.
 A codec importing them still loads, `info` shows which of its imports are
 not implemented, and calling one stops the harness with a message naming it.
 
-`decode` and `encode` are listed but not implemented yet.
+### Decoding and encoding: `decode` and `encode`
+
+```sh
+build/vfw-harness decode codec.dll clip.avi -o clip.y4m
+build/vfw-harness decode auto clip.avi -o 'frame%05d.bmp' --start 250 --frames 10
+build/vfw-harness decode XVID clip.avi -o clip.yuv --output-format YV12
+
+build/vfw-harness encode codec.dll in.y4m -o out.avi --keyint 30 --quality 8000
+build/vfw-harness encode TST0 'shot%04d.bmp' -o out.avi --rate 30000/1001
+build/vfw-harness encode codec.dll in.yuv -o out.avi --input-format I420 --size 720x576
+ffmpeg -i any.mkv -f yuv4mpegpipe - | build/vfw-harness encode codec.dll - -o out.avi
+```
+
+`decode` runs an AVI's video stream through a codec's decompressor
+(`ICM_DECOMPRESS_BEGIN`, then `ICDecompress` per frame) and writes the
+frames with the same writers as `convert`. The codec is a DLL, a FOURCC
+from `vfw.ini`, or `auto` for whichever registered codec accepts the
+stream (`ICLocate`). A DLL is opened as the stream's handler unless
+`--fourcc` says otherwise. The output format is `--output-format` if
+given; otherwise I420 for Y4M and YUV output and BGR24 for BMP and BGR, if
+the codec offers them, then what the codec suggests, then the first
+standard format it accepts. `--start` begins decoding at the keyframe
+before that frame, feeding the frames in between with
+`ICDECOMPRESS_PREROLL`; frames that aren't keyframes get
+`ICDECOMPRESS_NOTKEYFRAME`. A frame the codec rejects stops the decode,
+or with `--keep-going` repeats the previous picture. `.raw` output keeps
+the codec's output exactly, in whatever format it is.
+
+`encode` compresses video into an AVI through the msvfw32 sequence API
+(`ICSeqCompressFrameStart`, `ICSeqCompressFrame`, `ICSeqCompressFrameEnd`),
+which the harness also exports to codecs. It reads:
+- Y4M, 4:2:0 (any chroma siting) or mono, from a file or `-` for stdin.
+- An uncompressed AVI stream; RLE and palette-changing streams are turned
+  into BGR24.
+- A BMP file, or numbered files (`shot%04d.bmp`, from 0 or 1).
+- Raw frames with `--input-format` (I420, YV12, YUY2, UYVY, BGR32, BGR24,
+  RGB565, RGB555) and `--size`; raw RGB is top-down with unpadded rows,
+  as FFmpeg's `rawvideo` and our `.bgr` output are.
+
+Frames go to the codec as they are if it takes them
+(`ICM_COMPRESS_QUERY`); otherwise they are converted to the first standard
+format it takes, or to `--codec-input`. `--keyint` (default: the codec's
+`ICM_GETDEFAULTKEYFRAMERATE`), `--quality` (0 to 10000) and `--bitrate`
+(kbit/s, for codecs that can aim for one) set the sequence, and
+`ICM_COMPRESS_FRAMES_INFO` tells the codec about them and the frame rate.
+The keyframe flags in the AVI index are the codec's. `--state` sets a
+codec state saved earlier with `--save-state` (`ICM_SETSTATE` /
+`ICM_GETSTATE`), and `--odml` writes OpenDML indexes even for small
+files; files over 1 GB always get them.
+
+Both commands print the frame count, the formats on each side and the time
+spent in the codec per frame. With `testcodec.dll`, encoding a clip and
+decoding it again gives the input back byte for byte, which the unit tests
+and `validate_media` check for Y4M, BMP, raw and AVI input.
 
 ### Loader environment variables
 
@@ -204,11 +257,12 @@ not implemented, and calling one stops the harness with a message naming it.
 | `src/loader/` | PE parsing, mapping and relocation (`pe.c`); the module table and dependency loading (`modules.c`) |
 | `src/runtime/` | TEB and `%fs`, the built-in DLL registry, trap thunks for unimplemented imports |
 | `src/win32/` | Built-in kernel32, ntdll, winmm and msvfw32; placeholders for the other system DLLs |
-| `src/vfw/` | Installable drivers (`driver.c`), the codec registry (`registry.c`), the ICM API (`icm.c`) |
+| `src/vfw/` | Installable drivers (`driver.c`), the codec registry (`registry.c`), the ICM API (`icm.c`), sequence compression (`seq.c`) |
 | `src/avi/` | AVI reader (AVI 1.0 and OpenDML) and writer |
-| `src/out/` | DIB to BGR24 / I420 conversion; Y4M, BMP and raw writers |
+| `src/in/` | Frame sources for `encode`: Y4M, uncompressed AVI, BMP files, raw frames |
+| `src/out/` | DIB to and from BGR24 / I420; Y4M, BMP and raw writers |
 | `src/common/` | Error reporting, file, UTF-16 and FOURCC helpers |
-| `src/` | CLI entry point and commands (`main.c`, `cmd_*.c`) |
+| `src/` | CLI entry point and commands (`main.c`, `cmd_*.c`, shared helpers in `cmd_util.c`) |
 | `tests/unit/` | Unit tests (`test_*.c`, each a standalone program) |
 | `tests/fixtures/` | Sources of the test DLLs, including `testcodec.c`, a lossless VfW codec (`TST0`) |
 | `tests/abi/` | ABI cross-check against the mingw-w64 headers |

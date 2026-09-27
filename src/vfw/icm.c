@@ -476,8 +476,8 @@ const char *vfw_std_format(unsigned i, LONG w, LONG h, struct vfw_format *f)
 	return fmts[i].name;
 }
 
-static BITMAPINFOHEADER *get_format(HIC hic, UINT msg,
-				    const BITMAPINFOHEADER *in, LRESULT *err)
+BITMAPINFOHEADER *ic_get_format(HIC hic, UINT msg, const BITMAPINFOHEADER *in,
+				 size_t *fmt_size, LRESULT *err)
 {
 	LRESULT size = ic_send(hic, msg, (DWORD_PTR)in, 0);
 
@@ -503,6 +503,13 @@ static BITMAPINFOHEADER *get_format(HIC hic, UINT msg,
 	}
 	if (out->biSize < sizeof(*out) || out->biSize > cap)
 		out->biSize = sizeof(*out);
+	if (fmt_size) {
+		/* What the codec said, or what the header implies if more. */
+		size_t n = vfw_format_size(out);
+		if (n > cap)
+			n = cap;
+		*fmt_size = n > (size_t)size ? n : (size_t)size;
+	}
 	*err = ICERR_OK;
 	return out;
 }
@@ -510,13 +517,13 @@ static BITMAPINFOHEADER *get_format(HIC hic, UINT msg,
 BITMAPINFOHEADER *ic_decompress_get_format(HIC hic, const BITMAPINFOHEADER *in,
 					   LRESULT *err)
 {
-	return get_format(hic, ICM_DECOMPRESS_GET_FORMAT, in, err);
+	return ic_get_format(hic, ICM_DECOMPRESS_GET_FORMAT, in, NULL, err);
 }
 
 BITMAPINFOHEADER *ic_compress_get_format(HIC hic, const BITMAPINFOHEADER *in,
 					 LRESULT *err)
 {
-	return get_format(hic, ICM_COMPRESS_GET_FORMAT, in, err);
+	return ic_get_format(hic, ICM_COMPRESS_GET_FORMAT, in, NULL, err);
 }
 
 BITMAPINFOHEADER *ic_negotiate_output(HIC hic, const BITMAPINFOHEADER *in,

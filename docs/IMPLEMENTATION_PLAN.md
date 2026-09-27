@@ -97,8 +97,10 @@ The stub list is based on what VfW codecs use in general (with Wine and MPlayer'
 
 Status: done. `driver.c`, `registry.c` (`vfw.ini`) and `icm.c`, the winmm
 and msvfw32 built-ins, `probe` and `list`, and `testcodec.dll` with
-`test_vfw`. Still open:
-- ICImageCompress/ICImageDecompress, ICSeqCompressFrame* and ICCompressorChoose.
+`test_vfw`, and ICSeqCompressFrameStart/Frame/End and ICCompressorFree
+(`seq.c`), which `encode` uses. Still open:
+- ICImageCompress/ICImageDecompress (they return global-memory DIBs, so they
+  wait for GlobalAlloc in kernel32) and ICCompressorChoose (a dialog).
 - DrawDib* and the ICM_DRAW path (drawing is reported as unsupported).
 - The placeholder DLLs (user32, advapi32, msvcrt and so on) have no functions yet.
 
@@ -115,10 +117,11 @@ and msvfw32 built-ins, `probe` and `list`, and `testcodec.dll` with
 
 ### Container and output (`src/avi/`, `src/out/`)
 
-Status: the AVI reader and writer, the DIB conversion and the Y4M/BMP/raw
-writers are done, with the `avi` and `convert` commands; the `validate_media` test
-checks them against FFmpeg. Still open here: Y4M input for `encode`, and raw
-frame input.
+Status: done. The AVI reader and writer, the DIB conversion both ways
+(`image_pack` gives a codec the input format it takes), the Y4M/BMP/raw
+writers, and the frame sources for `encode` in `src/in/` (Y4M, uncompressed
+AVI, BMP files, raw frames), with the `avi`, `convert`, `decode` and `encode`
+commands; the `validate_media` test checks them against FFmpeg.
 
 - **AVI reader:**
   - RIFF `AVI `, `avih`, and `strl` → `strh`, `strf` (full BITMAPINFOHEADER including extradata or palette), `strn`.
@@ -136,8 +139,8 @@ frame input.
 - `info <dll>`: PE summary, sections, exports, and each import marked stubbed, trap or missing-DLL.
 - `list`: the drivers registered in `vfw.ini`.
 - `probe <dll|fcc> [in.avi]`: ICINFO, plus the input and output formats the codec accepts.
-- `decode <dll|fcc> <in.avi|raw> -o out.{y4m,bmp%05d,raw} [--fmt ...] [--frames N] [--state file]`
-- `encode <dll|fcc> <in.y4m|bmp…> -o out.avi [--quality Q --keyint N --bitrate B --state file]`
+- `decode <dll|fcc|auto> <in.avi> -o out.{y4m,bmp%05d,yuv,bgr,raw} [--output-format F --start N --frames N --state file --keep-going]` (done)
+- `encode <dll|fcc> <in.y4m|avi|bmp…|raw> -o out.avi [--quality Q --keyint N --bitrate B --rate R --codec-input F --state file --save-state file --odml]` (done)
 
 ## Phases and milestones
 
@@ -165,7 +168,7 @@ All milestones are checked against **test fixtures built in the repo**, never ag
 3. **VfW layer and `probe`.** `tests/fixtures/testcodec.dll` is a mingw-built lossless ICM codec (FourCC `TST0`). It can compress and decompress, keeps its state through Get/SetState, and supports several output formats.
 
    Milestone: `probe` lists the correct ICINFO, accepted formats and state size.
-4. **AVI and Y4M I/O, `decode` and `encode`.** Milestone: encoding a Y4M clip to AVI with `testcodec` and decoding it back gives a byte-exact result. The AVI output is validated with `ffprobe` when it is installed. The OpenDML path is tested with a large synthetic file.
+4. **AVI and Y4M I/O, `decode` and `encode`.** (Done.) Milestone: encoding a Y4M clip to AVI with `testcodec` and decoding it back gives a byte-exact result. The AVI output is validated with `ffprobe` when it is installed. The OpenDML path is tested with a large synthetic file.
 5. **Hardening and CI.**
    - Keep DLL-visible memory below 2 GB. On a 64-bit kernel a 32-bit process gets addresses up to 4 GB, and glibc's heap and `mmap` live near `0xf7000000`. Windows code without `LARGE_ADDRESS_AWARE` may treat pointers as signed. Options: an `ADDR_LIMIT_3GB`/low-memory personality with a re-exec, or serving Win32 heaps from a low reservation.
    - Build a matrix of fixtures, including 16-byte alignment and SSE use in the codec and C++ exceptions across a codec boundary.
