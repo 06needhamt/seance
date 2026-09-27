@@ -78,13 +78,13 @@ cli: vfw-harness info | probe | decode | encode | list
   - **Strings and code pages:** MultiByteToWideChar/WideCharToMultiByte, GetACP/GetCPInfo, lstr*.
   - **Errors:** Get/SetLastError, Set/UnhandledExceptionFilter, TerminateProcess/ExitProcess, OutputDebugString (to stderr).
   - **Modules and resources:** LoadLibrary*/FreeLibrary/GetProcAddress/GetModuleFileName, FindResource/LoadResource/LockResource, private-profile INI functions.
-- **CRT (msvcrt family):**
-  - Forward to glibc where the semantics match (math, string, memory, strto*, sscanf).
-  - Provide an MSVC-layout `FILE _iob[]` that maps to stdio.
-  - `printf`-family shims for MSVC-only specifiers (`%I64d`).
-  - MSVC `_pctype` table.
-  - Startup support: `_initterm`/`_initterm_e`, `_onexit`/`__dllonexit`/`atexit`, `_lock`/`_unlock`, `_encode`/`_decode_pointer`, `_malloc_crt` and friends, `_except_handler3`/`4_common` (routed into `seh.c`), `__CxxFrameHandler*` (minimal C++ EH), `_CIpow`-style intrinsics, `_ftol`/`_ftol2`, `_allmul`, `_alldiv` and so on.
-  - Codecs with a statically linked CRT need only the kernel32 side.
+- **CRT (msvcrt family):** done, apart from what's still open below.
+  - Forward to glibc where the semantics match (math, string, memory, strto*, `qsort`/`bsearch`, the CRT heap) - done (`crt_math.c`, `crt_string.c`).
+  - An MSVC-layout `FILE _iob[]` that maps to stdio, `fopen` routed through the same `C:\` sandbox `CreateFile` uses, and the `_pctype` table plus the real `isupper`-family functions mingw-w64 compiles calls to rather than an inlined table lookup - done (`crt_stdio.c`).
+  - Startup support: `_initterm`/`_initterm_e`, `_onexit`/`__dllonexit`/`atexit` (running at the harness's own process exit, skipping anything whose module was `mod_free`d first), `_lock`/`_unlock`, `_encode`/`_decode_pointer`, `_malloc_crt` and friends, `__set_app_type`, `_fmode`/`_commode` - done (`crt_startup.c`).
+  - `_ftol`/`_ftol2`, `_allmul`/`_alldiv`/`_aulldiv`/`_allrem`/`_aullrem`/`_allshl`/`_allshr`/`_aullshr`: the 64-bit-arithmetic and float-truncation helpers every 32-bit MSVC-compiled codec using `__int64` calls, whatever CRT it links, even a statically linked one - done (`crt_helpers.c`; `_allmul`'s family get the real MASM-runtime calling convention, callee-pops-its-own-args, for free by declaring them `stdcall` over four 32-bit halves rather than a single `__int64`, since the two only differ in stack cleanup; `_ftol` and the shifts take their operands in EDX:EAX/CL with no stack arguments at all, which no C calling convention expresses, so those five are hand-written asm reproduced from their long-published disassembly).
+  - Still open: `_except_handler3`/`4_common` (the scope-table walk a dynamically linked CRT's compiler-generated frames need on top of `seh.c`'s dispatch), `__CxxFrameHandler*` (minimal C++ EH), `printf`-family shims for MSVC-only specifiers (`%I64d`) - `crt_stdio.c`'s `printf`/`sprintf`/`fprintf` forward straight to the host's own, which don't understand that specifier, and `_CIpow`-style x87 intrinsics.
+  - Codecs with a statically linked CRT need only the kernel32 side plus the arithmetic helpers above, which they call regardless.
 - **user32 / gdi32:** headless. Window, dialog and message functions return failure or no-ops with fake HWND/HDC values. MessageBox prints to stderr and returns IDOK. LoadString, wsprintf, GetDC and CreateDIBSection work on memory buffers. GetSystemMetrics returns sane defaults.
 - **advapi32:** Reg* backed by a per-codec INI or JSON file (`$VFW_REGISTRY`, empty by default), so codec settings persist and can be seeded by tests.
 - **winmm:** DefDriverProc following Wine's `dlls/winmm/driver.c` semantics, timeGetTime, SendDriverMessage/OpenDriver on top of `vfw/`.
@@ -163,7 +163,7 @@ All milestones are checked against **test fixtures built in the repo**, never ag
    Milestone: the fixtures exercise these checks:
    - The SEH fixture (`pe_seh.dll`, done) recovers from an access violation, walks a chain of several hand-installed frames with an RtlUnwind in between, and reaches a frame through RaiseException.
    - The thread fixture reads per-thread TLS back correctly.
-   - The CRT fixture, linked against `msvcrt.dll`, prints through `_iob` and uses `_pctype`.
+   - The CRT fixture (`pe_crt.dll`, done) prints through `_iob`, round-trips a file through `fopen`/`fwrite`/`fread`, and uses `_pctype`, math, string and the 64-bit arithmetic helpers.
    - The registry fixture round-trips a value.
 3. **VfW layer and `probe`.** `tests/fixtures/testcodec.dll` is a mingw-built lossless ICM codec (FourCC `TST0`). It can compress and decompress, keeps its state through Get/SetState, and supports several output formats.
 

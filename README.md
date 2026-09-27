@@ -18,7 +18,7 @@ Work is split into phases; see [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION
 |---|---|---|
 | 0 | Build skeleton, Win32 headers, ABI cross-check, CLI skeleton | done |
 | 1 | PE loader and `info` | done |
-| 2 | Win32 runtime (TEB, SEH, threads, stub DLLs) | in progress: TEB, built-in DLLs, kernel32, ntdll, SEH dispatch and delay-load binding done; msvcrt-family CRT and the remaining stub DLLs (user32, gdi32, advapi32, version, ole32) still open |
+| 2 | Win32 runtime (TEB, SEH, threads, stub DLLs) | in progress: TEB, built-in DLLs, kernel32, ntdll, SEH dispatch, delay-load binding and the msvcrt-family CRT (math/string/stdio/startup/64-bit arithmetic helpers) done; `_except_handler3`/C++ EH and the remaining stub DLLs (user32, gdi32, advapi32, version, ole32) still open |
 | 3 | VfW layer and `probe` | done: driver lifecycle, ICM API, winmm/msvfw32 built-ins, `probe`, `list` |
 | 4 | AVI / Y4M I/O, `decode` and `encode` | done: AVI reader and writer, Y4M/BMP/raw input and output, `avi`, `convert`, `decode`, `encode` |
 | 5 | Hardening and CI | done: DLL memory below 2 GB, crash and hang reports, SSE/FPU fixture, fuzzing, samples run, CI |
@@ -181,10 +181,14 @@ directory, and Windows paths go through the drive mapping (`C:` is
 `$VFW_ROOT/drive_c`, `Z:` is `/`). `list` shows the entries and opens each
 one to show its name.
 
-Codecs usually import more than kernel32, winmm and msvfw32. user32, gdi32,
-advapi32, version, ole32, oleaut32, shell32, comctl32, comdlg32 and the
-msvcrt family exist as placeholder built-ins with no functions yet, and a
-native DLL of the same name on the search path takes precedence over them.
+Codecs usually import more than kernel32, winmm and msvfw32. The msvcrt
+family (msvcrt.dll, msvcr70-140, msvcp*, ucrtbase, api-ms-win-crt-*) is a
+real built-in: math, string/memory, stdio, CRT startup and the 64-bit
+arithmetic helpers a codec calls whatever CRT it links. user32, gdi32,
+advapi32, version, ole32, oleaut32, shell32, comctl32 and comdlg32 are
+still placeholder built-ins with no functions yet. Either way, a native
+DLL of the same name on the search path takes precedence over the
+built-in.
 A codec importing them still loads, `info` shows which of its imports are
 not implemented, and calling one stops the harness with a message naming it.
 
