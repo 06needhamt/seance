@@ -43,7 +43,7 @@ cli: vfw-harness info | probe | decode | encode | list
   - `mmap` at ImageBase. If that fails, map anywhere and apply `.reloc` (HIGHLOW; reject a stripped-reloc DLL with a clear error).
   - Set per-section `mprotect` flags.
   - Imports: by name, by ordinal, and with bound-import tolerance.
-  - Delay-load imports. Phase 1 parses and lists them; binding them eagerly moves to Phase 2, because a delay-loaded DLL's helper code imports kernel32.
+  - Delay-load imports. Phase 1 parses and lists them; Phase 2 binds them eagerly at load time (done), so the DLL's own delay-load helper never runs. A delay-loaded DLL or function that can't be had doesn't fail the load (the DLL would only have failed on first use): it is bound to a trap that says why when called.
   - Export lookup by name and by ordinal, including **forwarded exports** (`DLL.func`).
   - **TLS directory:** set up the TLS slot index and callbacks, and the implicit TLS template that `teb.c` copies into every thread's block (`fs:[0x2c]`), including threads that exist when the DLL is loaded (done).
   - A resource directory walker. Codecs use this for strings, dialogs, version info and manifests.

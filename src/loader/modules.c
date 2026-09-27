@@ -328,6 +328,61 @@ static void *resolve_import(void *ctx, const struct pe_import *imp)
 	return p;
 }
 
+/*
+ * Delay-load imports, bound at load time. Unlike a normal import, one that
+ * can't be had doesn't stop the load: the DLL would only have failed when
+ * it first called it, so it is bound to a trap saying why.
+ */
+struct delay_ctx {
+	struct module *m;
+	char failed[256];	/* the last DLL that couldn't be loaded */
+	char why[160];
+};
+
+static void *resolve_delayed(void *ctx, const struct pe_import *imp)
+{
+	struct delay_ctx *d = ctx;
+	struct module *dep = NULL;
+	char why[160];
+
+	if (strcasecmp(d->failed, imp->dll)) {
+		dep = dep_get(d->m, imp->dll);
+		if (!dep) {
+			snprintf(d->failed, sizeof(d->failed), "%s", imp->dll);
+			snprintf(d->why, sizeof(d->why),
+				 "that delay-loaded DLL could not be loaded (%s)",
+				 vfw_error());
+			TRACE("%s: delay-loaded %s: %s", d->m->name, imp->dll,
+			      vfw_error());
+		}
+	}
+	if (!dep)
+		return trap_thunk_why(imp->dll, imp->name, imp->ordinal, d->why);
+
+	void *p = imp->name ? lookup_name(dep, imp->name, imp->ordinal, 0) :
+			      lookup_ordinal(dep, imp->ordinal, 0);
+	if (p)
+		return p;
+	if (dep->builtin)
+		return trap_thunk(dep->name, imp->name, imp->ordinal);
+	snprintf(why, sizeof(why), "%s doesn't export it", dep->name);
+	TRACE("%s: delay-loaded %s!%s: not exported", d->m->name, imp->dll,
+	      imp->name ? imp->name : "#");
+	return trap_thunk_why(dep->name, imp->name, imp->ordinal, why);
+}
+
+static void *delay_handle(void *ctx, const char *dll)
+{
+	struct delay_ctx *d = ctx;
+	char want[256];
+
+	module_name(dll, want, sizeof(want));
+	for (size_t i = 0; i < d->m->ndeps; i++)
+		if (!strcasecmp(d->m->deps[i]->name, want))
+			return d->m->deps[i]->base;
+	return NULL;
+}
+
 static void unlink_module(struct module *m)
 {
 	for (struct module **p = &modules; *p; p = &(*p)->next) {
@@ -472,7 +527,9 @@ static struct module *load_pe(const char *path)
 		goto fail;
 	}
 	m->base = img->base;
+	struct delay_ctx delay = { .m = m };
 	if (pe_bind_imports(img, resolve_import, m) ||
+	    pe_bind_delay_imports(img, resolve_delayed, delay_handle, &delay) ||
 	    pe_tls_init(img) ||
 	    pe_protect(img)) {
 		error_prefix(m->name);

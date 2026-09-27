@@ -640,6 +640,45 @@ int pe_bind_imports(struct pe_image *img, pe_resolve_fn resolve, void *ctx)
 	return pe_foreach_import(img, bind_one, &b);
 }
 
+int pe_bind_delay_imports(struct pe_image *img, pe_resolve_fn resolve,
+			  pe_handle_fn handle, void *ctx)
+{
+	struct bind_ctx b = { img, resolve, ctx };
+	const IMAGE_DATA_DIRECTORY *d =
+		pe_dir(img, IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT);
+
+	if (!img->base)
+		FAIL("image is not mapped");
+	if (!d)
+		return 0;
+	for (DWORD n = 0; ; n++) {
+		IMAGE_DELAYLOAD_DESCRIPTOR desc;
+		const void *p = pe_ptr(img, d->VirtualAddress + n * sizeof(desc),
+				       sizeof(desc));
+
+		if (n >= MAX_DESCRIPTORS || !p)
+			FAIL("bad PE file: delay import directory runs off the image");
+		memcpy(&desc, p, sizeof(desc));
+		if (!desc.DllNameRVA)
+			return 0;
+
+		int va = !(desc.Attributes.AllAttributes & IMAGE_DELAYLOAD_RVA_BASED);
+		DWORD fix = va ? image_base(img) : 0;
+		const char *dll = pe_str(img, desc.DllNameRVA - fix);
+		if (!dll)
+			FAIL("bad PE file: delay import DLL name out of range");
+		if (walk_thunks(img, dll, desc.ImportNameTableRVA - fix,
+				desc.ImportAddressTableRVA - fix, va, 1, bind_one, &b))
+			return -1;
+		if (desc.ModuleHandleRVA) {
+			BYTE *slot = (BYTE *)pe_ptr(img, desc.ModuleHandleRVA - fix, 4);
+			if (!slot)
+				FAIL("%s: delay-load module handle out of range", dll);
+			wr32(slot, (DWORD)(uintptr_t)handle(ctx, dll));
+		}
+	}
+}
+
 /* Exports. */
 
 struct export_tables {

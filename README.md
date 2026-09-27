@@ -98,6 +98,9 @@ build/vfw-harness info some-codec.dll
 `info` parses a DLL without loading or running it. It prints the headers,
 sections, exports (including ordinal-only exports and forwarders), imports
 and delay imports, TLS callbacks, resources and version information.
+When a DLL is loaded, its delay-load imports are bound straight away, like
+its other imports; one whose DLL or function can't be found is bound to a
+trap that says why if the codec ever calls it.
 
 ```sh
 build/vfw-harness avi clip.avi [--chunks]

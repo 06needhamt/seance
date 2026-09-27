@@ -1,14 +1,20 @@
 /*
  * Loading DLLs with their dependencies: import binding by name, ordinal and
  * data, forwarders, reference counts, DllMain and TLS notifications, page
- * protections and failure unwinding.
+ * protections, failure unwinding and delay-load imports.
  */
+#include <signal.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 
 #include "common/error.h"
 #include "loader/modules.h"
+#include "loader/pe.h"
+#include "runtime/runtime.h"
+#include "runtime/trap.h"
 #include "test.h"
 
 typedef int (*int_fn)(void);
@@ -198,6 +204,159 @@ static void test_force_reloc(void)
 	unsetenv("VFW_FORCE_RELOC");
 }
 
+struct import_list {
+	char text[16][64];
+	int n;
+};
+
+static int list_import(void *ctx, const struct pe_import *imp)
+{
+	struct import_list *l = ctx;
+
+	if (l->n < 16) {
+		if (imp->name)
+			snprintf(l->text[l->n], 64, "%s!%s", imp->dll, imp->name);
+		else
+			snprintf(l->text[l->n], 64, "%s!#%u", imp->dll,
+				 imp->ordinal);
+	}
+	l->n++;
+	return 0;
+}
+
+/*
+ * pe_delay.dll with its delay import directory pointed at the tables it
+ * exports as delay_directory (GNU ld leaves the directory empty), written
+ * to dir. Returns the path, or NULL.
+ */
+static const char *patched_delay_dll(const char *dir)
+{
+	static char path[4200];
+	void *data;
+	size_t len;
+
+	if (vfw_read_file(fixture("pe_delay.dll"), &data, &len))
+		return NULL;
+	struct pe_image *img = pe_parse(data, len);
+	struct pe_export e;
+	int ok = img && !pe_find_export(img, "delay_directory", 0, &e);
+	if (ok) {
+		size_t off = (size_t)((IMAGE_DOS_HEADER *)data)->e_lfanew + 4 +
+			     sizeof(IMAGE_FILE_HEADER) +
+			     offsetof(IMAGE_OPTIONAL_HEADER32, DataDirectory) +
+			     IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT * sizeof(IMAGE_DATA_DIRECTORY);
+		IMAGE_DATA_DIRECTORY d = { e.rva, 3 * sizeof(IMAGE_DELAYLOAD_DESCRIPTOR) };
+		memcpy((BYTE *)data + off, &d, sizeof(d));
+		snprintf(path, sizeof(path), "%s/pe_delay.dll", dir);
+		FILE *f = fopen(path, "wb");
+		ok = f && fwrite(data, 1, len, f) == len;
+		if (f)
+			fclose(f);
+	}
+	pe_free(img);
+	free(data);
+	return ok ? path : NULL;
+}
+
+/* Runs fn from pe_delay.dll in a child; returns its status and stderr. */
+static int run_trapping(struct module *m, const char *fn, char *err, size_t size)
+{
+	int fds[2];
+	if (pipe(fds))
+		return -1;
+	fflush(NULL);
+	pid_t pid = fork();
+	if (!pid) {
+		dup2(fds[1], 2);
+		close(fds[0]);
+		int_fn f = mod_get_proc(m, fn);
+		if (f)
+			f();
+		_exit(3);
+	}
+	close(fds[1]);
+	size_t n = 0;
+	ssize_t r;
+	while (n + 1 < size && (r = read(fds[0], err + n, size - 1 - n)) > 0)
+		n += (size_t)r;
+	err[n] = 0;
+	close(fds[0]);
+	int status = 0;
+	waitpid(pid, &status, 0);
+	return status;
+}
+
+static void test_delay_load(void)
+{
+	char dir[4096], err[1024];
+	const char *t = getenv("TMPDIR");
+
+	snprintf(dir, sizeof(dir), "%s/vfw-delay-XXXXXX", t && *t ? t : "/tmp");
+	if (!mkdtemp(dir)) {
+		CHECK(0);
+		return;
+	}
+	const char *path = patched_delay_dll(dir);
+	CHECK(path != NULL);
+	if (!path)
+		return;
+
+	/* The delay imports, as info lists them. */
+	struct pe_image *img = pe_open(path);
+	CHECK(img != NULL);
+	struct import_list l = { .n = 0 };
+	CHECK(img && pe_foreach_delay_import(img, list_import, &l) == 0);
+	CHECK_EQ(l.n, 4);
+	CHECK_STR(l.text[0], "PE_BASIC.DLL!basic_add");
+	CHECK_STR(l.text[1], "PE_BASIC.DLL!#1");
+	CHECK_STR(l.text[2], "PE_BASIC.DLL!basic_gone");
+	CHECK_STR(l.text[3], "zz_nosuch.dll!nosuch_function");
+	pe_free(img);
+
+	/* pe_basic.dll is found through VFW_PATH; zz_nosuch.dll nowhere. */
+	setenv("VFW_PATH", getenv("VFW_FIXTURES"), 1);
+	struct module *m = mod_load(path, NULL);
+	unsetenv("VFW_PATH");
+	CHECK(m != NULL);
+	if (!m) {
+		fprintf(stderr, "  %s\n", vfw_error());
+		return;
+	}
+	add_fn add = mod_get_proc(m, "delay_add");
+	add_fn add_ord = mod_get_proc(m, "delay_add_by_ordinal");
+	dword_fn helper = mod_get_proc(m, "delay_helper_calls");
+	HMODULE (*handle)(int) = mod_get_proc(m, "delay_module");
+	CHECK(add && add_ord && helper && handle);
+	struct module *basic = mod_find("pe_basic.dll");
+	CHECK(basic != NULL);
+	if (add && add_ord && helper && handle && basic) {
+		CHECK_EQ(add(2, 3), 5);
+		CHECK_EQ(add_ord(4, 5), 9);
+		CHECK_EQ(helper(), 0);		/* bound at load: no lazy path */
+		CHECK(handle(0) == (HMODULE)basic->base);
+		CHECK(handle(1) == NULL);	/* never loaded */
+	}
+
+	/* What can't be had is a trap that says why. */
+	{
+		int st = run_trapping(m, "delay_nosuch", err, sizeof(err));
+		CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGABRT);
+		CHECK(strstr(err, "zz_nosuch.dll!nosuch_function called from "
+			      "pe_delay.dll+0x"));
+		CHECK(strstr(err, "but that delay-loaded DLL could not be loaded"));
+		st = run_trapping(m, "delay_gone", err, sizeof(err));
+		CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGABRT);
+		CHECK(strstr(err, "pe_basic.dll!basic_gone called from pe_delay.dll"));
+		CHECK(strstr(err, "but pe_basic.dll doesn't export it"));
+	}
+
+	/* Unloading releases what the delay imports loaded. */
+	mod_free(m);
+	CHECK(mod_find("pe_basic.dll") == NULL);
+	unlink(path);
+	rmdir(dir);
+}
+
 int main(void)
 {
 	test_dependencies();
@@ -205,5 +364,7 @@ int main(void)
 	test_load_failures();
 	test_search_path();
 	test_force_reloc();
+	CHECK_EQ(runtime_enter(), 0);
+	test_delay_load();
 	return test_summary("test_modules");
 }

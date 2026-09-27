@@ -15,6 +15,7 @@
 struct trap_record {
 	struct trap_record *next;	/* all records, kept for the process */
 	char what[128];
+	char why[160];		/* "" for an unimplemented built-in function */
 };
 
 /*
@@ -41,8 +42,12 @@ void vfw_trap_report(const struct trap_record *r, const void *ret)
 
 	/* The call instruction is just before the return address. */
 	mod_describe_address((const BYTE *)ret - 1, where, sizeof(where));
-	fprintf(stderr, "vfw-harness: unimplemented function %s called from %s\n",
-		r->what, where);
+	if (r->why[0])
+		fprintf(stderr, "vfw-harness: %s called from %s, but %s\n",
+			r->what, where, r->why);
+	else
+		fprintf(stderr, "vfw-harness: unimplemented function %s called "
+			"from %s\n", r->what, where);
 	fflush(stderr);
 	abort();
 }
@@ -56,9 +61,17 @@ static int npools;
 
 void *trap_thunk(const char *dll, const char *name, WORD ordinal)
 {
-	struct trap_record *r = malloc(sizeof(*r));
+	return trap_thunk_why(dll, name, ordinal, NULL);
+}
+
+void *trap_thunk_why(const char *dll, const char *name, WORD ordinal,
+		     const char *why)
+{
+	struct trap_record *r = calloc(1, sizeof(*r));
 	if (!r)
 		return NULL;
+	if (why)
+		snprintf(r->why, sizeof(r->why), "%s", why);
 	if (name)
 		snprintf(r->what, sizeof(r->what), "%s!%s", dll, name);
 	else

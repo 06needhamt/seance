@@ -60,6 +60,8 @@ fixture(pe_tls pe_tls.c)
 fixture(pe_fail pe_fail.c)
 fixture(pe_dep pe_dep.c pe_dep.def LIBS pe_basic_imports)
 fixture(pe_missing pe_missing.c LIBS zz_nosuch_imports pe_basic_imports)
+# Its own delay-load tables (GNU ld doesn't make them); see pe_delay.c.
+fixture(pe_delay pe_delay.c)
 
 # Links against kernel32 (the mingw import library) and a made-up function.
 fixture(pe_runtime pe_runtime.c LIBS vfw_missing_imports kernel32)
