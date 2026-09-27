@@ -126,7 +126,8 @@ static void test_builtin_tables(void)
 		size_t n = builtin_count(dll);
 		int unique = 1;
 
-		CHECK(n > 0);
+		/* Placeholders have no exports yet; everything else has. */
+		CHECK(dll->fallback ? n == 0 : n > 0);
 		for (size_t i = 0; i < n; i++) {
 			const struct builtin_export *e = builtin_entry(dll, i);
 			const struct builtin_export *prev =
@@ -150,6 +151,67 @@ static void test_builtin_tables(void)
 	CHECK(builtin_find("kernel32.dll") == builtin_find("Kernel32.Dll"));
 	CHECK(builtin_find("kernel33.dll") == NULL);
 	CHECK(builtin_find("pe_basic.dll") == NULL);
+
+	/* The system DLLs a codec may import, and their aliases. */
+	static const char *const names[] = {
+		"winmm.dll", "msvfw32.dll", "user32.dll", "gdi32.dll",
+		"advapi32.dll", "version.dll", "ole32.dll", "msvcrt.dll",
+		"MSVCR71.DLL", "msvcrt20.dll", "ucrtbase.dll",
+		"api-ms-win-crt-runtime-l1-1-0.dll",
+	};
+	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+		if (!builtin_find(names[i])) {
+			fprintf(stderr, "no built-in for %s\n", names[i]);
+			CHECK(0);
+		}
+	CHECK(!builtin_find("winmm.dll")->fallback);
+	CHECK(!builtin_find("msvfw32.dll")->fallback);
+	CHECK(builtin_find("msvcr90.dll") == builtin_find("msvcrt.dll"));
+	CHECK(builtin_find("msvcrt.dll")->fallback);
+	CHECK(builtin_find("msvcr.dll") == NULL);
+}
+
+/*
+ * A fallback built-in is used only when no DLL of that name is found; a
+ * native copy on the search path wins.
+ */
+static void test_fallback_builtins(void)
+{
+	struct module *m = mod_load("USER32", NULL);
+	CHECK(m && m->builtin && m->builtin->fallback && !m->img);
+	if (m)
+		CHECK(mod_get_proc(m, "MessageBoxA") == NULL);
+	mod_free(m);
+
+	char dir[4096], dst[4200];
+	const char *t = getenv("TMPDIR");
+	snprintf(dir, sizeof(dir), "%s/vfw-rt-XXXXXX", t && *t ? t : "/tmp");
+	if (!mkdtemp(dir)) {
+		CHECK(0);
+		return;
+	}
+	snprintf(dst, sizeof(dst), "%s/user32.dll", dir);
+	void *data;
+	size_t len;
+	CHECK_EQ(vfw_read_file(fixture("pe_basic.dll"), &data, &len), 0);
+	FILE *f = fopen(dst, "wb");
+	CHECK(f && fwrite(data, 1, len, f) == len);
+	if (f)
+		fclose(f);
+	free(data);
+
+	setenv("VFW_PATH", dir, 1);
+	m = mod_load("user32.dll", NULL);
+	CHECK(m && !m->builtin && m->img);
+	mod_free(m);
+	unsetenv("VFW_PATH");
+	unlink(dst);
+	rmdir(dir);
+
+	/* kernel32 is always the built-in one. */
+	m = mod_load("kernel32.dll", NULL);
+	CHECK(m && m->builtin && !m->builtin->fallback);
+	mod_free(m);
 }
 
 static void test_builtin_modules(void)
@@ -253,5 +315,6 @@ int main(void)
 	test_builtin_tables();
 	test_builtin_modules();
 	test_fixture();
+	test_fallback_builtins();
 	return test_summary("test_runtime");
 }

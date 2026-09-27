@@ -66,4 +66,4 @@ static const struct builtin_export exports[] = {
 
 static const struct builtin_export *const tables[] = { exports, NULL };
 
-const struct builtin_dll builtin_ntdll = { "ntdll.dll", NULL, tables };
+const struct builtin_dll builtin_ntdll = { "ntdll.dll", NULL, tables, 0 };

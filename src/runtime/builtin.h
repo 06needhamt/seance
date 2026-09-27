@@ -34,6 +34,14 @@ struct builtin_dll {
 	/* Other names it answers to, as fnmatch() patterns; NULL-terminated. */
 	const char *const *aliases;
 	const struct builtin_export *const *tables;	/* NULL-terminated */
+	/*
+	 * Used only when no DLL of that name is found on disk, so a native
+	 * copy (say of msvcrt.dll) placed on the search path wins. Set for the
+	 * system DLLs the harness has no implementation of yet: codecs
+	 * importing them still load, and calling one of their functions stops
+	 * at a trap that names it.
+	 */
+	int fallback;
 };
 
 #define BUILTIN_END { NULL, 0, NULL }

@@ -472,11 +472,15 @@ struct module *mod_load(const char *name, struct module *importer)
 		snprintf(path, sizeof(path), "%s", name);
 	} else {
 		const struct builtin_dll *b = builtin_find(want);
-		if (b) {
+		if (b && !b->fallback) {
 			m = load_builtin(want, b);
 			goto out;
 		}
 		if (search(want, importer, path, sizeof(path))) {
+			if (b) {
+				m = load_builtin(want, b);
+				goto out;
+			}
 			vfw_set_error("%s: not found (searched %s$VFW_PATH and the current directory)",
 				      want, importer ? "the importer's directory, " : "");
 			goto out;

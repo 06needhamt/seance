@@ -180,4 +180,4 @@ static const struct builtin_export *const tables[] = {
 	NULL
 };
 
-const struct builtin_dll builtin_kernel32 = { "kernel32.dll", NULL, tables };
+const struct builtin_dll builtin_kernel32 = { "kernel32.dll", NULL, tables, 0 };

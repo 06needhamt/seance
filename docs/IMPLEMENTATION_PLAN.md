@@ -95,6 +95,13 @@ The stub list is based on what VfW codecs use in general (with Wine and MPlayer'
 
 ### VfW layer (`src/vfw/`)
 
+Status: done. `driver.c`, `registry.c` (`vfw.ini`) and `icm.c`, the winmm
+and msvfw32 built-ins, `probe` and `list`, and `testcodec.dll` with
+`test_vfw`. Still open:
+- ICImageCompress/ICImageDecompress, ICSeqCompressFrame* and ICCompressorChoose.
+- DrawDib* and the ICM_DRAW path (drawing is reported as unsupported).
+- The placeholder DLLs (user32, advapi32, msvcrt and so on) have no functions yet.
+
 - **`driver.c`:**
   - Installable-driver lifecycle: `DRV_LOAD`, `DRV_ENABLE`, `DRV_OPEN` with ICOPEN, then `DRV_CLOSE`, `DRV_DISABLE`, `DRV_FREE`.
   - A driver table maps `fccType.fccHandler` to a DLL path, taken from `vfw.ini` (a `[drivers32]`-style file, the Linux equivalent of `system.ini`) or from the command line.

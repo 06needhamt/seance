@@ -63,7 +63,7 @@ FIXTURE_CFLAGS := -O2 -Wall -nostdlib -ffreestanding -fno-stack-protector \
 	-Wl,--image-base,0x10000000 -Wl,-e,_DllMain@12
 FIXTURES := $(addprefix $(FIXTURE_DIR)/,pe_basic.dll pe_reloc.dll \
 	pe_noreloc.dll pe_tls.dll pe_dep.dll pe_fail.dll pe_missing.dll \
-	pe_runtime.dll pe_k32.dll)
+	pe_runtime.dll pe_k32.dll testcodec.dll)
 
 fixtures: $(FIXTURES)
 
@@ -100,6 +100,15 @@ $(FIXTURE_DIR)/pe_k32.dll: $(FIXTURE_SRC)/pe_k32.c $(FIXTURE_DIR)/pe_k32.res.o \
 		$(FIXTURE_SRC)/fixture.h
 	$(MINGW_CC) $(FIXTURE_CFLAGS) -mpreferred-stack-boundary=2 -o $@ \
 		$(filter-out %.h,$^) -lkernel32
+
+# A small VfW codec. -fno-builtin and no loop-to-memset rewriting keep it
+# free of calls into a C runtime it doesn't link.
+$(FIXTURE_DIR)/testcodec.dll: $(FIXTURE_SRC)/testcodec.c \
+		$(FIXTURE_SRC)/testcodec.def $(FIXTURE_DIR)/testcodec.res.o \
+		$(FIXTURE_SRC)/fixture.h
+	$(MINGW_CC) $(FIXTURE_CFLAGS) -mpreferred-stack-boundary=2 -fno-builtin \
+		-fno-tree-loop-distribute-patterns -o $@ $(filter-out %.h,$^) \
+		-lkernel32 -lwinmm -lmsvfw32
 
 # The same image as pe_reloc.dll with its relocations stripped.
 $(FIXTURE_DIR)/pe_noreloc.dll: $(FIXTURE_DIR)/pe_reloc.dll
@@ -154,10 +163,13 @@ smoke: $(BIN) $(if $(HAVE_MINGW),fixtures)
 	@$(BIN) --help > /dev/null
 	@! $(BIN) no-such-command 2> /dev/null
 	@! $(BIN) info Makefile 2> /dev/null
+	@! $(BIN) probe Makefile 2> /dev/null
+	@VFW_INI=/nonexistent $(BIN) list > /dev/null
 	@! $(BIN) avi Makefile 2> /dev/null
 	@! $(BIN) convert Makefile -o /dev/null --format raw 2> /dev/null
 	@if [ -n "$(HAVE_MINGW)" ]; then \
 		$(BIN) info $(FIXTURE_DIR)/pe_dep.dll > /dev/null; \
+		$(BIN) probe $(FIXTURE_DIR)/testcodec.dll | grep -q "handler 'TST0'"; \
 	fi
 	@echo "smoke: CLI ok"
 
