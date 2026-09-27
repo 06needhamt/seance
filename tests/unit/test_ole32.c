@@ -326,6 +326,7 @@ static void test_registered(void)
 	FN(HRESULT, CoRegisterClassObject, REFCLSID, LPUNKNOWN, DWORD, DWORD,
 	   LPDWORD);
 	FN(HRESULT, CoRevokeClassObject, DWORD);
+	FN(HRESULT, CoResumeClassObjects, void);
 	FN(HRESULT, CoGetClassObject, REFCLSID, DWORD, LPVOID, REFIID, LPVOID *);
 	FN(HRESULT, CoCreateInstance, REFCLSID, LPUNKNOWN, DWORD, REFIID, LPVOID *);
 	DWORD cookie = 5;
@@ -368,6 +369,46 @@ static void test_registered(void)
 	CHECK_EQ(CoRevokeClassObject(cookie), E_INVALIDARG);
 	CHECK_EQ(CoCreateInstance(&iid_other, NULL, CLSCTX_ALL, &iid_unknown, &p),
 		 REGDB_E_CLASSNOTREG);
+
+	/* Suspended until CoResumeClassObjects. */
+	CHECK_EQ(CoRegisterClassObject(&iid_other, (IUnknown *)&factory,
+				       CLSCTX_INPROC_SERVER,
+				       REGCLS_MULTIPLEUSE | REGCLS_SUSPENDED,
+				       &cookie), S_OK);
+	CHECK_EQ(CoGetClassObject(&iid_other, CLSCTX_INPROC_SERVER, NULL,
+				  &iid_factory, &p), REGDB_E_CLASSNOTREG);
+	CHECK_EQ(CoResumeClassObjects(), S_OK);
+	CHECK_EQ(CoGetClassObject(&iid_other, CLSCTX_INPROC_SERVER, NULL,
+				  &iid_factory, &p), S_OK);
+	cf_release(&factory);
+	CHECK_EQ(CoRevokeClassObject(cookie), S_OK);
+
+	/* Single use: handed out once, then hidden (but still revocable). */
+	CHECK_EQ(CoRegisterClassObject(&iid_other, (IUnknown *)&factory,
+				       CLSCTX_INPROC_SERVER, REGCLS_SINGLEUSE,
+				       &cookie), S_OK);
+	CHECK_EQ(CoGetClassObject(&iid_other, CLSCTX_INPROC_SERVER, NULL,
+				  &iid_factory, &p), S_OK);
+	cf_release(&factory);
+	CHECK_EQ(CoGetClassObject(&iid_other, CLSCTX_INPROC_SERVER, NULL,
+				  &iid_factory, &p), REGDB_E_CLASSNOTREG);
+	CHECK_EQ(CoRevokeClassObject(cookie), S_OK);
+
+	/* A multiple-use local server is in-process to its own process. */
+	CHECK_EQ(CoRegisterClassObject(&iid_other, (IUnknown *)&factory,
+				       CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE,
+				       &cookie), S_OK);
+	CHECK_EQ(CoGetClassObject(&iid_other, CLSCTX_INPROC_SERVER, NULL,
+				  &iid_factory, &p), S_OK);
+	cf_release(&factory);
+	CHECK_EQ(CoRevokeClassObject(cookie), S_OK);
+	CHECK_EQ(CoRegisterClassObject(&iid_other, (IUnknown *)&factory,
+				       CLSCTX_LOCAL_SERVER, REGCLS_MULTI_SEPARATE,
+				       &cookie), S_OK);
+	CHECK_EQ(CoGetClassObject(&iid_other, CLSCTX_INPROC_SERVER, NULL,
+				  &iid_factory, &p), REGDB_E_CLASSNOTREG);
+	CHECK_EQ(CoRevokeClassObject(cookie), S_OK);
+	CHECK_EQ(factory_refs, 0);
 	CoUninitialize();
 }
 

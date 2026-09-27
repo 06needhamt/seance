@@ -3,10 +3,12 @@
  * RT_VERSION resource.
  *
  * The block GetFileVersionInfo hands out is the resource as stored (a
- * tree of VS_VERSIONINFO-style nodes with UTF-16 keys and strings), with
- * room after it for VerQueryValueA's ANSI copies of the strings, the way
- * Windows lays it out: GetFileVersionInfoSize asks for twice the resource
- * plus four bytes, and the second half starts after the "FE2X" signature.
+ * tree of VS_VERSIONINFO-style nodes with UTF-16 keys and strings),
+ * sized as Windows sizes it: GetFileVersionInfoSize asks for twice the
+ * resource plus four bytes, and the "FE2X" signature follows the block.
+ * Windows puts VerQueryValueA's ANSI copies of the strings in that second
+ * half; here they are kept aside (see intern()), since the buffer holding
+ * a block may be smaller.
  *
  * The harness's built-in DLLs have no resources, so they answer with a
  * version block of their own, versioned like Windows XP SP3's system DLLs
@@ -306,8 +308,8 @@ static BOOL info_get(const char *name, const void *ret, DWORD len, void *data)
 	}
 	memcpy(data, block, len < size ? len : size);
 	free(block);
-	/* Room for the ANSI half: VerQueryValueA converts into it. */
-	if (len >= total * 2 + sizeof(signature))
+	/* The signature Windows leaves where the ANSI half starts. */
+	if (len >= total + sizeof(signature))
 		memcpy((BYTE *)data + total, signature, sizeof(signature));
 	return TRUE;
 }
@@ -492,9 +494,12 @@ WINFN(BOOL) ver_VerQueryValueW(LPCVOID block, LPCWSTR sub, LPVOID *buf,
 }
 
 /*
- * ANSI copies of strings from blocks without room for them (not from
- * GetFileVersionInfo, or given it too small a buffer): kept for good, once
- * per distinct string, so the pointers handed out stay valid.
+ * VerQueryValueA's ANSI copies of strings. Windows writes them into the
+ * room GetFileVersionInfo leaves after the block, but VerQueryValueA is
+ * given only the block, not the size of the buffer holding it, which may
+ * be smaller (a truncated copy, or a raw resource from LockResource). So
+ * they are kept here instead, for good and once per distinct string, so
+ * the pointers handed out stay valid.
  */
 struct interned {
 	struct interned *next;
@@ -565,22 +570,7 @@ WINFN(BOOL) ver_VerQueryValueA(LPCVOID block, LPCSTR sub, LPVOID *buf,
 			return FALSE;
 		}
 
-		/*
-		 * At the string's own offset in the second half, if there is
-		 * one: never for a resource in a loaded image (LockResource),
-		 * which has nothing after it.
-		 */
-		size_t total = rd16(b), pos = (size_t)(n.value - b);
-		struct module *owner = mod_from_address(b);
-		if (!(owner && owner->img) &&
-		    !memcmp(b + total, signature, sizeof(signature)) &&
-		    pos + an <= total) {
-			char *dst = (char *)b + total + sizeof(signature) + pos;
-			memcpy(dst, a, an);
-			out = dst;
-		} else {
-			out = intern(a, an && !a[an - 1] ? an - 1 : an);
-		}
+		out = intern(a, an && !a[an - 1] ? an - 1 : an);
 		free(a);
 		out_len = an;
 		if (!out) {

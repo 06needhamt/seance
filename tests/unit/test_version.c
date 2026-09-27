@@ -71,7 +71,7 @@ static void test_file(void)
 	CHECK_EQ(size, res * 2 + 4);
 	CHECK_EQ(handle, 0);
 
-	BYTE *block = malloc(size);
+	BYTE *block = calloc(1, size);
 	CHECK(block && GetFileVersionInfoA(path, 0, size, block));
 	WORD total = (WORD)(block[0] | block[1] << 8);
 	CHECK(total <= res);
@@ -94,13 +94,21 @@ static void test_file(void)
 	CHECK_EQ(len, 4);
 	CHECK(trans && trans[0] == 0x409 && trans[1] == 1200);
 
-	/* ANSI strings land in the second half, at the same offset. */
+	/*
+	 * ANSI strings are copied aside, not into the room after the block,
+	 * which VerQueryValueA can't know the caller really has.
+	 */
 	char *s = NULL;
 	CHECK(VerQueryValueA(block, "\\StringFileInfo\\040904b0\\FileVersion",
 			     (void **)&s, &len));
 	CHECK_STR(s, "1.2.3.4");
 	CHECK_EQ(len, 8);
-	CHECK((BYTE *)s >= block + total + 4 && (BYTE *)s + len <= block + size);
+	CHECK((BYTE *)s < block || (BYTE *)s >= block + size);
+	for (DWORD i = res > total + 4u ? res : total + 4u; i < size; i++)
+		if (block[i]) {
+			CHECK(!"the second half was written to");
+			break;
+		}
 	/* Keys match case-insensitively; repeated separators are skipped. */
 	s = NULL;
 	CHECK(VerQueryValueA(block, "StringFileInfo\\\\040904B0\\FILEDESCRIPTION",
@@ -121,28 +129,37 @@ static void test_file(void)
 	CHECK(!VerQueryValueA(block, "\\VarFileInfo\\Translation\\x",
 			      (void **)&s, &len));
 
-	/* Too small a buffer for the ANSI half: strings are copied aside. */
-	memset(block, 0, size);
-	CHECK(GetFileVersionInfoA(path, 0, total, block));
-	CHECK(memcmp(block + total, "FE2X", 4));
+	/*
+	 * A buffer just big enough for the block, with what looks like the
+	 * signature after it (in memory that isn't the caller's): nothing
+	 * past the buffer is read or written (ASan checks).
+	 */
+	BYTE *exact = malloc(total + 4);
+	CHECK(exact && GetFileVersionInfoA(path, 0, total, exact));
+	memcpy(exact + total, "FE2X", 4);
+	BYTE *shrunk = realloc(exact, total);
+	CHECK(shrunk != NULL);
+	exact = shrunk;
 	s = NULL;
-	CHECK(VerQueryValueA(block, "\\StringFileInfo\\040904b0\\FileVersion",
+	CHECK(VerQueryValueA(exact, "\\StringFileInfo\\040904b0\\FileVersion",
 			     (void **)&s, &len));
 	CHECK_STR(s, "1.2.3.4");
-	CHECK((BYTE *)s < block || (BYTE *)s >= block + size);
+	CHECK((BYTE *)s < exact || (BYTE *)s >= exact + total);
 	char *again = NULL;
-	CHECK(VerQueryValueA(block, "\\StringFileInfo\\040904b0\\FileVersion",
+	CHECK(VerQueryValueA(exact, "\\StringFileInfo\\040904b0\\FileVersion",
 			     (void **)&again, &len));
 	CHECK(again == s);
+	free(exact);
 
 	/* Truncated: the block shrinks to what was copied. */
-	memset(block, 0, size);
-	CHECK(GetFileVersionInfoA(path, 0, 0x62, block));
-	CHECK_EQ(block[0] | block[1] << 8, 0x60);
-	CHECK(VerQueryValueA(block, "\\", (void **)&fixed, &len));
+	exact = malloc(0x62);
+	CHECK(exact && GetFileVersionInfoA(path, 0, 0x62, exact));
+	CHECK_EQ(exact[0] | exact[1] << 8, 0x60);
+	CHECK(VerQueryValueA(exact, "\\", (void **)&fixed, &len));
 	CHECK_EQ(len, sizeof(*fixed));
-	CHECK(!VerQueryValueA(block, "\\VarFileInfo\\Translation",
+	CHECK(!VerQueryValueA(exact, "\\VarFileInfo\\Translation",
 			      (void **)&trans, &len));
+	free(exact);
 
 	win_set_error(0);
 	CHECK(!GetFileVersionInfoA(path, 0, 0, block));

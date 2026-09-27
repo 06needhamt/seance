@@ -423,6 +423,9 @@ struct class_reg {
 	CLSID clsid;
 	DWORD context;
 	IUnknown *obj;
+	int suspended;		/* REGCLS_SUSPENDED, until CoResumeClassObjects */
+	int single_use;		/* REGCLS_SINGLEUSE: hidden once handed out */
+	int used;
 };
 static struct class_reg *classes;
 static DWORD next_cookie = 1;
@@ -446,6 +449,11 @@ WINFN(HRESULT) ole_CoRegisterClassObject(REFCLSID clsid, LPUNKNOWN obj,
 		return E_OUTOFMEMORY;
 	r->clsid = *clsid;
 	r->context = context;
+	/* A multiple-use local server serves this process in-process too. */
+	if ((flags & REGCLS_MULTIPLEUSE) && (context & CLSCTX_LOCAL_SERVER))
+		r->context |= CLSCTX_INPROC_SERVER;
+	r->suspended = !!(flags & REGCLS_SUSPENDED);
+	r->single_use = !(flags & (REGCLS_MULTIPLEUSE | REGCLS_MULTI_SEPARATE));
 	r->obj = obj;
 	obj->lpVtbl->AddRef(obj);
 
@@ -478,15 +486,32 @@ WINFN(HRESULT) ole_CoRevokeClassObject(DWORD cookie)
 	return S_OK;
 }
 
-/* A registered class object for clsid in context, with a reference. */
+WINFN(HRESULT) ole_CoResumeClassObjects(void)
+{
+	pthread_mutex_lock(&class_lock);
+	for (struct class_reg *r = classes; r; r = r->next)
+		r->suspended = 0;
+	pthread_mutex_unlock(&class_lock);
+	return S_OK;
+}
+
+/*
+ * A registered class object for clsid in context, with a reference.
+ * Suspended registrations aren't visible yet, and a single-use one only
+ * until it has been handed out once.
+ */
 static IUnknown *registered(REFCLSID clsid, DWORD context)
 {
 	IUnknown *obj = NULL;
 
 	pthread_mutex_lock(&class_lock);
-	for (struct class_reg *r = classes; r && !obj; r = r->next)
-		if ((r->context & context) && guid_eq(&r->clsid, clsid))
-			obj = r->obj;
+	for (struct class_reg *r = classes; r && !obj; r = r->next) {
+		if (!(r->context & context) || !guid_eq(&r->clsid, clsid) ||
+		    r->suspended || (r->single_use && r->used))
+			continue;
+		obj = r->obj;
+		r->used = 1;
+	}
 	if (obj)
 		obj->lpVtbl->AddRef(obj);
 	pthread_mutex_unlock(&class_lock);
@@ -626,6 +651,7 @@ static const struct builtin_export exports[] = {
 	{ "CoInitialize", 0, ole_CoInitialize },
 	{ "CoInitializeEx", 0, ole_CoInitializeEx },
 	{ "CoRegisterClassObject", 0, ole_CoRegisterClassObject },
+	{ "CoResumeClassObjects", 0, ole_CoResumeClassObjects },
 	{ "CoRevokeClassObject", 0, ole_CoRevokeClassObject },
 	{ "CoTaskMemAlloc", 0, ole_CoTaskMemAlloc },
 	{ "CoTaskMemFree", 0, ole_CoTaskMemFree },
