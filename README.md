@@ -21,7 +21,7 @@ Work is split into phases; see [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION
 | 2 | Win32 runtime (TEB, SEH, threads, stub DLLs) | in progress: TEB, built-in DLLs, kernel32 and ntdll done |
 | 3 | VfW layer and `probe` | done: driver lifecycle, ICM API, winmm/msvfw32 built-ins, `probe`, `list` |
 | 4 | AVI / Y4M I/O, `decode` and `encode` | done: AVI reader and writer, Y4M/BMP/raw input and output, `avi`, `convert`, `decode`, `encode` |
-| 5 | Hardening and CI | not started |
+| 5 | Hardening and CI | done: DLL memory below 2 GB, crash and hang reports, SSE/FPU fixture, fuzzing, samples run, CI |
 
 ## Prerequisites
 
@@ -62,9 +62,10 @@ early if the compiler can't produce one. Useful CMake options:
 | `VFW_REQUIRE_FFMPEG=ON` | fail instead of skipping the FFmpeg checks |
 | `VFW_SANITIZE=ON` | build with ASan and UBSan |
 | `VFW_MINGW_PREFIX=...` | the cross tools' prefix (`i686-w64-mingw32-`) |
+| `VFW_SAMPLES_DIR=<dir>` | add a `samples` test: `info` and `probe` over the codec DLLs in `<dir>` |
 
 The `ci` preset turns on both `REQUIRE` options. Tests carry the CTest
-labels `unit`, `abi`, `cli` and `media`, so `ctest --preset default -L unit`
+labels `unit`, `abi`, `cli`, `media` and `samples`, so `ctest --preset default -L unit`
 runs only the unit tests and `-LE media` leaves out the FFmpeg checks.
 
 The media checks (`validate_media`) need `ffmpeg` and `ffprobe`. FFmpeg
@@ -239,7 +240,39 @@ spent in the codec per frame. With `testcodec.dll`, encoding a clip and
 decoding it again gives the input back byte for byte, which the unit tests
 and `validate_media` check for Y4M, BMP, raw and AVI input.
 
-### Loader environment variables
+### Real codecs: the samples run
+
+```sh
+tests/samples.sh build/vfw-harness ~/codecs        # or -DVFW_SAMPLES_DIR=~/codecs
+```
+
+`tests/samples.sh` runs `info` and `probe` over every DLL in a directory
+you supply. For each it reports how many of its imports the harness
+doesn't implement yet, how many DLLs it needs from disk, and whether it
+opens and under which FOURCC. It asserts nothing about any particular
+codec; it fails only when the harness can't parse a file, or crashes or
+hangs on one.
+
+### Robustness
+
+- **Memory below 2 GB.** Windows gives programs that aren't large-address
+  aware the low 2 GB, and codec code may treat pointers as signed. At
+  startup the harness reserves the free address space from 2 GB up, and
+  runs each command on a thread with a low stack, so every heap block,
+  frame buffer, stack, TEB and DLL image a codec sees is below 2 GB.
+  `VFW_LOW_MEMORY=0` turns this off; sanitizer builds leave it off.
+- **Crashes.** A fault in DLL code is reported with the signal, the
+  faulting `module+offset`, the address touched, and the call in progress,
+  and the process then dies of the signal:
+
+  ```
+  vfw-harness: crash: SIGSEGV at testcodec.dll+0x178e, accessing (nil)
+  vfw-harness:   in DriverProc(DRV_USER+0x64) of testcodec.dll
+  ```
+- **Hangs.** With `VFW_TIMEOUT=<seconds>`, a single call into a DLL that
+  takes longer is reported the same way, and the harness exits with 124.
+
+### Environment variables
 
 | Variable | Effect |
 |---|---|
@@ -248,6 +281,9 @@ and `validate_media` check for Y4M, BMP, raw and AVI input.
 | `VFW_ROOT` | The harness's Windows world: `drive_c` and `vfw.ini` (default `~/.vfw-harness`) |
 | `VFW_INI` | The codec registry file (default `$VFW_ROOT/vfw.ini`) |
 | `VFW_TRACE=1` | Log calls into the built-in DLLs and every driver message to stderr |
+| `VFW_TIMEOUT=<s>` | Report and stop (exit 124) when one call into a DLL takes longer |
+| `VFW_LOW_MEMORY=0` | Don't keep DLL-visible memory below 2 GB |
+| `VFW_ENV_<NAME>=<value>` | Put `NAME=value` in the Windows environment codecs see |
 
 ## Layout
 
@@ -255,7 +291,7 @@ and `validate_media` check for Y4M, BMP, raw and AVI input.
 |---|---|
 | `include/win32/` | Win32 types, PE image structures, GDI bitmap structs, driver and ICM definitions, laid out to match 32-bit Windows |
 | `src/loader/` | PE parsing, mapping and relocation (`pe.c`); the module table and dependency loading (`modules.c`) |
-| `src/runtime/` | TEB and `%fs`, the built-in DLL registry, trap thunks for unimplemented imports |
+| `src/runtime/` | TEB and `%fs`, implicit TLS, the built-in DLL registry, trap thunks for unimplemented imports, the 2 GB limit (`lowmem.c`), crash and hang reports (`crash.c`) |
 | `src/win32/` | Built-in kernel32, ntdll, winmm and msvfw32; placeholders for the other system DLLs |
 | `src/vfw/` | Installable drivers (`driver.c`), the codec registry (`registry.c`), the ICM API (`icm.c`), sequence compression (`seq.c`) |
 | `src/avi/` | AVI reader (AVI 1.0 and OpenDML) and writer |
@@ -268,6 +304,7 @@ and `validate_media` check for Y4M, BMP, raw and AVI input.
 | `tests/abi/` | ABI cross-check against the mingw-w64 headers |
 | `tests/validate_media.sh` | Cross-check of the AVI and image code against FFmpeg |
 | `tests/smoke.sh` | A quick run of every CLI command |
+| `tests/samples.sh` | `info` and `probe` over a directory of codec DLLs |
 | `cmake/` | The mingw-w64 toolchain file for the fixtures, and build helpers |
 | `docs/` | Implementation plan |
 

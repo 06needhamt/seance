@@ -169,12 +169,13 @@ All milestones are checked against **test fixtures built in the repo**, never ag
 
    Milestone: `probe` lists the correct ICINFO, accepted formats and state size.
 4. **AVI and Y4M I/O, `decode` and `encode`.** (Done.) Milestone: encoding a Y4M clip to AVI with `testcodec` and decoding it back gives a byte-exact result. The AVI output is validated with `ffprobe` when it is installed. The OpenDML path is tested with a large synthetic file.
-5. **Hardening and CI.**
-   - Keep DLL-visible memory below 2 GB. On a 64-bit kernel a 32-bit process gets addresses up to 4 GB, and glibc's heap and `mmap` live near `0xf7000000`. Windows code without `LARGE_ADDRESS_AWARE` may treat pointers as signed. Options: an `ADDR_LIMIT_3GB`/low-memory personality with a re-exec, or serving Win32 heaps from a low reservation.
-   - Build a matrix of fixtures, including 16-byte alignment and SSE use in the codec and C++ exceptions across a codec boundary.
-   - A fuzz-style AVI parser test (done: `test_avi` truncates and corrupts files).
-   - A GitHub Actions workflow installs `gcc-multilib` and `mingw-w64` and runs the whole test suite (`ctest --preset ci`).
-   - An optional smoke run over a directory of samples runs `info` and `probe` over any user-supplied codec DLLs and reports missing imports, without asserting anything specific to a codec.
+5. **Hardening and CI.** (Done, apart from what depends on SEH.)
+   - Keep DLL-visible memory below 2 GB (done). On a 64-bit kernel a 32-bit process gets addresses up to 4 GB, and glibc's heap and `mmap` live near `0xf7000000`; Windows code without `LARGE_ADDRESS_AWARE` may treat pointers as signed. `src/runtime/lowmem.c` reserves the free space from 2 GB up at startup, sparing the main stack's growth, and each command runs on a worker thread with a low stack. `test_lowmem` checks each kind of allocation, and `testcodec`'s strict mode rejects any pointer at or above 2 GB in a smoke-test round trip.
+   - Crash and hang reports (done): a fault handler on an alternate stack names the faulting `module+offset`, the address touched and the call into the DLL in progress; `VFW_TIMEOUT` reports a call that runs too long.
+   - A matrix of fixtures (done: `pe_sse.dll` with SSE2 code assuming a 16-byte stack on entry and the FPU/MXCSR defaults on new threads). Still open: C++ exceptions across a codec boundary, which needs SEH first.
+   - Fuzz-style tests (done): `test_avi` truncates and corrupts AVIs; `test_pe_parse` does the same to the fixture DLLs and maps and relocates some of the results; `test_source` does it to Y4M, BMP and AVI input.
+   - A GitHub Actions workflow installs `gcc-multilib` and `mingw-w64` and runs the whole test suite (`ctest --preset ci`, done).
+   - An optional samples run (done): `tests/samples.sh` runs `info` and `probe` over any user-supplied codec DLLs and reports unimplemented imports, without asserting anything specific to a codec; `-DVFW_SAMPLES_DIR` adds it to CTest.
 
 ## Verification
 
