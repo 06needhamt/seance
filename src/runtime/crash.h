@@ -40,4 +40,13 @@ void crash_enter(const char *what, const void *fn, UINT code,
 		 crash_namer namer, struct crash_frame *saved);
 void crash_leave(const struct crash_frame *saved);
 
+/*
+ * Prints the same report a fault reaching on_fault would, for pc/fault_addr
+ * on the calling thread, then dies of sig as it would without the handler.
+ * seh.c calls this once its dispatch of a hardware fault finds no handler
+ * in the fs:[0] chain that takes it.
+ */
+void crash_report_and_die(int sig, const void *pc, const void *fault_addr)
+	__attribute__((noreturn));
+
 #endif /* VFW_RUNTIME_CRASH_H */

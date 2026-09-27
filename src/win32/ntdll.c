@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "runtime/builtin.h"
+#include "runtime/seh.h"
 #include "runtime/teb.h"
 
 #define NT(ret) static ret STUB_WINAPI
@@ -61,6 +62,7 @@ static const struct builtin_export exports[] = {
 	E(RtlMoveMemory),
 	E(RtlSetLastWin32Error),
 	E(RtlZeroMemory),
+	{ "RtlUnwind", 0, (void *)seh_RtlUnwind },
 	BUILTIN_END
 };
 

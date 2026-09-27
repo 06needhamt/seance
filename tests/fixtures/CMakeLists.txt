@@ -76,6 +76,10 @@ fixture(pe_sse pe_sse.c LIBS kernel32
 	OPTIONS -msse2 -mfpmath=sse -mpreferred-stack-boundary=4
 		-mincoming-stack-boundary=4 -fno-builtin)
 
+# Installs its own fs:[0] SEH frames by hand (no CRT here to compile
+# __try/__except into _except_handler3 frames) and faults under them.
+fixture(pe_seh pe_seh.c LIBS kernel32 OPTIONS -mpreferred-stack-boundary=2)
+
 # A small VfW codec. -fno-builtin and no loop-to-memset rewriting keep it
 # free of calls into a C runtime it doesn't link.
 fixture(testcodec testcodec.c testcodec.def testcodec.rc

@@ -310,6 +310,126 @@ typedef struct _IMAGE_RESOURCE_DATA_ENTRY {
 /* Version resources (verrsrc.h on Windows). */
 #define VS_FFI_SIGNATURE 0xFEEF04BD
 
+/* Structured exception handling: exception codes (winnt.h's NTSTATUS-based
+ * values), EXCEPTION_RECORD/CONTEXT and the fs:[0] chain's raw x86 ABI. */
+#define EXCEPTION_DATATYPE_MISALIGNMENT    0x80000002
+#define EXCEPTION_BREAKPOINT               0x80000003
+#define EXCEPTION_SINGLE_STEP              0x80000004
+#define EXCEPTION_ACCESS_VIOLATION         0xC0000005
+#define EXCEPTION_IN_PAGE_ERROR            0xC0000006
+#define EXCEPTION_ILLEGAL_INSTRUCTION      0xC000001D
+#define EXCEPTION_NONCONTINUABLE_EXCEPTION 0xC0000025
+#define EXCEPTION_INVALID_DISPOSITION      0xC0000026
+#define EXCEPTION_ARRAY_BOUNDS_EXCEEDED    0xC000008C
+#define EXCEPTION_FLT_DENORMAL_OPERAND     0xC000008D
+#define EXCEPTION_FLT_DIVIDE_BY_ZERO       0xC000008E
+#define EXCEPTION_FLT_INEXACT_RESULT       0xC000008F
+#define EXCEPTION_FLT_INVALID_OPERATION    0xC0000090
+#define EXCEPTION_FLT_OVERFLOW              0xC0000091
+#define EXCEPTION_FLT_STACK_CHECK          0xC0000092
+#define EXCEPTION_FLT_UNDERFLOW            0xC0000093
+#define EXCEPTION_INT_DIVIDE_BY_ZERO       0xC0000094
+#define EXCEPTION_INT_OVERFLOW             0xC0000095
+#define EXCEPTION_PRIV_INSTRUCTION         0xC0000096
+#define EXCEPTION_STACK_OVERFLOW           0xC00000FD
+
+#define EXCEPTION_MAXIMUM_PARAMETERS 15
+
+/* EXCEPTION_RECORD.ExceptionFlags, and RtlUnwind's internal ones. */
+#define EXCEPTION_NONCONTINUABLE  0x01
+#define EXCEPTION_UNWINDING       0x02
+#define EXCEPTION_EXIT_UNWIND     0x04
+#define EXCEPTION_STACK_INVALID   0x08
+#define EXCEPTION_NESTED_CALL     0x10
+#define EXCEPTION_TARGET_UNWIND   0x20
+#define EXCEPTION_COLLIDED_UNWIND 0x40
+#define EXCEPTION_UNWIND (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND | \
+			  EXCEPTION_TARGET_UNWIND | EXCEPTION_COLLIDED_UNWIND)
+
+/* A __except(filter) expression's value, and UnhandledExceptionFilter's
+ * return: distinct from EXCEPTION_DISPOSITION below. */
+#define EXCEPTION_CONTINUE_SEARCH    0
+#define EXCEPTION_EXECUTE_HANDLER    1
+#define EXCEPTION_CONTINUE_EXECUTION (-1)
+
+typedef struct _EXCEPTION_RECORD {
+	DWORD ExceptionCode;
+	DWORD ExceptionFlags;
+	struct _EXCEPTION_RECORD *ExceptionRecord;
+	PVOID ExceptionAddress;
+	DWORD NumberParameters;
+	DWORD_PTR ExceptionInformation[EXCEPTION_MAXIMUM_PARAMETERS];
+} EXCEPTION_RECORD, *PEXCEPTION_RECORD;
+
+/* CONTEXT (i386): GetThreadContext/SetThreadContext's flags selecting which
+ * of the sections below are meaningful. */
+#define CONTEXT_i386                0x00010000
+#define CONTEXT_CONTROL            (CONTEXT_i386 | 0x00000001)
+#define CONTEXT_INTEGER            (CONTEXT_i386 | 0x00000002)
+#define CONTEXT_SEGMENTS           (CONTEXT_i386 | 0x00000004)
+#define CONTEXT_FLOATING_POINT     (CONTEXT_i386 | 0x00000008)
+#define CONTEXT_DEBUG_REGISTERS    (CONTEXT_i386 | 0x00000010)
+#define CONTEXT_EXTENDED_REGISTERS (CONTEXT_i386 | 0x00000020)
+#define CONTEXT_FULL (CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS)
+
+#define SIZE_OF_80387_REGISTERS     80
+#define MAXIMUM_SUPPORTED_EXTENSION 512
+
+typedef struct _FLOATING_SAVE_AREA {
+	DWORD ControlWord;
+	DWORD StatusWord;
+	DWORD TagWord;
+	DWORD ErrorOffset;
+	DWORD ErrorSelector;
+	DWORD DataOffset;
+	DWORD DataSelector;
+	BYTE  RegisterArea[SIZE_OF_80387_REGISTERS];
+	DWORD Cr0NpxState;
+} FLOATING_SAVE_AREA;
+
+typedef struct _CONTEXT {
+	DWORD ContextFlags;
+
+	DWORD Dr0, Dr1, Dr2, Dr3, Dr6, Dr7;
+
+	FLOATING_SAVE_AREA FloatSave;
+
+	DWORD SegGs, SegFs, SegEs, SegDs;
+	DWORD Edi, Esi, Ebx, Edx, Ecx, Eax;
+	DWORD Ebp, Eip, SegCs, EFlags, Esp, SegSs;
+
+	BYTE ExtendedRegisters[MAXIMUM_SUPPORTED_EXTENSION];
+} CONTEXT, *PCONTEXT;
+
+typedef struct _EXCEPTION_POINTERS {
+	PEXCEPTION_RECORD ExceptionRecord;
+	PCONTEXT ContextRecord;
+} EXCEPTION_POINTERS, *PEXCEPTION_POINTERS;
+
+/* What a handler in the fs:[0] chain returns: whether it resolved the
+ * exception (ExceptionContinueExecution), wants the next frame tried
+ * (ExceptionContinueSearch), or is unwinding past a re-entrant exception. */
+typedef enum _EXCEPTION_DISPOSITION {
+	ExceptionContinueExecution,
+	ExceptionContinueSearch,
+	ExceptionNestedException,
+	ExceptionCollidedUnwind,
+} EXCEPTION_DISPOSITION;
+
+typedef EXCEPTION_DISPOSITION (WINAPI *PEXCEPTION_ROUTINE)(
+	struct _EXCEPTION_RECORD *ExceptionRecord, void *EstablisherFrame,
+	struct _CONTEXT *ContextRecord, void *DispatcherContext);
+
+/* The node type of the fs:[0] chain: every stack frame with a __try in it
+ * pushes one of these (or, compiler-specific, something starting with
+ * these two fields) and points fs:[0] at it. */
+typedef struct _EXCEPTION_REGISTRATION_RECORD {
+	struct _EXCEPTION_REGISTRATION_RECORD *Next;
+	PEXCEPTION_ROUTINE Handler;
+} EXCEPTION_REGISTRATION_RECORD, *PEXCEPTION_REGISTRATION_RECORD;
+
+typedef LONG (WINAPI *LPTOP_LEVEL_EXCEPTION_FILTER)(EXCEPTION_POINTERS *);
+
 typedef struct tagVS_FIXEDFILEINFO {
 	DWORD dwSignature;
 	DWORD dwStrucVersion;

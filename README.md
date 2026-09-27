@@ -18,7 +18,7 @@ Work is split into phases; see [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION
 |---|---|---|
 | 0 | Build skeleton, Win32 headers, ABI cross-check, CLI skeleton | done |
 | 1 | PE loader and `info` | done |
-| 2 | Win32 runtime (TEB, SEH, threads, stub DLLs) | in progress: TEB, built-in DLLs, kernel32 and ntdll done |
+| 2 | Win32 runtime (TEB, SEH, threads, stub DLLs) | in progress: TEB, built-in DLLs, kernel32, ntdll, SEH dispatch and delay-load binding done; msvcrt-family CRT and the remaining stub DLLs (user32, gdi32, advapi32, version, ole32) still open |
 | 3 | VfW layer and `probe` | done: driver lifecycle, ICM API, winmm/msvfw32 built-ins, `probe`, `list` |
 | 4 | AVI / Y4M I/O, `decode` and `encode` | done: AVI reader and writer, Y4M/BMP/raw input and output, `avi`, `convert`, `decode`, `encode` |
 | 5 | Hardening and CI | done: DLL memory below 2 GB, crash and hang reports, SSE/FPU fixture, fuzzing, samples run, CI |

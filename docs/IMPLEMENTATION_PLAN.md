@@ -57,7 +57,7 @@ cli: vfw-harness info | probe | decode | encode | list
 - **`teb.c`:**
   - One TEB/TIB per thread (SEH head, self pointer at `+0x18`, StackBase/Limit, PEB pointer, TLS slots at `+0xE10`, LastError), plus a minimal PEB (ProcessHeap, loader data).
   - The TEB is installed through `modify_ldt` into `%fs`. glibc i386 uses `%gs`, so `%fs` is free.
-- **`seh.c`:** real SEH dispatch. A SIGSEGV/SIGILL/SIGFPE/SIGBUS handler builds EXCEPTION_RECORD and CONTEXT, walks the `fs:[0]` chain, and honours ExceptionContinueExecution or the unwind that follows. This is needed because many codecs use `__try` or C++ EH. `RaiseException` and `RtlUnwind` use the same path. An unhandled fault prints `module+RVA` and a register dump.
+- **`seh.c`:** real SEH dispatch (done). A SIGSEGV/SIGILL/SIGFPE/SIGBUS handler builds an EXCEPTION_RECORD and CONTEXT and walks the `fs:[0]` chain - but not there: a handler that jumps away (as one that decides to run a `__except` body does) needs to do that off the signal's alternate stack, with the faulting signal unblocked, or the jump would abandon the kernel's signal frame with the signal blocked forever. So the fault handler instead rewrites the saved context to resume in a trampoline on the thread's own stack once it returns, and the chain is walked from there, in ordinary call context, where a handler's jump behaves like a longjmp. `RaiseException`, `RtlUnwind` and Set/UnhandledExceptionFilter (kernel32; `RtlUnwind` is also given by ntdll) go through the same chain-walking loop without needing any of that, since they already run in ordinary context. `tests/fixtures/pe_seh.c` installs frames by hand (no CRT to compile `__try`/`__except` into `_except_handler3` frames here) and checks recovery from a single frame, a chain of several with an unwind in between, RaiseException reaching a frame, a top-level filter, and that a fault nothing catches still crashes normally. Still open: `_except_handler3`/`4_common` themselves (the scope-table walk a dynamically-linked CRT's compiler-generated frames need), part of the CRT task below - a statically linked CRT, the common case, already carries them and needs nothing further from the harness.
 - **`thunks.c`:**
   - Every call from the harness into a DLL goes through `call_dll()`. It aligns the stack to 16 bytes, switches the x87 control word to the Windows default `0x27F` and back, and makes sure `%fs` holds the thread's TEB.
   - Imports that are not implemented get a generated trap thunk that logs `DLL!name` or `DLL!#ord` and aborts. `info` lists them ahead of time.
@@ -161,7 +161,7 @@ All milestones are checked against **test fixtures built in the repo**, never ag
 2. **Win32 runtime.** TEB/`%fs`, threads, SEH, the stub registry and trap thunks, and the stub modules.
 
    Milestone: the fixtures exercise these checks:
-   - The `__try`/`__except` fixture recovers from an access violation.
+   - The SEH fixture (`pe_seh.dll`, done) recovers from an access violation, walks a chain of several hand-installed frames with an RtlUnwind in between, and reaches a frame through RaiseException.
    - The thread fixture reads per-thread TLS back correctly.
    - The CRT fixture, linked against `msvcrt.dll`, prints through `_iob` and uses `_pctype`.
    - The registry fixture round-trips a value.
@@ -169,10 +169,10 @@ All milestones are checked against **test fixtures built in the repo**, never ag
 
    Milestone: `probe` lists the correct ICINFO, accepted formats and state size.
 4. **AVI and Y4M I/O, `decode` and `encode`.** (Done.) Milestone: encoding a Y4M clip to AVI with `testcodec` and decoding it back gives a byte-exact result. The AVI output is validated with `ffprobe` when it is installed. The OpenDML path is tested with a large synthetic file.
-5. **Hardening and CI.** (Done, apart from what depends on SEH.)
+5. **Hardening and CI.** (Done.)
    - Keep DLL-visible memory below 2 GB (done). On a 64-bit kernel a 32-bit process gets addresses up to 4 GB, and glibc's heap and `mmap` live near `0xf7000000`; Windows code without `LARGE_ADDRESS_AWARE` may treat pointers as signed. `src/runtime/lowmem.c` reserves the free space from 2 GB up at startup, sparing the main stack's growth, and each command runs on a worker thread with a low stack. `test_lowmem` checks each kind of allocation, and `testcodec`'s strict mode rejects any pointer at or above 2 GB in a smoke-test round trip.
    - Crash and hang reports (done): a fault handler on an alternate stack names the faulting `module+offset`, the address touched and the call into the DLL in progress; `VFW_TIMEOUT` reports a call that runs too long.
-   - A matrix of fixtures (done: `pe_sse.dll` with SSE2 code assuming a 16-byte stack on entry and the FPU/MXCSR defaults on new threads). Still open: C++ exceptions across a codec boundary, which needs SEH first.
+   - A matrix of fixtures (done: `pe_sse.dll` with SSE2 code assuming a 16-byte stack on entry and the FPU/MXCSR defaults on new threads; `pe_seh.dll`, see above). Still open: C++ exceptions across a codec boundary, which need the CRT's `__CxxFrameHandler*` on top of the SEH dispatch this now has.
    - Fuzz-style tests (done): `test_avi` truncates and corrupts AVIs; `test_pe_parse` does the same to the fixture DLLs and maps and relocates some of the results; `test_source` does it to Y4M, BMP and AVI input.
    - A GitHub Actions workflow installs `gcc-multilib` and `mingw-w64` and runs the whole test suite (`ctest --preset ci`, done).
    - An optional samples run (done): `tests/samples.sh` runs `info` and `probe` over any user-supplied codec DLLs and reports unimplemented imports, without asserting anything specific to a codec; `-DVFW_SAMPLES_DIR` adds it to CTest.
