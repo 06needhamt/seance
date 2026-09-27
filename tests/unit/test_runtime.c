@@ -126,8 +126,15 @@ static void test_builtin_tables(void)
 		size_t n = builtin_count(dll);
 		int unique = 1;
 
-		/* Placeholders have no exports yet; everything else has. */
-		CHECK(dll->fallback ? n == 0 : n > 0);
+		/*
+		 * Every DLL that isn't a bare placeholder has exports.
+		 * msvcrt.dll is the one fallback DLL that's also
+		 * implemented: fallback governs precedence (a real DLL of
+		 * that name on the search path still wins), not whether
+		 * there's anything behind it.
+		 */
+		int placeholder = dll->fallback && strcmp(dll->name, "msvcrt.dll");
+		CHECK(placeholder ? n == 0 : n > 0);
 		for (size_t i = 0; i < n; i++) {
 			const struct builtin_export *e = builtin_entry(dll, i);
 			const struct builtin_export *prev =

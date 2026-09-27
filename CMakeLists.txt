@@ -67,6 +67,7 @@ list(REMOVE_ITEM core_sources ${PROJECT_SOURCE_DIR}/src/main.c)
 
 add_library(vfw_core STATIC ${core_sources})
 target_include_directories(vfw_core PUBLIC include src)
+target_link_libraries(vfw_core PUBLIC m)
 
 add_executable(vfw-harness src/main.c)
 target_link_libraries(vfw-harness PRIVATE vfw_core)
