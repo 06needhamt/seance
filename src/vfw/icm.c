@@ -479,9 +479,9 @@ const char *vfw_std_format(unsigned i, LONG w, LONG h, struct vfw_format *f)
 BITMAPINFOHEADER *ic_get_format(HIC hic, UINT msg, const BITMAPINFOHEADER *in,
 				 size_t *fmt_size, LRESULT *err)
 {
-	LRESULT size = ic_send(hic, msg, (DWORD_PTR)in, 0);
+	LRESULT asked = ic_send(hic, msg, (DWORD_PTR)in, 0), size = asked;
 
-	/* Some codecs answer the size query with 0: assume a plain format. */
+	/* Some codecs answer the size query with 0: room for any plain format. */
 	if (size == 0)
 		size = sizeof(struct vfw_format);
 	if (size < (LRESULT)sizeof(BITMAPINFOHEADER) || size > (LRESULT)MAX_FORMAT) {
@@ -504,11 +504,14 @@ BITMAPINFOHEADER *ic_get_format(HIC hic, UINT msg, const BITMAPINFOHEADER *in,
 	if (out->biSize < sizeof(*out) || out->biSize > cap)
 		out->biSize = sizeof(*out);
 	if (fmt_size) {
-		/* What the codec said, or what the header implies if more. */
+		/*
+		 * What the codec said, or what the header implies if more; with
+		 * no answer, only the header's size (not the room given).
+		 */
 		size_t n = vfw_format_size(out);
 		if (n > cap)
 			n = cap;
-		*fmt_size = n > (size_t)size ? n : (size_t)size;
+		*fmt_size = asked > 0 && (size_t)asked > n ? (size_t)asked : n;
 	}
 	*err = ICERR_OK;
 	return out;

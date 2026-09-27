@@ -84,7 +84,15 @@ static int save_state(HIC hic, const char *path)
 		vfw_set_error("out of memory");
 		return -1;
 	}
+	/* ICERR_OK or the size used on success, an ICERR_* on failure. */
 	LRESULT got = ic_send(hic, ICM_GETSTATE, (DWORD_PTR)data, (DWORD_PTR)n);
+	if (got < 0) {
+		char err[24];
+		vfw_set_error("the codec didn't give its state (ICM_GETSTATE: %s)",
+			      icerr_name(got, err));
+		free(data);
+		return -1;
+	}
 	if (got > 0 && got < n)
 		n = got;
 	int r = -1;
@@ -297,6 +305,7 @@ int cmd_encode(int argc, char **argv)
 		keyint = k;
 	}
 	cv.lKey = keyint > INT32_MAX ? INT32_MAX : (LONG)keyint;
+	/* Without --quality, ic_seq_start_ex asks the codec for its own. */
 	cv.lQ = quality == (unsigned long)-1 ? ICQUALITY_DEFAULT : (LONG)quality;
 	cv.lDataRate = (LONG)((bitrate + 7) / 8);	/* KB/s */
 	if (state_path) {

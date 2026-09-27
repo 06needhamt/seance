@@ -254,7 +254,14 @@ int cmd_decode(int argc, char **argv)
 			fprintf(stderr, "vfw-harness: %s\n", vfw_error());
 			goto done;
 		}
-		ic_send(codec.hic, ICM_SETSTATE, (DWORD_PTR)state, (DWORD_PTR)n);
+		/* The bytes of state used; 0 or an ICERR_* if refused. */
+		LRESULT used = ic_send(codec.hic, ICM_SETSTATE, (DWORD_PTR)state,
+				       (DWORD_PTR)n);
+		if (used <= 0) {
+			fprintf(stderr, "vfw-harness: %s: the codec refused this state "
+				"(ICM_SETSTATE: %s)\n", state_path, icerr_name(used, err));
+			goto done;
+		}
 	}
 
 	/* The output format and its converter. */

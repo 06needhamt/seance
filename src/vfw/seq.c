@@ -158,9 +158,30 @@ BOOL ic_seq_start_ex(COMPVARS *pc, const BITMAPINFO *in, DWORD rate,
 	if ((info.dwFlags & VIDCF_CRUNCH) && pc->lDataRate > 0)
 		s->budget = (DWORD)((uint64_t)pc->lDataRate * 1024 * scale / rate);
 
-	if ((pc->dwFlags & ICMF_COMPVARS_VALID) && pc->lpState && pc->cbState > 0)
-		ic_send(pc->hic, ICM_SETSTATE, (DWORD_PTR)pc->lpState,
-			(DWORD_PTR)pc->cbState);
+	if ((pc->dwFlags & ICMF_COMPVARS_VALID) && pc->lpState && pc->cbState > 0) {
+		/* The bytes of state used; 0 or an ICERR_* if refused. */
+		r = ic_send(pc->hic, ICM_SETSTATE, (DWORD_PTR)pc->lpState,
+			    (DWORD_PTR)pc->cbState);
+		if (r <= 0) {
+			vfw_set_error("the codec refused the state (ICM_SETSTATE: %s)",
+				      icerr_name(r, err));
+			goto fail;
+		}
+	}
+
+	/*
+	 * ICQUALITY_DEFAULT becomes a real quality, since codecs may expect
+	 * 0..10000 in every frame: the current one (which a state may have
+	 * set), else the default, as ICCompressorChoose would fill in.
+	 */
+	if (pc->lQ == ICQUALITY_DEFAULT) {
+		DWORD q = 0;
+		if ((ic_send(pc->hic, ICM_GETQUALITY, (DWORD_PTR)&q, 0) == ICERR_OK &&
+		     q <= ICQUALITY_HIGH) ||
+		    (q = 0, ic_send(pc->hic, ICM_GETDEFAULTQUALITY, (DWORD_PTR)&q, 0) ==
+		     ICERR_OK && q <= ICQUALITY_HIGH))
+			pc->lQ = (LONG)q;
+	}
 
 	/* Informational; codecs that don't care say so, which is fine. */
 	ICCOMPRESSFRAMES f = {

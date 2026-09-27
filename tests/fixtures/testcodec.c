@@ -53,6 +53,7 @@ struct instance {
 
 static HINSTANCE self;
 static int strict;	/* TESTCODEC_STRICT */
+static DWORD last_quality = 0xffffffff;	/* of the last ICM_COMPRESS */
 static DWORD msg_log[MAX_LOG];
 static int nlog;
 static LONG opens;
@@ -81,6 +82,12 @@ EXPORT int testcodec_stats(DWORD *out, int n, int reset)
 EXPORT LONG testcodec_open_count(void)
 {
 	return opens;
+}
+
+/* The dwQuality of the last frame compressed. */
+EXPORT DWORD testcodec_last_quality(void)
+{
+	return last_quality;
 }
 
 static void *alloc(DWORD size)
@@ -300,6 +307,7 @@ static LRESULT compress(struct instance *inst, ICCOMPRESS *c)
 		return ICERR_BADPARAM;
 	if (compress_query(in, c->lpbiOutput) != ICERR_OK || !inst->cprev)
 		return ICERR_BADFORMAT;
+	last_quality = c->dwQuality;
 	key = (c->dwFlags & ICCOMPRESS_KEYFRAME) || inst->cframe == 0 ||
 	      (inst->st.keyrate && inst->cframe % inst->st.keyrate == 0);
 	dst[0] = key ? 'K' : 'D';

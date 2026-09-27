@@ -239,6 +239,7 @@ typedef int (*selftest_fn)(void);
 
 static stats_fn codec_stats;
 static count_fn codec_opens;
+static DWORD (*codec_quality)(void);
 
 static int log_is(const UINT *want, int n)
 {
@@ -618,6 +619,49 @@ static void test_probe_cli(const char *codec)
 
 static char seq_avi[4200];
 
+/* A codec that answers the format size query with 0. */
+static LRESULT WINAPI zero_size_proc(DWORD_PTR id, HDRVR h, UINT msg,
+				     LPARAM l1, LPARAM l2)
+{
+	switch (msg) {
+	case DRV_LOAD: case DRV_ENABLE: case DRV_DISABLE: case DRV_FREE:
+	case DRV_CLOSE:
+		return 1;
+	case DRV_OPEN:
+		return 1;
+	case ICM_COMPRESS_GET_FORMAT:
+		if (!l2)
+			return 0;
+		*(BITMAPINFOHEADER *)l2 = *(const BITMAPINFOHEADER *)l1;
+		((BITMAPINFOHEADER *)l2)->biCompression = FCC('Z', 'E', 'R', 'O');
+		return ICERR_OK;
+	}
+	return ICERR_UNSUPPORTED;
+}
+
+static void test_format_size(void)
+{
+	HIC hic = ic_open_function(ICTYPE_VIDEO, FCC('Z', 'E', 'R', 'O'),
+				   ICMODE_COMPRESS, (FARPROC)(void *)zero_size_proc);
+	CHECK(hic != NULL);
+	if (!hic)
+		return;
+	BITMAPINFOHEADER in = rgb(8, 8, 24);
+	size_t size = 0;
+	LRESULT err;
+	BITMAPINFOHEADER *out = ic_get_format(hic, ICM_COMPRESS_GET_FORMAT, &in,
+					      &size, &err);
+	CHECK(out && out->biCompression == FCC('Z', 'E', 'R', 'O'));
+	/* Just the header: not the room it was given to fill in. */
+	CHECK_EQ(size, sizeof(BITMAPINFOHEADER));
+	free(out);
+	/* A codec's own answer counts when it is more than the header. */
+	out = ic_get_format(hic, ICM_COMPRESS_GET_FORMAT, &in, NULL, &err);
+	CHECK(out != NULL);
+	free(out);
+	ic_close(hic);
+}
+
 /* ICSeqCompressFrame*: keyframes, forced keyframes, and the output. */
 static void test_seq(void)
 {
@@ -879,6 +923,25 @@ static void test_codec_cli(const char *codec)
 	CHECK_EQ(run(cmd_decode, (char *[]){ "decode", c, (char *)q, "-o",
 					     (char *)P("q.yuv"), "--state", (char *)st,
 					     NULL }), 0);
+	CHECK_EQ(codec_quality(), 1234);
+	CHECK_EQ(run(cmd_encode, (char *[]){ "encode", c, (char *)y4m, "-o",
+					     (char *)q, "--quality", "321", NULL }), 0);
+	CHECK_EQ(codec_quality(), 321);
+	/* Without --quality, the codec's current quality, not -1. */
+	CHECK_EQ(run(cmd_encode, (char *[]){ "encode", c, (char *)y4m, "-o",
+					     (char *)q, NULL }), 0);
+	CHECK_EQ(codec_quality(), 7500);
+
+	/* A state the codec refuses stops both commands. */
+	const char *bad = P("bad.bin");
+	f = fopen(bad, "wb");
+	fwrite("xyz", 1, 3, f);
+	fclose(f);
+	CHECK_EQ(run(cmd_encode, (char *[]){ "encode", c, (char *)y4m, "-o",
+					     (char *)q, "--state", (char *)bad, NULL }), 1);
+	CHECK_EQ(run(cmd_decode, (char *[]){ "decode", c, (char *)avi, "-o",
+					     (char *)P("q.yuv"), "--state", (char *)bad,
+					     NULL }), 1);
 
 	/* A damaged frame: an error, unless --keep-going repeats the last one. */
 	const char *kg = P("kg.bgr");
@@ -947,13 +1010,15 @@ int main(void)
 	}
 	codec_stats = mod_get_proc(m, "testcodec_stats");
 	codec_opens = mod_get_proc(m, "testcodec_open_count");
-	CHECK(codec_stats && codec_opens);
-	if (codec_stats && codec_opens) {
+	codec_quality = mod_get_proc(m, "testcodec_last_quality");
+	CHECK(codec_stats && codec_opens && codec_quality);
+	if (codec_stats && codec_opens && codec_quality) {
 		test_driver_lifecycle(codec);
 		test_icm();
 		test_builtins(m);
 		test_probe_cli(codec);
 		test_seq();
+		test_format_size();
 		test_codec_cli(codec);
 	}
 	mod_free(m);
