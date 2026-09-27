@@ -147,10 +147,23 @@ static LONG WINAPI nonlocal_handler(EXCEPTION_RECORD *rec, void *frame,
 
 	RtlUnwindProc(frame, NULL, rec, NULL);
 	__asm__ __volatile__(
-		"movl %0, %%esp\n\t"
+		/* The non-local transfer must restore the protected function's
+		 * callee-saved registers as well as its stack.  In particular, GCC
+		 * addresses this function's locals through EBP, so retaining the
+		 * dispatcher's EBP makes the recovery return corrupt its caller. */
+		"movl %c[ebp](%%eax), %%ebp\n\t"
+		"movl %c[ebx](%%eax), %%ebx\n\t"
+		"movl %c[esi](%%eax), %%esi\n\t"
+		"movl %c[edi](%%eax), %%edi\n\t"
+		"movl %c[esp](%%eax), %%esp\n\t"
 		"jmp vfw_seh_recovered\n\t"
 		:
-		: "r"(ctx->Esp)
+		: "a"(ctx),
+		  [ebp] "i"(offsetof(CONTEXT, Ebp)),
+		  [ebx] "i"(offsetof(CONTEXT, Ebx)),
+		  [esi] "i"(offsetof(CONTEXT, Esi)),
+		  [edi] "i"(offsetof(CONTEXT, Edi)),
+		  [esp] "i"(offsetof(CONTEXT, Esp))
 		: "memory");
 	__builtin_unreachable();
 }
