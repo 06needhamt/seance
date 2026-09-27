@@ -108,6 +108,11 @@ The stub list is based on what VfW codecs use in general (with Wine and MPlayer'
 
 ### Container and output (`src/avi/`, `src/out/`)
 
+Status: the AVI reader and writer, the DIB conversion and the Y4M/BMP/raw
+writers are done, with the `avi` and `convert` commands; `make validate-media`
+checks them against FFmpeg. Still open here: Y4M input for `encode`, and raw
+frame input.
+
 - **AVI reader:**
   - RIFF `AVI `, `avih`, and `strl` → `strh`, `strf` (full BITMAPINFOHEADER including extradata or palette), `strn`.
   - Read the `movi` `##dc`/`##db`/`##pc` chunks.
@@ -157,7 +162,7 @@ All milestones are checked against **test fixtures built in the repo**, never ag
 5. **Hardening and CI.**
    - Keep DLL-visible memory below 2 GB. On a 64-bit kernel a 32-bit process gets addresses up to 4 GB, and glibc's heap and `mmap` live near `0xf7000000`. Windows code without `LARGE_ADDRESS_AWARE` may treat pointers as signed. Options: an `ADDR_LIMIT_3GB`/low-memory personality with a re-exec, or serving Win32 heaps from a low reservation.
    - Build a matrix of fixtures, including 16-byte alignment and SSE use in the codec and C++ exceptions across a codec boundary.
-   - A fuzz-style AVI parser test.
+   - A fuzz-style AVI parser test (done: `test_avi` truncates and corrupts files).
    - A GitHub Actions workflow installs `gcc-multilib` and `mingw-w64` and runs `make test`.
    - An optional `make smoke SAMPLES=dir` runs `info` and `probe` over any user-supplied codec DLLs and reports missing imports, without asserting anything specific to a codec.
 

@@ -21,7 +21,7 @@ BUILD        ?= build
 
 HAVE_MINGW := $(shell command -v $(MINGW_CC) >/dev/null 2>&1 && echo 1)
 
-CPPFLAGS += -Iinclude -Isrc -D_GNU_SOURCE
+CPPFLAGS += -Iinclude -Isrc -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64
 CFLAGS   ?= -O2 -g
 CFLAGS   += -m32 -std=c11 -Wall -Wextra -Wno-unused-parameter
 LDFLAGS  += -m32
@@ -37,7 +37,7 @@ UNIT_BINS := $(UNIT_SRCS:tests/unit/%.c=$(BUILD)/tests/%)
 ABI_GEN := $(BUILD)/tests/gen_abi_checks
 ABI_INC := $(BUILD)/tests/abi_checks.inc
 
-.PHONY: all test unit fixtures check-abi smoke asan clean
+.PHONY: all test unit fixtures check-abi smoke validate-media asan clean
 
 all: $(BIN)
 
@@ -154,10 +154,20 @@ smoke: $(BIN) $(if $(HAVE_MINGW),fixtures)
 	@$(BIN) --help > /dev/null
 	@! $(BIN) no-such-command 2> /dev/null
 	@! $(BIN) info Makefile 2> /dev/null
+	@! $(BIN) avi Makefile 2> /dev/null
+	@! $(BIN) convert Makefile -o /dev/null --format raw 2> /dev/null
 	@if [ -n "$(HAVE_MINGW)" ]; then \
 		$(BIN) info $(FIXTURE_DIR)/pe_dep.dll > /dev/null; \
 	fi
 	@echo "smoke: CLI ok"
+
+# Cross-checks the AVI and image code against FFmpeg (exit 77: no FFmpeg).
+validate-media: $(BIN) $(BUILD)/tests/test_avi $(BUILD)/tests/test_image
+	@tests/validate_media.sh $(BUILD) $(BUILD)/media; rc=$$?; \
+	if [ $$rc -eq 77 ]; then \
+		echo "validate-media: SKIP (install ffmpeg)"; \
+		[ -z "$(REQUIRE_FFMPEG)" ] || exit 1; \
+	elif [ $$rc -ne 0 ]; then exit 1; fi
 
 SANITIZE := -fsanitize=address,undefined -fno-sanitize-recover=undefined
 
