@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <sys/mman.h>
 
+#include "common/sanitizer.h"
 #include "loader/modules.h"
 #include "runtime/lowmem.h"
 #include "runtime/runtime.h"
@@ -47,9 +48,13 @@ int main(void)
 		return TEST_SKIP;
 	}
 	CHECK_EQ(lowmem_reserve(), 0);
+	if (VFW_SANITIZER_BUILD) {
+		/* The sanitizer's allocator doesn't go through it: stays off. */
+		CHECK(!lowmem_active());
+		return test_summary("test_lowmem");
+	}
 	if (!lowmem_active()) {
-		/* A sanitizer build, or nothing above 2 GB was free. */
-		printf("no reservation (sanitizer build or 32-bit kernel)\n");
+		printf("no address space above 2 GB to reserve (32-bit kernel?)\n");
 		return TEST_SKIP;
 	}
 	CHECK_EQ(lowmem_reserve(), 0);	/* once is enough */
