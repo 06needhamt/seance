@@ -140,9 +140,17 @@ CRTFN(char *) crt__ultoa(unsigned long v, char *buf, int radix)
 	return itoa_base((long)v, buf, radix, 1);
 }
 
-/* rand/srand: msvcrt's RAND_MAX is 0x7fff, unlike glibc's; scale down. */
-CRTFN(void) crt_srand(unsigned int seed) { srand(seed); }
-CRTFN(int) crt_rand(void) { return rand() & 0x7fff; }
+/*
+ * rand/srand: msvcrt's own linear congruential generator, so a seeded
+ * sequence matches Windows'. Its state is per thread and starts at 1.
+ */
+static _Thread_local unsigned int rand_state = 1;
+CRTFN(void) crt_srand(unsigned int seed) { rand_state = seed; }
+CRTFN(int) crt_rand(void)
+{
+	rand_state = rand_state * 214013u + 2531011u;
+	return (rand_state >> 16) & 0x7fff;
+}
 
 CRTFN(void) crt_qsort(void *base, size_t n, size_t size,
 		      int (STUB_CDECL *cmp)(const void *, const void *))

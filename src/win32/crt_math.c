@@ -111,19 +111,28 @@ static int mcw_to_fe_round(unsigned int mcw)
 	}
 }
 
+/*
+ * The bits other than rounding (exception masks, precision, infinity
+ * control) aren't applied, but are remembered per thread so the word reads
+ * back as set. They start as MSVC's default: all exceptions masked, 53-bit
+ * precision (0x9001f).
+ */
+static _Thread_local unsigned int mcw_other = 0x0009001f;
+
+/* Applies new_val under mask and returns the control word as it now is. */
 CRTFN(unsigned int) crt__control87(unsigned int new_val, unsigned int mask)
 {
-	unsigned int old = fe_round_to_mcw(fegetround());
 	if (mask & _MCW_RC)
 		fesetround(mcw_to_fe_round(new_val));
-	return old;
+	mcw_other = (mcw_other & ~(mask & ~_MCW_RC)) | (new_val & mask & ~_MCW_RC);
+	return mcw_other | fe_round_to_mcw(fegetround());
 }
 
 CRTFN(int) crt__controlfp_s(unsigned int *cur, unsigned int new_val, unsigned int mask)
 {
-	unsigned int old = crt__control87(new_val, mask);
+	unsigned int now = crt__control87(new_val, mask);
 	if (cur)
-		*cur = old;
+		*cur = now;
 	return 0;
 }
 

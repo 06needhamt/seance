@@ -190,9 +190,13 @@ CRTFN(int) crt_feof(crt_FILE *f) { return (f->_flag & _IOEOF) != 0; }
 CRTFN(int) crt_ferror(crt_FILE *f) { return (f->_flag & _IOERR) != 0; }
 CRTFN(void) crt_clearerr(crt_FILE *f) { f->_flag &= ~(_IOEOF | _IOERR); }
 CRTFN(long) crt_ftell(crt_FILE *f) { return (long)lseek(f->_file, 0, SEEK_CUR); }
+/* A successful seek clears end-of-file, as C requires. */
 CRTFN(int) crt_fseek(crt_FILE *f, long off, int whence)
 {
-	return lseek(f->_file, off, whence) < 0 ? -1 : 0;
+	if (lseek(f->_file, off, whence) < 0)
+		return -1;
+	f->_flag &= ~_IOEOF;
+	return 0;
 }
 CRTFN(void) crt_rewind(crt_FILE *f) { lseek(f->_file, 0, SEEK_SET); crt_clearerr(f); }
 CRTFN(int) crt_setvbuf(crt_FILE *f, char *buf, int mode, size_t size)
@@ -207,6 +211,11 @@ CRTFN(int) crt_vfprintf(crt_FILE *f, const char *fmt, va_list ap)
 	va_list ap2;
 	va_copy(ap2, ap);
 	int n = vsnprintf(stack_buf, sizeof(stack_buf), fmt, ap);
+	if (n < 0) {
+		/* A conversion the host couldn't do (e.g. %ls on UTF-16). */
+		va_end(ap2);
+		return -1;
+	}
 	if (n >= (int)sizeof(stack_buf)) {
 		buf = malloc((size_t)n + 1);
 		if (!buf) {
@@ -254,11 +263,40 @@ CRTFN(int) crt_sprintf(char *buf, const char *fmt, ...)
 	return r;
 }
 
+/*
+ * MSVCRT's _vsnprintf: when the output is longer than n it writes n
+ * characters with no terminator and returns -1; when it is exactly n,
+ * no terminator either. glibc's vsnprintf always terminates and returns
+ * the full length, so format in full first and copy what fits.
+ */
+static int msvc_vsnprintf(char *buf, size_t n, const char *fmt, va_list ap)
+{
+	va_list ap2;
+	va_copy(ap2, ap);
+	int len = vsnprintf(NULL, 0, fmt, ap);
+	if (len < 0) {
+		va_end(ap2);
+		return -1;
+	}
+	char *tmp = malloc((size_t)len + 1);
+	if (!tmp) {
+		va_end(ap2);
+		return -1;
+	}
+	vsnprintf(tmp, (size_t)len + 1, fmt, ap2);
+	va_end(ap2);
+	size_t copy = (size_t)len < n ? (size_t)len + 1 : n;
+	if (buf && copy)
+		memcpy(buf, tmp, copy);
+	free(tmp);
+	return (size_t)len <= n ? len : -1;
+}
+
 CRTFN(int) crt__snprintf(char *buf, size_t n, const char *fmt, ...)
 {
 	va_list ap;
 	va_start(ap, fmt);
-	int r = vsnprintf(buf, n, fmt, ap);
+	int r = msvc_vsnprintf(buf, n, fmt, ap);
 	va_end(ap);
 	return r;
 }
@@ -270,7 +308,7 @@ CRTFN(int) crt_vsprintf(char *buf, const char *fmt, va_list ap)
 
 CRTFN(int) crt__vsnprintf(char *buf, size_t n, const char *fmt, va_list ap)
 {
-	return vsnprintf(buf, n, fmt, ap);
+	return msvc_vsnprintf(buf, n, fmt, ap);
 }
 
 CRTFN(crt_FILE *) crt___iob_func(void) { return crt_iob; }
@@ -308,7 +346,7 @@ static void ctype_init(void)
 			if (isspace(c)) f |= _SPACE;
 			if (ispunct(c)) f |= _PUNCT;
 			if (iscntrl(c)) f |= _CONTROL;
-			if (c == ' ' || c == '\t') f |= _BLANK;
+			if (c == ' ') f |= _BLANK;	/* MSVC's table: not tab */
 			if (isxdigit(c)) f |= _HEX;
 		}
 		ctype_table[c + 1] = f;
@@ -331,8 +369,15 @@ CRTFN(int) crt_isspace(int c) { return ctype_table[c + 1] & _SPACE; }
 CRTFN(int) crt_ispunct(int c) { return ctype_table[c + 1] & _PUNCT; }
 CRTFN(int) crt_iscntrl(int c) { return ctype_table[c + 1] & _CONTROL; }
 CRTFN(int) crt_isalnum(int c) { return ctype_table[c + 1] & (_ALPHA | _DIGIT); }
-CRTFN(int) crt_isprint(int c) { return c >= 0 && c <= 255 && !(ctype_table[c + 1] & _CONTROL); }
-CRTFN(int) crt_isgraph(int c) { return crt_isprint(c) && c != ' '; }
+/* As MSVC's <ctype.h> defines them; high bytes have no class in "C". */
+CRTFN(int) crt_isprint(int c)
+{
+	return c >= -1 && c <= 255 && (ctype_table[c + 1] & (_BLANK | _PUNCT | _ALPHA | _DIGIT));
+}
+CRTFN(int) crt_isgraph(int c)
+{
+	return c >= -1 && c <= 255 && (ctype_table[c + 1] & (_PUNCT | _ALPHA | _DIGIT));
+}
 CRTFN(int) crt_toupper(int c) { return crt_islower(c) ? c - 'a' + 'A' : c; }
 CRTFN(int) crt_tolower(int c) { return crt_isupper(c) ? c - 'A' + 'a' : c; }
 
