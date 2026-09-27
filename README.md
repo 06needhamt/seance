@@ -30,43 +30,62 @@ On a 64-bit host the kernel must support running 32-bit programs, which most
 distributions enable by default.
 
 - GCC with 32-bit support (`gcc-multilib` on Debian and Ubuntu)
-- GNU make
+- CMake 3.20 or later (3.25 for the presets) and Ninja or make
 - Optional: the mingw-w64 i686 cross compiler (`mingw-w64`). It builds the
   test fixture DLLs and runs the ABI cross-check; without it those tests are
   skipped.
+- Optional: FFmpeg (`ffmpeg`, `ffprobe`) for the media cross-checks.
 
 ```sh
-sudo apt install build-essential gcc-multilib mingw-w64
+sudo apt install build-essential gcc-multilib cmake ninja-build mingw-w64 ffmpeg
 ```
 
 ## Building and testing
 
 ```sh
-make          # builds build/vfw-harness
-make test     # unit tests, ABI cross-check, CLI smoke test
-make asan     # the unit tests again under AddressSanitizer and UBSan
-make validate-media   # AVI and image code checked against FFmpeg
+cmake --preset default        # configure build/ (or: cmake -B build)
+cmake --build --preset default
+ctest --preset default        # unit tests, ABI cross-check, CLI smoke test,
+                              # FFmpeg media checks
+
+cmake --preset asan && cmake --build --preset asan && ctest --preset asan
+                              # the same under AddressSanitizer and UBSan,
+                              # in build-asan/
 ```
 
-`make validate-media` needs `ffmpeg` and `ffprobe`. FFmpeg reads the AVI,
-Y4M and BMP files the harness writes, and `vfw-harness convert` has to
-reproduce FFmpeg's own decoding of AVIs FFmpeg wrote in each uncompressed
-format. Setting `VFW_KEEP_TEST_FILES=<dir>` when running `test_avi` or
-`test_image` keeps the files they write.
+The harness is always built as an i386 program (`-m32`); configuring fails
+early if the compiler can't produce one. Useful CMake options:
 
-The loader tests use small DLLs from `tests/fixtures/`, built with
-mingw-w64 into `build/fixtures/`. They are built without a C runtime, so
-they import only from each other until the Win32 runtime exists (Phase 2).
+| Option | Effect |
+| --- | --- |
+| `VFW_REQUIRE_MINGW=ON` | fail instead of skipping what needs mingw-w64 |
+| `VFW_REQUIRE_FFMPEG=ON` | fail instead of skipping the FFmpeg checks |
+| `VFW_SANITIZE=ON` | build with ASan and UBSan |
+| `VFW_MINGW_PREFIX=...` | the cross tools' prefix (`i686-w64-mingw32-`) |
+
+The `ci` preset turns on both `REQUIRE` options. Tests carry the CTest
+labels `unit`, `abi`, `cli` and `media`, so `ctest --preset default -L unit`
+runs only the unit tests and `-LE media` leaves out the FFmpeg checks.
+
+The media checks (`validate_media`) need `ffmpeg` and `ffprobe`. FFmpeg
+reads the AVI, Y4M and BMP files the harness writes, and
+`vfw-harness convert` has to reproduce FFmpeg's own decoding of AVIs FFmpeg
+wrote in each uncompressed format. Setting `VFW_KEEP_TEST_FILES=<dir>` when
+running `test_avi` or `test_image` keeps the files they write.
+
+The loader and codec tests use small DLLs from `tests/fixtures/`, which
+has its own CMake project: the top-level build cross-compiles it with
+`cmake/mingw-i686.cmake` as an external project, into `build/fixtures/`.
+The DLLs are built without a C runtime, so each imports only what it names.
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on every
-push and pull request: the full `make test REQUIRE_MINGW=1`, `make asan`,
-`make validate-media`, and a build with only `gcc-multilib` installed to
-check that the fixture tests skip cleanly.
+push and pull request: the `ci` preset with nothing skipped, the `asan`
+preset, and a build with only `gcc-multilib` installed to check that the
+fixture tests skip cleanly.
 
-`make check-abi` compiles every struct size, field offset and constant in
-`include/win32/` against the mingw-w64 Windows headers and fails if any of
-them differ. Without mingw-w64 it is skipped; `make test REQUIRE_MINGW=1`
-makes that an error.
+The `check_abi` test compiles every struct size, field offset and constant
+in `include/win32/` against the mingw-w64 Windows headers and fails if any
+of them differ.
 
 ## Usage
 
@@ -194,6 +213,8 @@ not implemented, and calling one stops the harness with a message naming it.
 | `tests/fixtures/` | Sources of the test DLLs, including `testcodec.c`, a lossless VfW codec (`TST0`) |
 | `tests/abi/` | ABI cross-check against the mingw-w64 headers |
 | `tests/validate_media.sh` | Cross-check of the AVI and image code against FFmpeg |
+| `tests/smoke.sh` | A quick run of every CLI command |
+| `cmake/` | The mingw-w64 toolchain file for the fixtures, and build helpers |
 | `docs/` | Implementation plan |
 
 ## License

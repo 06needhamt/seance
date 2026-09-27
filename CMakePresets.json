@@ -1,0 +1,55 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "i386 build in build/",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build"
+    },
+    {
+      "name": "ci",
+      "displayName": "CI: mingw-w64 and FFmpeg required",
+      "inherits": "default",
+      "cacheVariables": {
+        "VFW_REQUIRE_MINGW": "ON",
+        "VFW_REQUIRE_FFMPEG": "ON"
+      }
+    },
+    {
+      "name": "asan",
+      "displayName": "AddressSanitizer and UBSan in build-asan/",
+      "inherits": "default",
+      "binaryDir": "${sourceDir}/build-asan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "VFW_SANITIZE": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "default", "configurePreset": "default" },
+    { "name": "ci", "configurePreset": "ci" },
+    { "name": "asan", "configurePreset": "asan" }
+  ],
+  "testPresets": [
+    {
+      "name": "default",
+      "configurePreset": "default",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 8 }
+    },
+    {
+      "name": "ci",
+      "inherits": "default",
+      "configurePreset": "ci"
+    },
+    {
+      "name": "asan",
+      "inherits": "default",
+      "configurePreset": "asan",
+      "filter": { "exclude": { "label": "media" } }
+    }
+  ]
+}

@@ -6,7 +6,9 @@
 
 #include "commands.h"
 
+#ifndef VFW_HARNESS_VERSION
 #define VFW_HARNESS_VERSION "0.1.0-dev"
+#endif
 
 struct command {
 	const char *name;

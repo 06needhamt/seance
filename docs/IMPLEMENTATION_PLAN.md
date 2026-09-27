@@ -116,7 +116,7 @@ and msvfw32 built-ins, `probe` and `list`, and `testcodec.dll` with
 ### Container and output (`src/avi/`, `src/out/`)
 
 Status: the AVI reader and writer, the DIB conversion and the Y4M/BMP/raw
-writers are done, with the `avi` and `convert` commands; `make validate-media`
+writers are done, with the `avi` and `convert` commands; the `validate_media` test
 checks them against FFmpeg. Still open here: Y4M input for `encode`, and raw
 frame input.
 
@@ -144,10 +144,10 @@ frame input.
 All milestones are checked against **test fixtures built in the repo**, never against the uploaded DLL.
 
 0. **Skeleton.**
-   - Makefile (i386 build, `make test`), `include/win32.h` (types, structs, DRV_*/ICM_* constants modelled on Wine headers).
+   - Build system (i386 build and tests; a Makefile at first, now CMake with CTest), `include/win32.h` (types, structs, DRV_*/ICM_* constants modelled on Wine headers).
    - README with prerequisites and usage.
    - Remove the uploaded third-party DLL.
-   - `make test` runs unit tests, an ABI cross-check of `include/win32` against the mingw-w64 headers, and a CLI smoke test.
+   - The test suite runs unit tests, an ABI cross-check of `include/win32` against the mingw-w64 headers, and a CLI smoke test.
 1. **PE loader and `info`.** Fixtures are mingw-built DLLs under `tests/fixtures/`:
    - `pe_basic.dll`: exports by name and by ordinal, plus a forwarder.
    - `pe_reloc.dll`: loaded with `VFW_FORCE_RELOC=1`.
@@ -170,12 +170,12 @@ All milestones are checked against **test fixtures built in the repo**, never ag
    - Keep DLL-visible memory below 2 GB. On a 64-bit kernel a 32-bit process gets addresses up to 4 GB, and glibc's heap and `mmap` live near `0xf7000000`. Windows code without `LARGE_ADDRESS_AWARE` may treat pointers as signed. Options: an `ADDR_LIMIT_3GB`/low-memory personality with a re-exec, or serving Win32 heaps from a low reservation.
    - Build a matrix of fixtures, including 16-byte alignment and SSE use in the codec and C++ exceptions across a codec boundary.
    - A fuzz-style AVI parser test (done: `test_avi` truncates and corrupts files).
-   - A GitHub Actions workflow installs `gcc-multilib` and `mingw-w64` and runs `make test`.
-   - An optional `make smoke SAMPLES=dir` runs `info` and `probe` over any user-supplied codec DLLs and reports missing imports, without asserting anything specific to a codec.
+   - A GitHub Actions workflow installs `gcc-multilib` and `mingw-w64` and runs the whole test suite (`ctest --preset ci`).
+   - An optional smoke run over a directory of samples runs `info` and `probe` over any user-supplied codec DLLs and reports missing imports, without asserting anything specific to a codec.
 
 ## Verification
 
-- `apt install gcc-multilib mingw-w64`, then `make`, then `make test`. This runs the unit tests (reloc math, AVI parser, colour conversion) and the fixture-DLL integration tests from Phases 1–4.
+- `apt install gcc-multilib cmake ninja-build mingw-w64`, then `cmake --preset default`, `cmake --build --preset default` and `ctest --preset default`. This runs the unit tests (reloc math, AVI parser, colour conversion) and the fixture-DLL integration tests from Phases 1–4.
 - `VFW_TRACE=1 ./vfw-harness probe tests/fixtures/testcodec.dll` shows the full DRV/ICM sequence with no trap hits.
 - Round trip: `./vfw-harness encode testcodec.dll in.y4m -o t.avi && ./vfw-harness decode testcodec.dll t.avi -o out.y4m && cmp in.y4m out.y4m`.
 - Optional manual check against any real codec: `./vfw-harness info <any.dll>` to see import coverage, then `probe` and `decode` on a matching AVI.

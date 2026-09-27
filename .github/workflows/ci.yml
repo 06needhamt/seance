@@ -17,17 +17,18 @@ jobs:
       - name: Install toolchains
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-multilib mingw-w64 ffmpeg
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build gcc-multilib mingw-w64 ffmpeg
+
+      # mingw-w64 and FFmpeg are required: nothing may be skipped.
+      - name: Configure
+        run: cmake --preset ci
 
       - name: Build
-        run: make -j"$(nproc)"
+        run: cmake --build --preset ci
 
       - name: Test
-        run: make -j"$(nproc)" test REQUIRE_MINGW=1
-
-      # The AVI reader and writer and the output writers against FFmpeg.
-      - name: Validate media against FFmpeg
-        run: make validate-media REQUIRE_FFMPEG=1
+        run: ctest --preset ci
 
   sanitizers:
     name: Unit tests under ASan and UBSan
@@ -38,15 +39,22 @@ jobs:
       - name: Install toolchains
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-multilib mingw-w64
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build gcc-multilib mingw-w64
 
       # The runner's high mmap randomisation can collide with ASan's shadow
       # memory; this is the usual workaround.
       - name: Reduce mmap randomisation
         run: sudo sysctl -w vm.mmap_rnd_bits=28
 
+      - name: Configure
+        run: cmake --preset asan -DVFW_REQUIRE_MINGW=ON
+
+      - name: Build
+        run: cmake --build --preset asan
+
       - name: Test
-        run: make -j"$(nproc)" asan REQUIRE_MINGW=1
+        run: ctest --preset asan
 
   minimal:
     name: Build without mingw-w64
@@ -57,8 +65,16 @@ jobs:
       - name: Install toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-multilib
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build gcc-multilib
 
-      # Fixture tests and the ABI check report SKIP; everything else must pass.
-      - name: Build and test
-        run: make -j"$(nproc)" test
+      # Fixture tests and the ABI check report skipped; everything else must
+      # pass.
+      - name: Configure
+        run: cmake --preset default
+
+      - name: Build
+        run: cmake --build --preset default
+
+      - name: Test
+        run: ctest --preset default

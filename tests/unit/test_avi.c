@@ -381,7 +381,7 @@ static void test_bad_files(void)
 
 /*
  * Every chunk the reader reports must lie inside the file and read back,
- * however the file was damaged. (Run under ASan by `make asan`.)
+ * however the file was damaged. (Run under ASan by the asan preset.)
  */
 static unsigned check_sane(const char *path, unsigned *opened)
 {

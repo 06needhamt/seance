@@ -47,7 +47,7 @@ static int test_checks;
 		} \
 	} while (0)
 
-/* Exit status telling `make unit` that a test was skipped. */
+/* Exit status telling CTest that a test was skipped. */
 #define TEST_SKIP 77
 
 /*
