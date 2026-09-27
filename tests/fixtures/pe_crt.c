@@ -33,6 +33,9 @@ CRTIMPORT double log(double);
 CRTIMPORT double exp(double);
 CRTIMPORT double fmod(double, double);
 CRTIMPORT double fabs(double);
+CRTIMPORT int atexit(void (*)(void));
+CRTIMPORT void _lock(int);
+CRTIMPORT void _unlock(int);
 
 static int qsort_check(void);
 
@@ -134,6 +137,24 @@ EXPORT int crt_stdio_check(void)
 	if (got != sizeof(data) || memcmp(back, data, sizeof(data)) != 0)
 		return 7;
 	(void)eof_now;
+	return 0;
+}
+
+/* atexit/_onexit registration and _lock/_unlock. Returns 0, or the number
+ * of the first check that failed. Whether a registered exit callback
+ * actually runs at process exit isn't checked here - that happens after
+ * this DLL, and the harness, are both gone. */
+static void noop_atexit(void) {}
+
+EXPORT int crt_startup_check(void)
+{
+	if (atexit(noop_atexit) != 0)
+		return 1;
+	if (!_onexit((_onexit_t)noop_atexit))
+		return 2;
+
+	_lock(0);
+	_unlock(0);
 	return 0;
 }
 
