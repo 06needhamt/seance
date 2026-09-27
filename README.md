@@ -18,7 +18,7 @@ Work is split into phases; see [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION
 |---|---|---|
 | 0 | Build skeleton, Win32 headers, ABI cross-check, CLI skeleton | done |
 | 1 | PE loader and `info` | done |
-| 2 | Win32 runtime (TEB, SEH, threads, stub DLLs) | in progress: TEB, built-in DLLs, kernel32, ntdll, SEH dispatch, delay-load binding and the msvcrt-family CRT (math/string/stdio/startup/64-bit arithmetic helpers) done; `_except_handler3`/C++ EH and the remaining stub DLLs (user32, gdi32, advapi32, version, ole32) still open |
+| 2 | Win32 runtime (TEB, SEH, threads, stub DLLs) | in progress: TEB, built-in DLLs, kernel32, ntdll, SEH dispatch, delay-load binding, the msvcrt-family CRT (math/string/stdio/startup/64-bit arithmetic helpers), and headless user32, gdi32 and advapi32 (registry) done; `_except_handler3`/C++ EH, version and ole32 still open |
 | 3 | VfW layer and `probe` | done: driver lifecycle, ICM API, winmm/msvfw32 built-ins, `probe`, `list` |
 | 4 | AVI / Y4M I/O, `decode` and `encode` | done: AVI reader and writer, Y4M/BMP/raw input and output, `avi`, `convert`, `decode`, `encode` |
 | 5 | Hardening and CI | done: DLL memory below 2 GB, crash and hang reports, SSE/FPU fixture, fuzzing, samples run, CI |
@@ -184,13 +184,50 @@ one to show its name.
 Codecs usually import more than kernel32, winmm and msvfw32. The msvcrt
 family (msvcrt.dll, msvcr70-140, msvcp*, ucrtbase, api-ms-win-crt-*) is a
 real built-in: math, string/memory, stdio, CRT startup and the 64-bit
-arithmetic helpers a codec calls whatever CRT it links. user32, gdi32,
-advapi32, version, ole32, oleaut32, shell32, comctl32 and comdlg32 are
-still placeholder built-ins with no functions yet. Either way, a native
-DLL of the same name on the search path takes precedence over the
-built-in.
-A codec importing them still loads, `info` shows which of its imports are
-not implemented, and calling one stops the harness with a message naming it.
+arithmetic helpers a codec calls whatever CRT it links; a native DLL of
+the same name on the search path takes precedence over it.
+
+user32, gdi32 and advapi32 are built in too, headless:
+
+- **user32:** window classes and windows exist and get the messages
+  Windows would send them, each thread has a message queue with timers,
+  and LoadString, wsprintf and the `Char*` functions work; nothing is drawn
+  and no input arrives. A message box prints to stderr and answers with
+  its default button, as if someone pressed Enter. Dialog boxes can't be
+  shown: `DialogBox*` and `CreateDialog*` fail and say so.
+- **gdi32:** memory DCs, device-dependent bitmaps and DIB sections, with
+  conversion between every DIB format and blits between them (`BitBlt`,
+  `StretchBlt`, `StretchDIBits`, `GetDIBits`, ...), palettes, brushes,
+  pens and fonts. The display is a 1024x768 32-bit device that discards
+  what is drawn on it; text is measured but not drawn.
+- **advapi32:** the registry, kept in a `.reg` file (see below).
+
+version, ole32, oleaut32, shell32, comctl32 and comdlg32 are still
+placeholder built-ins with no functions yet: a native DLL of the same name
+on the search path is used instead if there is one. A codec importing
+functions that aren't implemented still loads, `info` shows which of its
+imports those are, and calling one stops the harness with a message naming
+it.
+
+### The registry
+
+Codecs that keep their settings in the registry get one that persists
+between runs, in `$VFW_REGISTRY`, else `$VFW_ROOT/registry.reg` (default
+`~/.vfw-harness/registry.reg`). It is saved after every change, in the
+format regedit exports, so it can be read, edited or seeded by hand, and a
+`.reg` file exported from Windows (UTF-16 or REGEDIT4) can be dropped in:
+
+```
+Windows Registry Editor Version 5.00
+
+[HKEY_CURRENT_USER\Software\SomeCodec]
+"Quality"=dword:0000004b
+"Mode"="fast"
+```
+
+`HKEY_CLASSES_ROOT` is `HKEY_LOCAL_MACHINE\Software\Classes`. Setting
+`VFW_REGISTRY=` (empty) keeps the registry in memory only, starting empty
+each run.
 
 ### Decoding and encoding: `decode` and `encode`
 
@@ -285,8 +322,9 @@ hangs on one.
 |---|---|
 | `VFW_PATH` | `:`-separated directories to search for DLLs, after the importing DLL's own directory |
 | `VFW_FORCE_RELOC=1` | Load every image away from its preferred base, to exercise relocations |
-| `VFW_ROOT` | The harness's Windows world: `drive_c` and `vfw.ini` (default `~/.vfw-harness`) |
+| `VFW_ROOT` | The harness's Windows world: `drive_c`, `vfw.ini` and `registry.reg` (default `~/.vfw-harness`) |
 | `VFW_INI` | The codec registry file (default `$VFW_ROOT/vfw.ini`) |
+| `VFW_REGISTRY` | The Windows registry file (default `$VFW_ROOT/registry.reg`); empty keeps it in memory only |
 | `VFW_TRACE=1` | Log calls into the built-in DLLs and every driver message to stderr |
 | `VFW_TIMEOUT=<s>` | Report and stop (exit 124) when one call into a DLL takes longer |
 | `VFW_LOW_MEMORY=0` | Don't keep DLL-visible memory below 2 GB |
@@ -296,10 +334,10 @@ hangs on one.
 
 | Path | Contents |
 |---|---|
-| `include/win32/` | Win32 types, PE image structures, GDI bitmap structs, driver and ICM definitions, laid out to match 32-bit Windows |
+| `include/win32/` | Win32 types, PE image structures, GDI, window-manager and registry definitions, driver and ICM definitions, laid out to match 32-bit Windows |
 | `src/loader/` | PE parsing, mapping and relocation (`pe.c`); the module table and dependency loading (`modules.c`) |
 | `src/runtime/` | TEB and `%fs`, implicit TLS, the built-in DLL registry, trap thunks for unimplemented imports, the 2 GB limit (`lowmem.c`), crash and hang reports (`crash.c`) |
-| `src/win32/` | Built-in kernel32, ntdll, winmm and msvfw32; placeholders for the other system DLLs |
+| `src/win32/` | Built-in kernel32 (`k32_*.c`), ntdll, the msvcrt family (`crt_*.c`), user32 (`user32.c`, `u32_*.c`), gdi32 (`gdi32.c`, `gdi_bitmap.c`), advapi32 and its registry (`reg.c`), winmm and msvfw32; placeholders for the other system DLLs |
 | `src/vfw/` | Installable drivers (`driver.c`), the codec registry (`registry.c`), the ICM API (`icm.c`), sequence compression (`seq.c`) |
 | `src/avi/` | AVI reader (AVI 1.0 and OpenDML) and writer |
 | `src/in/` | Frame sources for `encode`: Y4M, uncompressed AVI, BMP files, raw frames |

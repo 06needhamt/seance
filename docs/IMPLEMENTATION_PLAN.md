@@ -9,7 +9,7 @@ The goal is to load and run arbitrary 32-bit Video for Windows (VfW / ICM) codec
 
 ## Audit: what exists today
 
-`main` and `claude/dreamy-ptolemy-awki9u` are identical (2 commits). **There is no harness code at all.** The repo contains:
+This section records the starting point, before any harness code existed; the rest of the plan marks what has been done since. At the time, `main` and `claude/dreamy-ptolemy-awki9u` were identical (2 commits) and the repo contained:
 
 | File | State |
 |---|---|
@@ -18,7 +18,7 @@ The goal is to load and run arbitrary 32-bit Video for Windows (VfW / ICM) codec
 | `.gitignore` | Stock C template. It ignores `*.dll`/`*.exe`. |
 | `vcmimm6 (2).dll` | A third-party codec that was uploaded. It was not a design input and has since been removed from the repo (Phase 0). |
 
-**Everything is still missing:** the PE loader, the Win32 runtime, the ICM layer, AVI I/O, output writers, the CLI, tests, CI and docs.
+Everything was missing then: the PE loader, the Win32 runtime, the ICM layer, AVI I/O, output writers, the CLI, tests, CI and docs.
 
 **Environment gap:** the container's gcc cannot link `-m32`. The build needs `gcc-multilib`, and the in-repo test codecs need `mingw-w64` (i686).
 
@@ -85,8 +85,11 @@ cli: vfw-harness info | probe | decode | encode | list
   - `_ftol`/`_ftol2`, `_allmul`/`_alldiv`/`_aulldiv`/`_allrem`/`_aullrem`/`_allshl`/`_allshr`/`_aullshr`: the 64-bit-arithmetic and float-truncation helpers every 32-bit MSVC-compiled codec using `__int64` calls, whatever CRT it links, even a statically linked one - done (`crt_helpers.c`; `_allmul`'s family get the real MASM-runtime calling convention, callee-pops-its-own-args, for free by declaring them `stdcall` over four 32-bit halves rather than a single `__int64`, since the two only differ in stack cleanup; `_ftol` and the shifts take their operands in EDX:EAX/CL with no stack arguments at all, which no C calling convention expresses, so those five are hand-written asm reproduced from their long-published disassembly).
   - Still open: `_except_handler3`/`4_common` (the scope-table walk a dynamically linked CRT's compiler-generated frames need on top of `seh.c`'s dispatch), `__CxxFrameHandler*` (minimal C++ EH), `printf`-family shims for MSVC-only specifiers (`%I64d`) - `crt_stdio.c`'s `printf`/`sprintf`/`fprintf` forward straight to the host's own, which don't understand that specifier, and `_CIpow`-style x87 intrinsics.
   - Codecs with a statically linked CRT need only the kernel32 side plus the arithmetic helpers above, which they call regardless.
-- **user32 / gdi32:** headless. Window, dialog and message functions return failure or no-ops with fake HWND/HDC values. MessageBox prints to stderr and returns IDOK. LoadString, wsprintf, GetDC and CreateDIBSection work on memory buffers. GetSystemMetrics returns sane defaults.
-- **advapi32:** Reg* backed by a per-codec INI or JSON file (`$VFW_REGISTRY`, empty by default), so codec settings persist and can be seeded by tests.
+- **user32 / gdi32:** headless (done).
+  - user32 (`user32.c`, `u32_window.c`, `u32_string.c`): window classes and windows are real objects that get the messages Windows sends on create/show/move/destroy, with ANSI/UTF-16 text conversion between sender and window procedure; per-thread message queues with posted messages, WM_QUIT, timers and MsgWaitForMultipleObjects; window longs, extra bytes and properties. SendMessage to another thread's window runs on the caller's thread. Dialog boxes fail (there is no GUI) and say so. MessageBox prints to stderr and answers with its default button. LoadString, wsprintf/wvsprintf (own formatter: `%s`/`%S` follow the caller's width, not glibc's `wchar_t`), `Char*`, system metrics and colours (XP classic, 1024x768), rectangles, icons/cursors (empty handles), LoadBitmap/LoadImage, window stations and monitors.
+  - gdi32 (`gdi32.c`, `gdi_bitmap.c`): a handle table with Windows' type byte and a generation count, stock objects, memory and display DCs with SaveDC/RestoreDC, DDBs and DIB sections (page-aligned, or in a file mapping), Get/SetDIBits, BitBlt/StretchBlt/PatBlt/StretchDIBits/SetDIBitsToDevice through one pixel layer that reads and writes every DIB format, palettes (default and halftone), brushes, pens, fonts and fixed text metrics. The display is a 32-bit device that discards drawing; text isn't drawn; stretching is nearest-neighbour and ROPs work on RGB values.
+  - `pe_gui.dll` drives both from Win32 code with a 4-byte stack.
+- **advapi32:** Reg* (done, `advapi32.c`, `reg.c`), backed by a regedit-format `.reg` file (`$VFW_REGISTRY`, else `$VFW_ROOT/registry.reg`; empty means in memory only), saved after each change, so codec settings persist and can be seeded by tests or from a Windows export (UTF-16 and REGEDIT4 files are read too). Also GetUserName. Not done: RegNotifyChangeKeyValue, RegGetValue, the security functions, and a view of `vfw.ini`'s `[drivers32]` as the `Drivers32` key that msvfw32 on NT reads.
 - **winmm:** DefDriverProc following Wine's `dlls/winmm/driver.c` semantics, timeGetTime, SendDriverMessage/OpenDriver on top of `vfw/`.
 - **version and ole32-lite:** GetFileVersionInfo* from the resource walker. CoInitialize and CoTaskMemAlloc as trivial stubs.
 - **msvfw32 re-export:** some codecs call back into ICM, so they are given the harness's own `vfw/` API.
@@ -99,10 +102,12 @@ Status: done. `driver.c`, `registry.c` (`vfw.ini`) and `icm.c`, the winmm
 and msvfw32 built-ins, `probe` and `list`, and `testcodec.dll` with
 `test_vfw`, and ICSeqCompressFrameStart/Frame/End and ICCompressorFree
 (`seq.c`), which `encode` uses. Still open:
-- ICImageCompress/ICImageDecompress (they return global-memory DIBs, so they
-  wait for GlobalAlloc in kernel32) and ICCompressorChoose (a dialog).
+- ICImageCompress/ICImageDecompress (they return global-memory DIBs;
+  kernel32's GlobalAlloc, which they were waiting for, now exists) and
+  ICCompressorChoose (a dialog).
 - DrawDib* and the ICM_DRAW path (drawing is reported as unsupported).
-- The placeholder DLLs (user32, advapi32, msvcrt and so on) have no functions yet.
+- The remaining placeholder DLLs (version, ole32, oleaut32, shell32, comctl32,
+  comdlg32) have no functions yet.
 
 - **`driver.c`:**
   - Installable-driver lifecycle: `DRV_LOAD`, `DRV_ENABLE`, `DRV_OPEN` with ICOPEN, then `DRV_CLOSE`, `DRV_DISABLE`, `DRV_FREE`.
@@ -162,9 +167,9 @@ All milestones are checked against **test fixtures built in the repo**, never ag
 
    Milestone: the fixtures exercise these checks:
    - The SEH fixture (`pe_seh.dll`, done) recovers from an access violation, walks a chain of several hand-installed frames with an RtlUnwind in between, and reaches a frame through RaiseException.
-   - The thread fixture reads per-thread TLS back correctly.
+   - The thread fixture (`pe_k32.dll`, done) reads per-thread TLS back correctly.
    - The CRT fixture (`pe_crt.dll`, done) prints through `_iob`, round-trips a file through `fopen`/`fwrite`/`fread`, and uses `_pctype`, math, string and the 64-bit arithmetic helpers.
-   - The registry fixture round-trips a value.
+   - The registry fixture (`pe_reg.dll`, done) round-trips values through the registry file.
 3. **VfW layer and `probe`.** `tests/fixtures/testcodec.dll` is a mingw-built lossless ICM codec (FourCC `TST0`). It can compress and decompress, keeps its state through Get/SetState, and supports several output formats.
 
    Milestone: `probe` lists the correct ICINFO, accepted formats and state size.
