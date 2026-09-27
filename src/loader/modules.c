@@ -106,6 +106,23 @@ void mod_describe_address(const void *addr, char *out, size_t outsz)
 		snprintf(out, outsz, "%p", addr);
 }
 
+int mod_describe_address_try(const void *addr, char *out, size_t outsz)
+{
+	const BYTE *a = addr;
+	int found = 0;
+
+	if (pthread_mutex_trylock(&loader_lock))
+		return 0;
+	for (struct module *m = modules; m && !found; m = m->next)
+		if (a >= m->base && a < m->base + module_size(m)) {
+			snprintf(out, outsz, "%s+0x%x", m->name,
+				 (unsigned)(a - m->base));
+			found = 1;
+		}
+	UNLOCK();
+	return found;
+}
+
 /* Looks for name in dir, ignoring case. Returns 0 and the path, or -1. */
 static int find_in_dir(const char *dir, const char *name, char *out,
 		       size_t outsz)

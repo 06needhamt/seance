@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "commands.h"
+#include "runtime/crash.h"
 #include "runtime/lowmem.h"
 
 #ifndef VFW_HARNESS_VERSION
@@ -77,6 +78,9 @@ int main(int argc, char **argv)
 				cmd);
 			return 2;
 		}
+		/* Crashes and hangs in DLL code get reported. */
+		if (crash_install())
+			return 2;
 		/* DLL code only ever sees memory below 2 GB. */
 		return lowmem_run(c->run, argc - 1, argv + 1);
 	}

@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include "common/error.h"
+#include "runtime/crash.h"
 #include "runtime/teb.h"
 
 _Static_assert(offsetof(struct win_teb, ExceptionList) == 0x00, "TEB");
@@ -191,6 +192,7 @@ void teb_exit_thread(void)
 
 	if (!teb)
 		return;
+	crash_thread_exit();
 	load_fs(0);
 	current = NULL;
 

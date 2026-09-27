@@ -1,6 +1,7 @@
 #include <pthread.h>
 
 #include "common/log.h"
+#include "runtime/crash.h"
 #include "runtime/runtime.h"
 #include "runtime/teb.h"
 
@@ -15,5 +16,8 @@ static void process_init(void)
 int runtime_enter(void)
 {
 	pthread_once(&once, process_init);
-	return teb_init_thread() ? 0 : -1;
+	if (!teb_init_thread())
+		return -1;
+	crash_thread_init();
+	return 0;
 }

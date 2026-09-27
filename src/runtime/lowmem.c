@@ -24,6 +24,7 @@
 #include <sys/resource.h>
 
 #include "common/log.h"
+#include "common/sanitizer.h"
 #include "runtime/lowmem.h"
 
 #define LOW_LIMIT   0x80000000ull
@@ -36,16 +37,6 @@
  * allocator doesn't go through the reservation), so the reservation is off
  * in sanitizer builds.
  */
-#if defined(__SANITIZE_ADDRESS__)
-#define SANITIZER_BUILD 1
-#elif defined(__has_feature)
-#if __has_feature(address_sanitizer)
-#define SANITIZER_BUILD 1
-#endif
-#endif
-#ifndef SANITIZER_BUILD
-#define SANITIZER_BUILD 0
-#endif
 
 static int reserved;
 static uint64_t reserved_bytes;
@@ -104,7 +95,7 @@ int lowmem_reserve(void)
 	uint64_t stack_start;
 	const char *env = getenv("VFW_LOW_MEMORY");
 
-	if (SANITIZER_BUILD || sizeof(void *) != 4 || reserved ||
+	if (VFW_SANITIZER_BUILD || sizeof(void *) != 4 || reserved ||
 	    (env && !strcmp(env, "0")))
 		return 0;
 	int n = read_maps(maps, 1024, &stack_start);

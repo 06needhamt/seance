@@ -12,6 +12,7 @@
 #include "common/error.h"
 #include "common/unicode.h"
 #include "loader/pe.h"
+#include "runtime/crash.h"
 #include "runtime/teb.h"
 
 #define MAX_SECTIONS     96		/* the PE/COFF limit */
@@ -855,6 +856,18 @@ int pe_foreach_tls_callback(const struct pe_image *img, pe_tls_fn fn,
 	FAIL("bad PE file: too many TLS callbacks");
 }
 
+static const char *dll_reason_name(UINT reason, char buf[24])
+{
+	switch (reason) {
+	case DLL_PROCESS_ATTACH: return "DLL_PROCESS_ATTACH";
+	case DLL_PROCESS_DETACH: return "DLL_PROCESS_DETACH";
+	case DLL_THREAD_ATTACH:  return "DLL_THREAD_ATTACH";
+	case DLL_THREAD_DETACH:  return "DLL_THREAD_DETACH";
+	}
+	snprintf(buf, 24, "%u", reason);
+	return buf;
+}
+
 struct tls_call {
 	struct pe_image *img;
 	DWORD reason;
@@ -869,8 +882,12 @@ static int call_tls_callback(void *c, DWORD rva)
 {
 	struct tls_call *t = c;
 	PIMAGE_TLS_CALLBACK cb = (PIMAGE_TLS_CALLBACK)(t->img->base + rva);
+	struct crash_frame saved;
 
+	crash_enter("TLS callback", (const void *)cb, t->reason, dll_reason_name,
+		    &saved);
 	cb(t->img->base, t->reason, NULL);
+	crash_leave(&saved);
 	return 0;
 }
 
@@ -929,7 +946,11 @@ BOOL pe_call_entry(struct pe_image *img, DWORD reason)
 	if (!ep || !img->base)
 		return TRUE;
 	entry_fn entry = (entry_fn)(img->base + ep);
-	return entry((HINSTANCE)img->base, reason, NULL);
+	struct crash_frame saved;
+	crash_enter("DllMain", (const void *)entry, reason, dll_reason_name, &saved);
+	BOOL r = entry((HINSTANCE)img->base, reason, NULL);
+	crash_leave(&saved);
+	return r;
 }
 
 /* Resources. */

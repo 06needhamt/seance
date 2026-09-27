@@ -9,6 +9,7 @@
 #include "common/log.h"
 #include "loader/modules.h"
 #include "runtime/runtime.h"
+#include "runtime/crash.h"
 #include "vfw/driver.h"
 
 #define MAX_DRIVERS 256
@@ -100,7 +101,10 @@ LRESULT drv_call(DRIVERPROC proc, DWORD_PTR id, HDRVR h, UINT msg,
 	TRACE("driver %p: %s(id 0x%lx, 0x%lx, 0x%lx)", (void *)h,
 	      drv_msg_name(msg, buf), (unsigned long)id, (unsigned long)l1,
 	      (unsigned long)l2);
+	struct crash_frame saved;
+	crash_enter("DriverProc", (const void *)proc, msg, drv_msg_name, &saved);
 	LRESULT r = proc(id, h, msg, l1, l2);
+	crash_leave(&saved);
 	TRACE("driver %p: %s -> %ld (0x%lx)", (void *)h, drv_msg_name(msg, buf),
 	      (long)r, (unsigned long)r);
 	return r;

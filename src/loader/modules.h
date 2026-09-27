@@ -82,4 +82,10 @@ void mod_thread_notify(DWORD reason);
 /* Formats addr as "module+0xrva", or just the address if not in a module. */
 void mod_describe_address(const void *addr, char *out, size_t outsz);
 
+/*
+ * The same without waiting for the loader lock (for crash reports): 1 with
+ * "module+0xrva" in out, or 0 if addr is in no module or the lock is busy.
+ */
+int mod_describe_address_try(const void *addr, char *out, size_t outsz);
+
 #endif /* VFW_LOADER_MODULES_H */

@@ -16,6 +16,10 @@
  * with any pointer at or above 2 GB, the way code that isn't large-address
  * aware can go wrong with one: its instance, the ICOPEN, the (de)compress
  * structures, the formats, the frames and its own stack.
+ *
+ * Two private messages misbehave on purpose, for the harness's crash and
+ * hang reports: TESTCODEC_CRASH writes through a null pointer and
+ * TESTCODEC_HANG never returns.
  * Built like old MSVC code, with a 4-byte stack boundary.
  */
 #include "fixture.h"
@@ -26,6 +30,8 @@
 #define I420 mmioFOURCC('I', '4', '2', '0')
 #define IYUV mmioFOURCC('I', 'Y', 'U', 'V')
 #define MAX_LOG 64
+#define TESTCODEC_CRASH (ICM_USER + 100)
+#define TESTCODEC_HANG  (ICM_USER + 101)
 
 struct state {
 	DWORD quality;
@@ -455,6 +461,12 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		return DefDriverProc(id, hdrvr, msg, l1, l2);
 
 	switch (msg) {
+	case TESTCODEC_CRASH:
+		*(volatile DWORD *)l1 = 1;	/* l1 is 0 */
+		return ICERR_OK;
+	case TESTCODEC_HANG:
+		for (;;)
+			*(volatile DWORD *)&inst->magic;
 	case ICM_GETINFO:
 		return get_info((ICINFO *)l1, (DWORD)l2);
 	case ICM_GETSTATE:
