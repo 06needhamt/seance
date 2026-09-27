@@ -134,6 +134,46 @@ EXPORT int seh_chain_unwind(void)
 	return r == 1 && unwind_seen;
 }
 
+/* Model the transfer made by _except_handler3 after it accepts a fault:
+ * RtlUnwind returns to the handler, which restores the protected stack and
+ * jumps directly to the __except body instead of returning to the dispatcher.
+ * Doing this twice catches dispatch state left behind by the first jump. */
+static LONG WINAPI nonlocal_handler(EXCEPTION_RECORD *rec, void *frame,
+				    CONTEXT *ctx, void *disp)
+{
+	if (rec->ExceptionFlags & EXCEPTION_UNWINDING ||
+	    rec->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+		return DISP_CONTINUE_SEARCH;
+
+	RtlUnwindProc(frame, NULL, rec, NULL);
+	__asm__ __volatile__(
+		"movl %0, %%esp\n\t"
+		"jmp vfw_seh_recovered\n\t"
+		:
+		: "r"(ctx->Esp)
+		: "memory");
+	__builtin_unreachable();
+}
+
+EXPORT int seh_nonlocal_twice(void)
+{
+	struct seh_frame f;
+	int first, second;
+
+	RtlUnwindProc = (void *)GetProcAddress(GetModuleHandleA("kernel32.dll"),
+					       "RtlUnwind");
+	if (!RtlUnwindProc)
+		return -1;
+
+	chain_push(&f, nonlocal_handler);
+	first = vfw_seh_try_write();
+	chain_pop(&f);
+	chain_push(&f, nonlocal_handler);
+	second = vfw_seh_try_write();
+	chain_pop(&f);
+	return first == 1 && second == 1;
+}
+
 /* RaiseException reaching an installed frame, with its code and one
  * argument intact, and resuming normally afterwards. */
 static DWORD raised_seen;

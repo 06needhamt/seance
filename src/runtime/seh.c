@@ -334,6 +334,16 @@ void WINAPI seh_RtlUnwind(PEXCEPTION_REGISTRATION_RECORD target_frame,
 		frame = next;
 	}
 	teb->ExceptionList = target_frame ? target_frame : SEH_CHAIN_END;
+
+	/*
+	 * A compiler exception handler calls RtlUnwind immediately before it
+	 * restores the protected frame and jumps into the selected __except
+	 * body.  That non-local transfer means neither walk_chain() nor its
+	 * caller gets control back to clear this guard.  End the dispatch here,
+	 * once the unwind has finished, so a later fault in the same thread can
+	 * start a fresh dispatch.
+	 */
+	dispatching = 0;
 }
 
 LPTOP_LEVEL_EXCEPTION_FILTER WINAPI

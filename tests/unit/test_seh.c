@@ -77,6 +77,7 @@ int main(void)
 		if (!VFW_SANITIZER_BUILD) {
 			CHECK_EQ(get(m, "seh_recover")(), 1);
 			CHECK_EQ(get(m, "seh_chain_unwind")(), 1);
+			CHECK_EQ(get(m, "seh_nonlocal_twice")(), 1);
 			CHECK_EQ(get(m, "seh_unhandled_filter")(), 1);
 		} else {
 			printf("sanitizer build: skipping the fault-based checks\n");
