@@ -20,8 +20,8 @@ Work is split into phases; see [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION
 | 1 | PE loader and `info` | done |
 | 2 | Win32 runtime (TEB, SEH, threads, stub DLLs) | in progress: TEB, built-in DLLs, kernel32 and ntdll done |
 | 3 | VfW layer and `probe` | done: driver lifecycle, ICM API, winmm/msvfw32 built-ins, `probe`, `list` |
-| 4 | AVI / Y4M I/O, `decode` and `encode` | in progress: AVI reader and writer, `avi`, `convert` and the output writers done |
-| 5 | Hardening and CI | not started |
+| 4 | AVI / Y4M I/O, `decode` and `encode` | done: AVI reader and writer, Y4M/BMP/raw input and output, `avi`, `convert`, `decode`, `encode` |
+| 5 | Hardening and CI | done: DLL memory below 2 GB, crash and hang reports, SSE/FPU fixture, fuzzing, samples run, CI |
 
 ## Prerequisites
 
@@ -30,43 +30,63 @@ On a 64-bit host the kernel must support running 32-bit programs, which most
 distributions enable by default.
 
 - GCC with 32-bit support (`gcc-multilib` on Debian and Ubuntu)
-- GNU make
+- CMake 3.20 or later (3.25 for the presets) and Ninja or make
 - Optional: the mingw-w64 i686 cross compiler (`mingw-w64`). It builds the
   test fixture DLLs and runs the ABI cross-check; without it those tests are
   skipped.
+- Optional: FFmpeg (`ffmpeg`, `ffprobe`) for the media cross-checks.
 
 ```sh
-sudo apt install build-essential gcc-multilib mingw-w64
+sudo apt install build-essential gcc-multilib cmake ninja-build mingw-w64 ffmpeg
 ```
 
 ## Building and testing
 
 ```sh
-make          # builds build/vfw-harness
-make test     # unit tests, ABI cross-check, CLI smoke test
-make asan     # the unit tests again under AddressSanitizer and UBSan
-make validate-media   # AVI and image code checked against FFmpeg
+cmake --preset default        # configure build/ (or: cmake -B build)
+cmake --build --preset default
+ctest --preset default        # unit tests, ABI cross-check, CLI smoke test,
+                              # FFmpeg media checks
+
+cmake --preset asan && cmake --build --preset asan && ctest --preset asan
+                              # the same under AddressSanitizer and UBSan,
+                              # in build-asan/
 ```
 
-`make validate-media` needs `ffmpeg` and `ffprobe`. FFmpeg reads the AVI,
-Y4M and BMP files the harness writes, and `vfw-harness convert` has to
-reproduce FFmpeg's own decoding of AVIs FFmpeg wrote in each uncompressed
-format. Setting `VFW_KEEP_TEST_FILES=<dir>` when running `test_avi` or
-`test_image` keeps the files they write.
+The harness is always built as an i386 program (`-m32`); configuring fails
+early if the compiler can't produce one. Useful CMake options:
 
-The loader tests use small DLLs from `tests/fixtures/`, built with
-mingw-w64 into `build/fixtures/`. They are built without a C runtime, so
-they import only from each other until the Win32 runtime exists (Phase 2).
+| Option | Effect |
+| --- | --- |
+| `VFW_REQUIRE_MINGW=ON` | fail instead of skipping what needs mingw-w64 |
+| `VFW_REQUIRE_FFMPEG=ON` | fail instead of skipping the FFmpeg checks |
+| `VFW_SANITIZE=ON` | build with ASan and UBSan |
+| `VFW_MINGW_PREFIX=...` | the cross tools' prefix (`i686-w64-mingw32-`) |
+| `VFW_SAMPLES_DIR=<dir>` | add a `samples` test: `info` and `probe` over the codec DLLs in `<dir>` |
+
+The `ci` preset turns on both `REQUIRE` options. Tests carry the CTest
+labels `unit`, `abi`, `cli`, `media` and `samples`, so `ctest --preset default -L unit`
+runs only the unit tests and `-LE media` leaves out the FFmpeg checks.
+
+The media checks (`validate_media`) need `ffmpeg` and `ffprobe`. FFmpeg
+reads the AVI, Y4M and BMP files the harness writes, and
+`vfw-harness convert` has to reproduce FFmpeg's own decoding of AVIs FFmpeg
+wrote in each uncompressed format. Setting `VFW_KEEP_TEST_FILES=<dir>` when
+running `test_avi` or `test_image` keeps the files they write.
+
+The loader and codec tests use small DLLs from `tests/fixtures/`, which
+has its own CMake project: the top-level build cross-compiles it with
+`cmake/mingw-i686.cmake` as an external project, into `build/fixtures/`.
+The DLLs are built without a C runtime, so each imports only what it names.
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on every
-push and pull request: the full `make test REQUIRE_MINGW=1`, `make asan`,
-`make validate-media`, and a build with only `gcc-multilib` installed to
-check that the fixture tests skip cleanly.
+push and pull request: the `ci` preset with nothing skipped, the `asan`
+preset, and a build with only `gcc-multilib` installed to check that the
+fixture tests skip cleanly.
 
-`make check-abi` compiles every struct size, field offset and constant in
-`include/win32/` against the mingw-w64 Windows headers and fails if any of
-them differ. Without mingw-w64 it is skipped; `make test REQUIRE_MINGW=1`
-makes that an error.
+The `check_abi` test compiles every struct size, field offset and constant
+in `include/win32/` against the mingw-w64 Windows headers and fails if any
+of them differ.
 
 ## Usage
 
@@ -111,7 +131,7 @@ It accepts these inputs:
 - YUY2, UYVY, YVYU, I420/IYUV, YV12, NV12, NV21 and Y800.
 
 YUV is BT.601 limited range, and empty (dropped) frames repeat the previous one.
-Compressed streams need a codec, which will be the job of `decode`.
+Compressed streams need a codec: see `decode`.
 
 ### Codecs: `probe` and `list`
 
@@ -165,9 +185,94 @@ native DLL of the same name on the search path takes precedence over them.
 A codec importing them still loads, `info` shows which of its imports are
 not implemented, and calling one stops the harness with a message naming it.
 
-`decode` and `encode` are listed but not implemented yet.
+### Decoding and encoding: `decode` and `encode`
 
-### Loader environment variables
+```sh
+build/vfw-harness decode codec.dll clip.avi -o clip.y4m
+build/vfw-harness decode auto clip.avi -o 'frame%05d.bmp' --start 250 --frames 10
+build/vfw-harness decode XVID clip.avi -o clip.yuv --output-format YV12
+
+build/vfw-harness encode codec.dll in.y4m -o out.avi --keyint 30 --quality 8000
+build/vfw-harness encode TST0 'shot%04d.bmp' -o out.avi --rate 30000/1001
+build/vfw-harness encode codec.dll in.yuv -o out.avi --input-format I420 --size 720x576
+ffmpeg -i any.mkv -f yuv4mpegpipe - | build/vfw-harness encode codec.dll - -o out.avi
+```
+
+`decode` runs an AVI's video stream through a codec's decompressor
+(`ICM_DECOMPRESS_BEGIN`, then `ICDecompress` per frame) and writes the
+frames with the same writers as `convert`. The codec is a DLL, a FOURCC
+from `vfw.ini`, or `auto` for whichever registered codec accepts the
+stream (`ICLocate`). A DLL is opened as the stream's handler unless
+`--fourcc` says otherwise. The output format is `--output-format` if
+given; otherwise I420 for Y4M and YUV output and BGR24 for BMP and BGR, if
+the codec offers them, then what the codec suggests, then the first
+standard format it accepts. `--start` begins decoding at the keyframe
+before that frame, feeding the frames in between with
+`ICDECOMPRESS_PREROLL`; frames that aren't keyframes get
+`ICDECOMPRESS_NOTKEYFRAME`. A frame the codec rejects stops the decode,
+or with `--keep-going` repeats the previous picture. `.raw` output keeps
+the codec's output exactly, in whatever format it is.
+
+`encode` compresses video into an AVI through the msvfw32 sequence API
+(`ICSeqCompressFrameStart`, `ICSeqCompressFrame`, `ICSeqCompressFrameEnd`),
+which the harness also exports to codecs. It reads:
+- Y4M, 4:2:0 (any chroma siting) or mono, from a file or `-` for stdin.
+- An uncompressed AVI stream; RLE and palette-changing streams are turned
+  into BGR24.
+- A BMP file, or numbered files (`shot%04d.bmp`, from 0 or 1).
+- Raw frames with `--input-format` (I420, YV12, YUY2, UYVY, BGR32, BGR24,
+  RGB565, RGB555) and `--size`; raw RGB is top-down with unpadded rows,
+  as FFmpeg's `rawvideo` and our `.bgr` output are.
+
+Frames go to the codec as they are if it takes them
+(`ICM_COMPRESS_QUERY`); otherwise they are converted to the first standard
+format it takes, or to `--codec-input`. `--keyint` (default: the codec's
+`ICM_GETDEFAULTKEYFRAMERATE`), `--quality` (0 to 10000) and `--bitrate`
+(kbit/s, for codecs that can aim for one) set the sequence, and
+`ICM_COMPRESS_FRAMES_INFO` tells the codec about them and the frame rate.
+The keyframe flags in the AVI index are the codec's. `--state` sets a
+codec state saved earlier with `--save-state` (`ICM_SETSTATE` /
+`ICM_GETSTATE`), and `--odml` writes OpenDML indexes even for small
+files; files over 1 GB always get them.
+
+Both commands print the frame count, the formats on each side and the time
+spent in the codec per frame. With `testcodec.dll`, encoding a clip and
+decoding it again gives the input back byte for byte, which the unit tests
+and `validate_media` check for Y4M, BMP, raw and AVI input.
+
+### Real codecs: the samples run
+
+```sh
+tests/samples.sh build/vfw-harness ~/codecs        # or -DVFW_SAMPLES_DIR=~/codecs
+```
+
+`tests/samples.sh` runs `info` and `probe` over every DLL in a directory
+you supply. For each it reports how many of its imports the harness
+doesn't implement yet, how many DLLs it needs from disk, and whether it
+opens and under which FOURCC. It asserts nothing about any particular
+codec; it fails only when the harness can't parse a file, or crashes or
+hangs on one.
+
+### Robustness
+
+- **Memory below 2 GB.** Windows gives programs that aren't large-address
+  aware the low 2 GB, and codec code may treat pointers as signed. At
+  startup the harness reserves the free address space from 2 GB up, and
+  runs each command on a thread with a low stack, so every heap block,
+  frame buffer, stack, TEB and DLL image a codec sees is below 2 GB.
+  `VFW_LOW_MEMORY=0` turns this off; sanitizer builds leave it off.
+- **Crashes.** A fault in DLL code is reported with the signal, the
+  faulting `module+offset`, the address touched, and the call in progress,
+  and the process then dies of the signal:
+
+  ```
+  vfw-harness: crash: SIGSEGV at testcodec.dll+0x178e, accessing (nil)
+  vfw-harness:   in DriverProc(DRV_USER+0x64) of testcodec.dll
+  ```
+- **Hangs.** With `VFW_TIMEOUT=<seconds>`, a single call into a DLL that
+  takes longer is reported the same way, and the harness exits with 124.
+
+### Environment variables
 
 | Variable | Effect |
 |---|---|
@@ -176,6 +281,9 @@ not implemented, and calling one stops the harness with a message naming it.
 | `VFW_ROOT` | The harness's Windows world: `drive_c` and `vfw.ini` (default `~/.vfw-harness`) |
 | `VFW_INI` | The codec registry file (default `$VFW_ROOT/vfw.ini`) |
 | `VFW_TRACE=1` | Log calls into the built-in DLLs and every driver message to stderr |
+| `VFW_TIMEOUT=<s>` | Report and stop (exit 124) when one call into a DLL takes longer |
+| `VFW_LOW_MEMORY=0` | Don't keep DLL-visible memory below 2 GB |
+| `VFW_ENV_<NAME>=<value>` | Put `NAME=value` in the Windows environment codecs see |
 
 ## Layout
 
@@ -183,17 +291,21 @@ not implemented, and calling one stops the harness with a message naming it.
 |---|---|
 | `include/win32/` | Win32 types, PE image structures, GDI bitmap structs, driver and ICM definitions, laid out to match 32-bit Windows |
 | `src/loader/` | PE parsing, mapping and relocation (`pe.c`); the module table and dependency loading (`modules.c`) |
-| `src/runtime/` | TEB and `%fs`, the built-in DLL registry, trap thunks for unimplemented imports |
+| `src/runtime/` | TEB and `%fs`, implicit TLS, the built-in DLL registry, trap thunks for unimplemented imports, the 2 GB limit (`lowmem.c`), crash and hang reports (`crash.c`) |
 | `src/win32/` | Built-in kernel32, ntdll, winmm and msvfw32; placeholders for the other system DLLs |
-| `src/vfw/` | Installable drivers (`driver.c`), the codec registry (`registry.c`), the ICM API (`icm.c`) |
+| `src/vfw/` | Installable drivers (`driver.c`), the codec registry (`registry.c`), the ICM API (`icm.c`), sequence compression (`seq.c`) |
 | `src/avi/` | AVI reader (AVI 1.0 and OpenDML) and writer |
-| `src/out/` | DIB to BGR24 / I420 conversion; Y4M, BMP and raw writers |
+| `src/in/` | Frame sources for `encode`: Y4M, uncompressed AVI, BMP files, raw frames |
+| `src/out/` | DIB to and from BGR24 / I420; Y4M, BMP and raw writers |
 | `src/common/` | Error reporting, file, UTF-16 and FOURCC helpers |
-| `src/` | CLI entry point and commands (`main.c`, `cmd_*.c`) |
+| `src/` | CLI entry point and commands (`main.c`, `cmd_*.c`, shared helpers in `cmd_util.c`) |
 | `tests/unit/` | Unit tests (`test_*.c`, each a standalone program) |
 | `tests/fixtures/` | Sources of the test DLLs, including `testcodec.c`, a lossless VfW codec (`TST0`) |
 | `tests/abi/` | ABI cross-check against the mingw-w64 headers |
 | `tests/validate_media.sh` | Cross-check of the AVI and image code against FFmpeg |
+| `tests/smoke.sh` | A quick run of every CLI command |
+| `tests/samples.sh` | `info` and `probe` over a directory of codec DLLs |
+| `cmake/` | The mingw-w64 toolchain file for the fixtures, and build helpers |
 | `docs/` | Implementation plan |
 
 ## License

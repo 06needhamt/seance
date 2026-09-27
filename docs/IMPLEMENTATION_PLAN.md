@@ -45,7 +45,7 @@ cli: vfw-harness info | probe | decode | encode | list
   - Imports: by name, by ordinal, and with bound-import tolerance.
   - Delay-load imports. Phase 1 parses and lists them; binding them eagerly moves to Phase 2, because a delay-loaded DLL's helper code imports kernel32.
   - Export lookup by name and by ordinal, including **forwarded exports** (`DLL.func`).
-  - **TLS directory:** set up the TLS slot index and callbacks.
+  - **TLS directory:** set up the TLS slot index and callbacks, and the implicit TLS template that `teb.c` copies into every thread's block (`fs:[0x2c]`), including threads that exist when the DLL is loaded (done).
   - A resource directory walker. Codecs use this for strings, dialogs, version info and manifests.
   - Entry-point calls for PROCESS/THREAD ATTACH/DETACH.
 - **`modules.c`:** a module table with refcounts. `LoadLibrary` resolves names in this order:
@@ -70,7 +70,7 @@ cli: vfw-harness info | probe | decode | encode | list
 - **kernel32 / ntdll-lite:**
   - **Memory:** Heap* on malloc with a size header, Local/Global*, Virtual* on mmap/mprotect.
   - **Sync:** critical sections (pointer to a recursive pthread mutex stored inside the 24-byte struct), Interlocked*, events, mutexes and semaphores on pthread, WaitFor{Single,Multiple}Object(s).
-  - **Threads:** CreateThread (pthread plus a new TEB and THREAD_ATTACH notifications), Tls*, and Fls* falling back to Tls.
+  - **Threads:** CreateThread (pthread plus a new TEB, and DLL_THREAD_ATTACH / DLL_THREAD_DETACH to the loaded DLLs' TLS callbacks and, unless DisableThreadLibraryCalls, DllMain; done), Tls*, and Fls* falling back to Tls.
   - **Time:** GetTickCount, QPC, GetSystemTime*, GetLocalTime, Sleep.
   - **Process info:** GetCurrent*, IsDebuggerPresent, GetVersion(Ex) reporting XP SP3, GetSystemInfo, IsProcessorFeaturePresent.
   - **Files:** CreateFile/ReadFile/WriteFile/Close/GetFileSize, mapped to a sandbox root.
@@ -97,8 +97,10 @@ The stub list is based on what VfW codecs use in general (with Wine and MPlayer'
 
 Status: done. `driver.c`, `registry.c` (`vfw.ini`) and `icm.c`, the winmm
 and msvfw32 built-ins, `probe` and `list`, and `testcodec.dll` with
-`test_vfw`. Still open:
-- ICImageCompress/ICImageDecompress, ICSeqCompressFrame* and ICCompressorChoose.
+`test_vfw`, and ICSeqCompressFrameStart/Frame/End and ICCompressorFree
+(`seq.c`), which `encode` uses. Still open:
+- ICImageCompress/ICImageDecompress (they return global-memory DIBs, so they
+  wait for GlobalAlloc in kernel32) and ICCompressorChoose (a dialog).
 - DrawDib* and the ICM_DRAW path (drawing is reported as unsupported).
 - The placeholder DLLs (user32, advapi32, msvcrt and so on) have no functions yet.
 
@@ -115,10 +117,11 @@ and msvfw32 built-ins, `probe` and `list`, and `testcodec.dll` with
 
 ### Container and output (`src/avi/`, `src/out/`)
 
-Status: the AVI reader and writer, the DIB conversion and the Y4M/BMP/raw
-writers are done, with the `avi` and `convert` commands; `make validate-media`
-checks them against FFmpeg. Still open here: Y4M input for `encode`, and raw
-frame input.
+Status: done. The AVI reader and writer, the DIB conversion both ways
+(`image_pack` gives a codec the input format it takes), the Y4M/BMP/raw
+writers, and the frame sources for `encode` in `src/in/` (Y4M, uncompressed
+AVI, BMP files, raw frames), with the `avi`, `convert`, `decode` and `encode`
+commands; the `validate_media` test checks them against FFmpeg.
 
 - **AVI reader:**
   - RIFF `AVI `, `avih`, and `strl` → `strh`, `strf` (full BITMAPINFOHEADER including extradata or palette), `strn`.
@@ -136,18 +139,18 @@ frame input.
 - `info <dll>`: PE summary, sections, exports, and each import marked stubbed, trap or missing-DLL.
 - `list`: the drivers registered in `vfw.ini`.
 - `probe <dll|fcc> [in.avi]`: ICINFO, plus the input and output formats the codec accepts.
-- `decode <dll|fcc> <in.avi|raw> -o out.{y4m,bmp%05d,raw} [--fmt ...] [--frames N] [--state file]`
-- `encode <dll|fcc> <in.y4m|bmp…> -o out.avi [--quality Q --keyint N --bitrate B --state file]`
+- `decode <dll|fcc|auto> <in.avi> -o out.{y4m,bmp%05d,yuv,bgr,raw} [--output-format F --start N --frames N --state file --keep-going]` (done)
+- `encode <dll|fcc> <in.y4m|avi|bmp…|raw> -o out.avi [--quality Q --keyint N --bitrate B --rate R --codec-input F --state file --save-state file --odml]` (done)
 
 ## Phases and milestones
 
 All milestones are checked against **test fixtures built in the repo**, never against the uploaded DLL.
 
 0. **Skeleton.**
-   - Makefile (i386 build, `make test`), `include/win32.h` (types, structs, DRV_*/ICM_* constants modelled on Wine headers).
+   - Build system (i386 build and tests; a Makefile at first, now CMake with CTest), `include/win32.h` (types, structs, DRV_*/ICM_* constants modelled on Wine headers).
    - README with prerequisites and usage.
    - Remove the uploaded third-party DLL.
-   - `make test` runs unit tests, an ABI cross-check of `include/win32` against the mingw-w64 headers, and a CLI smoke test.
+   - The test suite runs unit tests, an ABI cross-check of `include/win32` against the mingw-w64 headers, and a CLI smoke test.
 1. **PE loader and `info`.** Fixtures are mingw-built DLLs under `tests/fixtures/`:
    - `pe_basic.dll`: exports by name and by ordinal, plus a forwarder.
    - `pe_reloc.dll`: loaded with `VFW_FORCE_RELOC=1`.
@@ -165,17 +168,18 @@ All milestones are checked against **test fixtures built in the repo**, never ag
 3. **VfW layer and `probe`.** `tests/fixtures/testcodec.dll` is a mingw-built lossless ICM codec (FourCC `TST0`). It can compress and decompress, keeps its state through Get/SetState, and supports several output formats.
 
    Milestone: `probe` lists the correct ICINFO, accepted formats and state size.
-4. **AVI and Y4M I/O, `decode` and `encode`.** Milestone: encoding a Y4M clip to AVI with `testcodec` and decoding it back gives a byte-exact result. The AVI output is validated with `ffprobe` when it is installed. The OpenDML path is tested with a large synthetic file.
-5. **Hardening and CI.**
-   - Keep DLL-visible memory below 2 GB. On a 64-bit kernel a 32-bit process gets addresses up to 4 GB, and glibc's heap and `mmap` live near `0xf7000000`. Windows code without `LARGE_ADDRESS_AWARE` may treat pointers as signed. Options: an `ADDR_LIMIT_3GB`/low-memory personality with a re-exec, or serving Win32 heaps from a low reservation.
-   - Build a matrix of fixtures, including 16-byte alignment and SSE use in the codec and C++ exceptions across a codec boundary.
-   - A fuzz-style AVI parser test (done: `test_avi` truncates and corrupts files).
-   - A GitHub Actions workflow installs `gcc-multilib` and `mingw-w64` and runs `make test`.
-   - An optional `make smoke SAMPLES=dir` runs `info` and `probe` over any user-supplied codec DLLs and reports missing imports, without asserting anything specific to a codec.
+4. **AVI and Y4M I/O, `decode` and `encode`.** (Done.) Milestone: encoding a Y4M clip to AVI with `testcodec` and decoding it back gives a byte-exact result. The AVI output is validated with `ffprobe` when it is installed. The OpenDML path is tested with a large synthetic file.
+5. **Hardening and CI.** (Done, apart from what depends on SEH.)
+   - Keep DLL-visible memory below 2 GB (done). On a 64-bit kernel a 32-bit process gets addresses up to 4 GB, and glibc's heap and `mmap` live near `0xf7000000`; Windows code without `LARGE_ADDRESS_AWARE` may treat pointers as signed. `src/runtime/lowmem.c` reserves the free space from 2 GB up at startup, sparing the main stack's growth, and each command runs on a worker thread with a low stack. `test_lowmem` checks each kind of allocation, and `testcodec`'s strict mode rejects any pointer at or above 2 GB in a smoke-test round trip.
+   - Crash and hang reports (done): a fault handler on an alternate stack names the faulting `module+offset`, the address touched and the call into the DLL in progress; `VFW_TIMEOUT` reports a call that runs too long.
+   - A matrix of fixtures (done: `pe_sse.dll` with SSE2 code assuming a 16-byte stack on entry and the FPU/MXCSR defaults on new threads). Still open: C++ exceptions across a codec boundary, which needs SEH first.
+   - Fuzz-style tests (done): `test_avi` truncates and corrupts AVIs; `test_pe_parse` does the same to the fixture DLLs and maps and relocates some of the results; `test_source` does it to Y4M, BMP and AVI input.
+   - A GitHub Actions workflow installs `gcc-multilib` and `mingw-w64` and runs the whole test suite (`ctest --preset ci`, done).
+   - An optional samples run (done): `tests/samples.sh` runs `info` and `probe` over any user-supplied codec DLLs and reports unimplemented imports, without asserting anything specific to a codec; `-DVFW_SAMPLES_DIR` adds it to CTest.
 
 ## Verification
 
-- `apt install gcc-multilib mingw-w64`, then `make`, then `make test`. This runs the unit tests (reloc math, AVI parser, colour conversion) and the fixture-DLL integration tests from Phases 1–4.
+- `apt install gcc-multilib cmake ninja-build mingw-w64`, then `cmake --preset default`, `cmake --build --preset default` and `ctest --preset default`. This runs the unit tests (reloc math, AVI parser, colour conversion) and the fixture-DLL integration tests from Phases 1–4.
 - `VFW_TRACE=1 ./vfw-harness probe tests/fixtures/testcodec.dll` shows the full DRV/ICM sequence with no trap hits.
 - Round trip: `./vfw-harness encode testcodec.dll in.y4m -o t.avi && ./vfw-harness decode testcodec.dll t.avi -o out.y4m && cmp in.y4m out.y4m`.
 - Optional manual check against any real codec: `./vfw-harness info <any.dll>` to see import coverage, then `probe` and `decode` on a matching AVI.

@@ -2,14 +2,24 @@
  * testcodec.dll: a small lossless VfW codec, FOURCC 'TST0', for testing
  * the harness's driver and ICM layers the way a real codec would use them.
  *
- * Input is BI_RGB 24 or 32 bits, either orientation. A compressed frame is
- * a 4-byte header ('K' keyframe or 'D' delta, bits per pixel, 0, 0) and a
- * byte-wise RLE of the DIB: of the frame itself for a keyframe, or of its
- * XOR with the previous frame for a delta. Decompression gives BI_RGB 24 or
- * 32 bits in either orientation.
+ * Input is BI_RGB 24 or 32 bits, either orientation, or I420 (IYUV). A
+ * compressed frame is a 4-byte header ('K' keyframe or 'D' delta, bits per
+ * pixel, 0, 0) and a byte-wise RLE of the frame: of the frame itself for a
+ * keyframe, or of its XOR with the previous frame for a delta. RGB
+ * decompresses to BI_RGB 24 or 32 bits in either orientation, I420 to
+ * I420, so both round trips are lossless.
  *
  * Messages it does not handle go to winmm's DefDriverProc, and
  * testcodec_selftest() calls winmm and msvfw32 from the Win32 side.
+ *
+ * With TESTCODEC_STRICT=1 in its (Windows) environment, it refuses to work
+ * with any pointer at or above 2 GB, the way code that isn't large-address
+ * aware can go wrong with one: its instance, the ICOPEN, the (de)compress
+ * structures, the formats, the frames and its own stack.
+ *
+ * Two private messages misbehave on purpose, for the harness's crash and
+ * hang reports: TESTCODEC_CRASH writes through a null pointer and
+ * TESTCODEC_HANG never returns.
  * Built like old MSVC code, with a 4-byte stack boundary.
  */
 #include "fixture.h"
@@ -17,7 +27,11 @@
 
 #define TST0 mmioFOURCC('T', 'S', 'T', '0')
 #define VIDC mmioFOURCC('v', 'i', 'd', 'c')
+#define I420 mmioFOURCC('I', '4', '2', '0')
+#define IYUV mmioFOURCC('I', 'Y', 'U', 'V')
 #define MAX_LOG 64
+#define TESTCODEC_CRASH (ICM_USER + 100)
+#define TESTCODEC_HANG  (ICM_USER + 101)
 
 struct state {
 	DWORD quality;
@@ -38,6 +52,8 @@ struct instance {
 #define MAGIC 0x54535430
 
 static HINSTANCE self;
+static int strict;	/* TESTCODEC_STRICT */
+static DWORD last_quality = 0xffffffff;	/* of the last ICM_COMPRESS */
 static DWORD msg_log[MAX_LOG];
 static int nlog;
 static LONG opens;
@@ -68,6 +84,12 @@ EXPORT LONG testcodec_open_count(void)
 	return opens;
 }
 
+/* The dwQuality of the last frame compressed. */
+EXPORT DWORD testcodec_last_quality(void)
+{
+	return last_quality;
+}
+
 static void *alloc(DWORD size)
 {
 	return HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size);
@@ -77,6 +99,23 @@ static void release(void *p)
 {
 	if (p)
 		HeapFree(GetProcessHeap(), 0, p);
+}
+
+/* In strict mode, whether any of the n pointers is at or above 2 GB. */
+static int high(int n, ...)
+{
+	__builtin_va_list ap;
+	int i, bad = 0;
+	char here;
+
+	if (!strict)
+		return 0;
+	bad = (DWORD)&here >= 0x80000000u;
+	__builtin_va_start(ap, n);
+	for (i = 0; i < n; i++)
+		bad |= (DWORD)__builtin_va_arg(ap, const void *) >= 0x80000000u;
+	__builtin_va_end(ap);
+	return bad;
 }
 
 static LONG abs_height(const BITMAPINFOHEADER *b)
@@ -91,7 +130,11 @@ static DWORD stride(LONG w, int bpp)
 
 static DWORD frame_bytes(const BITMAPINFOHEADER *b)
 {
-	return stride(b->biWidth, b->biBitCount) * abs_height(b);
+	LONG w = b->biWidth, h = abs_height(b);
+
+	if (b->biBitCount == 12)
+		return (DWORD)(w * h + 2 * ((w + 1) / 2) * ((h + 1) / 2));
+	return stride(w, b->biBitCount) * h;
 }
 
 /* The worst case of the RLE, plus the header. */
@@ -109,10 +152,26 @@ static int ok_rgb(const BITMAPINFOHEADER *b)
 	       abs_height(b) <= 16384;
 }
 
+static int ok_yuv(const BITMAPINFOHEADER *b)
+{
+	return b && b->biSize >= sizeof(*b) &&
+	       (b->biCompression == I420 || b->biCompression == IYUV) &&
+	       b->biBitCount == 12 &&
+	       b->biWidth > 0 && b->biWidth <= 16384 && b->biHeight != 0 &&
+	       abs_height(b) <= 16384;
+}
+
+/* An input the compressor takes. */
+static int ok_input(const BITMAPINFOHEADER *b)
+{
+	return ok_rgb(b) || ok_yuv(b);
+}
+
 static int ok_tst0(const BITMAPINFOHEADER *b)
 {
 	return b && b->biSize >= sizeof(*b) && b->biCompression == TST0 &&
-	       (b->biBitCount == 24 || b->biBitCount == 32) &&
+	       (b->biBitCount == 12 || b->biBitCount == 24 ||
+		b->biBitCount == 32) &&
 	       b->biWidth > 0 && b->biWidth <= 16384 && b->biHeight != 0 &&
 	       abs_height(b) <= 16384;
 }
@@ -212,7 +271,7 @@ static LRESULT get_info(ICINFO *info, DWORD size)
 static LRESULT compress_query(const BITMAPINFOHEADER *in,
 			      const BITMAPINFOHEADER *out)
 {
-	if (!ok_rgb(in))
+	if (!ok_input(in))
 		return ICERR_BADFORMAT;
 	if (out && (!ok_tst0(out) || !same_size(in, out) ||
 		    out->biBitCount != in->biBitCount))
@@ -223,7 +282,7 @@ static LRESULT compress_query(const BITMAPINFOHEADER *in,
 static LRESULT compress_get_format(const BITMAPINFOHEADER *in,
 				   BITMAPINFOHEADER *out)
 {
-	if (!ok_rgb(in))
+	if (!ok_input(in))
 		return ICERR_BADFORMAT;
 	if (!out)
 		return sizeof(BITMAPINFOHEADER);
@@ -243,8 +302,12 @@ static LRESULT compress(struct instance *inst, ICCOMPRESS *c)
 	const BYTE *src = c->lpInput;
 	int key;
 
+	if (high(8, inst, inst->cprev, c, c->lpbiInput, c->lpInput, c->lpbiOutput,
+		 c->lpOutput, c->lpdwFlags))
+		return ICERR_BADPARAM;
 	if (compress_query(in, c->lpbiOutput) != ICERR_OK || !inst->cprev)
 		return ICERR_BADFORMAT;
+	last_quality = c->dwQuality;
 	key = (c->dwFlags & ICCOMPRESS_KEYFRAME) || inst->cframe == 0 ||
 	      (inst->st.keyrate && inst->cframe % inst->st.keyrate == 0);
 	dst[0] = key ? 'K' : 'D';
@@ -273,7 +336,9 @@ static LRESULT decompress_query(const BITMAPINFOHEADER *in,
 {
 	if (!ok_tst0(in))
 		return ICERR_BADFORMAT;
-	if (out && (!ok_rgb(out) || !same_size(in, out)))
+	if (out && (in->biBitCount == 12 ? !ok_yuv(out) : !ok_rgb(out)))
+		return ICERR_BADFORMAT;
+	if (out && !same_size(in, out))
 		return ICERR_BADFORMAT;
 	return ICERR_OK;
 }
@@ -287,8 +352,8 @@ static LRESULT decompress_get_format(const BITMAPINFOHEADER *in,
 		return sizeof(BITMAPINFOHEADER);
 	*out = *in;
 	out->biSize = sizeof(*out);
-	out->biCompression = BI_RGB;
-	out->biBitCount = 24;
+	out->biCompression = in->biBitCount == 12 ? I420 : BI_RGB;
+	out->biBitCount = in->biBitCount == 12 ? 12 : 24;
 	out->biHeight = abs_height(in);
 	out->biSizeImage = frame_bytes(out);
 	out->biClrUsed = out->biClrImportant = 0;
@@ -303,6 +368,8 @@ static LRESULT decompress(struct instance *inst, ICDECOMPRESS *d)
 	LONG w = in->biWidth, h = abs_height(in), y, x;
 	int ib = in->biBitCount / 8, ob;
 
+	if (high(7, inst, inst->dcur, d, in, src, out, dst))
+		return ICERR_BADPARAM;
 	if (decompress_query(in, out) != ICERR_OK || !inst->dcur)
 		return ICERR_BADFORMAT;
 	if (!(d->dwFlags & ICDECOMPRESS_NULLFRAME)) {
@@ -315,6 +382,13 @@ static LRESULT decompress(struct instance *inst, ICDECOMPRESS *d)
 			       frame_bytes(in), src[0] == 'D'))
 			return ICERR_BADFORMAT;
 		inst->dvalid = 1;
+	}
+
+	if (in->biBitCount == 12) {
+		DWORD n = frame_bytes(in), i;
+		for (i = 0; i < n; i++)
+			dst[i] = inst->dcur[i];
+		return ICERR_OK;
 	}
 
 	/* Convert to the output's depth and orientation. */
@@ -342,7 +416,13 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 	struct instance *inst = (struct instance *)id;
 
 	switch (msg) {
-	case DRV_LOAD:
+	case DRV_LOAD: {
+		char v[8];
+		strict = GetEnvironmentVariableA("TESTCODEC_STRICT", v, sizeof(v)) == 1 &&
+			 v[0] == '1';
+		log_msg(msg);
+		return DefDriverProc(id, hdrvr, msg, l1, l2);
+	}
 	case DRV_FREE:
 	case DRV_ENABLE:
 	case DRV_DISABLE:
@@ -352,6 +432,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 	case DRV_OPEN: {
 		ICOPEN *op = (ICOPEN *)l2;
 		log_msg(msg);
+		if (high(1, op))
+			return 0;
 		if (op) {
 			DWORD t = op->fccType | 0x20202020;
 			DWORD hnd = op->fccHandler & ~0x20202020;
@@ -387,6 +469,12 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		return DefDriverProc(id, hdrvr, msg, l1, l2);
 
 	switch (msg) {
+	case TESTCODEC_CRASH:
+		*(volatile DWORD *)l1 = 1;	/* l1 is 0 */
+		return ICERR_OK;
+	case TESTCODEC_HANG:
+		for (;;)
+			*(volatile DWORD *)&inst->magic;
 	case ICM_GETINFO:
 		return get_info((ICINFO *)l1, (DWORD)l2);
 	case ICM_GETSTATE:
@@ -428,7 +516,7 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		return compress_get_format((BITMAPINFOHEADER *)l1,
 					   (BITMAPINFOHEADER *)l2);
 	case ICM_COMPRESS_GET_SIZE:
-		if (!ok_rgb((BITMAPINFOHEADER *)l1))
+		if (!ok_input((BITMAPINFOHEADER *)l1))
 			return ICERR_BADFORMAT;
 		return max_size((BITMAPINFOHEADER *)l1);
 	case ICM_COMPRESS_FRAMES_INFO: {

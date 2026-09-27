@@ -676,6 +676,102 @@ static void test_outputs(void)
 	image_conv_free(c);
 }
 
+/* image_pack() is the inverse of the conversions, for every format it takes. */
+static void test_pack(void)
+{
+	enum { W = 7, H = 5 };
+	static const DWORD yuv[] = {
+		FCC('I', '4', '2', '0'), FCC('I', 'Y', 'U', 'V'), FCC('Y', 'V', '1', '2'),
+		FCC('Y', 'U', 'Y', '2'), FCC('U', 'Y', 'V', 'Y'), FCC('Y', 'V', 'Y', 'U'),
+		FCC('N', 'V', '1', '2'), FCC('N', 'V', '2', '1'), FCC('y', 'u', 'y', '2'),
+	};
+	BYTE src[W * H * 3], back[W * H * 3], i420[W * H * 3], packed[W * H * 8];
+	BYTE again[W * H * 8];
+	size_t n420 = image_i420_size(W, H);
+
+	srand(7);
+	for (size_t i = 0; i < sizeof(src); i++)
+		src[i] = (BYTE)rand();
+
+	/* YUV: from I420 and back, exactly (4:2:2 repeats the chroma rows). */
+	memcpy(i420, src, n420);
+	for (size_t k = 0; k < sizeof(yuv) / sizeof(yuv[0]); k++) {
+		int bits = yuv[k] == FCC('Y', 'U', 'Y', '2') || yuv[k] == FCC('U', 'Y', 'V', 'Y') ||
+			   yuv[k] == FCC('Y', 'V', 'Y', 'U') || yuv[k] == FCC('y', 'u', 'y', '2') ?
+			   16 : 12;
+		struct fmt f = make_fmt(W, H, bits, yuv[k]);
+		struct image_conv *c = conv_for(&f);
+		CHECK(c != NULL);
+		if (!c)
+			continue;
+		CHECK(image_can_pack(c));
+		CHECK(image_pack_wants_i420(c));
+		CHECK_EQ(image_pack(c, i420, packed), 0);
+		CHECK_EQ(image_to_i420(c, packed, image_frame_size(c), back), 0);
+		CHECK(!memcmp(back, i420, n420));
+		image_conv_free(c);
+	}
+	{
+		struct fmt f = make_fmt(W, H, 8, FCC('Y', '8', '0', '0'));
+		struct image_conv *c = conv_for(&f);
+		CHECK(c && image_pack(c, i420, packed) == 0);
+		CHECK(c && image_to_i420(c, packed, W * H, back) == 0);
+		CHECK(!memcmp(back, i420, W * H));
+		CHECK(back[W * H] == 128 && back[n420 - 1] == 128);
+		image_conv_free(c);
+	}
+
+	/* 24 and 32 bits, both ways up: exact. */
+	for (int bits = 24; bits <= 32; bits += 8)
+		for (int dir = -1; dir <= 1; dir += 2) {
+			struct fmt f = make_fmt(W, dir * H, bits, BI_RGB);
+			struct image_conv *c = conv_for(&f);
+			CHECK(c && !image_pack_wants_i420(c));
+			CHECK(c && image_pack(c, src, packed) == 0);
+			CHECK(c && image_to_bgr24(c, packed, image_frame_size(c), back) == 0);
+			CHECK(!memcmp(back, src, sizeof(src)));
+			/* Row padding is zero. */
+			if (bits == 24 && dir > 0)
+				CHECK(packed[W * 3] == 0 && packed[W * 3 + 2] == 0);
+			image_conv_free(c);
+		}
+
+	/* Fewer bits per channel: packing what it unpacks gives the same frame. */
+	static const DWORD masks[][3] = {
+		{ 0x7c00, 0x03e0, 0x001f }, { 0xf800, 0x07e0, 0x001f },
+		{ 0x3ff00000, 0x000ffc00, 0x000003ff }, { 0x00ff0000, 0x0000ff00, 0x000000ff },
+	};
+	for (size_t k = 0; k < 5; k++) {
+		struct fmt f = k == 4 ? make_fmt(W, H, 16, BI_RGB) :
+			       make_fmt(W, H, k < 2 ? 16 : 32, BI_BITFIELDS);
+		if (k < 4)
+			memcpy(f.extra, masks[k], sizeof(masks[k]));
+		struct image_conv *c = conv_for(&f);
+		CHECK(c != NULL);
+		if (!c)
+			continue;
+		size_t n = image_frame_size(c);
+		CHECK_EQ(image_pack(c, src, packed), 0);
+		CHECK_EQ(image_to_bgr24(c, packed, n, back), 0);
+		CHECK_EQ(image_pack(c, back, again), 0);
+		CHECK(!memcmp(again, packed, n));
+		int worst = 0;
+		for (size_t i = 0; i < sizeof(src); i++) {
+			int d = abs(back[i] - src[i]);
+			worst = d > worst ? d : worst;
+		}
+		CHECK(worst <= (k == 2 || k == 3 ? 0 : 4));
+		image_conv_free(c);
+	}
+
+	/* Palettes can't be packed. */
+	struct fmt f = make_fmt(W, H, 8, BI_RGB);
+	struct image_conv *c = conv_for(&f);
+	CHECK(c && !image_can_pack(c));
+	CHECK(c && image_pack(c, src, packed) == -1);
+	image_conv_free(c);
+}
+
 int main(void)
 {
 	setup_dir();
@@ -687,6 +783,7 @@ int main(void)
 	test_refused();
 	test_bmp_paths();
 	test_outputs();
+	test_pack();
 	if (!keep)
 		rmdir(dir);
 	return test_summary("test_image");

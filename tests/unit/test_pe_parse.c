@@ -431,7 +431,7 @@ static void test_truncation_and_corruption(const char *name)
 
 	/* Random corruption; whatever still parses must walk safely. */
 	BYTE *buf = malloc(len);
-	int survived = 0;
+	int survived = 0, mapped = 0;
 	for (int iter = 0; iter < 3000; iter++) {
 		memcpy(buf, orig, len);
 		int flips = 1 + rng() % 4;
@@ -444,10 +444,21 @@ static void test_truncation_and_corruption(const char *name)
 		if (img) {
 			survived++;
 			exercise(img);
+			/*
+			 * Some get mapped and relocated too (never run), and
+			 * walked again through the mapped image.
+			 */
+			if (iter % 8 == 0 &&
+			    !pe_map(img, iter % 16 ? 0 : PE_MAP_FORCE_RELOC)) {
+				mapped++;
+				exercise(img);
+				pe_tls_init(img);
+			}
 			pe_free(img);
 		}
 	}
 	CHECK(survived > 0);	/* the walkers really ran on damaged images */
+	CHECK(mapped > 0);
 	free(buf);
 	free(orig);
 }
@@ -463,5 +474,6 @@ int main(void)
 	test_truncation_and_corruption("pe_basic.dll");
 	test_truncation_and_corruption("pe_dep.dll");
 	test_truncation_and_corruption("pe_tls.dll");
+	test_truncation_and_corruption("testcodec.dll");
 	return test_summary("test_pe_parse");
 }

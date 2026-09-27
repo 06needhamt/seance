@@ -176,6 +176,15 @@ static void test_virtual(void)
 	VirtualQuery(r, &mbi, sizeof(mbi));
 	CHECK_EQ(mbi.State, MEM_FREE);
 
+	/* Reserving at an unaligned address gives the 64 KiB boundary below. */
+	BYTE *at = VirtualAlloc(r + 0x1234, 0x1000, MEM_RESERVE | MEM_COMMIT,
+				PAGE_READWRITE);
+	CHECK(at == r);
+	if (at) {
+		at[0x1234] = 3;
+		CHECK(VirtualFree(at, 0, MEM_RELEASE));
+	}
+
 	/* Commit and reserve in one go, at no particular address. */
 	int *ints = VirtualAlloc(NULL, 5000, MEM_COMMIT | MEM_RESERVE,
 				 PAGE_EXECUTE_READWRITE);
@@ -941,6 +950,186 @@ static void test_modules(void)
 }
 
 /* The same APIs from Win32 code (with a 4-byte-aligned stack). */
+/* Implicit TLS and thread notifications, with pe_tls.dll. */
+static int (*tls_read)(void), (*tls_block_ok)(void);
+static void (*tls_write)(int);
+static LONG (*tls_callback_count)(DWORD), (*tls_entry_count)(DWORD);
+
+struct tls_seen {
+	HANDLE ready, go;	/* for the thread started before the load */
+	int value, block_ok;
+	LONG callbacks, entries;	/* THREAD_ATTACH seen from inside */
+};
+
+static DWORD WINAPI tls_thread(LPVOID p)
+{
+	struct tls_seen *s = p;
+	FN(DWORD, WaitForSingleObject, HANDLE, DWORD);
+
+	FN(BOOL, SetEvent, HANDLE);
+
+	if (s->go) {
+		SetEvent(s->ready);
+		WaitForSingleObject(s->go, INFINITE);
+	}
+	s->value = tls_read();
+	s->block_ok = tls_block_ok();
+	s->callbacks = tls_callback_count(DLL_THREAD_ATTACH);
+	s->entries = tls_entry_count(DLL_THREAD_ATTACH);
+	tls_write(7);		/* only this thread's copy */
+	return 0;
+}
+
+static void test_static_tls(void)
+{
+	FN(HANDLE, CreateThread, LPSECURITY_ATTRIBUTES, SIZE_T,
+	   LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD);
+	FN(DWORD, WaitForSingleObject, HANDLE, DWORD);
+	FN(BOOL, CloseHandle, HANDLE);
+	FN(HANDLE, CreateEventA, LPSECURITY_ATTRIBUTES, BOOL, BOOL, LPCSTR);
+	FN(BOOL, SetEvent, HANDLE);
+	FN(BOOL, DisableThreadLibraryCalls, HMODULE);
+	const char *dir = getenv("VFW_FIXTURES");
+	char path[512];
+
+	snprintf(path, sizeof(path), "%s/pe_tls.dll", dir ? dir : ".");
+	if (!dir || access(path, R_OK)) {
+		printf("test_kernel32: pe_tls.dll not built, skipping TLS\n");
+		return;
+	}
+
+	/* A thread that is running before the DLL is loaded. */
+	struct tls_seen early = { 0 };
+	early.ready = CreateEventA(NULL, TRUE, FALSE, NULL);
+	early.go = CreateEventA(NULL, TRUE, FALSE, NULL);
+	HANDLE te = CreateThread(NULL, 0, tls_thread, &early, 0, NULL);
+	CHECK(early.ready && early.go && te);
+	CHECK_EQ(WaitForSingleObject(early.ready, 10000), WAIT_OBJECT_0);
+
+	struct module *m = mod_load(path, NULL);
+	CHECK(m != NULL);
+	if (!m) {
+		SetEvent(early.go);
+		return;
+	}
+	tls_read = mod_get_proc(m, "tls_read");
+	tls_write = mod_get_proc(m, "tls_write");
+	tls_block_ok = mod_get_proc(m, "tls_block_ok");
+	tls_callback_count = mod_get_proc(m, "tls_callback_count");
+	tls_entry_count = mod_get_proc(m, "tls_entry_count");
+	CHECK(tls_read && tls_write && tls_block_ok && tls_callback_count &&
+	      tls_entry_count);
+	if (!tls_read || !tls_write || !tls_block_ok || !tls_callback_count ||
+	    !tls_entry_count) {
+		SetEvent(early.go);
+		mod_free(m);
+		return;
+	}
+
+	/* The loading thread has its copy of the template, zero fill after it. */
+	CHECK_EQ(tls_read(), 1234);
+	CHECK(tls_block_ok());
+	tls_write(99);
+	CHECK_EQ(tls_read(), 99);
+	CHECK_EQ(tls_callback_count(DLL_PROCESS_ATTACH), 1);
+	CHECK_EQ(tls_entry_count(DLL_PROCESS_ATTACH), 1);
+
+	/*
+	 * The earlier thread got a block too, but no THREAD_ATTACH; like
+	 * Windows, every loaded DLL still hears of its end.
+	 */
+	SetEvent(early.go);
+	CHECK_EQ(WaitForSingleObject(te, 10000), WAIT_OBJECT_0);
+	CHECK_EQ(early.value, 1234);
+	CHECK(early.block_ok);
+	CHECK_EQ(early.callbacks, 0);
+	CHECK_EQ(early.entries, 0);
+	CHECK_EQ(tls_callback_count(DLL_THREAD_DETACH), 1);
+	CHECK_EQ(tls_entry_count(DLL_THREAD_DETACH), 1);
+
+	/* A new thread: attach before its code runs, detach when it ends. */
+	struct tls_seen s = { 0 };
+	HANDLE t = CreateThread(NULL, 0, tls_thread, &s, 0, NULL);
+	CHECK(t != NULL);
+	CHECK_EQ(WaitForSingleObject(t, 10000), WAIT_OBJECT_0);
+	CHECK_EQ(s.value, 1234);
+	CHECK(s.block_ok);
+	CHECK_EQ(s.callbacks, 1);
+	CHECK_EQ(s.entries, 1);
+	CHECK_EQ(tls_callback_count(DLL_THREAD_DETACH), 2);
+	CHECK_EQ(tls_entry_count(DLL_THREAD_DETACH), 2);
+	CHECK_EQ(tls_read(), 99);	/* the other thread wrote its own copy */
+
+	/* DisableThreadLibraryCalls stops DllMain's calls, not the callbacks. */
+	CHECK(DisableThreadLibraryCalls((HMODULE)m->base));
+	struct tls_seen s2 = { 0 };
+	HANDLE t2 = CreateThread(NULL, 0, tls_thread, &s2, 0, NULL);
+	CHECK(t2 && WaitForSingleObject(t2, 10000) == WAIT_OBJECT_0);
+	CHECK_EQ(s2.callbacks, 2);
+	CHECK_EQ(s2.entries, 1);
+	CHECK_EQ(tls_callback_count(DLL_THREAD_DETACH), 3);
+	CHECK_EQ(tls_entry_count(DLL_THREAD_DETACH), 2);
+
+	CloseHandle(te);
+	CloseHandle(t);
+	CloseHandle(t2);
+	CloseHandle(early.go);
+	CloseHandle(early.ready);
+	mod_free(m);
+
+	/* Loaded again, it starts from the template. */
+	m = mod_load(path, NULL);
+	CHECK(m != NULL);
+	if (m) {
+		int (*again)(void) = mod_get_proc(m, "tls_read");
+		CHECK(again && again() == 1234);
+		mod_free(m);
+	}
+}
+
+/* SSE code with 16-byte stack assumptions, and threads' FPU defaults. */
+static void test_sse(void)
+{
+	const char *dir = getenv("VFW_FIXTURES");
+	char path[512];
+
+	snprintf(path, sizeof(path), "%s/pe_sse.dll", dir ? dir : ".");
+	if (!dir || access(path, R_OK)) {
+		printf("test_kernel32: pe_sse.dll not built, skipping SSE\n");
+		return;
+	}
+	struct module *m = mod_load(path, NULL);
+	CHECK(m != NULL);
+	if (!m)
+		return;
+	float (*dot)(const float *, const float *, int) = mod_get_proc(m, "sse_dot");
+	int (*aligned)(void) = mod_get_proc(m, "sse_stack_aligned");
+	void (*state)(DWORD *, DWORD *) = mod_get_proc(m, "sse_fpu_state");
+	int (*in_thread)(DWORD *, DWORD *, int *, float *) =
+		mod_get_proc(m, "sse_in_thread");
+	CHECK(dot && aligned && state && in_thread);
+	if (dot && aligned && state && in_thread) {
+		static const float a[9] = { 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+		CHECK(dot(a, a, 9) == 285.0f);
+		CHECK(aligned());
+
+		DWORD cw = 0, mxcsr = 0;
+		state(&cw, &mxcsr);
+		CHECK_EQ(cw, 0x27f);
+		CHECK_EQ(mxcsr & 0xffbf, 0x1f80);	/* DAZ aside */
+
+		int al = 0;
+		float d = 0;
+		cw = mxcsr = 0;
+		CHECK_EQ(in_thread(&cw, &mxcsr, &al, &d), 0);
+		CHECK_EQ(cw, 0x27f);
+		CHECK_EQ(mxcsr & 0xffbf, 0x1f80);
+		CHECK(al);
+		CHECK(d == 204.0f);
+	}
+	mod_free(m);
+}
+
 static void test_fixture(void)
 {
 	const char *dir = getenv("VFW_FIXTURES");
@@ -995,6 +1184,8 @@ int main(void)
 	test_modules();
 
 	test_fixture();
+	test_static_tls();
+	test_sse();
 
 	mod_free(k32);
 	char cmd[512];

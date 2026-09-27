@@ -94,7 +94,40 @@ BITMAPINFOHEADER *ic_negotiate_output(HIC hic, const BITMAPINFOHEADER *in,
  */
 BITMAPINFOHEADER *ic_decompress_get_format(HIC hic, const BITMAPINFOHEADER *in,
 					   LRESULT *err);
+/*
+ * The same for either message, also giving the format's size in bytes (the
+ * codec's answer to the size query, or more if the header needs it).
+ */
+BITMAPINFOHEADER *ic_get_format(HIC hic, UINT msg, const BITMAPINFOHEADER *in,
+				 size_t *size, LRESULT *err);
 BITMAPINFOHEADER *ic_compress_get_format(HIC hic, const BITMAPINFOHEADER *in,
 					 LRESULT *err);
+
+/*
+ * Sequence compression through a COMPVARS (src/vfw/seq.c). The caller
+ * fills cbSize, hic, lKey (keyframe interval, 0 for only the first),
+ * lDataRate (KB/s, 0 for none) and lQ (0..10000 or ICQUALITY_DEFAULT),
+ * and optionally lpState / cbState with ICMF_COMPVARS_VALID.
+ */
+/* ICSeqCompressFrameStart */
+BOOL STUB_WINAPI ic_seq_start(COMPVARS *pc, BITMAPINFO *in);
+/* ICSeqCompressFrame: the compressed frame (valid until the next call). */
+LPVOID STUB_WINAPI ic_seq_frame(COMPVARS *pc, UINT flags, LPVOID bits,
+				BOOL *key, LONG *size);
+/* ICSeqCompressFrameEnd */
+void STUB_WINAPI ic_seq_end(COMPVARS *pc);
+/* ICCompressorFree */
+void STUB_WINAPI ic_compressor_free(COMPVARS *pc);
+
+/*
+ * ic_seq_start with the stream's frame rate and length, which go to the
+ * codec in ICM_COMPRESS_FRAMES_INFO (frames may be 0 if not known).
+ * FALSE with vfw_error() on failure.
+ */
+BOOL ic_seq_start_ex(COMPVARS *pc, const BITMAPINFO *in, DWORD rate,
+		     DWORD scale, LONG frames);
+
+/* The size in bytes of pc->lpbiOut, for writing it to a file. */
+size_t ic_seq_format_size(const COMPVARS *pc);
 
 #endif /* VFW_VFW_ICM_H */

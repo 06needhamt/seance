@@ -70,7 +70,22 @@ void mod_pin(struct module *mod);
 /* Drops a reference; at zero, detaches and unloads it and its dependencies. */
 void mod_free(struct module *mod);
 
+/*
+ * Tells every attached DLL that a thread is starting or ending
+ * (DLL_THREAD_ATTACH / DLL_THREAD_DETACH): TLS callbacks, then DllMain
+ * unless the DLL called DisableThreadLibraryCalls. Attach goes in load
+ * order, detach in reverse. Called on the thread concerned, with the
+ * loader lock held, as Windows does.
+ */
+void mod_thread_notify(DWORD reason);
+
 /* Formats addr as "module+0xrva", or just the address if not in a module. */
 void mod_describe_address(const void *addr, char *out, size_t outsz);
+
+/*
+ * The same without waiting for the loader lock (for crash reports): 1 with
+ * "module+0xrva" in out, or 0 if addr is in no module or the lock is busy.
+ */
+int mod_describe_address_try(const void *addr, char *out, size_t outsz);
 
 #endif /* VFW_LOADER_MODULES_H */

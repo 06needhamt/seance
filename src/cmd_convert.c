@@ -2,12 +2,12 @@
  * vfw-harness convert <in.avi> -o <out>: write an AVI's uncompressed video
  * as Y4M, BMP files or raw frames, without a codec.
  */
-#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "avi/avi.h"
+#include "cmd_util.h"
 #include "commands.h"
 #include "common/error.h"
 #include "out/image.h"
@@ -29,20 +29,6 @@ static int usage(void)
 	return 2;
 }
 
-static int parse_count(const char *opt, const char *s, unsigned long *out)
-{
-	char *end;
-
-	errno = 0;
-	unsigned long v = strtoul(s, &end, 10);
-	if (!*s || *end || errno || s[0] == '-') {
-		fprintf(stderr, "vfw-harness: %s wants a number, not '%s'\n", opt, s);
-		return -1;
-	}
-	*out = v;
-	return 0;
-}
-
 int cmd_convert(int argc, char **argv)
 {
 	const char *in = NULL, *out = NULL, *format = NULL;
@@ -58,13 +44,13 @@ int cmd_convert(int argc, char **argv)
 		else if (!strcmp(a, "--format") && has_value)
 			format = argv[++i];
 		else if (!strcmp(a, "--start") && has_value) {
-			if (parse_count(a, argv[++i], &start))
+			if (cli_parse_count(a, argv[++i], &start))
 				return 2;
 		} else if (!strcmp(a, "--frames") && has_value) {
-			if (parse_count(a, argv[++i], &count))
+			if (cli_parse_count(a, argv[++i], &count))
 				return 2;
 		} else if (!strcmp(a, "--stream") && has_value) {
-			if (parse_count(a, argv[++i], &stream))
+			if (cli_parse_count(a, argv[++i], &stream))
 				return 2;
 		} else if (a[0] == '-' || in)
 			return usage();

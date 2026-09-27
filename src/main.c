@@ -5,8 +5,12 @@
 #include <string.h>
 
 #include "commands.h"
+#include "runtime/crash.h"
+#include "runtime/lowmem.h"
 
+#ifndef VFW_HARNESS_VERSION
 #define VFW_HARNESS_VERSION "0.1.0-dev"
+#endif
 
 struct command {
 	const char *name;
@@ -27,10 +31,10 @@ static const struct command commands[] = {
 	  "list the codecs registered in vfw.ini", cmd_list },
 	{ "probe", "<dll|fourcc> [in.avi]",
 	  "show codec info and the formats it accepts", cmd_probe },
-	{ "decode", "<dll|fourcc> <in.avi> -o <out>",
-	  "decompress a video to Y4M, BMP or raw frames", NULL },
-	{ "encode", "<dll|fourcc> <in.y4m> -o <out.avi>",
-	  "compress a video to AVI", NULL },
+	{ "decode", "<dll|fourcc|auto> <in.avi> -o <out>",
+	  "decompress a video to Y4M, BMP or raw frames", cmd_decode },
+	{ "encode", "<dll|fourcc> <in.y4m|avi|bmp|raw> -o <out.avi>",
+	  "compress video to an AVI", cmd_encode },
 };
 
 static void usage(FILE *out)
@@ -74,7 +78,11 @@ int main(int argc, char **argv)
 				cmd);
 			return 2;
 		}
-		return c->run(argc - 1, argv + 1);
+		/* Crashes and hangs in DLL code get reported. */
+		if (crash_install())
+			return 2;
+		/* DLL code only ever sees memory below 2 GB. */
+		return lowmem_run(c->run, argc - 1, argv + 1);
 	}
 
 	fprintf(stderr, "vfw-harness: unknown command '%s'\n\n", cmd);

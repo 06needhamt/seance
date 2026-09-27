@@ -7,6 +7,8 @@
 int cmd_info(int argc, char **argv);
 int cmd_avi(int argc, char **argv);
 int cmd_convert(int argc, char **argv);
+int cmd_decode(int argc, char **argv);
+int cmd_encode(int argc, char **argv);
 int cmd_list(int argc, char **argv);
 int cmd_probe(int argc, char **argv);
 

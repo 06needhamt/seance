@@ -11,6 +11,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "loader/modules.h"
 #include "runtime/runtime.h"
 #include "win32/handle.h"
 #include "win32/internal.h"
@@ -115,10 +116,16 @@ void thread_exit_cleanup(void)
 	}
 }
 
-/* Marks t finished and wakes its waiters. */
-static void thread_finish(struct thread *t, DWORD code)
+/*
+ * Runs the FLS callbacks, then, if the DLLs were told the thread started,
+ * tells them it is ending, as Windows's thread shutdown does; then marks t
+ * finished and wakes its waiters.
+ */
+static void thread_finish(struct thread *t, DWORD code, int attached)
 {
 	thread_exit_cleanup();
+	if (attached)
+		mod_thread_notify(DLL_THREAD_DETACH);
 	wait_lock();
 	t->exit_code = code;
 	t->done = 1;
@@ -133,7 +140,7 @@ static void *thread_main(void *arg)
 
 	self = t;
 	if (runtime_enter()) {
-		thread_finish(t, (DWORD)-1);
+		thread_finish(t, (DWORD)-1, 0);
 		kobj_unref(&t->obj);
 		return NULL;
 	}
@@ -147,13 +154,14 @@ static void *thread_main(void *arg)
 	TRACE("thread %u starting at %p(%p)", t->tid, (void *)t->start, t->param);
 	if (!sigsetjmp(t->exit_jump, 0)) {
 		t->can_jump = 1;
+		mod_thread_notify(DLL_THREAD_ATTACH);
 		code = t->start(t->param);
 	} else {
 		code = t->exit_code;	/* set by ExitThread */
 	}
 	t->can_jump = 0;
 
-	thread_finish(t, code);
+	thread_finish(t, code, 1);
 	self = NULL;
 	teb_exit_thread();
 	kobj_unref(&t->obj);	/* the thread's own reference */
@@ -224,7 +232,7 @@ void thread_exit(DWORD code)
 	}
 	/* A thread we didn't create (e.g. the harness's own): just end it. */
 	if (t)
-		thread_finish(t, code);
+		thread_finish(t, code, 0);
 	teb_exit_thread();
 	pthread_exit(NULL);
 }

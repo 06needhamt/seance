@@ -2,6 +2,7 @@
 LIBRARY testcodec.dll
 EXPORTS
 	DriverProc=DriverProc@20
+	testcodec_last_quality
 	testcodec_open_count
 	testcodec_selftest
 	testcodec_stats

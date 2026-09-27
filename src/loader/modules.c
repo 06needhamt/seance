@@ -106,6 +106,23 @@ void mod_describe_address(const void *addr, char *out, size_t outsz)
 		snprintf(out, outsz, "%p", addr);
 }
 
+int mod_describe_address_try(const void *addr, char *out, size_t outsz)
+{
+	const BYTE *a = addr;
+	int found = 0;
+
+	if (pthread_mutex_trylock(&loader_lock))
+		return 0;
+	for (struct module *m = modules; m && !found; m = m->next)
+		if (a >= m->base && a < m->base + module_size(m)) {
+			snprintf(out, outsz, "%s+0x%x", m->name,
+				 (unsigned)(a - m->base));
+			found = 1;
+		}
+	UNLOCK();
+	return found;
+}
+
 /* Looks for name in dir, ignoring case. Returns 0 and the path, or -1. */
 static int find_in_dir(const char *dir, const char *name, char *out,
 		       size_t outsz)
@@ -364,6 +381,31 @@ static void detach(struct module *m)
 		return;
 	pe_tls_notify(m->img, DLL_PROCESS_DETACH);
 	pe_call_entry(m->img, DLL_PROCESS_DETACH);
+}
+
+void mod_thread_notify(DWORD reason)
+{
+	LOCK();
+	size_t n = 0;
+	for (struct module *m = modules; m; m = m->next)
+		n++;
+	struct module **list = n ? malloc(n * sizeof(*list)) : NULL;
+	if (list) {
+		/* modules is newest first. */
+		size_t i = n;
+		for (struct module *m = modules; m; m = m->next)
+			list[--i] = m;
+		for (size_t k = 0; k < n; k++) {
+			struct module *m = list[reason == DLL_THREAD_DETACH ? n - 1 - k : k];
+			if (!m->img || !m->attached)
+				continue;
+			pe_tls_notify(m->img, reason);
+			if (!m->no_thread_calls)
+				pe_call_entry(m->img, reason);
+		}
+		free(list);
+	}
+	UNLOCK();
 }
 
 static struct module *new_module(const char *name, const char *path)
