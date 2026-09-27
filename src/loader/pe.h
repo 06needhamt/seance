@@ -95,6 +95,17 @@ int pe_foreach_delay_import(const struct pe_image *img, pe_import_fn fn,
 typedef void *(*pe_resolve_fn)(void *ctx, const struct pe_import *imp);
 int pe_bind_imports(struct pe_image *img, pe_resolve_fn resolve, void *ctx);
 
+/*
+ * Binds the delay-load imports eagerly, as if each had been called: every
+ * slot of each delay IAT gets resolve's answer, and each descriptor's
+ * module handle slot gets handle's (NULL if the DLL isn't there). The DLL's
+ * own delay-load helper then never runs. resolve returns NULL to fail the
+ * bind, as for pe_bind_imports.
+ */
+typedef void *(*pe_handle_fn)(void *ctx, const char *dll);
+int pe_bind_delay_imports(struct pe_image *img, pe_resolve_fn resolve,
+			  pe_handle_fn handle, void *ctx);
+
 /* Exports. */
 struct pe_export {
 	WORD ordinal;

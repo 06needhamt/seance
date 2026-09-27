@@ -60,6 +60,8 @@ fixture(pe_tls pe_tls.c)
 fixture(pe_fail pe_fail.c)
 fixture(pe_dep pe_dep.c pe_dep.def LIBS pe_basic_imports)
 fixture(pe_missing pe_missing.c LIBS zz_nosuch_imports pe_basic_imports)
+# Its own delay-load tables (GNU ld doesn't make them); see pe_delay.c.
+fixture(pe_delay pe_delay.c)
 
 # Links against kernel32 (the mingw import library) and a made-up function.
 fixture(pe_runtime pe_runtime.c LIBS vfw_missing_imports kernel32)
@@ -73,6 +75,10 @@ fixture(pe_k32 pe_k32.c pe_k32.rc LIBS kernel32
 fixture(pe_sse pe_sse.c LIBS kernel32
 	OPTIONS -msse2 -mfpmath=sse -mpreferred-stack-boundary=4
 		-mincoming-stack-boundary=4 -fno-builtin)
+
+# Installs its own fs:[0] SEH frames by hand (no CRT here to compile
+# __try/__except into _except_handler3 frames) and faults under them.
+fixture(pe_seh pe_seh.c LIBS kernel32 OPTIONS -mpreferred-stack-boundary=2)
 
 # A small VfW codec. -fno-builtin and no loop-to-memset rewriting keep it
 # free of calls into a C runtime it doesn't link.

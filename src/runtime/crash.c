@@ -24,6 +24,7 @@
 #include "common/sanitizer.h"
 #include "loader/modules.h"
 #include "runtime/crash.h"
+#include "runtime/seh.h"
 
 #define MAX_THREADS 256
 #define ALT_STACK   (64 * 1024)
@@ -93,21 +94,45 @@ static const char *signame(int sig)
 	}
 }
 
-static void on_fault(int sig, siginfo_t *si, void *ctx)
+static void report_fault(int sig, const void *pc, const void *fault_addr)
 {
-	ucontext_t *uc = ctx;
-	const void *pc = (const void *)uc->uc_mcontext.gregs[REG_EIP];
 	char where[160], line[400];
 
 	describe(pc, where, sizeof(where));
 	if (sig == SIGSEGV || sig == SIGBUS)
 		snprintf(line, sizeof(line), "vfw-harness: crash: %s at %s, "
-			 "accessing %p\n", signame(sig), where, si->si_addr);
+			 "accessing %p\n", signame(sig), where, fault_addr);
 	else
 		snprintf(line, sizeof(line), "vfw-harness: crash: %s at %s\n",
 			 signame(sig), where);
 	put(line);
 	report_call(mine);
+}
+
+void crash_report_and_die(int sig, const void *pc, const void *fault_addr)
+{
+	report_fault(sig, pc, fault_addr);
+	signal(sig, SIG_DFL);
+	raise(sig);
+	_exit(128 + sig);	/* raise() should not return */
+}
+
+static void on_fault(int sig, siginfo_t *si, void *ctx)
+{
+	ucontext_t *uc = ctx;
+	const void *pc = (const void *)uc->uc_mcontext.gregs[REG_EIP];
+
+	/*
+	 * Give seh.c first chance at it: a thread running DLL code may have
+	 * __try frames in its fs:[0] chain, and it walks them on the
+	 * thread's own stack rather than here on the signal's alternate
+	 * one. It reports the crash itself, the same way, if nothing in the
+	 * chain handles it.
+	 */
+	if (seh_take_fault(sig, si, uc))
+		return;
+
+	report_fault(sig, pc, si->si_addr);
 
 	/* Die of the signal, as without the handler. */
 	signal(sig, SIG_DFL);
