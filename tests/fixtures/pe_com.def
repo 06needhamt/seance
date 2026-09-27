@@ -1,0 +1,6 @@
+; DllGetClassObject is exported undecorated, as COM servers do.
+LIBRARY pe_com.dll
+EXPORTS
+	DllGetClassObject=DllGetClassObject@12
+	com_run
+	com_objects

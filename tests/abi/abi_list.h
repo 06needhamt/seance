@@ -492,4 +492,14 @@
 	O(TEXTMETRICW, tmUnderlined) O(TEXTMETRICW, tmStruckOut) \
 	O(TEXTMETRICW, tmPitchAndFamily) O(TEXTMETRICW, tmCharSet) \
 	S(HMONITOR) A(MONITORINFO) S(MONITORINFO) O(MONITORINFO, cbSize) \
-	O(MONITORINFO, rcMonitor) O(MONITORINFO, rcWork) O(MONITORINFO, dwFlags)
+	O(MONITORINFO, rcMonitor) O(MONITORINFO, rcWork) O(MONITORINFO, dwFlags) \
+	/* objbase.h */ \
+	S(GUID) A(GUID) O(GUID, Data1) O(GUID, Data2) O(GUID, Data3) \
+	O(GUID, Data4) S(OLECHAR) S(LPFNGETCLASSOBJECT) \
+	S(IUnknown) S(IUnknownVtbl) O(IUnknownVtbl, QueryInterface) \
+	O(IUnknownVtbl, AddRef) O(IUnknownVtbl, Release) \
+	S(IClassFactory) S(IClassFactoryVtbl) \
+	O(IClassFactoryVtbl, CreateInstance) O(IClassFactoryVtbl, LockServer) \
+	S(IMalloc) S(IMallocVtbl) O(IMallocVtbl, Alloc) \
+	O(IMallocVtbl, Realloc) O(IMallocVtbl, Free) O(IMallocVtbl, GetSize) \
+	O(IMallocVtbl, DidAlloc) O(IMallocVtbl, HeapMinimize)

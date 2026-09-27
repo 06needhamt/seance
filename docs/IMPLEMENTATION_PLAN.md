@@ -91,7 +91,8 @@ cli: vfw-harness info | probe | decode | encode | list
   - `pe_gui.dll` drives both from Win32 code with a 4-byte stack.
 - **advapi32:** Reg* (done, `advapi32.c`, `reg.c`), backed by a regedit-format `.reg` file (`$VFW_REGISTRY`, else `$VFW_ROOT/registry.reg`; empty means in memory only), saved after each change, so codec settings persist and can be seeded by tests or from a Windows export (UTF-16 and REGEDIT4 files are read too). Also GetUserName. Not done: RegNotifyChangeKeyValue, RegGetValue, the security functions, and a view of `vfw.ini`'s `[drivers32]` as the `Drivers32` key that msvfw32 on NT reads.
 - **winmm:** DefDriverProc following Wine's `dlls/winmm/driver.c` semantics, timeGetTime, SendDriverMessage/OpenDriver on top of `vfw/`.
-- **version and ole32-lite:** GetFileVersionInfo* from the resource walker. CoInitialize and CoTaskMemAlloc as trivial stubs.
+- **version:** GetFileVersionInfo(Size)(Ex)A/W and VerQueryValueA/W (done, `version.c`). The block is the RT_VERSION resource, sized as Windows sizes it (twice the resource plus the `FE2X` signature), but VerQueryValueA keeps its ANSI copies of strings in a table rather than the second half, since it isn't told how big the caller's buffer really is; names resolve the way LoadLibrary would (a loaded module, a built-in, then the search path from the caller's directory), and the built-in DLLs answer with a generated block versioned 5.1.2600.5512 (XP SP3). So a truncated copy or a raw resource from FindResource/LockResource is never written past or into. Not done: VerFindFile, VerInstallFile, VerLanguageName and the 16-bit (NE) format.
+- **ole32-lite:** done (`ole32.c`). CoInitialize(Ex)/CoUninitialize and OleInitialize are counted per thread, with RPC_E_CHANGED_MODE and the implicit multithreaded apartment. CoTaskMem* and CoGetMalloc use the process heap; there are also GUID strings (StringFromGUID2/CLSID/IID, CLSIDFromString, IIDFromString), ProgIDs from the registry, and CoCreateGuid. CoCreateInstance and CoGetClassObject find classes registered with CoRegisterClassObject (honouring REGCLS_SUSPENDED with CoResumeClassObjects, REGCLS_SINGLEUSE, and a multiple-use local server serving in-process), or in-process servers named by `HKCR\CLSID\{...}\InprocServer32` (per-user classes first), which stay loaded. `pe_com.dll` is such a server and uses version.dll on itself. Not done: out-of-process servers, marshalling, CreateStreamOnHGlobal and the rest of OLE.
 - **msvfw32 re-export:** some codecs call back into ICM, so they are given the harness's own `vfw/` API.
 
 The stub list is based on what VfW codecs use in general (with Wine and MPlayer's loader as the behavioural reference), not on any single DLL. The trap thunks plus `info` show what is left to add.
@@ -106,8 +107,8 @@ and msvfw32 built-ins, `probe` and `list`, and `testcodec.dll` with
   kernel32's GlobalAlloc, which they were waiting for, now exists) and
   ICCompressorChoose (a dialog).
 - DrawDib* and the ICM_DRAW path (drawing is reported as unsupported).
-- The remaining placeholder DLLs (version, ole32, oleaut32, shell32, comctl32,
-  comdlg32) have no functions yet.
+- The remaining placeholder DLLs (oleaut32, shell32, comctl32, comdlg32)
+  have no functions yet.
 
 - **`driver.c`:**
   - Installable-driver lifecycle: `DRV_LOAD`, `DRV_ENABLE`, `DRV_OPEN` with ICOPEN, then `DRV_CLOSE`, `DRV_DISABLE`, `DRV_FREE`.
@@ -170,6 +171,7 @@ All milestones are checked against **test fixtures built in the repo**, never ag
    - The thread fixture (`pe_k32.dll`, done) reads per-thread TLS back correctly.
    - The CRT fixture (`pe_crt.dll`, done) prints through `_iob`, round-trips a file through `fopen`/`fwrite`/`fread`, and uses `_pctype`, math, string and the 64-bit arithmetic helpers.
    - The registry fixture (`pe_reg.dll`, done) round-trips values through the registry file.
+   - The COM fixture (`pe_com.dll`, done) is created through CoCreateInstance from its InprocServer32 key and reads its own version resource through version.dll.
 3. **VfW layer and `probe`.** `tests/fixtures/testcodec.dll` is a mingw-built lossless ICM codec (FourCC `TST0`). It can compress and decompress, keeps its state through Get/SetState, and supports several output formats.
 
    Milestone: `probe` lists the correct ICINFO, accepted formats and state size.

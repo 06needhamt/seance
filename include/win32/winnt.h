@@ -308,7 +308,14 @@ typedef struct _IMAGE_RESOURCE_DATA_ENTRY {
 } IMAGE_RESOURCE_DATA_ENTRY;
 
 /* Version resources (verrsrc.h on Windows). */
-#define VS_FFI_SIGNATURE 0xFEEF04BD
+#define VS_FFI_SIGNATURE     0xFEEF04BD
+#define VS_FFI_STRUCVERSION  0x00010000
+#define VS_FFI_FILEFLAGSMASK 0x0000003F
+#define VOS_NT_WINDOWS32     0x00040004
+#define VFT_UNKNOWN          0x00000000
+#define VFT_APP              0x00000001
+#define VFT_DLL              0x00000002
+#define VFT_DRV              0x00000003
 
 /* Structured exception handling: exception codes (winnt.h's NTSTATUS-based
  * values), EXCEPTION_RECORD/CONTEXT and the fs:[0] chain's raw x86 ABI. */
