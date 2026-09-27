@@ -126,8 +126,15 @@ static void test_builtin_tables(void)
 		size_t n = builtin_count(dll);
 		int unique = 1;
 
-		/* Placeholders have no exports yet; everything else has. */
-		CHECK(dll->fallback ? n == 0 : n > 0);
+		/*
+		 * Every DLL that isn't a bare placeholder has exports.
+		 * msvcrt.dll is the one fallback DLL that's also
+		 * implemented: fallback governs precedence (a real DLL of
+		 * that name on the search path still wins), not whether
+		 * there's anything behind it.
+		 */
+		int placeholder = dll->fallback && strcmp(dll->name, "msvcrt.dll");
+		CHECK(placeholder ? n == 0 : n > 0);
 		for (size_t i = 0; i < n; i++) {
 			const struct builtin_export *e = builtin_entry(dll, i);
 			const struct builtin_export *prev =
@@ -177,10 +184,10 @@ static void test_builtin_tables(void)
  */
 static void test_fallback_builtins(void)
 {
-	struct module *m = mod_load("USER32", NULL);
+	struct module *m = mod_load("VERSION", NULL);
 	CHECK(m && m->builtin && m->builtin->fallback && !m->img);
 	if (m)
-		CHECK(mod_get_proc(m, "MessageBoxA") == NULL);
+		CHECK(mod_get_proc(m, "GetFileVersionInfoA") == NULL);
 	mod_free(m);
 
 	char dir[4096], dst[4200];
@@ -190,7 +197,7 @@ static void test_fallback_builtins(void)
 		CHECK(0);
 		return;
 	}
-	snprintf(dst, sizeof(dst), "%s/user32.dll", dir);
+	snprintf(dst, sizeof(dst), "%s/version.dll", dir);
 	void *data;
 	size_t len;
 	CHECK_EQ(vfw_read_file(fixture("pe_basic.dll"), &data, &len), 0);
@@ -201,7 +208,7 @@ static void test_fallback_builtins(void)
 	free(data);
 
 	setenv("VFW_PATH", dir, 1);
-	m = mod_load("user32.dll", NULL);
+	m = mod_load("version.dll", NULL);
 	CHECK(m && !m->builtin && m->img);
 	mod_free(m);
 	unsetenv("VFW_PATH");

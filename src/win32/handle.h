@@ -22,6 +22,7 @@ enum kobj_type {
 	KOBJ_THREAD,
 	KOBJ_MAPPING,
 	KOBJ_FIND,
+	KOBJ_KEY,
 };
 
 struct kobject {

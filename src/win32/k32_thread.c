@@ -324,6 +324,11 @@ WINFN(HANDLE) k32_GetCurrentProcess(void) { return PSEUDO_PROCESS; }
 WINFN(DWORD) k32_GetCurrentThreadId(void) { return thread_self() ? self->tid : 0; }
 WINFN(DWORD) k32_GetCurrentProcessId(void) { return getpid(); }
 
+DWORD thread_current_id(void)
+{
+	return k32_GetCurrentThreadId();
+}
+
 WINFN(int) k32_GetThreadPriority(HANDLE h)
 {
 	struct thread *t = thread_from(h);

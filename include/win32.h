@@ -8,6 +8,8 @@
 #include "win32/winnt.h"
 #include "win32/winbase.h"
 #include "win32/wingdi.h"
+#include "win32/winuser.h"
+#include "win32/winreg.h"
 #include "win32/mmsystem.h"
 #include "win32/vfw.h"
 #include "win32/aviriff.h"

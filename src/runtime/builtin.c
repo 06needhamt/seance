@@ -20,10 +20,10 @@ const struct builtin_dll *const builtin_dlls[] = {
 	&builtin_ntdll,
 	&builtin_winmm,
 	&builtin_msvfw32,
-	/* Placeholders (fallback only, no exports yet). */
 	&builtin_user32,
 	&builtin_gdi32,
 	&builtin_advapi32,
+	/* Placeholders (fallback only, no exports yet). */
 	&builtin_version,
 	&builtin_ole32,
 	&builtin_oleaut32,

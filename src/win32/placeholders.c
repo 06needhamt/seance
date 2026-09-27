@@ -12,19 +12,11 @@ static const struct builtin_export *const tables[] = { none, NULL };
 #define PLACEHOLDER(var, name, aliases) \
 	const struct builtin_dll var = { name, aliases, tables, 1 }
 
-static const char *const msvcrt_aliases[] = {
-	"msvcrt[0-9]*.dll", "msvcr[0-9]*.dll", "msvcp[0-9]*.dll",
-	"ucrtbase.dll", "api-ms-win-crt-*.dll", NULL
-};
 static const char *const comctl_aliases[] = { "comctl32.ocx", NULL };
 
-PLACEHOLDER(builtin_user32, "user32.dll", NULL);
-PLACEHOLDER(builtin_gdi32, "gdi32.dll", NULL);
-PLACEHOLDER(builtin_advapi32, "advapi32.dll", NULL);
 PLACEHOLDER(builtin_version, "version.dll", NULL);
 PLACEHOLDER(builtin_ole32, "ole32.dll", NULL);
 PLACEHOLDER(builtin_oleaut32, "oleaut32.dll", NULL);
 PLACEHOLDER(builtin_shell32, "shell32.dll", NULL);
 PLACEHOLDER(builtin_comctl32, "comctl32.dll", comctl_aliases);
 PLACEHOLDER(builtin_comdlg32, "comdlg32.dll", NULL);
-PLACEHOLDER(builtin_msvcrt, "msvcrt.dll", msvcrt_aliases);

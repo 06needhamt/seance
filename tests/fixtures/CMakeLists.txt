@@ -3,8 +3,9 @@
 # cmake/mingw-i686.cmake as its toolchain; the DLLs go to VFW_FIXTURE_DIR.
 #
 # They are built without a C runtime, so each imports only what it names:
-# nothing, each other, or kernel32, winmm and msvfw32 (whose mingw import
-# libraries the harness's built-in DLLs stand in for).
+# nothing, each other, or system DLLs such as kernel32, user32, gdi32,
+# advapi32, winmm and msvfw32 (whose mingw import libraries the harness's
+# built-in DLLs stand in for).
 cmake_minimum_required(VERSION 3.20)
 project(vfw-harness-fixtures C RC)
 
@@ -79,6 +80,22 @@ fixture(pe_sse pe_sse.c LIBS kernel32
 # Installs its own fs:[0] SEH frames by hand (no CRT here to compile
 # __try/__except into _except_handler3 frames) and faults under them.
 fixture(pe_seh pe_seh.c LIBS kernel32 OPTIONS -mpreferred-stack-boundary=2)
+
+# Keeps settings in the registry (advapi32), as many codecs do.
+fixture(pe_reg pe_reg.c LIBS advapi32 OPTIONS -mpreferred-stack-boundary=2)
+
+# Uses user32 and gdi32 the way a codec might: strings, wsprintf, a
+# hidden window with messages and timers, a bitmap resource.
+fixture(pe_gui pe_gui.c pe_gui.rc LIBS user32 gdi32 kernel32
+	OPTIONS -mpreferred-stack-boundary=2 -fno-builtin)
+
+# Imports msvcrt's math and string functions, as a codec with a dynamic
+# CRT (/MD) would.
+# -Wl,--disable-auto-import: no CRT startup object is linked (-nostdlib),
+# so nothing provides the runtime pseudo-relocator GNU ld's default
+# auto-import of data symbols across the DLL boundary would need; none of
+# msvcrt's functions used here need it anyway.
+fixture(pe_crt pe_crt.c LIBS msvcrt OPTIONS -Wl,--disable-auto-import)
 
 # A small VfW codec. -fno-builtin and no loop-to-memset rewriting keep it
 # free of calls into a C runtime it doesn't link.

@@ -85,7 +85,7 @@ WINFN(int) k32_WideCharToMultiByte(UINT cp, DWORD flags, LPCWSTR src,
 /* Case mapping and classification cover Latin-1; other characters are
  * left unmapped (and classed as letters). */
 
-static WCHAR wupper(WCHAR c)
+WCHAR k32_toupper_w(WCHAR c)
 {
 	if ((c >= 'a' && c <= 'z') || (c >= 0xe0 && c <= 0xfe && c != 0xf7))
 		return c - 32;
@@ -94,7 +94,7 @@ static WCHAR wupper(WCHAR c)
 	return c;
 }
 
-static WCHAR wlower(WCHAR c)
+WCHAR k32_tolower_w(WCHAR c)
 {
 	if ((c >= 'A' && c <= 'Z') || (c >= 0xc0 && c <= 0xde && c != 0xd7))
 		return c + 32;
@@ -103,7 +103,7 @@ static WCHAR wlower(WCHAR c)
 	return c;
 }
 
-static WORD ctype1(WCHAR c)
+WORD k32_ctype1(WCHAR c)
 {
 	if (c == ' ' || c == 0xa0)
 		return C1_SPACE | C1_BLANK;
@@ -138,7 +138,7 @@ WINFN(BOOL) k32_GetStringTypeW(DWORD type, LPCWSTR src, int count, LPWORD out)
 	if (count < 0)
 		count = wstrlen(src) + 1;
 	for (int i = 0; i < count; i++)
-		out[i] = type == CT_CTYPE1 ? ctype1(src[i]) : 0;
+		out[i] = type == CT_CTYPE1 ? k32_ctype1(src[i]) : 0;
 	return TRUE;
 }
 
@@ -160,7 +160,7 @@ WINFN(BOOL) k32_GetStringTypeA(LCID lcid, DWORD type, LPCSTR src, int count,
 	for (int i = 0; i < count; i++) {
 		WCHAR w;
 		cp_to_utf16(CP_ACP, src + i, 1, &w, 1, 0);
-		out[i] = type == CT_CTYPE1 ? ctype1(w) : 0;
+		out[i] = type == CT_CTYPE1 ? k32_ctype1(w) : 0;
 	}
 	return TRUE;
 }
@@ -182,7 +182,7 @@ static int compare_w(DWORD flags, const WCHAR *a, int na, const WCHAR *b, int nb
 	if (nb < 0)
 		nb = wstrlen(b);
 	for (int i = 0; i < na && i < nb; i++) {
-		WCHAR x = wlower(a[i]), y = wlower(b[i]);
+		WCHAR x = k32_tolower_w(a[i]), y = k32_tolower_w(b[i]);
 		if (x != y)
 			return x < y ? CSTR_LESS_THAN : CSTR_GREATER_THAN;
 		/* Case only breaks ties: lower case sorts first. */
@@ -264,9 +264,9 @@ static int map_w(DWORD flags, const WCHAR *src, int n, WCHAR *out)
 	for (int i = 0; i < n; i++) {
 		WCHAR c = src[i];
 		if (flags & LCMAP_LOWERCASE)
-			c = wlower(c);
+			c = k32_tolower_w(c);
 		else if (flags & LCMAP_UPPERCASE)
-			c = wupper(c);
+			c = k32_toupper_w(c);
 		out[i] = c;
 	}
 	return n;
@@ -294,7 +294,7 @@ WINFN(int) k32_LCMapStringW(LCID lcid, DWORD flags, LPCWSTR src, int n,
 			return 0;
 		}
 		for (int i = 0; i < n; i++) {
-			WCHAR c = wlower(src[i]);
+			WCHAR c = k32_tolower_w(src[i]);
 			out[2 * i] = c >> 8;
 			out[2 * i + 1] = c & 0xff;
 		}

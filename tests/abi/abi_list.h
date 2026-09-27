@@ -398,4 +398,98 @@
 	O(ICDRAWSUGGEST, dxDst) O(ICDRAWSUGGEST, dyDst) \
 	O(ICDRAWSUGGEST, hicDecompressor) \
 	S(ICPALETTE) O(ICPALETTE, dwFlags) O(ICPALETTE, iStart) \
-	O(ICPALETTE, iLen) O(ICPALETTE, lppe)
+	O(ICPALETTE, iLen) O(ICPALETTE, lppe) \
+	/* winuser.h, wingdi.h, winreg.h */ \
+	S(HKEY) S(HBITMAP) S(HGDIOBJ) S(HICON) S(HCURSOR) S(ATOM) S(COLORREF) \
+	S(REGSAM) S(WNDPROC) S(DLGPROC) S(TIMERPROC) \
+	A(SIZE) A(WNDCLASSA) A(WNDCLASSW) A(WNDCLASSEXA) A(WNDCLASSEXW) A(MSG) A(CREATESTRUCTA) A(CREATESTRUCTW) A(PAINTSTRUCT) A(USEROBJECTFLAGS) A(BITMAP) A(DIBSECTION) A(LOGPALETTE) A(LOGBRUSH) A(LOGPEN) A(LOGFONTA) A(LOGFONTW) A(TEXTMETRICA) A(TEXTMETRICW) \
+	S(SIZE) O(SIZE, cx) O(SIZE, cy) \
+	S(WNDCLASSA) O(WNDCLASSA, style) O(WNDCLASSA, lpfnWndProc) \
+	O(WNDCLASSA, cbClsExtra) O(WNDCLASSA, cbWndExtra) \
+	O(WNDCLASSA, hInstance) O(WNDCLASSA, hIcon) O(WNDCLASSA, hCursor) \
+	O(WNDCLASSA, hbrBackground) O(WNDCLASSA, lpszMenuName) \
+	O(WNDCLASSA, lpszClassName) \
+	S(WNDCLASSW) O(WNDCLASSW, style) O(WNDCLASSW, lpfnWndProc) \
+	O(WNDCLASSW, cbClsExtra) O(WNDCLASSW, cbWndExtra) \
+	O(WNDCLASSW, hInstance) O(WNDCLASSW, hIcon) O(WNDCLASSW, hCursor) \
+	O(WNDCLASSW, hbrBackground) O(WNDCLASSW, lpszMenuName) \
+	O(WNDCLASSW, lpszClassName) \
+	S(WNDCLASSEXA) O(WNDCLASSEXA, cbSize) O(WNDCLASSEXA, style) \
+	O(WNDCLASSEXA, lpfnWndProc) O(WNDCLASSEXA, cbClsExtra) \
+	O(WNDCLASSEXA, cbWndExtra) O(WNDCLASSEXA, hInstance) \
+	O(WNDCLASSEXA, hIcon) O(WNDCLASSEXA, hCursor) \
+	O(WNDCLASSEXA, hbrBackground) O(WNDCLASSEXA, lpszMenuName) \
+	O(WNDCLASSEXA, lpszClassName) O(WNDCLASSEXA, hIconSm) \
+	S(WNDCLASSEXW) O(WNDCLASSEXW, cbSize) O(WNDCLASSEXW, style) \
+	O(WNDCLASSEXW, lpfnWndProc) O(WNDCLASSEXW, cbClsExtra) \
+	O(WNDCLASSEXW, cbWndExtra) O(WNDCLASSEXW, hInstance) \
+	O(WNDCLASSEXW, hIcon) O(WNDCLASSEXW, hCursor) \
+	O(WNDCLASSEXW, hbrBackground) O(WNDCLASSEXW, lpszMenuName) \
+	O(WNDCLASSEXW, lpszClassName) O(WNDCLASSEXW, hIconSm) \
+	S(MSG) O(MSG, hwnd) O(MSG, message) O(MSG, wParam) O(MSG, lParam) \
+	O(MSG, time) O(MSG, pt) \
+	S(CREATESTRUCTA) O(CREATESTRUCTA, lpCreateParams) \
+	O(CREATESTRUCTA, hInstance) O(CREATESTRUCTA, hMenu) \
+	O(CREATESTRUCTA, hwndParent) O(CREATESTRUCTA, cy) \
+	O(CREATESTRUCTA, cx) O(CREATESTRUCTA, y) O(CREATESTRUCTA, x) \
+	O(CREATESTRUCTA, style) O(CREATESTRUCTA, lpszName) \
+	O(CREATESTRUCTA, lpszClass) O(CREATESTRUCTA, dwExStyle) \
+	S(CREATESTRUCTW) O(CREATESTRUCTW, lpCreateParams) \
+	O(CREATESTRUCTW, hInstance) O(CREATESTRUCTW, hMenu) \
+	O(CREATESTRUCTW, hwndParent) O(CREATESTRUCTW, cy) \
+	O(CREATESTRUCTW, cx) O(CREATESTRUCTW, y) O(CREATESTRUCTW, x) \
+	O(CREATESTRUCTW, style) O(CREATESTRUCTW, lpszName) \
+	O(CREATESTRUCTW, lpszClass) O(CREATESTRUCTW, dwExStyle) \
+	S(PAINTSTRUCT) O(PAINTSTRUCT, hdc) O(PAINTSTRUCT, fErase) \
+	O(PAINTSTRUCT, rcPaint) O(PAINTSTRUCT, fRestore) \
+	O(PAINTSTRUCT, fIncUpdate) O(PAINTSTRUCT, rgbReserved) \
+	S(USEROBJECTFLAGS) O(USEROBJECTFLAGS, fInherit) \
+	O(USEROBJECTFLAGS, fReserved) O(USEROBJECTFLAGS, dwFlags) \
+	S(BITMAP) O(BITMAP, bmType) O(BITMAP, bmWidth) O(BITMAP, bmHeight) \
+	O(BITMAP, bmWidthBytes) O(BITMAP, bmPlanes) O(BITMAP, bmBitsPixel) \
+	O(BITMAP, bmBits) \
+	S(DIBSECTION) O(DIBSECTION, dsBm) O(DIBSECTION, dsBmih) \
+	O(DIBSECTION, dsBitfields) O(DIBSECTION, dshSection) \
+	O(DIBSECTION, dsOffset) \
+	S(LOGPALETTE) O(LOGPALETTE, palVersion) O(LOGPALETTE, palNumEntries) \
+	O(LOGPALETTE, palPalEntry) \
+	S(LOGBRUSH) O(LOGBRUSH, lbStyle) O(LOGBRUSH, lbColor) \
+	O(LOGBRUSH, lbHatch) \
+	S(LOGPEN) O(LOGPEN, lopnStyle) O(LOGPEN, lopnWidth) \
+	O(LOGPEN, lopnColor) \
+	S(LOGFONTA) O(LOGFONTA, lfHeight) O(LOGFONTA, lfWidth) \
+	O(LOGFONTA, lfEscapement) O(LOGFONTA, lfOrientation) \
+	O(LOGFONTA, lfWeight) O(LOGFONTA, lfItalic) O(LOGFONTA, lfUnderline) \
+	O(LOGFONTA, lfStrikeOut) O(LOGFONTA, lfCharSet) \
+	O(LOGFONTA, lfOutPrecision) O(LOGFONTA, lfClipPrecision) \
+	O(LOGFONTA, lfQuality) O(LOGFONTA, lfPitchAndFamily) \
+	O(LOGFONTA, lfFaceName) \
+	S(LOGFONTW) O(LOGFONTW, lfHeight) O(LOGFONTW, lfWidth) \
+	O(LOGFONTW, lfEscapement) O(LOGFONTW, lfOrientation) \
+	O(LOGFONTW, lfWeight) O(LOGFONTW, lfItalic) O(LOGFONTW, lfUnderline) \
+	O(LOGFONTW, lfStrikeOut) O(LOGFONTW, lfCharSet) \
+	O(LOGFONTW, lfOutPrecision) O(LOGFONTW, lfClipPrecision) \
+	O(LOGFONTW, lfQuality) O(LOGFONTW, lfPitchAndFamily) \
+	O(LOGFONTW, lfFaceName) \
+	S(TEXTMETRICA) O(TEXTMETRICA, tmHeight) O(TEXTMETRICA, tmAscent) \
+	O(TEXTMETRICA, tmDescent) O(TEXTMETRICA, tmInternalLeading) \
+	O(TEXTMETRICA, tmExternalLeading) O(TEXTMETRICA, tmAveCharWidth) \
+	O(TEXTMETRICA, tmMaxCharWidth) O(TEXTMETRICA, tmWeight) \
+	O(TEXTMETRICA, tmOverhang) O(TEXTMETRICA, tmDigitizedAspectX) \
+	O(TEXTMETRICA, tmDigitizedAspectY) O(TEXTMETRICA, tmFirstChar) \
+	O(TEXTMETRICA, tmLastChar) O(TEXTMETRICA, tmDefaultChar) \
+	O(TEXTMETRICA, tmBreakChar) O(TEXTMETRICA, tmItalic) \
+	O(TEXTMETRICA, tmUnderlined) O(TEXTMETRICA, tmStruckOut) \
+	O(TEXTMETRICA, tmPitchAndFamily) O(TEXTMETRICA, tmCharSet) \
+	S(TEXTMETRICW) O(TEXTMETRICW, tmHeight) O(TEXTMETRICW, tmAscent) \
+	O(TEXTMETRICW, tmDescent) O(TEXTMETRICW, tmInternalLeading) \
+	O(TEXTMETRICW, tmExternalLeading) O(TEXTMETRICW, tmAveCharWidth) \
+	O(TEXTMETRICW, tmMaxCharWidth) O(TEXTMETRICW, tmWeight) \
+	O(TEXTMETRICW, tmOverhang) O(TEXTMETRICW, tmDigitizedAspectX) \
+	O(TEXTMETRICW, tmDigitizedAspectY) O(TEXTMETRICW, tmFirstChar) \
+	O(TEXTMETRICW, tmLastChar) O(TEXTMETRICW, tmDefaultChar) \
+	O(TEXTMETRICW, tmBreakChar) O(TEXTMETRICW, tmItalic) \
+	O(TEXTMETRICW, tmUnderlined) O(TEXTMETRICW, tmStruckOut) \
+	O(TEXTMETRICW, tmPitchAndFamily) O(TEXTMETRICW, tmCharSet) \
+	S(HMONITOR) A(MONITORINFO) S(MONITORINFO) O(MONITORINFO, cbSize) \
+	O(MONITORINFO, rcMonitor) O(MONITORINFO, rcWork) O(MONITORINFO, dwFlags)

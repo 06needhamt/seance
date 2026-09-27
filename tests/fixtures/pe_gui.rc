@@ -1,0 +1,18 @@
+STRINGTABLE
+BEGIN
+	1 "hello"
+	17 "block two"
+	18 L"euro \x20ac"
+END
+
+/*
+ * A 2x2 24-bit bitmap as a raw RT_BITMAP (type 2) resource: a packed DIB,
+ * written as words since there is no .bmp file to point windres at.
+ */
+/* The rows: bottom (01 02 03, 04 05 06), then top (07 08 09, 0a 0b 0c). */
+10 2
+BEGIN
+	40L, 2L, 2L, 1, 24, 0L, 16L, 0L, 0L, 0L, 0L,
+	0x0201, 0x0403, 0x0605, 0x0000,
+	0x0807, 0x0a09, 0x0c0b, 0x0000
+END
