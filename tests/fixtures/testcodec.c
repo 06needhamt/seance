@@ -11,6 +11,11 @@
  *
  * Messages it does not handle go to winmm's DefDriverProc, and
  * testcodec_selftest() calls winmm and msvfw32 from the Win32 side.
+ *
+ * With TESTCODEC_STRICT=1 in its (Windows) environment, it refuses to work
+ * with any pointer at or above 2 GB, the way code that isn't large-address
+ * aware can go wrong with one: its instance, the ICOPEN, the (de)compress
+ * structures, the formats, the frames and its own stack.
  * Built like old MSVC code, with a 4-byte stack boundary.
  */
 #include "fixture.h"
@@ -41,6 +46,7 @@ struct instance {
 #define MAGIC 0x54535430
 
 static HINSTANCE self;
+static int strict;	/* TESTCODEC_STRICT */
 static DWORD msg_log[MAX_LOG];
 static int nlog;
 static LONG opens;
@@ -80,6 +86,23 @@ static void release(void *p)
 {
 	if (p)
 		HeapFree(GetProcessHeap(), 0, p);
+}
+
+/* In strict mode, whether any of the n pointers is at or above 2 GB. */
+static int high(int n, ...)
+{
+	__builtin_va_list ap;
+	int i, bad = 0;
+	char here;
+
+	if (!strict)
+		return 0;
+	bad = (DWORD)&here >= 0x80000000u;
+	__builtin_va_start(ap, n);
+	for (i = 0; i < n; i++)
+		bad |= (DWORD)__builtin_va_arg(ap, const void *) >= 0x80000000u;
+	__builtin_va_end(ap);
+	return bad;
 }
 
 static LONG abs_height(const BITMAPINFOHEADER *b)
@@ -266,6 +289,9 @@ static LRESULT compress(struct instance *inst, ICCOMPRESS *c)
 	const BYTE *src = c->lpInput;
 	int key;
 
+	if (high(8, inst, inst->cprev, c, c->lpbiInput, c->lpInput, c->lpbiOutput,
+		 c->lpOutput, c->lpdwFlags))
+		return ICERR_BADPARAM;
 	if (compress_query(in, c->lpbiOutput) != ICERR_OK || !inst->cprev)
 		return ICERR_BADFORMAT;
 	key = (c->dwFlags & ICCOMPRESS_KEYFRAME) || inst->cframe == 0 ||
@@ -328,6 +354,8 @@ static LRESULT decompress(struct instance *inst, ICDECOMPRESS *d)
 	LONG w = in->biWidth, h = abs_height(in), y, x;
 	int ib = in->biBitCount / 8, ob;
 
+	if (high(7, inst, inst->dcur, d, in, src, out, dst))
+		return ICERR_BADPARAM;
 	if (decompress_query(in, out) != ICERR_OK || !inst->dcur)
 		return ICERR_BADFORMAT;
 	if (!(d->dwFlags & ICDECOMPRESS_NULLFRAME)) {
@@ -374,7 +402,13 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 	struct instance *inst = (struct instance *)id;
 
 	switch (msg) {
-	case DRV_LOAD:
+	case DRV_LOAD: {
+		char v[8];
+		strict = GetEnvironmentVariableA("TESTCODEC_STRICT", v, sizeof(v)) == 1 &&
+			 v[0] == '1';
+		log_msg(msg);
+		return DefDriverProc(id, hdrvr, msg, l1, l2);
+	}
 	case DRV_FREE:
 	case DRV_ENABLE:
 	case DRV_DISABLE:
@@ -384,6 +418,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 	case DRV_OPEN: {
 		ICOPEN *op = (ICOPEN *)l2;
 		log_msg(msg);
+		if (high(1, op))
+			return 0;
 		if (op) {
 			DWORD t = op->fccType | 0x20202020;
 			DWORD hnd = op->fccHandler & ~0x20202020;

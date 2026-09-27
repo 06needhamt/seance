@@ -166,7 +166,8 @@ if(BUILD_TESTING)
 	add_test(NAME smoke
 		COMMAND sh ${PROJECT_SOURCE_DIR}/tests/smoke.sh
 			$<TARGET_FILE:vfw-harness> ${PROJECT_SOURCE_DIR}/CMakeLists.txt
-			$<$<BOOL:${VFW_MINGW_CC}>:${VFW_FIXTURE_DIR}>)
+			$<$<BOOL:${VFW_MINGW_CC}>:${VFW_FIXTURE_DIR}>
+			$<IF:$<BOOL:${VFW_SANITIZE}>,0,1>)
 	set_tests_properties(smoke PROPERTIES LABELS cli)
 
 	# The AVI and image code cross-checked with FFmpeg.

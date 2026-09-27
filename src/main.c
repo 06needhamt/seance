@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "commands.h"
+#include "runtime/lowmem.h"
 
 #ifndef VFW_HARNESS_VERSION
 #define VFW_HARNESS_VERSION "0.1.0-dev"
@@ -76,7 +77,8 @@ int main(int argc, char **argv)
 				cmd);
 			return 2;
 		}
-		return c->run(argc - 1, argv + 1);
+		/* DLL code only ever sees memory below 2 GB. */
+		return lowmem_run(c->run, argc - 1, argv + 1);
 	}
 
 	fprintf(stderr, "vfw-harness: unknown command '%s'\n\n", cmd);
