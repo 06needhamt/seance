@@ -6,8 +6,10 @@
 
 #include "win32/types.h"
 #include "win32/winnt.h"
+#include "win32/winbase.h"
 #include "win32/wingdi.h"
 #include "win32/mmsystem.h"
 #include "win32/vfw.h"
+#include "win32/aviriff.h"
 
 #endif /* VFW_WIN32_H */

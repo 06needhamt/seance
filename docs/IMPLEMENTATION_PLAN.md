@@ -95,6 +95,13 @@ The stub list is based on what VfW codecs use in general (with Wine and MPlayer'
 
 ### VfW layer (`src/vfw/`)
 
+Status: done. `driver.c`, `registry.c` (`vfw.ini`) and `icm.c`, the winmm
+and msvfw32 built-ins, `probe` and `list`, and `testcodec.dll` with
+`test_vfw`. Still open:
+- ICImageCompress/ICImageDecompress, ICSeqCompressFrame* and ICCompressorChoose.
+- DrawDib* and the ICM_DRAW path (drawing is reported as unsupported).
+- The placeholder DLLs (user32, advapi32, msvcrt and so on) have no functions yet.
+
 - **`driver.c`:**
   - Installable-driver lifecycle: `DRV_LOAD`, `DRV_ENABLE`, `DRV_OPEN` with ICOPEN, then `DRV_CLOSE`, `DRV_DISABLE`, `DRV_FREE`.
   - A driver table maps `fccType.fccHandler` to a DLL path, taken from `vfw.ini` (a `[drivers32]`-style file, the Linux equivalent of `system.ini`) or from the command line.
@@ -107,6 +114,11 @@ The stub list is based on what VfW codecs use in general (with Wine and MPlayer'
   - Output-format negotiation: first try the codec's own `GET_FORMAT`, then a preference list (I420, YV12, YUY2, BGR32, BGR24, RGB565, RGB555, 8-bit palettised) checked with `DECOMPRESS_QUERY`.
 
 ### Container and output (`src/avi/`, `src/out/`)
+
+Status: the AVI reader and writer, the DIB conversion and the Y4M/BMP/raw
+writers are done, with the `avi` and `convert` commands; `make validate-media`
+checks them against FFmpeg. Still open here: Y4M input for `encode`, and raw
+frame input.
 
 - **AVI reader:**
   - RIFF `AVI `, `avih`, and `strl` → `strh`, `strf` (full BITMAPINFOHEADER including extradata or palette), `strn`.
@@ -155,8 +167,9 @@ All milestones are checked against **test fixtures built in the repo**, never ag
    Milestone: `probe` lists the correct ICINFO, accepted formats and state size.
 4. **AVI and Y4M I/O, `decode` and `encode`.** Milestone: encoding a Y4M clip to AVI with `testcodec` and decoding it back gives a byte-exact result. The AVI output is validated with `ffprobe` when it is installed. The OpenDML path is tested with a large synthetic file.
 5. **Hardening and CI.**
+   - Keep DLL-visible memory below 2 GB. On a 64-bit kernel a 32-bit process gets addresses up to 4 GB, and glibc's heap and `mmap` live near `0xf7000000`. Windows code without `LARGE_ADDRESS_AWARE` may treat pointers as signed. Options: an `ADDR_LIMIT_3GB`/low-memory personality with a re-exec, or serving Win32 heaps from a low reservation.
    - Build a matrix of fixtures, including 16-byte alignment and SSE use in the codec and C++ exceptions across a codec boundary.
-   - A fuzz-style AVI parser test.
+   - A fuzz-style AVI parser test (done: `test_avi` truncates and corrupts files).
    - A GitHub Actions workflow installs `gcc-multilib` and `mingw-w64` and runs `make test`.
    - An optional `make smoke SAMPLES=dir` runs `info` and `probe` over any user-supplied codec DLLs and reports missing imports, without asserting anything specific to a codec.
 

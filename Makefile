@@ -21,7 +21,7 @@ BUILD        ?= build
 
 HAVE_MINGW := $(shell command -v $(MINGW_CC) >/dev/null 2>&1 && echo 1)
 
-CPPFLAGS += -Iinclude -Isrc -D_GNU_SOURCE
+CPPFLAGS += -Iinclude -Isrc -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64
 CFLAGS   ?= -O2 -g
 CFLAGS   += -m32 -std=c11 -Wall -Wextra -Wno-unused-parameter
 LDFLAGS  += -m32
@@ -37,7 +37,7 @@ UNIT_BINS := $(UNIT_SRCS:tests/unit/%.c=$(BUILD)/tests/%)
 ABI_GEN := $(BUILD)/tests/gen_abi_checks
 ABI_INC := $(BUILD)/tests/abi_checks.inc
 
-.PHONY: all test unit fixtures check-abi smoke asan clean
+.PHONY: all test unit fixtures check-abi smoke validate-media asan clean
 
 all: $(BIN)
 
@@ -62,7 +62,8 @@ FIXTURE_CFLAGS := -O2 -Wall -nostdlib -ffreestanding -fno-stack-protector \
 	-mno-stack-arg-probe -fno-asynchronous-unwind-tables -shared \
 	-Wl,--image-base,0x10000000 -Wl,-e,_DllMain@12
 FIXTURES := $(addprefix $(FIXTURE_DIR)/,pe_basic.dll pe_reloc.dll \
-	pe_noreloc.dll pe_tls.dll pe_dep.dll pe_fail.dll pe_missing.dll)
+	pe_noreloc.dll pe_tls.dll pe_dep.dll pe_fail.dll pe_missing.dll \
+	pe_runtime.dll pe_k32.dll testcodec.dll)
 
 fixtures: $(FIXTURES)
 
@@ -72,7 +73,7 @@ $(FIXTURE_DIR)/%.res.o: $(FIXTURE_SRC)/%.rc
 
 $(FIXTURE_DIR)/lib%.a: $(FIXTURE_SRC)/%.def
 	@mkdir -p $(dir $@)
-	$(DLLTOOL) -d $< -l $@
+	$(DLLTOOL) -k -d $< -l $@
 
 $(FIXTURE_DIR)/pe_basic.dll: $(FIXTURE_SRC)/pe_basic.c \
 		$(FIXTURE_SRC)/pe_basic.def $(FIXTURE_DIR)/pe_basic.res.o \
@@ -88,6 +89,27 @@ $(FIXTURE_DIR)/pe_missing.dll: $(FIXTURE_SRC)/pe_missing.c \
 		$(FIXTURE_SRC)/fixture.h
 	$(MINGW_CC) $(FIXTURE_CFLAGS) -o $@ $(filter-out %.h,$^)
 
+# Links against kernel32 (the mingw import library) and a made-up function.
+$(FIXTURE_DIR)/pe_runtime.dll: $(FIXTURE_SRC)/pe_runtime.c \
+		$(FIXTURE_DIR)/libvfw_missing.a $(FIXTURE_SRC)/fixture.h
+	$(MINGW_CC) $(FIXTURE_CFLAGS) -o $@ $< $(FIXTURE_DIR)/libvfw_missing.a \
+		-lkernel32
+
+# Calls into kernel32 with a 4-byte-aligned stack, as MSVC code does.
+$(FIXTURE_DIR)/pe_k32.dll: $(FIXTURE_SRC)/pe_k32.c $(FIXTURE_DIR)/pe_k32.res.o \
+		$(FIXTURE_SRC)/fixture.h
+	$(MINGW_CC) $(FIXTURE_CFLAGS) -mpreferred-stack-boundary=2 -o $@ \
+		$(filter-out %.h,$^) -lkernel32
+
+# A small VfW codec. -fno-builtin and no loop-to-memset rewriting keep it
+# free of calls into a C runtime it doesn't link.
+$(FIXTURE_DIR)/testcodec.dll: $(FIXTURE_SRC)/testcodec.c \
+		$(FIXTURE_SRC)/testcodec.def $(FIXTURE_DIR)/testcodec.res.o \
+		$(FIXTURE_SRC)/fixture.h
+	$(MINGW_CC) $(FIXTURE_CFLAGS) -mpreferred-stack-boundary=2 -fno-builtin \
+		-fno-tree-loop-distribute-patterns -o $@ $(filter-out %.h,$^) \
+		-lkernel32 -lwinmm -lmsvfw32
+
 # The same image as pe_reloc.dll with its relocations stripped.
 $(FIXTURE_DIR)/pe_noreloc.dll: $(FIXTURE_DIR)/pe_reloc.dll
 	$(MINGW_OBJCOPY) --remove-section .reloc $< $@
@@ -96,9 +118,17 @@ $(FIXTURE_DIR)/%.dll: $(FIXTURE_SRC)/%.c $(FIXTURE_SRC)/fixture.h
 	@mkdir -p $(dir $@)
 	$(MINGW_CC) $(FIXTURE_CFLAGS) -o $@ $<
 
-$(ABI_GEN): tests/abi/gen_abi_checks.c
+# Every constant in include/win32, checked by value against mingw-w64.
+ABI_CONSTANTS := $(BUILD)/tests/abi_constants.h
+$(ABI_CONSTANTS): tests/abi/constants.sh tests/abi/constants_skip.txt \
+		$(wildcard include/win32/*.h)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) -Itests/abi $(CFLAGS) -MMD -MP $(LDFLAGS) -o $@ $<
+	sh tests/abi/constants.sh include/win32/*.h > $@
+
+$(ABI_GEN): tests/abi/gen_abi_checks.c $(ABI_CONSTANTS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -Itests/abi -I$(BUILD)/tests $(CFLAGS) -MMD -MP \
+		$(LDFLAGS) -o $@ $<
 
 $(ABI_INC): $(ABI_GEN)
 	$(ABI_GEN) > $@
@@ -133,10 +163,23 @@ smoke: $(BIN) $(if $(HAVE_MINGW),fixtures)
 	@$(BIN) --help > /dev/null
 	@! $(BIN) no-such-command 2> /dev/null
 	@! $(BIN) info Makefile 2> /dev/null
+	@! $(BIN) probe Makefile 2> /dev/null
+	@VFW_INI=/nonexistent $(BIN) list > /dev/null
+	@! $(BIN) avi Makefile 2> /dev/null
+	@! $(BIN) convert Makefile -o /dev/null --format raw 2> /dev/null
 	@if [ -n "$(HAVE_MINGW)" ]; then \
 		$(BIN) info $(FIXTURE_DIR)/pe_dep.dll > /dev/null; \
+		$(BIN) probe $(FIXTURE_DIR)/testcodec.dll | grep -q "handler 'TST0'"; \
 	fi
 	@echo "smoke: CLI ok"
+
+# Cross-checks the AVI and image code against FFmpeg (exit 77: no FFmpeg).
+validate-media: $(BIN) $(BUILD)/tests/test_avi $(BUILD)/tests/test_image
+	@tests/validate_media.sh $(BUILD) $(BUILD)/media; rc=$$?; \
+	if [ $$rc -eq 77 ]; then \
+		echo "validate-media: SKIP (install ffmpeg)"; \
+		[ -z "$(REQUIRE_FFMPEG)" ] || exit 1; \
+	elif [ $$rc -ne 0 ]; then exit 1; fi
 
 SANITIZE := -fsanitize=address,undefined -fno-sanitize-recover=undefined
 

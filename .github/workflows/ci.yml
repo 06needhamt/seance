@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchains
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-multilib mingw-w64 ffmpeg
+
+      - name: Build
+        run: make -j"$(nproc)"
+
+      - name: Test
+        run: make -j"$(nproc)" test REQUIRE_MINGW=1
+
+      # The AVI reader and writer and the output writers against FFmpeg.
+      - name: Validate media against FFmpeg
+        run: make validate-media REQUIRE_FFMPEG=1
+
+  sanitizers:
+    name: Unit tests under ASan and UBSan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchains
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-multilib mingw-w64
+
+      # The runner's high mmap randomisation can collide with ASan's shadow
+      # memory; this is the usual workaround.
+      - name: Reduce mmap randomisation
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Test
+        run: make -j"$(nproc)" asan REQUIRE_MINGW=1
+
+  minimal:
+    name: Build without mingw-w64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-multilib
+
+      # Fixture tests and the ABI check report SKIP; everything else must pass.
+      - name: Build and test
+        run: make -j"$(nproc)" test

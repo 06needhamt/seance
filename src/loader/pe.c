@@ -1026,6 +1026,7 @@ static int res_leaf(const struct res_walk *w, DWORD data,
 	    !(p = pe_ptr(w->img, w->root + data, sizeof(de))))
 		FAIL("bad PE file: resource data entry out of range");
 	memcpy(&de, p, sizeof(de));
+	out->entry_rva = w->root + data;
 	out->data_rva = de.OffsetToData;
 	out->size = de.Size;
 	out->codepage = de.CodePage;

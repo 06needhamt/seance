@@ -1,0 +1,7 @@
+; DriverProc is exported undecorated, as installable drivers do.
+LIBRARY testcodec.dll
+EXPORTS
+	DriverProc=DriverProc@20
+	testcodec_open_count
+	testcodec_selftest
+	testcodec_stats

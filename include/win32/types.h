@@ -51,6 +51,10 @@ typedef UINT_PTR  WPARAM;
 typedef LONG_PTR  LPARAM;
 typedef LONG_PTR  LRESULT;
 typedef LONG      HRESULT;
+typedef ULONG_PTR SIZE_T;
+typedef LONG_PTR  SSIZE_T;
+typedef DWORD     LCID;
+typedef WORD      LANGID;
 
 /* Pointer types. */
 typedef void        *LPVOID, *PVOID;
@@ -78,6 +82,10 @@ typedef const WCHAR *LPCWSTR, *PCWSTR;
 	typedef struct name##__ *name
 
 typedef void *HANDLE;
+typedef HANDLE *PHANDLE, *LPHANDLE;
+typedef SIZE_T *PSIZE_T;
+typedef DWORD_PTR *PDWORD_PTR;
+typedef HANDLE HGLOBAL, HLOCAL, HRSRC;
 DECLARE_HANDLE(HINSTANCE);
 typedef HINSTANCE HMODULE;
 DECLARE_HANDLE(HWND);

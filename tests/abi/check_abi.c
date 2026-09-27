@@ -7,5 +7,6 @@
 #include <windows.h>
 #include <mmsystem.h>
 #include <vfw.h>
+#include <aviriff.h>
 
 #include "abi_checks.inc"
