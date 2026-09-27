@@ -23,6 +23,7 @@ _Static_assert(offsetof(struct win_teb, LastErrorValue) == 0x34, "TEB");
 _Static_assert(offsetof(struct win_teb, TlsSlots) == 0xe10, "TEB");
 _Static_assert(offsetof(struct win_teb, TlsExpansionSlots) == 0xf94, "TEB");
 _Static_assert(sizeof(struct win_teb) <= TEB_SIZE, "TEB size");
+_Static_assert(offsetof(struct win_teb, priv) == 0x1000, "TEB private area");
 _Static_assert(offsetof(struct win_peb, BeingDebugged) == 0x02, "PEB");
 _Static_assert(offsetof(struct win_peb, ImageBaseAddress) == 0x08, "PEB");
 _Static_assert(offsetof(struct win_peb, ProcessHeap) == 0x18, "PEB");
@@ -41,6 +42,23 @@ static unsigned char tls_used[TEB_TLS_MAX];
 
 static struct win_peb peb;
 static pthread_once_t peb_once = PTHREAD_ONCE_INIT;
+
+/* Implicit TLS templates, by index; protected by lock. */
+static struct static_tls {
+	int used;
+	const BYTE *tmpl;
+	size_t size, zero_fill;
+} static_tls[TEB_STATIC_TLS_MAX];
+
+/* A new thread's copy of template t. */
+static void *static_tls_block(const struct static_tls *t)
+{
+	size_t n = t->size + t->zero_fill;
+	BYTE *b = calloc(1, n ? n : 1);
+	if (b && t->size)
+		memcpy(b, t->tmpl, t->size);
+	return b;
+}
 
 static void peb_init(void)
 {
@@ -122,6 +140,20 @@ struct win_teb *teb_init_thread(void)
 	}
 
 	pthread_mutex_lock(&lock);
+	/* This thread's implicit TLS blocks. */
+	teb->ThreadLocalStoragePointer = teb->priv.static_tls;
+	for (int i = 0; i < TEB_STATIC_TLS_MAX; i++) {
+		if (!static_tls[i].used)
+			continue;
+		if (!(teb->priv.static_tls[i] = static_tls_block(&static_tls[i]))) {
+			pthread_mutex_unlock(&lock);
+			for (int j = 0; j < i; j++)
+				free(teb->priv.static_tls[j]);
+			munmap(teb, TEB_SIZE);
+			vfw_set_error("out of memory for a thread's TLS");
+			return NULL;
+		}
+	}
 	int entry = -1;
 	for (int i = 0; i < LDT_ENTRIES; i++) {
 		if (!ldt_used[i]) {
@@ -132,6 +164,8 @@ struct win_teb *teb_init_thread(void)
 	if (entry < 0 || set_ldt(entry, teb, TEB_SIZE - 1, 1)) {
 		int err = errno;
 		pthread_mutex_unlock(&lock);
+		for (int i = 0; i < TEB_STATIC_TLS_MAX; i++)
+			free(teb->priv.static_tls[i]);
 		munmap(teb, TEB_SIZE);
 		if (entry < 0)
 			vfw_set_error("no free LDT entries");
@@ -171,6 +205,9 @@ void teb_exit_thread(void)
 	ldt_used[teb->priv.ldt_entry] = 0;
 	pthread_mutex_unlock(&lock);
 
+	for (int i = 0; i < TEB_STATIC_TLS_MAX; i++)
+		free(teb->priv.static_tls[i]);
+
 	if (teb->TlsExpansionSlots)
 		munmap(teb->TlsExpansionSlots, EXPANSION_BYTES);
 	munmap(teb, TEB_SIZE);
@@ -186,6 +223,59 @@ void teb_foreach(void (*fn)(struct win_teb *teb, void *ctx), void *ctx)
 	pthread_mutex_lock(&lock);
 	for (struct win_teb *t = all_tebs; t; t = t->priv.next)
 		fn(t, ctx);
+	pthread_mutex_unlock(&lock);
+}
+
+/* Implicit TLS. */
+
+DWORD teb_static_tls_add(const void *tmpl, size_t size, size_t zero_fill)
+{
+	DWORD index = 0xffffffff;
+
+	if (size > (64u << 20) || zero_fill > (64u << 20)) {
+		vfw_set_error("TLS template too large");
+		return index;
+	}
+	pthread_mutex_lock(&lock);
+	for (DWORD i = 0; i < TEB_STATIC_TLS_MAX; i++)
+		if (!static_tls[i].used) {
+			index = i;
+			break;
+		}
+	if (index == 0xffffffff) {
+		pthread_mutex_unlock(&lock);
+		vfw_set_error("too many modules with TLS (%d)", TEB_STATIC_TLS_MAX);
+		return index;
+	}
+	struct static_tls *t = &static_tls[index];
+	*t = (struct static_tls){ 1, tmpl, size, zero_fill };
+	/* Every thread there already gets its copy. */
+	for (struct win_teb *teb = all_tebs; teb; teb = teb->priv.next) {
+		if (!(teb->priv.static_tls[index] = static_tls_block(t))) {
+			for (struct win_teb *u = all_tebs; u != teb; u = u->priv.next) {
+				free(u->priv.static_tls[index]);
+				u->priv.static_tls[index] = NULL;
+			}
+			t->used = 0;
+			pthread_mutex_unlock(&lock);
+			vfw_set_error("out of memory for TLS");
+			return 0xffffffff;
+		}
+	}
+	pthread_mutex_unlock(&lock);
+	return index;
+}
+
+void teb_static_tls_remove(DWORD index)
+{
+	if (index >= TEB_STATIC_TLS_MAX)
+		return;
+	pthread_mutex_lock(&lock);
+	for (struct win_teb *teb = all_tebs; teb; teb = teb->priv.next) {
+		free(teb->priv.static_tls[index]);
+		teb->priv.static_tls[index] = NULL;
+	}
+	static_tls[index].used = 0;
 	pthread_mutex_unlock(&lock);
 }
 

@@ -751,7 +751,8 @@ WINFN(LPVOID) k32_VirtualAlloc(LPVOID addr, SIZE_T size, DWORD type,
 		r->next = regions;
 		regions = r;
 		pthread_mutex_unlock(&region_lock);
-		return addr ? addr : base;
+		/* A reservation starts at the 64 KiB boundary at or below addr. */
+		return base;
 	}
 
 	/* Commit pages inside an existing reservation. */

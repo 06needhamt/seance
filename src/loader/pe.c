@@ -12,6 +12,7 @@
 #include "common/error.h"
 #include "common/unicode.h"
 #include "loader/pe.h"
+#include "runtime/teb.h"
 
 #define MAX_SECTIONS     96		/* the PE/COFF limit */
 #define MAX_IMAGE_SIZE   (512u << 20)
@@ -226,6 +227,8 @@ void pe_free(struct pe_image *img)
 {
 	if (!img)
 		return;
+	if (img->has_tls)
+		teb_static_tls_remove(img->tls_index);
 	if (img->base)
 		munmap(img->base, img->map_len);
 	free(img->sections);
@@ -852,9 +855,6 @@ int pe_foreach_tls_callback(const struct pe_image *img, pe_tls_fn fn,
 	FAIL("bad PE file: too many TLS callbacks");
 }
 
-/* Phase 2 replaces this with the TEB's TLS slot allocator. */
-static DWORD next_tls_index;
-
 struct tls_call {
 	struct pe_image *img;
 	DWORD reason;
@@ -896,8 +896,22 @@ int pe_tls_init(struct pe_image *img)
 	if (pe_foreach_tls_callback(img, tls_check, NULL))
 		return -1;
 
+	/* The template: raw data from Start to End, then zero fill. */
+	const void *tmpl = NULL;
+	size_t size = 0;
+	if (tls.EndAddressOfRawData > tls.StartAddressOfRawData) {
+		size = tls.EndAddressOfRawData - tls.StartAddressOfRawData;
+		tmpl = pe_ptr(img, va_to_rva(img, tls.StartAddressOfRawData), size);
+		if (!tmpl)
+			FAIL("bad PE file: TLS data out of range");
+	} else if (tls.EndAddressOfRawData < tls.StartAddressOfRawData) {
+		FAIL("bad PE file: TLS data ends before it starts");
+	}
+	DWORD index = teb_static_tls_add(tmpl, size, tls.SizeOfZeroFill);
+	if (index == 0xffffffff)
+		return -1;
 	img->has_tls = 1;
-	img->tls_index = next_tls_index++;
+	img->tls_index = index;
 	if (tls.AddressOfIndex) {
 		BYTE *p = (BYTE *)pe_ptr(img, va_to_rva(img, tls.AddressOfIndex), 4);
 		if (!p)

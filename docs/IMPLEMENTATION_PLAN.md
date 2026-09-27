@@ -45,7 +45,7 @@ cli: vfw-harness info | probe | decode | encode | list
   - Imports: by name, by ordinal, and with bound-import tolerance.
   - Delay-load imports. Phase 1 parses and lists them; binding them eagerly moves to Phase 2, because a delay-loaded DLL's helper code imports kernel32.
   - Export lookup by name and by ordinal, including **forwarded exports** (`DLL.func`).
-  - **TLS directory:** set up the TLS slot index and callbacks.
+  - **TLS directory:** set up the TLS slot index and callbacks, and the implicit TLS template that `teb.c` copies into every thread's block (`fs:[0x2c]`), including threads that exist when the DLL is loaded (done).
   - A resource directory walker. Codecs use this for strings, dialogs, version info and manifests.
   - Entry-point calls for PROCESS/THREAD ATTACH/DETACH.
 - **`modules.c`:** a module table with refcounts. `LoadLibrary` resolves names in this order:
@@ -70,7 +70,7 @@ cli: vfw-harness info | probe | decode | encode | list
 - **kernel32 / ntdll-lite:**
   - **Memory:** Heap* on malloc with a size header, Local/Global*, Virtual* on mmap/mprotect.
   - **Sync:** critical sections (pointer to a recursive pthread mutex stored inside the 24-byte struct), Interlocked*, events, mutexes and semaphores on pthread, WaitFor{Single,Multiple}Object(s).
-  - **Threads:** CreateThread (pthread plus a new TEB and THREAD_ATTACH notifications), Tls*, and Fls* falling back to Tls.
+  - **Threads:** CreateThread (pthread plus a new TEB, and DLL_THREAD_ATTACH / DLL_THREAD_DETACH to the loaded DLLs' TLS callbacks and, unless DisableThreadLibraryCalls, DllMain; done), Tls*, and Fls* falling back to Tls.
   - **Time:** GetTickCount, QPC, GetSystemTime*, GetLocalTime, Sleep.
   - **Process info:** GetCurrent*, IsDebuggerPresent, GetVersion(Ex) reporting XP SP3, GetSystemInfo, IsProcessorFeaturePresent.
   - **Files:** CreateFile/ReadFile/WriteFile/Close/GetFileSize, mapped to a sandbox root.

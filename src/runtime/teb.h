@@ -19,6 +19,7 @@
 #define TEB_TLS_EXPANSION_SLOTS 1024
 #define TEB_TLS_MAX             (TEB_TLS_SLOTS + TEB_TLS_EXPANSION_SLOTS)
 #define TEB_SIZE                0x2000
+#define TEB_STATIC_TLS_MAX      128	/* modules with implicit TLS */
 
 /* The end of the SEH chain. */
 #define SEH_CHAIN_END ((void *)0xffffffff)
@@ -53,6 +54,8 @@ struct teb_private {
 	int ldt_entry;
 	pthread_t thread;
 	int in_exception;		/* SEH dispatch in progress */
+	/* The implicit TLS array fs:[0x2c] points to: a block per module. */
+	void *static_tls[TEB_STATIC_TLS_MAX];
 };
 
 struct win_teb {
@@ -108,5 +111,18 @@ BOOL teb_tls_free(DWORD index);
 BOOL teb_tls_set(DWORD index, void *value);
 void *teb_tls_get(DWORD index);
 int teb_tls_valid(DWORD index);
+
+/*
+ * Implicit (static) TLS, for modules with a TLS directory: MSVC's
+ * __declspec(thread) variables live in a per-thread copy of the module's
+ * TLS template, found as fs:[0x2c][_tls_index]. teb_static_tls_add()
+ * registers a template of size bytes followed by zero_fill zero bytes and
+ * gives every existing thread its block, as Windows Vista and later do for
+ * DLLs loaded at run time; threads created afterwards get theirs when their
+ * TEB is set up. Returns the index, or 0xffffffff with vfw_error().
+ * teb_static_tls_remove() frees every thread's block for that index.
+ */
+DWORD teb_static_tls_add(const void *tmpl, size_t size, size_t zero_fill);
+void teb_static_tls_remove(DWORD index);
 
 #endif /* VFW_RUNTIME_TEB_H */

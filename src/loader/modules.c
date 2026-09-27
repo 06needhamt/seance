@@ -366,6 +366,31 @@ static void detach(struct module *m)
 	pe_call_entry(m->img, DLL_PROCESS_DETACH);
 }
 
+void mod_thread_notify(DWORD reason)
+{
+	LOCK();
+	size_t n = 0;
+	for (struct module *m = modules; m; m = m->next)
+		n++;
+	struct module **list = n ? malloc(n * sizeof(*list)) : NULL;
+	if (list) {
+		/* modules is newest first. */
+		size_t i = n;
+		for (struct module *m = modules; m; m = m->next)
+			list[--i] = m;
+		for (size_t k = 0; k < n; k++) {
+			struct module *m = list[reason == DLL_THREAD_DETACH ? n - 1 - k : k];
+			if (!m->img || !m->attached)
+				continue;
+			pe_tls_notify(m->img, reason);
+			if (!m->no_thread_calls)
+				pe_call_entry(m->img, reason);
+		}
+		free(list);
+	}
+	UNLOCK();
+}
+
 static struct module *new_module(const char *name, const char *path)
 {
 	struct module *m = calloc(1, sizeof(*m));
