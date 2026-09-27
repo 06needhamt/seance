@@ -80,6 +80,9 @@ fixture(pe_sse pe_sse.c LIBS kernel32
 # __try/__except into _except_handler3 frames) and faults under them.
 fixture(pe_seh pe_seh.c LIBS kernel32 OPTIONS -mpreferred-stack-boundary=2)
 
+# Keeps settings in the registry (advapi32), as many codecs do.
+fixture(pe_reg pe_reg.c LIBS advapi32 OPTIONS -mpreferred-stack-boundary=2)
+
 # Imports msvcrt's math and string functions, as a codec with a dynamic
 # CRT (/MD) would.
 # -Wl,--disable-auto-import: no CRT startup object is linked (-nostdlib),

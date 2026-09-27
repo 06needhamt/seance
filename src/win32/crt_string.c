@@ -7,6 +7,7 @@
  */
 #include <ctype.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -102,9 +103,10 @@ CRTFN(double) crt_strtod(const char *s, char **end) { return strtod(s, end); }
 
 static char *itoa_base(long v, char *buf, int radix, int is_unsigned)
 {
-	if (radix == 10)
-		snprintf(buf, 34, is_unsigned ? "%lu" : "%ld", is_unsigned ?
-			 (unsigned long)v : v);
+	if (radix == 10 && is_unsigned)
+		snprintf(buf, 34, "%lu", (unsigned long)v);
+	else if (radix == 10)
+		snprintf(buf, 34, "%ld", v);
 	else if (radix == 16)
 		snprintf(buf, 34, "%lx", (unsigned long)v);
 	else if (radix == 8)
