@@ -1087,6 +1087,49 @@ static void test_static_tls(void)
 	}
 }
 
+/* SSE code with 16-byte stack assumptions, and threads' FPU defaults. */
+static void test_sse(void)
+{
+	const char *dir = getenv("VFW_FIXTURES");
+	char path[512];
+
+	snprintf(path, sizeof(path), "%s/pe_sse.dll", dir ? dir : ".");
+	if (!dir || access(path, R_OK)) {
+		printf("test_kernel32: pe_sse.dll not built, skipping SSE\n");
+		return;
+	}
+	struct module *m = mod_load(path, NULL);
+	CHECK(m != NULL);
+	if (!m)
+		return;
+	float (*dot)(const float *, const float *, int) = mod_get_proc(m, "sse_dot");
+	int (*aligned)(void) = mod_get_proc(m, "sse_stack_aligned");
+	void (*state)(DWORD *, DWORD *) = mod_get_proc(m, "sse_fpu_state");
+	int (*in_thread)(DWORD *, DWORD *, int *, float *) =
+		mod_get_proc(m, "sse_in_thread");
+	CHECK(dot && aligned && state && in_thread);
+	if (dot && aligned && state && in_thread) {
+		static const float a[9] = { 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+		CHECK(dot(a, a, 9) == 285.0f);
+		CHECK(aligned());
+
+		DWORD cw = 0, mxcsr = 0;
+		state(&cw, &mxcsr);
+		CHECK_EQ(cw, 0x27f);
+		CHECK_EQ(mxcsr & 0xffbf, 0x1f80);	/* DAZ aside */
+
+		int al = 0;
+		float d = 0;
+		cw = mxcsr = 0;
+		CHECK_EQ(in_thread(&cw, &mxcsr, &al, &d), 0);
+		CHECK_EQ(cw, 0x27f);
+		CHECK_EQ(mxcsr & 0xffbf, 0x1f80);
+		CHECK(al);
+		CHECK(d == 204.0f);
+	}
+	mod_free(m);
+}
+
 static void test_fixture(void)
 {
 	const char *dir = getenv("VFW_FIXTURES");
@@ -1142,6 +1185,7 @@ int main(void)
 
 	test_fixture();
 	test_static_tls();
+	test_sse();
 
 	mod_free(k32);
 	char cmd[512];

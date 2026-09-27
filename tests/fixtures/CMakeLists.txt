@@ -68,6 +68,12 @@ fixture(pe_runtime pe_runtime.c LIBS vfw_missing_imports kernel32)
 fixture(pe_k32 pe_k32.c pe_k32.rc LIBS kernel32
 	OPTIONS -mpreferred-stack-boundary=2)
 
+# SSE2 code that assumes a 16-byte-aligned stack on entry, as GCC-built and
+# SIMD codecs do.
+fixture(pe_sse pe_sse.c LIBS kernel32
+	OPTIONS -msse2 -mfpmath=sse -mpreferred-stack-boundary=4
+		-mincoming-stack-boundary=4 -fno-builtin)
+
 # A small VfW codec. -fno-builtin and no loop-to-memset rewriting keep it
 # free of calls into a C runtime it doesn't link.
 fixture(testcodec testcodec.c testcodec.def testcodec.rc

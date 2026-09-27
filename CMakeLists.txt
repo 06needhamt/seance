@@ -12,6 +12,7 @@
 #   VFW_REQUIRE_FFMPEG  fail instead of skipping the FFmpeg checks
 #   VFW_SANITIZE        build with AddressSanitizer and UBSan
 #   VFW_MINGW_PREFIX    the mingw-w64 tool prefix (i686-w64-mingw32-)
+#   VFW_SAMPLES_DIR     codec DLLs for the samples test (info and probe)
 cmake_minimum_required(VERSION 3.20)
 
 # The harness loads 32-bit Windows DLLs into its own address space, so it
@@ -35,6 +36,8 @@ option(VFW_REQUIRE_FFMPEG "Fail the media checks if FFmpeg is missing" OFF)
 option(VFW_SANITIZE "Build with AddressSanitizer and UBSan" OFF)
 set(VFW_MINGW_PREFIX "i686-w64-mingw32-" CACHE STRING
 	"Prefix of the mingw-w64 cross tools")
+set(VFW_SAMPLES_DIR "" CACHE PATH
+	"A directory of codec DLLs to run info and probe over (the samples test)")
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 	set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
@@ -169,6 +172,21 @@ if(BUILD_TESTING)
 			$<$<BOOL:${VFW_MINGW_CC}>:${VFW_FIXTURE_DIR}>
 			$<IF:$<BOOL:${VFW_SANITIZE}>,0,1>)
 	set_tests_properties(smoke PROPERTIES LABELS cli)
+
+	# info and probe over codec DLLs you supply; the script itself is
+	# checked over the fixture DLLs.
+	if(VFW_MINGW_CC)
+		add_test(NAME samples_fixtures
+			COMMAND sh ${PROJECT_SOURCE_DIR}/tests/samples.sh
+				$<TARGET_FILE:vfw-harness> ${VFW_FIXTURE_DIR})
+		set_tests_properties(samples_fixtures PROPERTIES LABELS cli)
+	endif()
+	if(VFW_SAMPLES_DIR)
+		add_test(NAME samples
+			COMMAND sh ${PROJECT_SOURCE_DIR}/tests/samples.sh
+				$<TARGET_FILE:vfw-harness> ${VFW_SAMPLES_DIR})
+		set_tests_properties(samples PROPERTIES LABELS samples)
+	endif()
 
 	# The AVI and image code cross-checked with FFmpeg.
 	add_test(NAME validate_media

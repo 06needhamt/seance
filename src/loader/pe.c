@@ -374,8 +374,10 @@ int pe_map(struct pe_image *img, unsigned flags)
 		DWORD raw = s->SizeOfRawData;
 		if (raw > section_vsize(s))
 			raw = section_vsize(s);
-		memcpy(img->base + s->VirtualAddress,
-		       img->file + s->PointerToRawData, raw);
+		/* PointerToRawData means nothing (and isn't checked) without data. */
+		if (raw)
+			memcpy(img->base + s->VirtualAddress,
+			       img->file + s->PointerToRawData, raw);
 	}
 
 	DWORD delta = (DWORD)(uintptr_t)base - o->ImageBase;

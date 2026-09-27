@@ -344,6 +344,97 @@ static void test_avi(void)
 	CHECK(source_open(path_of("u.avi"), &o) == NULL);
 }
 
+static DWORD rng_state = 0x2545f491;
+
+static DWORD rng(void)
+{
+	rng_state ^= rng_state << 13;
+	rng_state ^= rng_state >> 17;
+	rng_state ^= rng_state << 5;
+	return rng_state;
+}
+
+static void *read_back(const char *path, size_t *len)
+{
+	FILE *f = fopen(path, "rb");
+	void *p = NULL;
+	if (!f)
+		return NULL;
+	fseek(f, 0, SEEK_END);
+	*len = (size_t)ftell(f);
+	rewind(f);
+	if ((p = malloc(*len)) && fread(p, 1, *len, f) != *len) {
+		free(p);
+		p = NULL;
+	}
+	fclose(f);
+	return p;
+}
+
+/*
+ * Damaged inputs: every truncation of small Y4M, BMP and AVI files and
+ * random byte changes, read to the end. Nothing may crash or overrun (the
+ * sanitizer build checks that); errors are fine.
+ */
+static void test_fuzz(void)
+{
+	static const char *const names[] = { "fz.y4m", "fz.bmp", "fz.avi" };
+	BITMAPINFOHEADER b = { .biSize = 40, .biWidth = 5, .biHeight = 3,
+			       .biPlanes = 1, .biBitCount = 24,
+			       .biCompression = BI_RGB, .biSizeImage = 48 };
+	BYTE frame[48];
+
+	write_y4m(path_of(names[0]), "W7 H5 F25:1 C420jpeg", 7, 5, 3, 0);
+	write_bmp(path_of(names[1]), 5, 3, 8, 3);
+	struct avi_writer *w = avi_writer_open(path_of(names[2]), &b, sizeof(b),
+					       0, 25, 1, NULL);
+	for (int i = 0; w && i < 3; i++) {
+		memset(frame, i, sizeof(frame));
+		avi_writer_add(w, frame, sizeof(frame), 1);
+	}
+	CHECK(w && avi_writer_close(w) == 0);
+
+	int opened = 0, frames = 0;
+	for (size_t k = 0; k < 3; k++) {
+		size_t len;
+		BYTE *orig = read_back(path_of(names[k]), &len);
+		CHECK(orig != NULL);
+		if (!orig)
+			continue;
+		BYTE *buf = malloc(len);
+		const char *p = path_of(k == 0 ? "cut.y4m" : k == 1 ? "cut.bmp" : "cut.avi");
+		for (int iter = 0; iter < (int)len + 600; iter++) {
+			size_t n = len;
+			memcpy(buf, orig, len);
+			if (iter < (int)len) {
+				n = (size_t)iter;		/* each truncation */
+			} else {
+				int flips = 1 + rng() % 4;	/* then damage */
+				for (int f = 0; f < flips; f++)
+					buf[rng() % (len < 256 || iter % 2 ? len : 256)] = rng();
+			}
+			write_bytes(p, buf, n);
+			struct source *s = source_open(p, NULL);
+			if (!s)
+				continue;
+			opened++;
+			const BYTE *fr;
+			size_t fl;
+			while (source_read(s, &fr, &fl) == 1) {
+				/* Touch every byte a frame claims to have. */
+				volatile BYTE sum = 0;
+				for (size_t i = 0; i < fl; i++)
+					sum += fr[i];
+				frames++;
+			}
+			source_close(s);
+		}
+		free(buf);
+		free(orig);
+	}
+	CHECK(opened > 0 && frames > 0);
+}
+
 int main(void)
 {
 	const char *t = getenv("TMPDIR");
@@ -356,6 +447,7 @@ int main(void)
 	test_raw();
 	test_bmp();
 	test_avi();
+	test_fuzz();
 
 	char cmd[4200];
 	snprintf(cmd, sizeof(cmd), "rm -rf '%s'", dir);
