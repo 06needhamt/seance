@@ -14,6 +14,8 @@
  * from <windows.h>, which gates them behind facilities this freestanding
  * build doesn't have.
  */
+#include <stddef.h>
+
 #include "fixture.h"
 
 struct seh_frame {
