@@ -6,6 +6,8 @@
  */
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 
 #include "loader/modules.h"
@@ -285,6 +287,12 @@ static void test_ui(void)
 	CHECK_EQ((UINT_PTR)FindExecutableA("C:\\readme.txt", NULL, exe),
 		 SE_ERR_NOASSOC);
 	CHECK_STR(exe, "");
+	CHECK_EQ((UINT_PTR)FindExecutableA("C:\\nope.txt", NULL, exe),
+		 SE_ERR_FNF);
+	CHECK_EQ((UINT_PTR)FindExecutableA("readme.txt", "C:\\", exe),
+		 SE_ERR_NOASSOC);
+	CHECK_EQ((UINT_PTR)FindExecutableA("readme.txt", "C:\\made", exe),
+		 SE_ERR_FNF);
 
 	char name[MAX_PATH] = "x";
 	BROWSEINFOA bi;
@@ -367,6 +375,27 @@ static void test_file_operation(void)
 	CHECK(OP(FO_COPY, "C:\\src\0", "C:\\src\\sub\\inner\0", 0) != 0);
 	CHECK(!exists("src/sub/inner"));
 
+	/* A file bigger than one read, and a copy cut short by a full disk. */
+	FILE *f = fopen(on_disk("big.bin"), "wb");
+	CHECK(f != NULL);
+	for (int i = 0; f && i < 150000; i++)
+		fputc(i * 7, f);
+	if (f)
+		fclose(f);
+	CHECK_EQ(OP(FO_COPY, "C:\\big.bin\0", "C:\\big2.bin\0", 0), 0);
+	struct stat st;
+	CHECK(!stat(on_disk("big2.bin"), &st) && st.st_size == 150000);
+	struct rlimit old, lim;
+	void (*xfsz)(int) = signal(SIGXFSZ, SIG_IGN);
+	CHECK(!getrlimit(RLIMIT_FSIZE, &old));
+	lim = old;
+	lim.rlim_cur = 70000;	/* the second write stops short */
+	CHECK(!setrlimit(RLIMIT_FSIZE, &lim));
+	CHECK_EQ(OP(FO_COPY, "C:\\big.bin\0", "C:\\big3.bin\0", 0),
+		 ERROR_DISK_FULL);
+	CHECK(!setrlimit(RLIMIT_FSIZE, &old));
+	signal(SIGXFSZ, xfsz);
+
 	/* Move, rename, delete. */
 	CHECK_EQ(OP(FO_MOVE, "C:\\dst\\two.TXT\0", "C:\\moved.txt\0", 0), 0);
 	CHECK(!exists("dst/two.TXT") && exists("moved.txt"));
@@ -382,6 +411,18 @@ static void test_file_operation(void)
 		 ERROR_FILE_NOT_FOUND);
 	CHECK_EQ(OP(FO_DELETE, "C:\\files\\*\0", NULL, 0), 0);
 	CHECK(is_dir("files") && !exists("files/one.txt"));
+	/* Without recursion a directory isn't entered: only an empty one goes. */
+	mkdir(on_disk("keep"), 0755);
+	mkdir(on_disk("keep/inner"), 0755);
+	write_file("keep/inner/x.txt", "x");
+	CHECK_EQ(OP(FO_DELETE, "C:\\keep\0", NULL, FOF_NORECURSION),
+		 ERROR_DIR_NOT_EMPTY);
+	CHECK(exists("keep/inner/x.txt"));
+	CHECK_EQ(OP(FO_DELETE, "C:\\keep\\inner\\x.txt\0", NULL,
+		    FOF_NORECURSION), 0);
+	CHECK_EQ(OP(FO_DELETE, "C:\\keep\\inner\0", NULL, FOF_NORECURSION),
+		 0);
+	CHECK(is_dir("keep") && !exists("keep/inner"));
 	CHECK(OP(9, "C:\\src\0", NULL, 0) != 0);
 #undef OP
 

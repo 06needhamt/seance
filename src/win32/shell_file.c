@@ -146,7 +146,13 @@ static DWORD errno_error(void)
 	return win_error_from_errno(errno);
 }
 
-static DWORD delete_tree(const char *path)
+/*
+ * Deletes a file, or a directory with everything in it; without recurse
+ * (FOF_NORECURSION), as copy_tree does, a directory isn't entered: an
+ * empty one is removed, and one with anything in it stays, with
+ * ERROR_DIR_NOT_EMPTY.
+ */
+static DWORD delete_tree(const char *path, int recurse)
 {
 	struct stat st;
 
@@ -154,6 +160,8 @@ static DWORD delete_tree(const char *path)
 		return errno == ENOENT ? ERROR_FILE_NOT_FOUND : errno_error();
 	if (!S_ISDIR(st.st_mode))
 		return unlink(path) ? errno_error() : 0;
+	if (!recurse)
+		return rmdir(path) ? errno_error() : 0;
 	DIR *d = opendir(path);
 	if (!d)
 		return errno_error();
@@ -163,7 +171,7 @@ static DWORD delete_tree(const char *path)
 		if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
 			continue;
 		char *p = join(path, e->d_name);
-		err = p ? delete_tree(p) : ERROR_NOT_ENOUGH_MEMORY;
+		err = p ? delete_tree(p, 1) : ERROR_NOT_ENOUGH_MEMORY;
 		free(p);
 	}
 	closedir(d);
@@ -185,13 +193,23 @@ static DWORD copy_one(const char *from, const char *to)
 		close(in);
 		return err;
 	}
-	while ((n = read(in, buf, sizeof(buf))) > 0)
-		if (write(out, buf, (size_t)n) != n) {
-			n = -1;
-			break;
+	while (!err && (n = read(in, buf, sizeof(buf))) != 0) {
+		if (n < 0) {
+			if (errno != EINTR)
+				err = errno_error();
+			continue;
 		}
-	if (n < 0)
-		err = errno_error();
+		/* Short writes go on from where they stopped. */
+		for (ssize_t done = 0; !err && done < n;) {
+			ssize_t w = write(out, buf + done, (size_t)(n - done));
+			if (w > 0)
+				done += w;
+			else if (!w)
+				err = ERROR_DISK_FULL;
+			else if (errno != EINTR)
+				err = errno_error();
+		}
+	}
 	close(in);
 	if (close(out) && !err)
 		err = errno_error();
@@ -286,7 +304,7 @@ static DWORD transfer(const char *from, const char *to, int move,
 	} else {
 		err = copy_tree(from, to, !(flags & FOF_NORECURSION) || move);
 		if (!err && move)
-			err = delete_tree(from);
+			err = delete_tree(from, 1);
 	}
 	free(dest);
 	return err;
@@ -333,7 +351,8 @@ static DWORD file_op(UINT func, const struct list *from,
 
 	if (func == FO_DELETE) {
 		for (int i = 0; !err && i < src.n; i++)
-			err = delete_tree(src.item[i]);
+			err = delete_tree(src.item[i],
+					  !(flags & FOF_NORECURSION));
 		list_free(&src);
 		return err;
 	}

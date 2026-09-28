@@ -36,7 +36,8 @@ DWORD win_error_from_errno(int err)
 	case EROFS:        return ERROR_ACCESS_DENIED;
 	case EEXIST:       return ERROR_FILE_EXISTS;
 	case ENOMEM:       return ERROR_NOT_ENOUGH_MEMORY;
-	case ENOSPC:       return ERROR_DISK_FULL;
+	case ENOSPC:
+	case EFBIG:        return ERROR_DISK_FULL;
 	case EBADF:        return ERROR_INVALID_HANDLE;
 	case EINVAL:       return ERROR_INVALID_PARAMETER;
 	case ENOTEMPTY:    return ERROR_DIR_NOT_EMPTY;

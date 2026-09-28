@@ -693,18 +693,49 @@ WINFN(BOOL) sh_ShellExecuteExW(SHELLEXECUTEINFOW *info)
 	return FALSE;
 }
 
+/*
+ * No program is associated with anything: SE_ERR_FNF for a file (in dir,
+ * when relative) that isn't there, else SE_ERR_NOASSOC.
+ */
+static UINT_PTR find_executable(const void *file, const void *dir, int wide)
+{
+	char *f = dup_text(file, wide), *d = dup_text(dir, wide);
+	UINT_PTR r = SE_ERR_NOASSOC;
+
+	if (f && d && *d && f[0] != '\\' && f[0] != '/' &&
+	    !(f[0] && f[1] == ':')) {
+		size_t n = strlen(d);
+		char *j = malloc(n + strlen(f) + 2);
+		if (j) {
+			memcpy(j, d, n);
+			if (d[n - 1] != '\\' && d[n - 1] != '/')
+				j[n++] = '\\';
+			strcpy(j + n, f);
+		}
+		free(f);
+		f = j;
+	}
+	char *u = f ? path_to_unix(f) : NULL;
+	if (!u || access(u, F_OK))
+		r = SE_ERR_FNF;
+	free(u);
+	free(f);
+	free(d);
+	return r;
+}
+
 WINFN(HINSTANCE) sh_FindExecutableA(LPCSTR file, LPCSTR dir, LPSTR result)
 {
 	if (result)
 		result[0] = 0;
-	return (HINSTANCE)SE_ERR_NOASSOC;
+	return (HINSTANCE)find_executable(file, dir, 0);
 }
 
 WINFN(HINSTANCE) sh_FindExecutableW(LPCWSTR file, LPCWSTR dir, LPWSTR result)
 {
 	if (result)
 		result[0] = 0;
-	return (HINSTANCE)SE_ERR_NOASSOC;
+	return (HINSTANCE)find_executable(file, dir, 1);
 }
 
 /* The folder browser, cancelled, as a user closing it would. */
