@@ -108,6 +108,13 @@ static void test_printf(void)
 	short h = 0;
 	sprintf_(b, "ab%ncd%hn", &n, &h);
 	CHECK(n == 2 && h == 4);
+	/* Each size writes just its own width. */
+	unsigned char guard[4] = { 0x55, 0x55, 0x55, 0x55 };
+	long long big = -1, big2 = -1;
+	sprintf_(b, "abc%hhn%I64n%lln", &guard[1], &big, &big2);
+	CHECK(guard[0] == 0x55 && guard[1] == 3 && guard[2] == 0x55 &&
+	      guard[3] == 0x55);
+	CHECK(big == 3 && big2 == 3);
 	sprintf_(b, "100%% %y %");
 	CHECK_STR(b, "100% y ");
 

@@ -390,9 +390,14 @@ static void format(struct sink *s, const void *fmt, va_list *ap)
 			break;
 		}
 		case 'n': {
+			/* Through a pointer as wide as the size prefix says. */
 			void *p = va_arg(*ap, void *);
-			if (sp.size == SZ_H)
+			if (sp.size == SZ_HH)
+				*(signed char *)p = (signed char)s->len;
+			else if (sp.size == SZ_H)
 				*(short *)p = (short)s->len;
+			else if (sp.size == SZ_64)
+				*(long long *)p = (long long)s->len;
 			else
 				*(int *)p = (int)s->len;
 			break;
