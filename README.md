@@ -19,7 +19,7 @@ Work is split into phases; see [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION
 | 0 | Build skeleton, Win32 headers, ABI cross-check, CLI skeleton | done |
 | 1 | PE loader and `info` | done |
 | 2 | Win32 runtime (TEB, SEH, threads, stub DLLs) | in progress: TEB, built-in DLLs, kernel32, ntdll, SEH dispatch, delay-load binding, the msvcrt-family CRT (math/string/stdio/startup/64-bit arithmetic helpers), msvcrt's `__try`/`__except` handlers, its printf dialect and `_CI*` intrinsics, headless user32, gdi32 and advapi32 (registry), version, ole32 and shell32 done; C++ EH still open |
-| 3 | VfW layer and `probe` | done: driver lifecycle, ICM API (including ICSeqCompressFrame* and ICImageCompress/ICImageDecompress), winmm/msvfw32 built-ins, `probe`, `list` |
+| 3 | VfW layer and `probe` | done: driver lifecycle, ICM API (including ICSeqCompressFrame*, ICImageCompress/ICImageDecompress and DrawDib*), winmm/msvfw32 built-ins, `probe`, `list` |
 | 4 | AVI / Y4M I/O, `decode` and `encode` | done: AVI reader and writer, Y4M/BMP/raw input and output, `avi`, `convert`, `decode`, `encode` |
 | 5 | Hardening and CI | done: DLL memory below 2 GB, crash and hang reports, SSE/FPU fixture, fuzzing, samples run, CI |
 
@@ -229,7 +229,8 @@ user32, gdi32, advapi32, version, ole32 and shell32 are built in too, headless:
   compressor dialog, `ICCompressorChoose`, answers as if OK were pressed
   on its initial selection (the compressor chosen last time, else Full
   Frames), or as `$VFW_COMPRESSOR` says: a FOURCC, `uncompressed` or
-  `cancel`.
+  `cancel`. DrawDib draws DIBs, compressed or not, onto a memory DC as on
+  Windows; drawing to a window's DC is discarded.
 - **gdi32:** memory DCs, device-dependent bitmaps and DIB sections, with
   conversion between every DIB format and blits between them (`BitBlt`,
   `StretchBlt`, `StretchDIBits`, `GetDIBits`, ...), palettes, brushes,
