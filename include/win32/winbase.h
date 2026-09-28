@@ -53,6 +53,7 @@
 #define ERROR_INVALID_ADDRESS          487
 #define ERROR_NOACCESS                 998
 #define ERROR_INVALID_FLAGS            1004
+#define ERROR_NO_TOKEN                 1008
 #define ERROR_BADDB                    1009
 #define ERROR_BADKEY                   1010
 #define ERROR_CANTOPEN                 1011
@@ -63,6 +64,18 @@
 #define ERROR_DLL_INIT_FAILED          1114
 #define ERROR_NO_ASSOCIATION           1155
 #define ERROR_CANCELLED                1223
+#define ERROR_NOT_ALL_ASSIGNED         1300
+#define ERROR_SOME_NOT_MAPPED          1301
+#define ERROR_UNKNOWN_REVISION         1305
+#define ERROR_NO_IMPERSONATION_TOKEN   1309
+#define ERROR_NO_SUCH_PRIVILEGE        1313
+#define ERROR_NONE_MAPPED              1332
+#define ERROR_INVALID_ACL              1336
+#define ERROR_INVALID_SID              1337
+#define ERROR_INVALID_SECURITY_DESCR   1338
+#define ERROR_ALLOTTED_SPACE_EXCEEDED  1344
+#define ERROR_BAD_IMPERSONATION_LEVEL  1346
+#define ERROR_BAD_TOKEN_TYPE           1349
 #define ERROR_INVALID_WINDOW_HANDLE    1400
 #define ERROR_TLW_WITH_WSCHILD         1406
 #define ERROR_CANNOT_FIND_WND_CLASS    1407
@@ -72,6 +85,8 @@
 #define ERROR_INVALID_INDEX            1413
 #define ERROR_CONTROL_ID_NOT_FOUND     1421
 #define ERROR_TIMEOUT                  1460
+#define ERROR_DATATYPE_MISMATCH        1629
+#define ERROR_UNSUPPORTED_TYPE         1630
 #define ERROR_RESOURCE_DATA_NOT_FOUND  1812
 #define ERROR_RESOURCE_TYPE_NOT_FOUND  1813
 #define ERROR_RESOURCE_NAME_NOT_FOUND  1814

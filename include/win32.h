@@ -10,6 +10,7 @@
 #include "win32/wingdi.h"
 #include "win32/winuser.h"
 #include "win32/winreg.h"
+#include "win32/winsec.h"
 #include "win32/objbase.h"
 #include "win32/shellapi.h"
 #include "win32/shlobj.h"

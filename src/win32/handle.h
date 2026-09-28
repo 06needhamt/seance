@@ -23,6 +23,7 @@ enum kobj_type {
 	KOBJ_MAPPING,
 	KOBJ_FIND,
 	KOBJ_KEY,
+	KOBJ_TOKEN,
 };
 
 struct kobject {

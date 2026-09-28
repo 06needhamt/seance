@@ -404,6 +404,81 @@
 	O(DRAWDIBTIME, timeDraw) O(DRAWDIBTIME, timeDecompress) \
 	O(DRAWDIBTIME, timeDither) O(DRAWDIBTIME, timeStretch) \
 	O(DRAWDIBTIME, timeBlt) O(DRAWDIBTIME, timeSetDIBits) \
+	/* winnt.h, accctrl.h, wincrypt.h: security */ \
+	S(ACCESS_MASK) S(PSID) S(PSECURITY_DESCRIPTOR) \
+	S(SECURITY_DESCRIPTOR_CONTROL) S(SECURITY_INFORMATION) S(HCRYPTPROV) \
+	A(SID) A(SID_AND_ATTRIBUTES) A(LUID) A(LUID_AND_ATTRIBUTES) \
+	A(TOKEN_STATISTICS) A(ACL) A(ACE_HEADER) A(SECURITY_DESCRIPTOR) \
+	S(SID_IDENTIFIER_AUTHORITY) S(SID) O(SID, Revision) \
+	O(SID, SubAuthorityCount) O(SID, IdentifierAuthority) \
+	O(SID, SubAuthority) S(SID_NAME_USE) S(WELL_KNOWN_SID_TYPE) \
+	S(SID_AND_ATTRIBUTES) O(SID_AND_ATTRIBUTES, Sid) \
+	O(SID_AND_ATTRIBUTES, Attributes) \
+	S(LUID) O(LUID, LowPart) O(LUID, HighPart) \
+	S(LUID_AND_ATTRIBUTES) O(LUID_AND_ATTRIBUTES, Luid) \
+	O(LUID_AND_ATTRIBUTES, Attributes) \
+	S(PRIVILEGE_SET) O(PRIVILEGE_SET, PrivilegeCount) \
+	O(PRIVILEGE_SET, Control) O(PRIVILEGE_SET, Privilege) \
+	S(TOKEN_TYPE) S(SECURITY_IMPERSONATION_LEVEL) \
+	S(TOKEN_ELEVATION_TYPE) S(TOKEN_INFORMATION_CLASS) \
+	S(TOKEN_USER) O(TOKEN_USER, User) \
+	S(TOKEN_GROUPS) O(TOKEN_GROUPS, GroupCount) O(TOKEN_GROUPS, Groups) \
+	S(TOKEN_PRIVILEGES) O(TOKEN_PRIVILEGES, PrivilegeCount) \
+	O(TOKEN_PRIVILEGES, Privileges) \
+	S(TOKEN_OWNER) S(TOKEN_PRIMARY_GROUP) S(TOKEN_ELEVATION) \
+	S(TOKEN_MANDATORY_LABEL) \
+	S(TOKEN_STATISTICS) O(TOKEN_STATISTICS, TokenId) \
+	O(TOKEN_STATISTICS, AuthenticationId) \
+	O(TOKEN_STATISTICS, ExpirationTime) O(TOKEN_STATISTICS, TokenType) \
+	O(TOKEN_STATISTICS, ImpersonationLevel) \
+	O(TOKEN_STATISTICS, DynamicCharged) \
+	O(TOKEN_STATISTICS, DynamicAvailable) \
+	O(TOKEN_STATISTICS, GroupCount) O(TOKEN_STATISTICS, PrivilegeCount) \
+	O(TOKEN_STATISTICS, ModifiedId) \
+	S(ACL) O(ACL, AclRevision) O(ACL, Sbz1) O(ACL, AclSize) \
+	O(ACL, AceCount) O(ACL, Sbz2) \
+	S(ACE_HEADER) O(ACE_HEADER, AceType) O(ACE_HEADER, AceFlags) \
+	O(ACE_HEADER, AceSize) \
+	S(ACCESS_ALLOWED_ACE) O(ACCESS_ALLOWED_ACE, Header) \
+	O(ACCESS_ALLOWED_ACE, Mask) O(ACCESS_ALLOWED_ACE, SidStart) \
+	S(ACCESS_DENIED_ACE) O(ACCESS_DENIED_ACE, SidStart) \
+	S(ACL_INFORMATION_CLASS) S(ACL_REVISION_INFORMATION) \
+	S(ACL_SIZE_INFORMATION) O(ACL_SIZE_INFORMATION, AclBytesInUse) \
+	O(ACL_SIZE_INFORMATION, AclBytesFree) \
+	S(SECURITY_DESCRIPTOR) O(SECURITY_DESCRIPTOR, Revision) \
+	O(SECURITY_DESCRIPTOR, Control) O(SECURITY_DESCRIPTOR, Owner) \
+	O(SECURITY_DESCRIPTOR, Group) O(SECURITY_DESCRIPTOR, Sacl) \
+	O(SECURITY_DESCRIPTOR, Dacl) \
+	S(SECURITY_DESCRIPTOR_RELATIVE) \
+	O(SECURITY_DESCRIPTOR_RELATIVE, Control) \
+	O(SECURITY_DESCRIPTOR_RELATIVE, Owner) \
+	O(SECURITY_DESCRIPTOR_RELATIVE, Group) \
+	O(SECURITY_DESCRIPTOR_RELATIVE, Sacl) \
+	O(SECURITY_DESCRIPTOR_RELATIVE, Dacl) \
+	S(SE_OBJECT_TYPE) \
+	C(SidTypeUser) C(SidTypeGroup) C(SidTypeDomain) C(SidTypeAlias) \
+	C(SidTypeWellKnownGroup) C(SidTypeLabel) \
+	C(WinNullSid) C(WinWorldSid) C(WinLocalSid) C(WinCreatorOwnerSid) \
+	C(WinCreatorGroupSid) C(WinNtAuthoritySid) C(WinNetworkSid) \
+	C(WinInteractiveSid) C(WinAnonymousSid) C(WinSelfSid) \
+	C(WinAuthenticatedUserSid) C(WinLocalSystemSid) \
+	C(WinLocalServiceSid) C(WinNetworkServiceSid) \
+	C(WinBuiltinDomainSid) C(WinBuiltinAdministratorsSid) \
+	C(WinBuiltinUsersSid) C(WinBuiltinGuestsSid) \
+	C(WinBuiltinPowerUsersSid) C(WinAccountAdministratorSid) \
+	C(WinAccountGuestSid) C(WinAccountDomainUsersSid) \
+	C(WinMediumLabelSid) C(WinHighLabelSid) \
+	C(TokenPrimary) C(TokenImpersonation) C(SecurityAnonymous) \
+	C(SecurityImpersonation) C(SecurityDelegation) \
+	C(TokenElevationTypeDefault) C(TokenElevationTypeFull) \
+	C(TokenElevationTypeLimited) C(TokenUser) C(TokenGroups) \
+	C(TokenPrivileges) C(TokenOwner) C(TokenPrimaryGroup) \
+	C(TokenDefaultDacl) C(TokenType) C(TokenImpersonationLevel) \
+	C(TokenStatistics) C(TokenSessionId) C(TokenElevationType) \
+	C(TokenLinkedToken) C(TokenElevation) C(TokenIntegrityLevel) \
+	C(AclRevisionInformation) C(AclSizeInformation) \
+	C(SE_FILE_OBJECT) C(SE_REGISTRY_KEY) C(SE_KERNEL_OBJECT) \
+	C(SE_REGISTRY_WOW64_32KEY) \
 	/* winuser.h, wingdi.h, winreg.h */ \
 	S(HKEY) S(HBITMAP) S(HGDIOBJ) S(HICON) S(HCURSOR) S(ATOM) S(COLORREF) \
 	S(REGSAM) S(WNDPROC) S(DLGPROC) S(TIMERPROC) \
