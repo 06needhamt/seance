@@ -15,6 +15,8 @@ set -eu
 build=${1:?usage: $0 <build dir> <work dir>}
 work=${2:?usage: $0 <build dir> <work dir>}
 harness=$build/vfw-harness
+# On a cross build, what runs i386 programs (qemu-i386), from CMake.
+emu=${VFW_EMULATOR:-}
 failures=0
 
 for tool in ffmpeg ffprobe; do
@@ -70,8 +72,8 @@ at_least() {
 }
 
 echo "== Files written by the unit tests"
-VFW_KEEP_TEST_FILES=$work/unit "$build/tests/test_avi" >/dev/null
-VFW_KEEP_TEST_FILES=$work/unit "$build/tests/test_image" >/dev/null
+VFW_KEEP_TEST_FILES=$work/unit $emu "$build/tests/test_avi" >/dev/null
+VFW_KEEP_TEST_FILES=$work/unit $emu "$build/tests/test_image" >/dev/null
 u=$work/unit
 # test_avi: frames, keyframes and bytes as written.
 expect "plain.avi" "$(packets $u/plain.avi)" "20 20 30720"
@@ -102,7 +104,7 @@ make_avi() {
 	name=$1
 	shift
 	ffmpeg -v error -y -f lavfi -i "$src" "$@" "$f/$name.avi"
-	if ! "$harness" avi "$f/$name.avi" >"$f/$name.txt"; then
+	if ! $emu "$harness" avi "$f/$name.avi" >"$f/$name.txt"; then
 		fail "$name: vfw-harness avi"
 	fi
 }
@@ -110,22 +112,22 @@ make_avi() {
 # Uncompressed YUV: our Y4M must be FFmpeg's, exactly.
 for fmt in yuyv422 uyvy422 yuv420p nv12 nv21; do
 	make_avi $fmt -c:v rawvideo -pix_fmt $fmt
-	"$harness" convert $f/$fmt.avi -o $f/$fmt.y4m 2>/dev/null
+	$emu "$harness" convert $f/$fmt.avi -o $f/$fmt.y4m 2>/dev/null
 	ffmpeg -v error -y -i $f/$fmt.avi -pix_fmt yuv420p -strict -1 $f/$fmt.ref.y4m
 	at_least "$fmt -> Y4M" "$(psnr $f/$fmt.y4m $f/$fmt.ref.y4m)" inf
 done
 make_avi yv12 -c:v rawvideo -pix_fmt yuv420p -vtag YV12
-"$harness" convert $f/yv12.avi -o $f/yv12.y4m 2>/dev/null
+$emu "$harness" convert $f/yv12.avi -o $f/yv12.y4m 2>/dev/null
 ffmpeg -v error -y -i $f/yv12.avi -pix_fmt yuv420p -strict -1 $f/yv12.ref.y4m
 at_least "YV12 -> Y4M" "$(psnr $f/yv12.y4m $f/yv12.ref.y4m)" inf
 # FFmpeg treats Y800 as full range and resamples YVYU chroma differently.
 make_avi gray -c:v rawvideo -pix_fmt gray
-"$harness" convert $f/gray.avi -o $f/gray.y4m 2>/dev/null
+$emu "$harness" convert $f/gray.avi -o $f/gray.y4m 2>/dev/null
 ffmpeg -v error -y -i $f/gray.avi -vf scale=in_range=limited:out_range=limited \
 	-pix_fmt yuv420p -strict -1 $f/gray.ref.y4m
 at_least "Y800 -> Y4M" "$(psnr $f/gray.y4m $f/gray.ref.y4m)" inf
 make_avi yvyu422 -c:v rawvideo -pix_fmt yvyu422
-"$harness" convert $f/yvyu422.avi -o $f/yvyu422.y4m 2>/dev/null
+$emu "$harness" convert $f/yvyu422.avi -o $f/yvyu422.y4m 2>/dev/null
 ffmpeg -v error -y -i $f/yvyu422.avi -pix_fmt yuv420p -strict -1 $f/yvyu422.ref.y4m
 at_least "YVYU -> Y4M" "$(psnr $f/yvyu422.y4m $f/yvyu422.ref.y4m)" 40
 
@@ -138,30 +140,30 @@ for fmt in bgr24 pal8 rgb555le msrle bgr24_odd; do
 			-c:v rawvideo -pix_fmt bgr24 $f/$fmt.avi ;;
 	*)         make_avi $fmt -c:v rawvideo -pix_fmt $fmt ;;
 	esac
-	"$harness" convert $f/$fmt.avi -o $f/$fmt.bgr 2>/dev/null
+	$emu "$harness" convert $f/$fmt.avi -o $f/$fmt.bgr 2>/dev/null
 	ffmpeg -v error -y -i $f/$fmt.avi -f rawvideo -pix_fmt bgr24 $f/$fmt.ref.bgr
 	if cmp -s $f/$fmt.bgr $f/$fmt.ref.bgr; then
 		pass "$fmt -> BGR24 identical"
 	else
 		fail "$fmt -> BGR24 differs"
 	fi
-	"$harness" convert $f/$fmt.avi -o $f/$fmt.y4m 2>/dev/null
+	$emu "$harness" convert $f/$fmt.avi -o $f/$fmt.y4m 2>/dev/null
 	ffmpeg -v error -y -i $f/$fmt.avi -pix_fmt yuv420p -strict -1 $f/$fmt.ref.y4m
 	at_least "$fmt -> Y4M" "$(psnr $f/$fmt.y4m $f/$fmt.ref.y4m)" 30
 done
 
 echo "== convert options"
-"$harness" convert $f/bgr24.avi -o $f/part.y4m --start 3 --frames 4 2>/dev/null
+$emu "$harness" convert $f/bgr24.avi -o $f/part.y4m --start 3 --frames 4 2>/dev/null
 expect "--start 3 --frames 4" "$(frames $f/part.y4m)" 4
 ffmpeg -v error -y -i $f/bgr24.avi -vf "select=between(n\,3\,6)" -fps_mode passthrough \
 	-f rawvideo -pix_fmt bgr24 $f/part.ref.bgr
-"$harness" convert $f/bgr24.avi -o $f/part.bgr --start 3 --frames 4 2>/dev/null
+$emu "$harness" convert $f/bgr24.avi -o $f/part.bgr --start 3 --frames 4 2>/dev/null
 if cmp -s $f/part.bgr $f/part.ref.bgr; then
 	pass "--start/--frames pick the right frames"
 else
 	fail "--start/--frames picked the wrong frames"
 fi
-"$harness" convert $f/msrle.avi -o "$f/rle%02d.bmp" --start 5 --frames 2 2>/dev/null
+$emu "$harness" convert $f/msrle.avi -o "$f/rle%02d.bmp" --start 5 --frames 2 2>/dev/null
 ffmpeg -v error -y -i $f/rle01.bmp -f rawvideo -pix_fmt bgr24 $f/rle01.bgr
 ffmpeg -v error -y -i $f/msrle.avi -vf "select=eq(n\,6)" -fps_mode passthrough \
 	-f rawvideo -pix_fmt bgr24 $f/rle6.ref.bgr
@@ -170,11 +172,11 @@ if cmp -s $f/rle01.bgr $f/rle6.ref.bgr; then
 else
 	fail "RLE from frame 5 to BMP differs"
 fi
-"$harness" convert $f/bgr24.avi -o - --format y4m 2>/dev/null >$f/stdout.y4m
+$emu "$harness" convert $f/bgr24.avi -o - --format y4m 2>/dev/null >$f/stdout.y4m
 expect "Y4M on stdout" "$(frames $f/stdout.y4m)" 10
 
 echo "== Our AVI writer's files through vfw-harness"
-"$harness" avi $u/odml.avi >$f/odml.txt
+$emu "$harness" avi $u/odml.avi >$f/odml.txt
 if grep -q "Index: OpenDML" $f/odml.txt && grep -q "150 frames" $f/odml.txt; then
 	pass "vfw-harness avi odml.avi"
 else
@@ -187,32 +189,32 @@ if [ -f "$codec" ]; then
 	e=$work/enc
 	mkdir -p $e
 	ffmpeg -v error -y -f lavfi -i "$src" -pix_fmt yuv420p $e/in.y4m
-	"$harness" encode $codec $e/in.y4m -o $e/t.avi --keyint 5 2>/dev/null ||
+	$emu "$harness" encode $codec $e/in.y4m -o $e/t.avi --keyint 5 2>/dev/null ||
 		fail "encode Y4M"
 	expect "encoded AVI: packets and keyframes" \
 		"$(packets $e/t.avi | cut -d' ' -f1-2)" "10 2"
 	expect "encoded AVI: size" "$(size $e/t.avi)" 64x48
 	expect "encoded AVI: FOURCC" "$(ffprobe -v error -select_streams v:0 \
 		-show_entries stream=codec_tag_string -of csv=p=0 $e/t.avi)" TST0
-	"$harness" decode $codec $e/t.avi -o $e/out.y4m 2>/dev/null || fail "decode"
+	$emu "$harness" decode $codec $e/t.avi -o $e/out.y4m 2>/dev/null || fail "decode"
 	at_least "Y4M -> TST0 -> Y4M" "$(psnr $e/out.y4m $e/in.y4m)" inf
-	"$harness" encode $codec - -o $e/stdin.avi <$e/in.y4m 2>/dev/null
+	$emu "$harness" encode $codec - -o $e/stdin.avi <$e/in.y4m 2>/dev/null
 	expect "Y4M from stdin" "$(packets $e/stdin.avi | cut -d' ' -f1)" 10
-	"$harness" encode $codec $e/in.y4m -o $e/odml.avi --odml 2>/dev/null
+	$emu "$harness" encode $codec $e/in.y4m -o $e/odml.avi --odml 2>/dev/null
 	expect "OpenDML output" "$(packets $e/odml.avi | cut -d' ' -f1)" 10
 
 	# BMP files numbered from 1, and an AVI, both BGR24: exact.
 	ffmpeg -v error -y -f lavfi -i "$src" -pix_fmt bgr24 "$e/f%03d.bmp"
 	ffmpeg -v error -y -f lavfi -i "$src" -f rawvideo -pix_fmt bgr24 $e/ref.bgr
-	"$harness" encode $codec "$e/f%03d.bmp" -o $e/bmp.avi 2>/dev/null
-	"$harness" decode $codec $e/bmp.avi -o $e/bmp.bgr 2>/dev/null
+	$emu "$harness" encode $codec "$e/f%03d.bmp" -o $e/bmp.avi 2>/dev/null
+	$emu "$harness" decode $codec $e/bmp.avi -o $e/bmp.bgr 2>/dev/null
 	if cmp -s $e/bmp.bgr $e/ref.bgr; then
 		pass "BMP files -> TST0 -> BGR24 identical"
 	else
 		fail "BMP files -> TST0 -> BGR24 differ"
 	fi
-	"$harness" encode $codec $f/bgr24_odd.avi -o $e/odd.avi 2>/dev/null
-	"$harness" decode $codec $e/odd.avi -o $e/odd.bgr 2>/dev/null
+	$emu "$harness" encode $codec $f/bgr24_odd.avi -o $e/odd.avi 2>/dev/null
+	$emu "$harness" decode $codec $e/odd.avi -o $e/odd.bgr 2>/dev/null
 	if cmp -s $e/odd.bgr $f/bgr24_odd.ref.bgr; then
 		pass "odd-sized BGR24 AVI -> TST0 -> BGR24 identical"
 	else

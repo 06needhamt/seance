@@ -9,6 +9,10 @@
  * decompresses to BI_RGB 24 or 32 bits in either orientation, I420 to
  * I420, so both round trips are lossless.
  *
+ * It also draws TST0 RGB frames itself (ICM_DRAW_BEGIN / ICM_DRAW /
+ * ICM_DRAW_END, onto the DC it is given, through msvfw32's DrawDib), as
+ * codecs that render their own output do.
+ *
  * Messages it does not handle go to winmm's DefDriverProc, and
  * testcodec_selftest() calls winmm and msvfw32 from the Win32 side.
  *
@@ -47,6 +51,12 @@ struct instance {
 	/* Decompression: the current picture, in the compressed layout. */
 	BYTE *dcur;
 	int dvalid;
+	/* Drawing: DrawDib, where to, and a BGR24 frame to draw from. */
+	HDRAWDIB hdd;
+	HDC hdc;
+	int x, y, dx, dy;
+	BITMAPINFOHEADER dout;
+	BYTE *dbuf;
 };
 
 #define MAGIC 0x54535430
@@ -256,7 +266,7 @@ static LRESULT get_info(ICINFO *info, DWORD size)
 	info->dwSize = sizeof(*info);
 	info->fccType = ICTYPE_VIDEO;
 	info->fccHandler = TST0;
-	info->dwFlags = VIDCF_TEMPORAL | VIDCF_FASTTEMPORALC;
+	info->dwFlags = VIDCF_TEMPORAL | VIDCF_FASTTEMPORALC | VIDCF_DRAW;
 	info->dwVersion = 0x00010002;
 	info->dwVersionICM = ICVERSION;
 	for (i = 0; name[i]; i++)
@@ -410,6 +420,78 @@ static LRESULT decompress(struct instance *inst, ICDECOMPRESS *d)
 	return ICERR_OK;
 }
 
+static void draw_end(struct instance *inst)
+{
+	if (inst->hdd)
+		DrawDibClose(inst->hdd);
+	inst->hdd = NULL;
+	release(inst->dbuf);
+	inst->dbuf = NULL;
+}
+
+/* An RGB TST0 stream, decompressed to BGR24 and drawn with DrawDib. */
+static LRESULT draw_begin(struct instance *inst, const ICDRAWBEGIN *b)
+{
+	const BITMAPINFOHEADER *in = b ? b->lpbi : NULL;
+
+	if (!in || decompress_query(in, NULL) != ICERR_OK ||
+	    in->biBitCount == 12)
+		return ICERR_BADFORMAT;
+	if (b->dwFlags & ICDRAW_QUERY)
+		return ICERR_OK;
+	if (!(b->dwFlags & ICDRAW_HDC) || !b->hdc)
+		return ICERR_BADPARAM;
+	draw_end(inst);
+	decompress_get_format(in, &inst->dout);
+	inst->dout.biBitCount = 24;
+	inst->dout.biSizeImage = frame_bytes(&inst->dout);
+	release(inst->dcur);
+	inst->dcur = alloc(frame_bytes(in));
+	inst->dbuf = alloc(inst->dout.biSizeImage);
+	inst->dvalid = 0;
+	inst->hdd = DrawDibOpen();
+	inst->hdc = b->hdc;
+	inst->x = b->xDst;
+	inst->y = b->yDst;
+	inst->dx = b->dxDst;
+	inst->dy = b->dyDst;
+	if (!inst->dcur || !inst->dbuf || !inst->hdd ||
+	    !DrawDibBegin(inst->hdd, inst->hdc, inst->dx, inst->dy,
+			  &inst->dout, in->biWidth, abs_height(in), 0)) {
+		draw_end(inst);
+		return ICERR_MEMORY;
+	}
+	return ICERR_OK;
+}
+
+static LRESULT draw(struct instance *inst, const ICDRAW *d)
+{
+	if (!d || !inst->hdd)
+		return ICERR_BADPARAM;
+	if (!(d->dwFlags & ICDRAW_UPDATE) || d->lpData) {
+		BITMAPINFOHEADER in = *(const BITMAPINFOHEADER *)d->lpFormat;
+		ICDECOMPRESS dc;
+		LRESULT r;
+		in.biSizeImage = d->cbData;
+		dc.dwFlags = d->cbData ? 0 : ICDECOMPRESS_NULLFRAME;
+		dc.lpbiInput = &in;
+		dc.lpInput = d->lpData;
+		dc.lpbiOutput = &inst->dout;
+		dc.lpOutput = inst->dbuf;
+		dc.ckid = 0;
+		if ((r = decompress(inst, &dc)) != ICERR_OK)
+			return r;
+		if (d->dwFlags & (ICDRAW_PREROLL | ICDRAW_HURRYUP))
+			return ICERR_OK;
+	}
+	if (!DrawDibDraw(inst->hdd, inst->hdc, inst->x, inst->y, inst->dx,
+			 inst->dy, &inst->dout, inst->dbuf, 0, 0,
+			 inst->dout.biWidth, inst->dout.biHeight,
+			 DDF_SAME_HDC | DDF_SAME_DRAW))
+		return ICERR_ERROR;
+	return ICERR_OK;
+}
+
 LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 			  LPARAM l2)
 {
@@ -456,6 +538,7 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 	case DRV_CLOSE:
 		log_msg(msg);
 		if (inst && inst->magic == MAGIC) {
+			draw_end(inst);
 			release(inst->cprev);
 			release(inst->dcur);
 			inst->magic = 0;
@@ -568,6 +651,18 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 	case ICM_DECOMPRESS_END:
 		release(inst->dcur);
 		inst->dcur = NULL;
+		return ICERR_OK;
+
+	case ICM_DRAW_QUERY:
+		return ok_tst0((BITMAPINFOHEADER *)l1) &&
+		       ((BITMAPINFOHEADER *)l1)->biBitCount != 12 ?
+		       ICERR_OK : ICERR_BADFORMAT;
+	case ICM_DRAW_BEGIN:
+		return draw_begin(inst, (ICDRAWBEGIN *)l1);
+	case ICM_DRAW:
+		return draw(inst, (ICDRAW *)l1);
+	case ICM_DRAW_END:
+		draw_end(inst);
 		return ICERR_OK;
 	}
 	return ICERR_UNSUPPORTED;

@@ -114,9 +114,13 @@ asked for to the codec as its target), and ICCompressorChoose
 (`choose.c`: no dialog; it answers as OK on the initial selection would,
 the compressor the COMPVARS already names if the dialog would list it,
 else Full Frames, unless `$VFW_COMPRESSOR` names one, "uncompressed" or
-"cancel"; the list and what is filled in follow Wine's dialog). Still
-open:
-- DrawDib* and the ICM_DRAW path (drawing is reported as unsupported).
+"cancel"; the list and what is filled in follow Wine's dialog), and
+DrawDib* with ICDrawBegin/ICDraw (`drawdib.c`, after Wine: a compressed
+DIB goes through a decompressor found for it, into a DIB section in a
+memory DC, and StretchBlt puts it on the target DC; drawing to a window
+is discarded as gdi32 discards it, while drawing to a memory DC is real;
+testcodec draws its own frames through it, which tests the ICM_DRAW path
+from Win32 code). Still open:
 - The remaining placeholder DLLs (oleaut32, comctl32, comdlg32)
   have no functions yet.
 
@@ -128,7 +132,7 @@ open:
   - Opening and dispatch: ICOpen, ICOpenFunction, ICLocate, ICInfo (enumeration), ICGetInfo, ICSendMessage, ICClose.
   - Decompress: ICDecompressQuery/GetFormat/GetPalette/Begin/Decompress/End, and ICDecompressEx*.
   - Compress: ICCompressQuery/GetFormat/GetSize/Begin/Compress/End, plus ICSeqCompressFrame* (keyframe rate, quality, data rate).
-  - Other messages: ICGetState/SetState, ICGetDefaultQuality/KeyFrameRate, ICM_DRAW* (reported as unsupported), and ICConfigure/ICAbout (report "no GUI").
+  - Other messages: ICGetState/SetState, ICGetDefaultQuality/KeyFrameRate, ICDrawBegin/ICDraw (packed into ICDRAWBEGIN/ICDRAW for codecs that draw themselves), and ICConfigure/ICAbout (report "no GUI").
   - Output-format negotiation: first try the codec's own `GET_FORMAT`, then a preference list (I420, YV12, YUY2, BGR32, BGR24, RGB565, RGB555, 8-bit palettised) checked with `DECOMPRESS_QUERY`.
 
 ### Container and output (`src/avi/`, `src/out/`)

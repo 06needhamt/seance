@@ -2,8 +2,9 @@
  * msvfw32.dll: the ICM API from src/vfw/icm.c, for codecs that call back
  * into it (wrappers opening another codec, for instance), the
  * ICSeqCompressFrame* sequence API, ICImageCompress/ICImageDecompress, and
- * ICCompressorChoose answering without its dialog. DrawDib*, MCIWnd* and
- * the rest of the GUI side are left as traps.
+ * ICCompressorChoose answering without its dialog, and DrawDib* with
+ * ICDrawBegin/ICDraw (src/vfw/drawdib.c). MCIWnd* and the rest of the GUI
+ * side are left as traps.
  */
 #include "vfw/icm.h"
 #include "win32/internal.h"
@@ -14,25 +15,12 @@ WINFN(DWORD) vfw_VideoForWindowsVersion(void)
 	return 0x040003B6;
 }
 
-/* Drawing is not supported: there is no display. */
-static DWORD STUB_CDECL vfw_ICDrawBegin(void)
-{
-	return (DWORD)ICERR_UNSUPPORTED;
-}
-
-static DWORD STUB_CDECL vfw_ICDraw(void)
-{
-	return (DWORD)ICERR_UNSUPPORTED;
-}
-
 static const struct builtin_export exports[] = {
 	{ "ICClose", 0, (void *)ic_close },
 	{ "ICCompress", 0, (void *)ic_compress },
 	{ "ICCompressorChoose", 0, (void *)ic_compressor_choose },
 	{ "ICCompressorFree", 0, (void *)ic_compressor_free },
 	{ "ICDecompress", 0, (void *)ic_decompress },
-	{ "ICDraw", 0, (void *)vfw_ICDraw },
-	{ "ICDrawBegin", 0, (void *)vfw_ICDrawBegin },
 	{ "ICGetDisplayFormat", 0, (void *)ic_get_display_format },
 	{ "ICGetInfo", 0, (void *)ic_get_info },
 	{ "ICImageCompress", 0, (void *)ic_image_compress },
@@ -51,6 +39,10 @@ static const struct builtin_export exports[] = {
 	BUILTIN_END
 };
 
-static const struct builtin_export *const tables[] = { exports, NULL };
+extern const struct builtin_export vfw_drawdib_exports[];
+
+static const struct builtin_export *const tables[] = {
+	exports, vfw_drawdib_exports, NULL
+};
 
 const struct builtin_dll builtin_msvfw32 = { "msvfw32.dll", NULL, tables, 0 };

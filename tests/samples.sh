@@ -13,6 +13,8 @@ dir=${2:?usage: $0 <vfw-harness> <dir> [<timeout>]}
 timeout=${3:-30}
 failures=0
 count=0
+# On a cross build, what runs i386 programs (qemu-i386), from CMake.
+emu=${VFW_EMULATOR:-}
 
 if [ ! -d "$dir" ]; then
 	echo "samples: $dir is not a directory" >&2
@@ -34,7 +36,7 @@ for f in "$dir"/*; do
 	count=$((count + 1))
 	name=$(basename "$f")
 
-	VFW_TIMEOUT=$timeout "$harness" info "$f" >"$out" 2>&1
+	VFW_TIMEOUT=$timeout $emu "$harness" info "$f" >"$out" 2>&1
 	rc=$?
 	if [ $rc -ne 0 ]; then
 		echo "FAIL $name: info exited $rc"
@@ -45,7 +47,7 @@ for f in "$dir"/*; do
 	traps=$(grep -c '\[not implemented\]' "$out")
 	native=$(grep -c '(loaded from disk)' "$out")
 
-	VFW_TIMEOUT=$timeout "$harness" probe "$f" >"$out" 2>&1
+	VFW_TIMEOUT=$timeout $emu "$harness" probe "$f" >"$out" 2>&1
 	rc=$?
 	if bad_status $rc; then
 		echo "FAIL $name: probe crashed or hung (exit $rc)"

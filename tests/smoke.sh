@@ -14,6 +14,8 @@ harness=${1:?$usage}
 junk=${2:?$usage}
 fixtures=${3:-}
 lowmem=${4:-0}
+# On a cross build, what runs i386 programs (qemu-i386), from CMake.
+emu=${VFW_EMULATOR:-}
 
 fails() {
 	if "$@" >/dev/null 2>&1; then
@@ -22,23 +24,23 @@ fails() {
 	fi
 }
 
-"$harness" --version
-"$harness" --help >/dev/null
-fails "$harness" no-such-command
-fails "$harness" info "$junk"
-fails "$harness" probe "$junk"
-VFW_INI=/nonexistent "$harness" list >/dev/null
-fails "$harness" avi "$junk"
-fails "$harness" convert "$junk" -o /dev/null --format raw
-fails "$harness" decode
-fails "$harness" encode
-fails "$harness" decode TST0 "$junk" -o /dev/null --format raw
-fails "$harness" encode TST0 "$junk" -o /dev/null
+$emu "$harness" --version
+$emu "$harness" --help >/dev/null
+fails $emu "$harness" no-such-command
+fails $emu "$harness" info "$junk"
+fails $emu "$harness" probe "$junk"
+VFW_INI=/nonexistent $emu "$harness" list >/dev/null
+fails $emu "$harness" avi "$junk"
+fails $emu "$harness" convert "$junk" -o /dev/null --format raw
+fails $emu "$harness" decode
+fails $emu "$harness" encode
+fails $emu "$harness" decode TST0 "$junk" -o /dev/null --format raw
+fails $emu "$harness" encode TST0 "$junk" -o /dev/null
 
 if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
-	"$harness" info "$fixtures/pe_dep.dll" >/dev/null
-	"$harness" probe "$fixtures/testcodec.dll" | grep -q "handler 'TST0'"
-	fails "$harness" decode "$fixtures/testcodec.dll" "$junk" -o /dev/null \
+	$emu "$harness" info "$fixtures/pe_dep.dll" >/dev/null
+	$emu "$harness" probe "$fixtures/testcodec.dll" | grep -q "handler 'TST0'"
+	fails $emu "$harness" decode "$fixtures/testcodec.dll" "$junk" -o /dev/null \
 		--format raw
 
 	if [ "$lowmem" = 1 ]; then
@@ -52,17 +54,22 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 			done
 		} >"$work/in.y4m"
 		export VFW_ENV_TESTCODEC_STRICT=1
-		"$harness" encode "$fixtures/testcodec.dll" "$work/in.y4m" \
+		$emu "$harness" encode "$fixtures/testcodec.dll" "$work/in.y4m" \
 			-o "$work/t.avi" 2>/dev/null
-		"$harness" decode "$fixtures/testcodec.dll" "$work/t.avi" \
+		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/t.avi" \
 			-o "$work/out.y4m" 2>/dev/null
 		cmp -s "$work/in.y4m" "$work/out.y4m" || {
 			echo "smoke: strict round trip differs" >&2
 			exit 1
 		}
 		# The check itself works: without the reservation it trips.
-		fails env VFW_LOW_MEMORY=0 "$harness" encode \
-			"$fixtures/testcodec.dll" "$work/in.y4m" -o "$work/t2.avi"
+		# Not under an emulator, where the guest's memory is all below
+		# 2 GB anyway (qemu-user maps it low).
+		if [ -z "$emu" ]; then
+			fails env VFW_LOW_MEMORY=0 $emu "$harness" encode \
+				"$fixtures/testcodec.dll" "$work/in.y4m" \
+				-o "$work/t2.avi"
+		fi
 		echo "smoke: the codec saw no pointers above 2 GB"
 	fi
 fi
