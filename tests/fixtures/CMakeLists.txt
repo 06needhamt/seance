@@ -4,8 +4,8 @@
 #
 # They are built without a C runtime, so each imports only what it names:
 # nothing, each other, or system DLLs such as kernel32, user32, gdi32,
-# advapi32, version, ole32, winmm and msvfw32 (whose mingw import libraries
-# the harness's built-in DLLs stand in for).
+# advapi32, version, ole32, shell32, winmm and msvfw32 (whose mingw import
+# libraries the harness's built-in DLLs stand in for).
 cmake_minimum_required(VERSION 3.20)
 project(vfw-harness-fixtures C RC)
 
@@ -93,6 +93,11 @@ fixture(pe_reg pe_reg.c LIBS advapi32 OPTIONS -mpreferred-stack-boundary=2)
 # Uses user32 and gdi32 the way a codec might: strings, wsprintf, a
 # hidden window with messages and timers, a bitmap resource.
 fixture(pe_gui pe_gui.c pe_gui.rc LIBS user32 gdi32 kernel32
+	OPTIONS -mpreferred-stack-boundary=2 -fno-builtin)
+
+# Uses shell32 as a codec might: its settings folder, SHFileOperation, an
+# item ID list, a command line, a link nothing can open.
+fixture(pe_shell pe_shell.c LIBS shell32 kernel32
 	OPTIONS -mpreferred-stack-boundary=2 -fno-builtin)
 
 # An in-process COM server that also calls version.dll and ole32 itself.

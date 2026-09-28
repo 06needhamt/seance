@@ -11,6 +11,8 @@
 #include "win32/winuser.h"
 #include "win32/winreg.h"
 #include "win32/objbase.h"
+#include "win32/shellapi.h"
+#include "win32/shlobj.h"
 #include "win32/mmsystem.h"
 #include "win32/vfw.h"
 #include "win32/aviriff.h"

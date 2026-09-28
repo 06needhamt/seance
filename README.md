@@ -18,7 +18,7 @@ Work is split into phases; see [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION
 |---|---|---|
 | 0 | Build skeleton, Win32 headers, ABI cross-check, CLI skeleton | done |
 | 1 | PE loader and `info` | done |
-| 2 | Win32 runtime (TEB, SEH, threads, stub DLLs) | in progress: TEB, built-in DLLs, kernel32, ntdll, SEH dispatch, delay-load binding, the msvcrt-family CRT (math/string/stdio/startup/64-bit arithmetic helpers), msvcrt's `__try`/`__except` handlers, its printf dialect and `_CI*` intrinsics, headless user32, gdi32 and advapi32 (registry), version and ole32 done; C++ EH still open |
+| 2 | Win32 runtime (TEB, SEH, threads, stub DLLs) | in progress: TEB, built-in DLLs, kernel32, ntdll, SEH dispatch, delay-load binding, the msvcrt-family CRT (math/string/stdio/startup/64-bit arithmetic helpers), msvcrt's `__try`/`__except` handlers, its printf dialect and `_CI*` intrinsics, headless user32, gdi32 and advapi32 (registry), version, ole32 and shell32 done; C++ EH still open |
 | 3 | VfW layer and `probe` | done: driver lifecycle, ICM API (including ICSeqCompressFrame* and ICImageCompress/ICImageDecompress), winmm/msvfw32 built-ins, `probe`, `list` |
 | 4 | AVI / Y4M I/O, `decode` and `encode` | done: AVI reader and writer, Y4M/BMP/raw input and output, `avi`, `convert`, `decode`, `encode` |
 | 5 | Hardening and CI | done: DLL memory below 2 GB, crash and hang reports, SSE/FPU fixture, fuzzing, samples run, CI |
@@ -187,7 +187,7 @@ real built-in: math, string/memory, stdio, CRT startup and the 64-bit
 arithmetic helpers a codec calls whatever CRT it links; a native DLL of
 the same name on the search path takes precedence over it.
 
-user32, gdi32, advapi32, version and ole32 are built in too, headless:
+user32, gdi32, advapi32, version, ole32 and shell32 are built in too, headless:
 
 - **user32:** window classes and windows exist and get the messages
   Windows would send them, each thread has a message queue with timers,
@@ -215,8 +215,18 @@ user32, gdi32, advapi32, version and ole32 are built in too, headless:
   `CoRegisterClassObject`, or loads the DLL named by the registry's
   `HKEY_CLASSES_ROOT\CLSID\{...}\InprocServer32` and calls its
   `DllGetClassObject`. There are no out-of-process servers or marshalling.
+- **shell32:** special folders (`SHGetFolderPath` and friends) laid out
+  as on Windows XP under drive C:, with the profile named after `$USER`
+  (`C:\Documents and Settings\<user>\Application Data`, ...) and each
+  created when first asked for; item ID lists for them;
+  `CommandLineToArgvW`; `SHFileOperation` (copy, move, rename and delete,
+  with wildcards and whole trees, answering every confirmation "Yes to
+  all"), `SHCreateDirectoryEx` and `SHGetFileInfo`. With no desktop,
+  `ShellExecute` has nothing to open anything with, `SHBrowseForFolder` is
+  cancelled, and there are no icons or dropped files; each says so on
+  stderr.
 
-oleaut32, shell32, comctl32 and comdlg32 are still placeholder built-ins with no functions yet: a native DLL of the same name
+oleaut32, comctl32 and comdlg32 are still placeholder built-ins with no functions yet: a native DLL of the same name
 on the search path is used instead if there is one. A codec importing
 functions that aren't implemented still loads, `info` shows which of its
 imports those are, and calling one stops the harness with a message naming
@@ -351,7 +361,7 @@ hangs on one.
 | `include/win32/` | Win32 types, PE image structures, GDI, window-manager and registry definitions, driver and ICM definitions, laid out to match 32-bit Windows |
 | `src/loader/` | PE parsing, mapping and relocation (`pe.c`); the module table and dependency loading (`modules.c`) |
 | `src/runtime/` | TEB and `%fs`, implicit TLS, the built-in DLL registry, trap thunks for unimplemented imports, the 2 GB limit (`lowmem.c`), crash and hang reports (`crash.c`) |
-| `src/win32/` | Built-in kernel32 (`k32_*.c`), ntdll, the msvcrt family (`crt_*.c`), user32 (`user32.c`, `u32_*.c`), gdi32 (`gdi32.c`, `gdi_bitmap.c`), advapi32 and its registry (`reg.c`), version, ole32, winmm and msvfw32; placeholders for the other system DLLs |
+| `src/win32/` | Built-in kernel32 (`k32_*.c`), ntdll, the msvcrt family (`crt_*.c`), user32 (`user32.c`, `u32_*.c`), gdi32 (`gdi32.c`, `gdi_bitmap.c`), advapi32 and its registry (`reg.c`), version, ole32, shell32 (`shell32.c`, `shell_file.c`), winmm and msvfw32; placeholders for the other system DLLs |
 | `src/vfw/` | Installable drivers (`driver.c`), the codec registry (`registry.c`), the ICM API (`icm.c`), sequence compression (`seq.c`) |
 | `src/avi/` | AVI reader (AVI 1.0 and OpenDML) and writer |
 | `src/in/` | Frame sources for `encode`: Y4M, uncompressed AVI, BMP files, raw frames |

@@ -502,4 +502,28 @@
 	O(IClassFactoryVtbl, CreateInstance) O(IClassFactoryVtbl, LockServer) \
 	S(IMalloc) S(IMallocVtbl) O(IMallocVtbl, Alloc) \
 	O(IMallocVtbl, Realloc) O(IMallocVtbl, Free) O(IMallocVtbl, GetSize) \
-	O(IMallocVtbl, DidAlloc) O(IMallocVtbl, HeapMinimize)
+	O(IMallocVtbl, DidAlloc) O(IMallocVtbl, HeapMinimize) \
+	/* shellapi.h, shlobj.h */ \
+	S(HDROP) S(FILEOP_FLAGS) \
+	S(SHFILEOPSTRUCTA) O(SHFILEOPSTRUCTA, wFunc) O(SHFILEOPSTRUCTA, pFrom) \
+	O(SHFILEOPSTRUCTA, pTo) O(SHFILEOPSTRUCTA, fFlags) \
+	O(SHFILEOPSTRUCTA, fAnyOperationsAborted) \
+	O(SHFILEOPSTRUCTA, hNameMappings) O(SHFILEOPSTRUCTA, lpszProgressTitle) \
+	S(SHFILEOPSTRUCTW) O(SHFILEOPSTRUCTW, fFlags) \
+	O(SHFILEOPSTRUCTW, fAnyOperationsAborted) \
+	O(SHFILEOPSTRUCTW, lpszProgressTitle) \
+	S(SHELLEXECUTEINFOA) O(SHELLEXECUTEINFOA, fMask) \
+	O(SHELLEXECUTEINFOA, lpVerb) O(SHELLEXECUTEINFOA, lpFile) \
+	O(SHELLEXECUTEINFOA, nShow) O(SHELLEXECUTEINFOA, hInstApp) \
+	O(SHELLEXECUTEINFOA, lpIDList) O(SHELLEXECUTEINFOA, hkeyClass) \
+	O(SHELLEXECUTEINFOA, hIcon) O(SHELLEXECUTEINFOA, hProcess) \
+	S(SHELLEXECUTEINFOW) O(SHELLEXECUTEINFOW, hInstApp) \
+	O(SHELLEXECUTEINFOW, hProcess) \
+	S(SHFILEINFOA) O(SHFILEINFOA, iIcon) O(SHFILEINFOA, dwAttributes) \
+	O(SHFILEINFOA, szDisplayName) O(SHFILEINFOA, szTypeName) \
+	S(SHFILEINFOW) O(SHFILEINFOW, dwAttributes) \
+	O(SHFILEINFOW, szDisplayName) O(SHFILEINFOW, szTypeName) \
+	S(SHITEMID) O(SHITEMID, abID) S(ITEMIDLIST) \
+	S(BROWSEINFOA) O(BROWSEINFOA, pszDisplayName) O(BROWSEINFOA, lpszTitle) \
+	O(BROWSEINFOA, ulFlags) O(BROWSEINFOA, iImage) S(BROWSEINFOW) \
+	O(BROWSEINFOW, lpszTitle) O(BROWSEINFOW, iImage)
