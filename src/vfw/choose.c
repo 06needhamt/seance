@@ -10,9 +10,9 @@
  * compressor of the type, only those accepting the input format pvIn
  * unless ICMF_CHOOSE_ALLCOMPRESSORS is set; the chosen one opened in
  * pc->hic (NULL for Full Frames), with the state from an earlier choice
- * of the same compressor restored. Where the dialog's quality slider and
- * keyframe box would start from the codec's defaults, so do lQ and lKey
- * when pc left them unset.
+ * of the same compressor restored, and dropped for any other. Where the
+ * dialog's quality slider and keyframe box would start from the codec's
+ * defaults, so do lQ and lKey when pc left them unset.
  */
 #include <ctype.h>
 #include <stdio.h>
@@ -141,6 +141,16 @@ BOOL STUB_WINAPI ic_compressor_choose(HWND hwnd, UINT flags, LPVOID in,
 			cv.lKey = ic_send(hic, ICM_GETDEFAULTKEYFRAMERATE,
 					  (DWORD_PTR)&v, sizeof(v)) == ICERR_OK ?
 				  (LONG)v : 0;
+	}
+
+	/*
+	 * State belongs to the compressor that made it: kept only when the
+	 * same one is chosen again, so a sequence started on the new choice
+	 * isn't handed another codec's settings.
+	 */
+	if (!hic || !same_fourcc(cv.fccHandler, handler)) {
+		cv.lpState = NULL;
+		cv.cbState = 0;
 	}
 
 	/* An earlier choice's compressor gives way to this one. */

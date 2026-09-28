@@ -750,10 +750,19 @@ static void test_choose(void)
 	CHECK(!memcmp(&saved, &cv, sizeof(cv)));
 	setenv("VFW_COMPRESSOR", "TST0", 1);
 	CHECK(choose(NULL, 0, &in, NULL, &cv, title));
+	/* Another compressor's state doesn't follow the choice. */
+	cv.lpState = st;
+	cv.cbState = sizeof(st);
 	setenv("VFW_COMPRESSOR", "uncompressed", 1);
 	CHECK(choose(NULL, 0, &in, NULL, &cv, title));
 	CHECK(!cv.hic && cv.fccHandler == comptypeDIB);
+	CHECK(!cv.lpState && !cv.cbState);
 	CHECK_EQ(codec_opens(), 0);
+	cv.lpState = st;
+	cv.cbState = sizeof(st);
+	setenv("VFW_COMPRESSOR", "TST0", 1);
+	CHECK(choose(NULL, 0, &in, NULL, &cv, title));
+	CHECK(cv.hic && !cv.lpState && !cv.cbState);
 	unsetenv("VFW_COMPRESSOR");
 
 	cfree(&cv);
