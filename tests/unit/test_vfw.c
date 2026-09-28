@@ -15,6 +15,7 @@
 #include "vfw/driver.h"
 #include "vfw/icm.h"
 #include "vfw/registry.h"
+#include "win32/k32.h"
 
 #define FCC(a, b, c, d) mmioFOURCC(a, b, c, d)
 #define TST0 FCC('T', 'S', 'T', '0')
@@ -657,6 +658,254 @@ static void test_image(void)
 	mod_free(vfw);
 }
 
+/* The BGR of pixel (x, y), counted from the top, of a 24-bit DIB. */
+static DWORD bgr24_at(const BYTE *p, LONG w, LONG h, LONG x, LONG y)
+{
+	size_t stride = ((size_t)w * 3 + 3) & ~(size_t)3;
+	const BYTE *q = p + (size_t)(h > 0 ? h - 1 - y : y) * stride + 3 * x;
+	return (DWORD)q[2] << 16 | q[1] << 8 | q[0];
+}
+
+/* The same of a top-down 32-bit DIB, w wide. */
+static DWORD bgr32_at(const BYTE *p, LONG w, LONG x, LONG y)
+{
+	const BYTE *q = p + ((size_t)y * w + x) * 4;
+	return (DWORD)q[2] << 16 | q[1] << 8 | q[0];
+}
+
+/*
+ * Whether the dw x dh rectangle at (dx, dy) of the 32-bit target shows
+ * the w x h source, stretched nearest-neighbour.
+ */
+static int shows(const BYTE *t, LONG tw, LONG dx, LONG dy, LONG dw, LONG dh,
+		 const BYTE *src, LONG w, LONG h)
+{
+	for (LONG y = 0; y < dh; y++)
+		for (LONG x = 0; x < dw; x++)
+			if (bgr32_at(t, tw, dx + x, dy + y) !=
+			    bgr24_at(src, w, h, x * w / dw, y * h / dh))
+				return 0;
+	return 1;
+}
+
+/* DrawDib* and ICDrawBegin/ICDraw, through msvfw32's exports. */
+static void test_drawdib(void)
+{
+	struct module *vfw = mod_load("msvfw32.dll", NULL);
+	struct module *gdi = mod_load("gdi32.dll", NULL);
+	CHECK(vfw && gdi);
+	if (!vfw || !gdi)
+		return;
+#define P(mod, name) mod_get_proc(mod, #name)
+	HDRAWDIB (WINAPI *open)(void) = P(vfw, DrawDibOpen);
+	BOOL (WINAPI *close)(HDRAWDIB) = P(vfw, DrawDibClose);
+	BOOL (WINAPI *begin)(HDRAWDIB, HDC, int, int, BITMAPINFOHEADER *, int,
+			     int, UINT) = P(vfw, DrawDibBegin);
+	BOOL (WINAPI *draw)(HDRAWDIB, HDC, int, int, int, int,
+			    BITMAPINFOHEADER *, void *, int, int, int, int,
+			    UINT) = P(vfw, DrawDibDraw);
+	BOOL (WINAPI *end)(HDRAWDIB) = P(vfw, DrawDibEnd);
+	void *(WINAPI *get_buffer)(HDRAWDIB, BITMAPINFOHEADER *, DWORD,
+				   DWORD) = P(vfw, DrawDibGetBuffer);
+	HPALETTE (WINAPI *get_palette)(HDRAWDIB) = P(vfw, DrawDibGetPalette);
+	UINT (WINAPI *realize)(HDRAWDIB, HDC, BOOL) = P(vfw, DrawDibRealize);
+	BOOL (WINAPI *change_palette)(HDRAWDIB, int, int, PALETTEENTRY *) =
+		P(vfw, DrawDibChangePalette);
+	BOOL (WINAPI *start)(HDRAWDIB, DWORD) = P(vfw, DrawDibStart);
+	BOOL (WINAPI *stop)(HDRAWDIB) = P(vfw, DrawDibStop);
+	BOOL (WINAPI *timing)(HDRAWDIB, DRAWDIBTIME *) = P(vfw, DrawDibTime);
+	LRESULT (WINAPI *profile)(BITMAPINFOHEADER *) =
+		P(vfw, DrawDibProfileDisplay);
+	DWORD (__attribute__((cdecl)) *draw_begin)(HIC, DWORD, HPALETTE, HWND,
+		HDC, int, int, int, int, BITMAPINFOHEADER *, int, int, int,
+		int, DWORD, DWORD) = P(vfw, ICDrawBegin);
+	DWORD (__attribute__((cdecl)) *ic_draw)(HIC, DWORD, void *, void *,
+		DWORD, LONG) = P(vfw, ICDraw);
+	HDC (WINAPI *create_dc)(HDC) = P(gdi, CreateCompatibleDC);
+	BOOL (WINAPI *delete_dc)(HDC) = P(gdi, DeleteDC);
+	HBITMAP (WINAPI *create_dib)(HDC, const BITMAPINFO *, UINT, void **,
+				     HANDLE, DWORD) = P(gdi, CreateDIBSection);
+	HGDIOBJ (WINAPI *select)(HDC, HGDIOBJ) = P(gdi, SelectObject);
+	BOOL (WINAPI *delete_obj)(HGDIOBJ) = P(gdi, DeleteObject);
+#undef P
+	CHECK(open && close && begin && draw && end && get_buffer &&
+	      get_palette && realize && change_palette && start && stop &&
+	      timing && profile && draw_begin && ic_draw && create_dc &&
+	      delete_dc && create_dib && select && delete_obj);
+	if (!open || !close || !begin || !draw || !end || !get_buffer ||
+	    !get_palette || !realize || !change_palette || !start || !stop ||
+	    !timing || !profile || !draw_begin || !ic_draw || !create_dc ||
+	    !delete_dc || !create_dib || !select || !delete_obj)
+		return;
+
+	/* The target: a 32-bit top-down DIB section in a memory DC. */
+	const LONG tw = 80, th = 60, w = 21, h = 13;
+	BITMAPINFOHEADER tfmt = rgb(tw, -th, 32);
+	BYTE *t = NULL;
+	HDC hdc = create_dc(NULL);
+	HBITMAP tbm = create_dib(hdc, (BITMAPINFO *)&tfmt, DIB_RGB_COLORS,
+				 (void **)&t, NULL, 0);
+	CHECK(hdc && tbm && t);
+	if (!hdc || !tbm || !t)
+		return;
+	HGDIOBJ old = select(hdc, tbm);
+
+	BITMAPINFOHEADER in = rgb(w, h, 24);
+	BYTE *src = malloc(in.biSizeImage), *src2 = malloc(in.biSizeImage);
+	picture(src, w, h, 0);
+	picture(src2, w, h, 9);
+
+	HDRAWDIB hdd = open();
+	CHECK(hdd != NULL);
+	CHECK(profile(&in) & PD_CAN_DRAW_DIB);
+	CHECK(start(hdd, 1000) && stop(hdd));
+	DRAWDIBTIME tm;
+	CHECK(!timing(hdd, &tm));
+	CHECK(!get_buffer(hdd, NULL, 0, 0));	/* not begun */
+	CHECK(!realize(hdd, hdc, FALSE));
+
+	/* Uncompressed, 1:1, without DrawDibBegin; -1 sizes are the DIB's. */
+	CHECK(draw(hdd, hdc, 3, 4, -1, -1, &in, src, 0, 0, -1, -1, 0));
+	CHECK(shows(t, tw, 3, 4, w, h, src, w, h));
+	CHECK(bgr32_at(t, tw, 2, 4) == 0 && bgr32_at(t, tw, 3 + w, 4) == 0);
+	BITMAPINFOHEADER buf_fmt;
+	memset(&buf_fmt, 0xcc, sizeof(buf_fmt));
+	BYTE *buf = get_buffer(hdd, &buf_fmt, sizeof(buf_fmt), 0);
+	CHECK(buf && !memcmp(buf, src, in.biSizeImage));
+	CHECK(buf_fmt.biBitCount == 24 && buf_fmt.biWidth == w);
+
+	/* The bits after a packed DIB's header when none are given. */
+	BYTE *packed = malloc(sizeof(in) + in.biSizeImage);
+	memcpy(packed, &in, sizeof(in));
+	memcpy(packed + sizeof(in), src2, in.biSizeImage);
+	CHECK(draw(hdd, hdc, 3, 4, w, h, (BITMAPINFOHEADER *)packed, NULL, 0,
+		   0, w, h, 0));
+	CHECK(shows(t, tw, 3, 4, w, h, src2, w, h));
+	free(packed);
+
+	/* Decompressed without drawing, then DrawDibUpdate shows it. */
+	CHECK(draw(hdd, hdc, 3, 4, w, h, &in, src, 0, 0, w, h, DDF_DONTDRAW));
+	CHECK(shows(t, tw, 3, 4, w, h, src2, w, h));
+	CHECK(draw(hdd, hdc, 3, 4, 0, 0, NULL, NULL, 0, 0, 0, 0, DDF_UPDATE));
+	CHECK(shows(t, tw, 3, 4, w, h, src, w, h));
+	/* An update onto another DC, which doesn't begin again. */
+	BYTE *t2 = NULL;
+	HDC hdc2 = create_dc(NULL);
+	HBITMAP tbm2 = create_dib(hdc2, (BITMAPINFO *)&tfmt, DIB_RGB_COLORS,
+				  (void **)&t2, NULL, 0);
+	HGDIOBJ old2 = select(hdc2, tbm2);
+	CHECK(t2 && draw(hdd, hdc2, 7, 8, 0, 0, NULL, NULL, 0, 0, 0, 0,
+			 DDF_UPDATE));
+	CHECK(t2 && shows(t2, tw, 7, 8, w, h, src, w, h));
+	CHECK(draw(hdd, hdc, 3, 4, 0, 0, NULL, NULL, 0, 0, 0, 0, DDF_UPDATE));
+	select(hdc2, old2);
+	delete_obj(tbm2);
+	delete_dc(hdc2);
+
+	/* A top-down source. */
+	BITMAPINFOHEADER td = rgb(w, -h, 24);
+	BYTE *flip = malloc(in.biSizeImage);
+	size_t stride = ((size_t)w * 3 + 3) & ~(size_t)3;
+	for (LONG y = 0; y < h; y++)
+		memcpy(flip + y * stride, src2 + (h - 1 - y) * stride, stride);
+	CHECK(draw(hdd, hdc, 40, 30, w, h, &td, flip, 0, 0, w, h, 0));
+	CHECK(shows(t, tw, 40, 30, w, h, src2, w, h));
+	free(flip);
+
+	/* Compressed: through a TST0 decompressor it opens, stretched 2x. */
+	LONG csize = 0;
+	HANDLE c = ic_image_compress(NULL, 0, (BITMAPINFO *)&in, src, NULL,
+				     ICQUALITY_DEFAULT, &csize);
+	CHECK(c != NULL);
+	BITMAPINFOHEADER *cfmt = c ? global_lock(c) : NULL;
+	if (cfmt) {
+		void *cbits = (BYTE *)cfmt + vfw_format_size(cfmt);
+		memset(t, 0, (size_t)tw * th * 4);
+		CHECK(begin(hdd, hdc, 2 * w, 2 * h, cfmt, w, h, 0));
+		CHECK_EQ(codec_opens(), 1);
+		CHECK(draw(hdd, hdc, 1, 2, 2 * w, 2 * h, cfmt, cbits, 0, 0, w,
+			   h, 0));
+		CHECK(shows(t, tw, 1, 2, 2 * w, 2 * h, src, w, h));
+		buf = get_buffer(hdd, &buf_fmt, sizeof(buf_fmt), 0);
+		CHECK(buf && buf_fmt.biCompression == BI_RGB &&
+		      !memcmp(buf, src, in.biSizeImage));
+		/* Back to uncompressed: the decompressor is closed. */
+		CHECK(draw(hdd, hdc, 1, 2, w, h, &in, src2, 0, 0, w, h, 0));
+		CHECK_EQ(codec_opens(), 0);
+		CHECK(begin(hdd, hdc, w, h, cfmt, w, h, 0));
+		CHECK(end(hdd));
+		CHECK_EQ(codec_opens(), 0);
+
+		/* A format nothing decompresses. */
+		BITMAPINFOHEADER mjpg = *cfmt;
+		mjpg.biCompression = FCC('M', 'J', 'P', 'G');
+		CHECK(!begin(hdd, hdc, w, h, &mjpg, w, h, 0));
+		CHECK(!draw(hdd, hdc, 0, 0, w, h, &mjpg, cbits, 0, 0, w, h, 0));
+		CHECK(!get_buffer(hdd, NULL, 0, 0));
+
+		/* A codec drawing for itself: ICDrawBegin, ICDraw. */
+		HIC hic = ic_open(ICTYPE_VIDEO, TST0, ICMODE_DRAW);
+		CHECK(hic != NULL);
+		CHECK_EQ((LONG)draw_begin(hic, ICDRAW_QUERY, NULL, NULL, NULL,
+					  0, 0, w, h, cfmt, 0, 0, w, h, 25, 1),
+			 ICERR_OK);
+		CHECK_EQ((LONG)draw_begin(hic, ICDRAW_QUERY, NULL, NULL, NULL,
+					  0, 0, w, h, &mjpg, 0, 0, w, h, 25, 1),
+			 ICERR_BADFORMAT);
+		memset(t, 0, (size_t)tw * th * 4);
+		CHECK_EQ((LONG)draw_begin(hic, ICDRAW_HDC, NULL, NULL, hdc, 5,
+					  6, 3 * w, 3 * h, cfmt, 0, 0, w, h,
+					  25, 1), ICERR_OK);
+		CHECK_EQ((LONG)ic_draw(hic, 0, cfmt, cbits, (DWORD)csize, 0),
+			 ICERR_OK);
+		CHECK(shows(t, tw, 5, 6, 3 * w, 3 * h, src, w, h));
+		memset(t, 0, (size_t)tw * th * 4);
+		CHECK_EQ((LONG)ic_draw(hic, ICDRAW_UPDATE, cfmt, NULL, 0, 0),
+			 ICERR_OK);
+		CHECK(shows(t, tw, 5, 6, 3 * w, 3 * h, src, w, h));
+		CHECK_EQ(ic_send(hic, ICM_DRAW_END, 0, 0), ICERR_OK);
+		ic_close(hic);
+		global_unlock(c);
+	}
+	if (c)
+		global_free(c);
+
+	/* Palettised: two colours, then colour 0 changed. */
+	struct {
+		BITMAPINFOHEADER h;
+		RGBQUAD pal[2];
+	} p8 = { rgb(4, 2, 8), { { 0, 0, 0xff, 0 }, { 0xff, 0, 0, 0 } } };
+	p8.h.biClrUsed = 2;
+	BYTE idx[8] = { 0, 1, 0, 1, 1, 1, 1, 1 };	/* bottom row first */
+	memset(t, 0, (size_t)tw * th * 4);
+	CHECK(draw(hdd, hdc, 0, 0, 4, 2, &p8.h, idx, 0, 0, 4, 2, 0));
+	CHECK_EQ(bgr32_at(t, tw, 0, 1), 0xff0000);
+	CHECK_EQ(bgr32_at(t, tw, 1, 1), 0x0000ff);
+	PALETTEENTRY green = { 0, 0xff, 0, 0 };
+	CHECK(change_palette(hdd, 0, 1, &green));
+	CHECK(draw(hdd, hdc, 0, 0, 4, 2, &p8.h, idx, 0, 0, 4, 2,
+		   DDF_SAME_HDC | DDF_SAME_DRAW));
+	CHECK_EQ(bgr32_at(t, tw, 0, 1), 0x00ff00);
+	CHECK_EQ(bgr32_at(t, tw, 1, 1), 0x0000ff);
+	/* A halftone palette, which the true-colour display doesn't need. */
+	CHECK_EQ(realize(hdd, hdc, FALSE), 0);
+	CHECK(get_palette(hdd) != NULL);
+
+	CHECK(close(hdd));
+	CHECK(!close(hdd));
+	CHECK(!draw(hdd, hdc, 0, 0, w, h, &in, src, 0, 0, w, h, 0));
+	CHECK(!begin(hdd, hdc, w, h, &in, w, h, 0));
+	CHECK_EQ(codec_opens(), 0);
+
+	free(src);
+	free(src2);
+	select(hdc, old);
+	delete_obj(tbm);
+	delete_dc(hdc);
+	mod_free(gdi);
+	mod_free(vfw);
+}
+
 /* ICCompressorChoose without its dialog, through msvfw32's exports. */
 static void test_choose(void)
 {
@@ -805,7 +1054,7 @@ static void test_probe_cli(const char *codec)
 	CHECK_EQ(run_captured(cmd_probe, 3, args, out, sizeof(out)), 0);
 	CHECK(strstr(out, "handler 'TST0'"));
 	CHECK(strstr(out, "description: vfw-harness test codec"));
-	CHECK(strstr(out, "flags: 0x0024 TEMPORAL FASTTEMPORALC"));
+	CHECK(strstr(out, "flags: 0x0034 TEMPORAL DRAW FASTTEMPORALC"));
 	CHECK(strstr(out, "state: 8 bytes"));
 	CHECK(strstr(out, "Decompression of"));
 	CHECK(strstr(out, "input: 33x17, 24 bits, 'TST0'"));
@@ -1241,6 +1490,7 @@ int main(void)
 		test_probe_cli(codec);
 		test_seq();
 		test_image();
+		test_drawdib();
 		test_choose();
 		test_format_size();
 		test_codec_cli(codec);

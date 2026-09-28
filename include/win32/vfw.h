@@ -350,4 +350,42 @@ typedef struct {
 #define ICINSTALL_HDRV     0x0004
 #define ICINSTALL_DRIVERW  0x8002
 
+/* DrawDib. */
+typedef HANDLE HDRAWDIB;
+
+#define DDF_0001          0x0001
+#define DDF_UPDATE        0x0002
+#define DDF_SAME_HDC      0x0004
+#define DDF_SAME_DRAW     0x0008
+#define DDF_DONTDRAW      0x0010
+#define DDF_ANIMATE       0x0020
+#define DDF_BUFFER        0x0040
+#define DDF_JUSTDRAWIT    0x0080
+#define DDF_FULLSCREEN    0x0100
+#define DDF_BACKGROUNDPAL 0x0200
+#define DDF_NOTKEYFRAME   0x0400
+#define DDF_HURRYUP       0x0800
+#define DDF_HALFTONE      0x1000
+#define DDF_2000          0x2000
+#define DDF_PREROLL       DDF_DONTDRAW
+#define DDF_SAME_DIB      DDF_SAME_DRAW
+#define DDF_SAME_SIZE     DDF_SAME_DRAW
+
+typedef struct {
+	LONG timeCount;
+	LONG timeDraw;
+	LONG timeDecompress;
+	LONG timeDither;
+	LONG timeStretch;
+	LONG timeBlt;
+	LONG timeSetDIBits;
+} DRAWDIBTIME, *LPDRAWDIBTIME;
+
+/* DrawDibProfileDisplay. */
+#define PD_CAN_DRAW_DIB      0x0001
+#define PD_CAN_STRETCHDIB    0x0002
+#define PD_STRETCHDIB_1_1_OK 0x0004
+#define PD_STRETCHDIB_1_2_OK 0x0008
+#define PD_STRETCHDIB_1_N_OK 0x0010
+
 #endif /* VFW_WIN32_VFW_H */
