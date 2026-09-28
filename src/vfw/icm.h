@@ -128,6 +128,12 @@ LPVOID STUB_WINAPI ic_seq_frame(COMPVARS *pc, UINT flags, LPVOID bits,
 void STUB_WINAPI ic_seq_end(COMPVARS *pc);
 /* ICCompressorFree */
 void STUB_WINAPI ic_compressor_free(COMPVARS *pc);
+/*
+ * ICCompressorChoose, answering as the dialog would on OK
+ * (src/vfw/choose.c); $VFW_COMPRESSOR picks the answer.
+ */
+BOOL STUB_WINAPI ic_compressor_choose(HWND hwnd, UINT flags, LPVOID in,
+				      LPVOID data, COMPVARS *pc, LPSTR title);
 
 /*
  * ic_seq_start with the stream's frame rate and length, which go to the

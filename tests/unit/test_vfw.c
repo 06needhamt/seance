@@ -657,6 +657,109 @@ static void test_image(void)
 	mod_free(vfw);
 }
 
+/* ICCompressorChoose without its dialog, through msvfw32's exports. */
+static void test_choose(void)
+{
+	struct module *vfw = mod_load("msvfw32.dll", NULL);
+	CHECK(vfw != NULL);
+	if (!vfw)
+		return;
+	BOOL (WINAPI *choose)(HWND, UINT, LPVOID, LPVOID, COMPVARS *, LPSTR) =
+		mod_get_proc(vfw, "ICCompressorChoose");
+	void (WINAPI *cfree)(COMPVARS *) = mod_get_proc(vfw, "ICCompressorFree");
+	BOOL (WINAPI *start)(COMPVARS *, BITMAPINFO *) =
+		mod_get_proc(vfw, "ICSeqCompressFrameStart");
+	LPVOID (WINAPI *frame)(COMPVARS *, UINT, LPVOID, BOOL *, LONG *) =
+		mod_get_proc(vfw, "ICSeqCompressFrame");
+	void (WINAPI *end)(COMPVARS *) = mod_get_proc(vfw, "ICSeqCompressFrameEnd");
+	CHECK(choose && cfree && start && frame && end);
+	if (!choose || !cfree || !start || !frame || !end) {
+		mod_free(vfw);
+		return;
+	}
+	const LONG w = 33, h = 17;
+	BITMAPINFOHEADER in = rgb(w, h, 24), yuy2 = rgb(w, h, 16);
+	yuy2.biCompression = FCC('Y', 'U', 'Y', '2');
+	char title[] = "Video Compression";
+	COMPVARS cv;
+
+	memset(&cv, 0, sizeof(cv));
+	CHECK(!choose(NULL, 0, &in, NULL, &cv, title));	/* no cbSize */
+
+	/* The initial selection of a fresh COMPVARS: Full Frames. */
+	unsetenv("VFW_COMPRESSOR");
+	cv.cbSize = sizeof(cv);
+	cv.fccHandler = TST0;	/* ignored without ICMF_COMPVARS_VALID */
+	CHECK(choose(NULL, 0, &in, NULL, &cv, title));
+	CHECK(cv.dwFlags & ICMF_COMPVARS_VALID);
+	CHECK(!cv.hic && cv.fccType == ICTYPE_VIDEO && cv.fccHandler == comptypeDIB);
+	CHECK(cv.lQ == ICQUALITY_DEFAULT && cv.lKey == -1 && cv.lDataRate == 300);
+	cfree(&cv);
+
+	/* Chosen by VFW_COMPRESSOR: opened, with the codec's defaults. */
+	setenv("VFW_COMPRESSOR", "vidc.tst0", 1);
+	CHECK(choose(NULL, 0, &in, NULL, &cv, title));
+	CHECK(cv.hic && ic_valid(cv.hic) && cv.fccHandler == TST0);
+	CHECK(cv.lQ == 7500 && cv.lKey == 15);
+	CHECK_EQ(codec_opens(), 1);
+
+	/* Choosing again keeps the choice and its state; one codec open. */
+	unsetenv("VFW_COMPRESSOR");
+	DWORD st[2] = { 1234, 3 }, got[2] = { 0, 0 };
+	cv.lpState = st;
+	cv.cbState = sizeof(st);
+	CHECK(choose(NULL, 0, &in, NULL, &cv, title));
+	CHECK(cv.hic && cv.fccHandler == TST0);
+	CHECK_EQ(codec_opens(), 1);
+	CHECK_EQ(ic_send(cv.hic, ICM_GETSTATE, (DWORD_PTR)got, sizeof(got)), 8);
+	CHECK(got[0] == 1234 && got[1] == 3);
+	cv.lpState = NULL;
+	cv.cbState = 0;
+
+	/* The choice works for a sequence. */
+	BYTE *src = malloc(in.biSizeImage);
+	picture(src, w, h, 1);
+	BOOL key = FALSE;
+	LONG size = 0;
+	CHECK(start(&cv, (BITMAPINFO *)&in));
+	CHECK(frame(&cv, 0, src, &key, &size) && key && size > 0);
+	end(&cv);
+	free(src);
+
+	/* A compressor that won't take the input isn't listed. */
+	setenv("VFW_COMPRESSOR", "TST0", 1);
+	HIC before = cv.hic;
+	CHECK(!choose(NULL, 0, &yuy2, NULL, &cv, title));
+	CHECK(cv.hic == before && ic_valid(before));	/* unchanged */
+	CHECK(choose(NULL, ICMF_CHOOSE_ALLCOMPRESSORS, &yuy2, NULL, &cv, title));
+	CHECK(cv.hic && cv.fccHandler == TST0);
+	CHECK_EQ(codec_opens(), 1);
+	unsetenv("VFW_COMPRESSOR");
+	CHECK(choose(NULL, 0, &yuy2, NULL, &cv, title));
+	CHECK(!cv.hic && cv.fccHandler == comptypeDIB);	/* fell back */
+	CHECK_EQ(codec_opens(), 0);
+
+	/* Cancelled, unknown, or not a FOURCC: FALSE, cv untouched. */
+	COMPVARS saved = cv;
+	setenv("VFW_COMPRESSOR", "Cancel", 1);
+	CHECK(!choose(NULL, 0, &in, NULL, &cv, title));
+	setenv("VFW_COMPRESSOR", "ZZZZ", 1);
+	CHECK(!choose(NULL, 0, &in, NULL, &cv, title));
+	setenv("VFW_COMPRESSOR", "much too long", 1);
+	CHECK(!choose(NULL, 0, &in, NULL, &cv, NULL));
+	CHECK(!memcmp(&saved, &cv, sizeof(cv)));
+	setenv("VFW_COMPRESSOR", "TST0", 1);
+	CHECK(choose(NULL, 0, &in, NULL, &cv, title));
+	setenv("VFW_COMPRESSOR", "uncompressed", 1);
+	CHECK(choose(NULL, 0, &in, NULL, &cv, title));
+	CHECK(!cv.hic && cv.fccHandler == comptypeDIB);
+	CHECK_EQ(codec_opens(), 0);
+	unsetenv("VFW_COMPRESSOR");
+
+	cfree(&cv);
+	mod_free(vfw);
+}
+
 /* Runs a command with stdout captured; returns its status and output. */
 static int run_captured(int (*cmd)(int, char **), int argc, char **argv,
 			char *out, size_t size)
@@ -1129,6 +1232,7 @@ int main(void)
 		test_probe_cli(codec);
 		test_seq();
 		test_image();
+		test_choose();
 		test_format_size();
 		test_codec_cli(codec);
 	}
