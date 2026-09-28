@@ -110,8 +110,12 @@ and msvfw32 built-ins, `probe` and `list`, and `testcodec.dll` with
 (`image.c`: one image to a packed DIB in a GMEM_MOVEABLE block, with the
 codec found by format when none is given; ICImageDecompress after Wine,
 ICImageCompress, which Wine only stubs, as documented, passing the size
-asked for to the codec as its target). Still open:
-- ICCompressorChoose (a dialog).
+asked for to the codec as its target), and ICCompressorChoose
+(`choose.c`: no dialog; it answers as OK on the initial selection would,
+the compressor the COMPVARS already names if the dialog would list it,
+else Full Frames, unless `$VFW_COMPRESSOR` names one, "uncompressed" or
+"cancel"; the list and what is filled in follow Wine's dialog). Still
+open:
 - DrawDib* and the ICM_DRAW path (drawing is reported as unsupported).
 - The remaining placeholder DLLs (oleaut32, comctl32, comdlg32)
   have no functions yet.

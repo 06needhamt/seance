@@ -317,6 +317,13 @@ typedef struct {
 /* ICCompressorChoose / ICSeqCompressFrame* state. */
 #define ICMF_COMPVARS_VALID 0x00000001
 
+/* ICCompressorChoose flags, and its "Full Frames (Uncompressed)" entry. */
+#define ICMF_CHOOSE_KEYFRAME       0x0001
+#define ICMF_CHOOSE_DATARATE       0x0002
+#define ICMF_CHOOSE_PREVIEW        0x0004
+#define ICMF_CHOOSE_ALLCOMPRESSORS 0x0008
+#define comptypeDIB mmioFOURCC('D', 'I', 'B', ' ')
+
 typedef struct {
 	LONG cbSize;
 	DWORD dwFlags;
