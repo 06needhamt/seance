@@ -484,7 +484,7 @@ static struct moveable *moveable_of(HGLOBAL h)
 	return found;
 }
 
-static HGLOBAL global_alloc(UINT flags, SIZE_T size)
+HGLOBAL global_alloc(UINT flags, SIZE_T size)
 {
 	DWORD hflags = (flags & GMEM_ZEROINIT) ? HEAP_ZERO_MEMORY : 0;
 
@@ -511,7 +511,7 @@ static HGLOBAL global_alloc(UINT flags, SIZE_T size)
 	return (BYTE *)m + 2;
 }
 
-static HGLOBAL global_free(HGLOBAL h)
+HGLOBAL global_free(HGLOBAL h)
 {
 	struct moveable *m = moveable_of(h);
 
@@ -534,7 +534,7 @@ static HGLOBAL global_free(HGLOBAL h)
 	return NULL;
 }
 
-static LPVOID global_lock(HGLOBAL h)
+LPVOID global_lock(HGLOBAL h)
 {
 	struct moveable *m = moveable_of(h);
 
@@ -544,7 +544,7 @@ static LPVOID global_lock(HGLOBAL h)
 	return m->ptr;
 }
 
-static BOOL global_unlock(HGLOBAL h)
+BOOL global_unlock(HGLOBAL h)
 {
 	struct moveable *m = moveable_of(h);
 
@@ -553,7 +553,7 @@ static BOOL global_unlock(HGLOBAL h)
 	return __atomic_sub_fetch(&m->locks, 1, __ATOMIC_SEQ_CST) > 0;
 }
 
-static SIZE_T global_size(HGLOBAL h)
+SIZE_T global_size(HGLOBAL h)
 {
 	struct moveable *m = moveable_of(h);
 	SIZE_T s;

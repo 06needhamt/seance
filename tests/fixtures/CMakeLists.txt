@@ -54,6 +54,7 @@ endfunction()
 import_library(pe_basic)
 import_library(zz_nosuch)
 import_library(vfw_missing)
+import_library(sehcrt)
 
 fixture(pe_basic pe_basic.c pe_basic.def pe_basic.rc)
 fixture(pe_reloc pe_reloc.c)
@@ -80,6 +81,11 @@ fixture(pe_sse pe_sse.c LIBS kernel32
 # Installs its own fs:[0] SEH frames by hand (no CRT here to compile
 # __try/__except into _except_handler3 frames) and faults under them.
 fixture(pe_seh pe_seh.c LIBS kernel32 OPTIONS -mpreferred-stack-boundary=2)
+
+# __try/__except/__finally as cl compiles them against msvcrt's
+# _except_handler3 and _except_handler4_common, frames written out by hand.
+fixture(pe_sehcrt pe_sehcrt.c LIBS sehcrt_imports kernel32
+	OPTIONS -mpreferred-stack-boundary=2)
 
 # Keeps settings in the registry (advapi32), as many codecs do.
 fixture(pe_reg pe_reg.c LIBS advapi32 OPTIONS -mpreferred-stack-boundary=2)

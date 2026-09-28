@@ -5,6 +5,9 @@
  * RaiseException goes through the same chain without a fault. An unhandled
  * fault still has to crash normally, checked in a child as test_crash does.
  *
+ * pe_sehcrt.dll does the same through msvcrt's _except_handler3/4, with
+ * frames laid out as cl compiles __try/__except/__finally.
+ *
  * The signal-based checks need the harness's own SIGSEGV handler, which
  * sanitizer builds leave uninstalled (ASan's own runs instead); only the
  * RaiseException path, which never touches a signal, still applies there.
@@ -83,6 +86,24 @@ int main(void)
 			printf("sanitizer build: skipping the fault-based checks\n");
 		}
 		mod_free(m);
+	}
+
+	/*
+	 * __try/__except/__finally frames as cl compiles them against
+	 * msvcrt's handlers: raised exceptions always, faults outside
+	 * sanitizer builds.
+	 */
+	struct module *crt = mod_load(fixture("pe_sehcrt.dll"), NULL);
+	CHECK(crt != NULL);
+	if (crt) {
+		int (*run)(int) = (int (*)(int))mod_get_proc(crt, "sehcrt_run");
+		CHECK(run != NULL);
+		if (run) {
+			CHECK_EQ(run(1), 0);
+			if (!VFW_SANITIZER_BUILD)
+				CHECK_EQ(run(0), 0);
+		}
+		mod_free(crt);
 	}
 
 	if (VFW_SANITIZER_BUILD) {

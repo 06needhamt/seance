@@ -25,6 +25,13 @@ BOOL heap_free(HANDLE heap, DWORD flags, void *p);
 SIZE_T heap_size(HANDLE heap, DWORD flags, const void *p);
 void *heap_realloc(HANDLE heap, DWORD flags, void *p, SIZE_T size);
 
+/* GlobalAlloc, GlobalFree, GlobalLock, GlobalUnlock and GlobalSize. */
+HGLOBAL global_alloc(UINT flags, SIZE_T size);
+HGLOBAL global_free(HGLOBAL h);
+LPVOID global_lock(HGLOBAL h);
+BOOL global_unlock(HGLOBAL h);
+SIZE_T global_size(HGLOBAL h);
+
 /* The Unix fd behind a file handle, or -1. */
 int file_handle_fd(HANDLE h);
 

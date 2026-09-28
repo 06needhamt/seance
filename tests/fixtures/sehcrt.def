@@ -1,0 +1,10 @@
+; msvcrt's SEH helpers, imported as a VC6-VC8 /MD DLL does (mingw's own
+; libmsvcrt.a doesn't carry all of them).
+LIBRARY msvcrt.dll
+EXPORTS
+	_abnormal_termination
+	_except_handler3
+	_except_handler4_common
+	_global_unwind2
+	_local_unwind2
+	_local_unwind4
