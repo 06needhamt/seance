@@ -175,6 +175,7 @@ static void test_builtin_tables(void)
 	CHECK(!builtin_find("msvfw32.dll")->fallback);
 	CHECK(!builtin_find("version.dll")->fallback);
 	CHECK(!builtin_find("ole32.dll")->fallback);
+	CHECK(!builtin_find("shell32.dll")->fallback);
 	CHECK(builtin_find("msvcr90.dll") == builtin_find("msvcrt.dll"));
 	CHECK(builtin_find("msvcrt.dll")->fallback);
 	CHECK(builtin_find("msvcr.dll") == NULL);
@@ -186,10 +187,10 @@ static void test_builtin_tables(void)
  */
 static void test_fallback_builtins(void)
 {
-	struct module *m = mod_load("SHELL32", NULL);
+	struct module *m = mod_load("OLEAUT32", NULL);
 	CHECK(m && m->builtin && m->builtin->fallback && !m->img);
 	if (m)
-		CHECK(mod_get_proc(m, "ShellExecuteA") == NULL);
+		CHECK(mod_get_proc(m, "SysAllocString") == NULL);
 	mod_free(m);
 
 	char dir[4096], dst[4200];
@@ -199,7 +200,7 @@ static void test_fallback_builtins(void)
 		CHECK(0);
 		return;
 	}
-	snprintf(dst, sizeof(dst), "%s/shell32.dll", dir);
+	snprintf(dst, sizeof(dst), "%s/oleaut32.dll", dir);
 	void *data;
 	size_t len;
 	CHECK_EQ(vfw_read_file(fixture("pe_basic.dll"), &data, &len), 0);
@@ -210,7 +211,7 @@ static void test_fallback_builtins(void)
 	free(data);
 
 	setenv("VFW_PATH", dir, 1);
-	m = mod_load("shell32.dll", NULL);
+	m = mod_load("oleaut32.dll", NULL);
 	CHECK(m && !m->builtin && m->img);
 	mod_free(m);
 	unsetenv("VFW_PATH");

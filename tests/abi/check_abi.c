@@ -8,5 +8,6 @@
 #include <mmsystem.h>
 #include <vfw.h>
 #include <aviriff.h>
+#include <shlobj.h>
 
 #include "abi_checks.inc"
