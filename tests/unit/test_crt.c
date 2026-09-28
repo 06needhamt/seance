@@ -133,6 +133,107 @@ static void test_printf(void)
 	CHECK(w16_is(w, "7"));
 }
 
+/*
+ * Calling the _CI* intrinsics as cl does: arguments pushed on the x87
+ * stack, the result left in ST0.
+ */
+__asm__(
+	".text\n"
+	/* double ci_call1(void *fn, double x) */
+	"ci_call1:\n\t"
+	"fldl 8(%esp)\n\t"
+	"call *4(%esp)\n\t"
+	"ret\n"
+	/* double ci_call2(void *fn, double x, double y) */
+	"ci_call2:\n\t"
+	"fldl 8(%esp)\n\t"
+	"fldl 16(%esp)\n\t"
+	"call *4(%esp)\n\t"
+	"ret\n"
+	/* void ci_deep(void *fn, double x, const double in[6], double out[7]):
+	 * six values live under x; out gets the result, then them. */
+	"ci_deep:\n\t"
+	"movl 16(%esp), %eax\n\t"
+	"fldl 0(%eax)\n\t"
+	"fldl 8(%eax)\n\t"
+	"fldl 16(%eax)\n\t"
+	"fldl 24(%eax)\n\t"
+	"fldl 32(%eax)\n\t"
+	"fldl 40(%eax)\n\t"
+	"fldl 8(%esp)\n\t"
+	"call *4(%esp)\n\t"
+	"movl 20(%esp), %eax\n\t"
+	"fstpl 0(%eax)\n\t"
+	"fstpl 8(%eax)\n\t"
+	"fstpl 16(%eax)\n\t"
+	"fstpl 24(%eax)\n\t"
+	"fstpl 32(%eax)\n\t"
+	"fstpl 40(%eax)\n\t"
+	"fstpl 48(%eax)\n\t"
+	"ret\n"
+	/* unsigned ci_cw(void *fn, double x, unsigned cw): the control word
+	 * after calling fn with cw set. */
+	"ci_cw:\n\t"
+	"subl $8, %esp\n\t"
+	"fnstcw (%esp)\n\t"
+	"fldcw 24(%esp)\n\t"
+	"fldl 16(%esp)\n\t"
+	"call *12(%esp)\n\t"
+	"fstp %st(0)\n\t"
+	"fnstcw 4(%esp)\n\t"
+	"fldcw (%esp)\n\t"
+	"movzwl 4(%esp), %eax\n\t"
+	"addl $8, %esp\n\t"
+	"ret\n"
+);
+double ci_call1(void *fn, double x) __asm__("ci_call1");
+double ci_call2(void *fn, double x, double y) __asm__("ci_call2");
+void ci_deep(void *fn, double x, const double *in, double *out)
+	__asm__("ci_deep");
+unsigned ci_cw(void *fn, double x, unsigned cw) __asm__("ci_cw");
+
+static void test_intrinsics(void)
+{
+	static const struct {
+		const char *name;
+		double (*ref)(double);
+		double x;
+	} one[] = {
+		{ "_CIacos", acos, 0.25 }, { "_CIasin", asin, 0.25 },
+		{ "_CIatan", atan, 2.0 }, { "_CIcos", cos, 1.0 },
+		{ "_CIcosh", cosh, 1.5 }, { "_CIexp", exp, 2.5 },
+		{ "_CIlog", log, 10.0 }, { "_CIlog10", log10, 1234.0 },
+		{ "_CIsin", sin, 1.0 }, { "_CIsinh", sinh, 1.5 },
+		{ "_CIsqrt", sqrt, 2.0 }, { "_CItan", tan, 0.5 },
+		{ "_CItanh", tanh, 0.5 },
+	};
+	for (size_t i = 0; i < sizeof(one) / sizeof(*one); i++) {
+		double r = ci_call1(get(one[i].name), one[i].x);
+		if (fabs(r - one[i].ref(one[i].x)) > 1e-12) {
+			fprintf(stderr, "%s(%g) = %.17g\n", one[i].name,
+				one[i].x, r);
+			CHECK(0);
+		}
+	}
+	CHECK(fabs(ci_call2(get("_CIpow"), 2.0, 10.0) - 1024.0) < 1e-9);
+	CHECK(fabs(ci_call2(get("_CIpow"), 9.0, 0.5) - 3.0) < 1e-12);
+	CHECK(fabs(ci_call2(get("_CIatan2"), 1.0, -1.0) - atan2(1.0, -1.0)) <
+	      1e-12);
+	CHECK(fabs(ci_call2(get("_CIfmod"), 7.5, 2.0) - 1.5) < 1e-12);
+
+	/* What the caller keeps on the x87 stack survives. */
+	static const double in[6] = { 1, 2, 3, 4, 5, 6 };
+	double out[7] = { 0 };
+	ci_deep(get("_CIsin"), 0.5, in, out);
+	CHECK(fabs(out[0] - sin(0.5)) < 1e-12);
+	for (int i = 0; i < 6; i++)
+		CHECK(out[1 + i] == in[5 - i]);
+
+	/* And its control word, Windows' default here. */
+	CHECK_EQ(ci_cw(get("_CIexp"), 1.0, 0x27f), 0x27f);
+	CHECK_EQ(ci_cw(get("_CIsqrt"), 2.0, 0x7f), 0x7f);
+}
+
 /* MSVCRT behaviour that differs from glibc's, called directly. */
 static void test_msvcrt_semantics(void)
 {
@@ -227,6 +328,7 @@ int main(void)
 	if (crt) {
 		test_msvcrt_semantics();
 	test_printf();
+	test_intrinsics();
 		mod_free(crt);
 	}
 	/* The fixture, if it was built (the checks above need no mingw). */

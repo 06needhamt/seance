@@ -141,6 +141,83 @@ CRTFN(unsigned int) crt__controlfp(unsigned int new_val, unsigned int mask)
 	return crt__control87(new_val, mask);
 }
 
+/*
+ * The _CI* intrinsics cl calls for math functions under /Oi or /Og: the
+ * arguments on the x87 stack (one in ST0, or for two, the first in ST1
+ * and the second in ST0), popped, and the result left in ST0. The caller
+ * may keep other values live on the x87 stack across the call, but libm
+ * expects it empty (and may use all eight registers), so each trampoline
+ * saves the rest of the stack with fnsave, calls libm with the caller's
+ * control word, and restores it under the result. The arguments are
+ * rounded to double on the way, as /Op code stores them anyway.
+ */
+#define CI1(name) \
+	double vfw_ci_##name(double x) \
+		__attribute__((used, visibility("hidden"))); \
+	double vfw_ci_##name(double x) { return name(x); }
+#define CI2(name) \
+	double vfw_ci_##name(double x, double y) \
+		__attribute__((used, visibility("hidden"))); \
+	double vfw_ci_##name(double x, double y) { return name(x, y); }
+
+CI1(acos) CI1(asin) CI1(atan) CI1(cos) CI1(cosh) CI1(exp) CI1(log)
+CI1(log10) CI1(sin) CI1(sinh) CI1(sqrt) CI1(tan) CI1(tanh)
+CI2(atan2) CI2(fmod) CI2(pow)
+
+__asm__(
+	/* 0(%esp): arguments, 16: result, 32: the saved x87 state. */
+	".macro CI_ENTER\n\t"
+	"pushl %ebp\n\t"
+	"movl %esp, %ebp\n\t"
+	"subl $160, %esp\n\t"
+	"andl $-16, %esp\n"
+	".endm\n"
+	".macro CI_CALL fn\n\t"
+	"fnsave 32(%esp)\n\t"
+	"fldcw 32(%esp)\n\t"
+	"call \\fn\n\t"
+	"fstpl 16(%esp)\n\t"
+	"frstor 32(%esp)\n\t"
+	"fldl 16(%esp)\n\t"
+	"movl %ebp, %esp\n\t"
+	"popl %ebp\n\t"
+	"ret\n"
+	".endm\n"
+	".macro CI1 name\n"
+	".globl _CI\\name\n"
+	".type _CI\\name, @function\n"
+	"_CI\\name:\n\t"
+	"CI_ENTER\n\t"
+	"fstpl (%esp)\n\t"
+	"CI_CALL vfw_ci_\\name\n"
+	".size _CI\\name, .-_CI\\name\n"
+	".endm\n"
+	".macro CI2 name\n"
+	".globl _CI\\name\n"
+	".type _CI\\name, @function\n"
+	"_CI\\name:\n\t"
+	"CI_ENTER\n\t"
+	"fstpl 8(%esp)\n\t"
+	"fstpl (%esp)\n\t"
+	"CI_CALL vfw_ci_\\name\n"
+	".size _CI\\name, .-_CI\\name\n"
+	".endm\n"
+	".text\n"
+	"CI1 acos\n" "CI1 asin\n" "CI1 atan\n" "CI1 cos\n" "CI1 cosh\n"
+	"CI1 exp\n" "CI1 log\n" "CI1 log10\n" "CI1 sin\n" "CI1 sinh\n"
+	"CI1 sqrt\n" "CI1 tan\n" "CI1 tanh\n"
+	"CI2 atan2\n" "CI2 fmod\n" "CI2 pow\n"
+	".purgem CI_ENTER\n" ".purgem CI_CALL\n"
+	".purgem CI1\n" ".purgem CI2\n"
+);
+
+extern void _CIacos(void), _CIasin(void), _CIatan(void), _CIcos(void),
+	_CIcosh(void), _CIexp(void), _CIlog(void), _CIlog10(void),
+	_CIsin(void), _CIsinh(void), _CIsqrt(void), _CItan(void),
+	_CItanh(void), _CIatan2(void), _CIfmod(void), _CIpow(void);
+
+#define EASM(name) { #name, 0, (void *)name }
+
 #define E(name) { #name, 0, (void *)crt_##name }
 
 const struct builtin_export crt_math_exports[] = {
@@ -152,5 +229,9 @@ const struct builtin_export crt_math_exports[] = {
 	E(_finite), E(_isnan), E(_fpclass), E(_matherr),
 	E(_control87), E(_controlfp), E(_controlfp_s),
 	E(sinf), E(cosf), E(sqrtf), E(fabsf), E(powf), E(floorf), E(ceilf),
+	EASM(_CIacos), EASM(_CIasin), EASM(_CIatan), EASM(_CIatan2),
+	EASM(_CIcos), EASM(_CIcosh), EASM(_CIexp), EASM(_CIfmod),
+	EASM(_CIlog), EASM(_CIlog10), EASM(_CIpow), EASM(_CIsin),
+	EASM(_CIsinh), EASM(_CIsqrt), EASM(_CItan), EASM(_CItanh),
 	BUILTIN_END
 };
