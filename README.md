@@ -194,7 +194,11 @@ user32, gdi32, advapi32, version and ole32 are built in too, headless:
   and LoadString, wsprintf and the `Char*` functions work; nothing is drawn
   and no input arrives. A message box prints to stderr and answers with
   its default button, as if someone pressed Enter. Dialog boxes can't be
-  shown: `DialogBox*` and `CreateDialog*` fail and say so.
+  shown: `DialogBox*` and `CreateDialog*` fail and say so. msvfw32's
+  compressor dialog, `ICCompressorChoose`, answers as if OK were pressed
+  on its initial selection (the compressor chosen last time, else Full
+  Frames), or as `$VFW_COMPRESSOR` says: a FOURCC, `uncompressed` or
+  `cancel`.
 - **gdi32:** memory DCs, device-dependent bitmaps and DIB sections, with
   conversion between every DIB format and blits between them (`BitBlt`,
   `StretchBlt`, `StretchDIBits`, `GetDIBits`, ...), palettes, brushes,
@@ -336,6 +340,7 @@ hangs on one.
 | `VFW_REGISTRY` | The Windows registry file (default `$VFW_ROOT/registry.reg`); empty keeps it in memory only |
 | `VFW_TRACE=1` | Log calls into the built-in DLLs and every driver message to stderr |
 | `VFW_TIMEOUT=<s>` | Report and stop (exit 124) when one call into a DLL takes longer |
+| `VFW_COMPRESSOR` | What `ICCompressorChoose` answers: a FOURCC (`TST0`), `uncompressed` or `cancel` |
 | `VFW_LOW_MEMORY=0` | Don't keep DLL-visible memory below 2 GB |
 | `VFW_ENV_<NAME>=<value>` | Put `NAME=value` in the Windows environment codecs see |
 
