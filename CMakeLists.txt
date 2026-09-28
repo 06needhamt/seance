@@ -13,23 +13,48 @@
 #   VFW_SANITIZE        build with AddressSanitizer and UBSan
 #   VFW_MINGW_PREFIX    the mingw-w64 tool prefix (i686-w64-mingw32-)
 #   VFW_SAMPLES_DIR     codec DLLs for the samples test (info and probe)
+#   VFW_HOST_ARCH       the host architecture, if detecting it goes wrong
+#
+# The compiler: see cmake/i386.cmake. On an x86 host it is the default one
+# with -m32, else (or without 32-bit support) an i686 cross compiler; a
+# cross build's tests run through qemu-i386 when there is one.
 cmake_minimum_required(VERSION 3.20)
 
 # The harness loads 32-bit Windows DLLs into its own address space, so it
-# is always an i386 program. Set before project() so the compiler checks
-# use it too; they fail here if gcc-multilib (or the like) is missing.
-if(NOT CMAKE_TOOLCHAIN_FILE)
-	set(CMAKE_C_FLAGS_INIT "-m32")
-	set(CMAKE_EXE_LINKER_FLAGS_INIT "-m32")
-endif()
+# is always an i386 program. Chosen before project() so the compiler
+# checks use it too.
+include(cmake/i386.cmake)
 
 project(vfw-harness VERSION 0.1.0 LANGUAGES C)
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
 	message(FATAL_ERROR "vfw-harness must be built as a 32-bit x86 "
 		"program; the compiler gives ${CMAKE_SIZEOF_VOID_P}-byte pointers. "
-		"Install gcc-multilib, or give a toolchain file for i386.")
+		"Install gcc-multilib or an i686 cross compiler, or give a "
+		"toolchain file for i386.")
 endif()
+
+# Running what was built: directly, or through an emulator on a cross
+# build (qemu-i386, unless the toolchain file names one). With neither an
+# emulator nor binfmt_misc to run i386 programs, nothing can be tested.
+set(vfw_can_run TRUE)
+if(CMAKE_CROSSCOMPILING AND NOT CMAKE_CROSSCOMPILING_EMULATOR)
+	find_program(VFW_QEMU_I386 NAMES qemu-i386-static qemu-i386)
+	if(VFW_QEMU_I386)
+		set(CMAKE_CROSSCOMPILING_EMULATOR ${VFW_QEMU_I386})
+	elseif(EXISTS /proc/sys/fs/binfmt_misc/qemu-i386)
+		message(STATUS "i386 programs run through binfmt_misc")
+	else()
+		set(vfw_can_run FALSE)
+		message(WARNING "Cross-compiling with no way to run i386 programs: "
+			"install qemu-user (qemu-i386) to build and run the tests.")
+	endif()
+endif()
+if(CMAKE_CROSSCOMPILING_EMULATOR)
+	message(STATUS "i386 programs run through ${CMAKE_CROSSCOMPILING_EMULATOR}")
+endif()
+# For the test scripts, which run the harness themselves.
+string(REPLACE ";" " " vfw_emulator "${CMAKE_CROSSCOMPILING_EMULATOR}")
 
 option(VFW_REQUIRE_MINGW "Fail if mingw-w64 is missing" OFF)
 option(VFW_REQUIRE_FFMPEG "Fail the media checks if FFmpeg is missing" OFF)
@@ -102,7 +127,7 @@ endif()
 
 # Tests.
 
-option(BUILD_TESTING "Build the tests" ON)
+option(BUILD_TESTING "Build the tests" ${vfw_can_run})
 if(BUILD_TESTING)
 	enable_testing()
 	set(test_dir ${CMAKE_BINARY_DIR}/tests)
@@ -151,7 +176,7 @@ if(BUILD_TESTING)
 	add_custom_command(OUTPUT ${abi_checks}
 		COMMAND ${CMAKE_COMMAND} -DOUTPUT=${abi_checks}
 			-P ${PROJECT_SOURCE_DIR}/cmake/capture.cmake
-			$<TARGET_FILE:gen_abi_checks>
+			${CMAKE_CROSSCOMPILING_EMULATOR} $<TARGET_FILE:gen_abi_checks>
 		DEPENDS gen_abi_checks
 		VERBATIM)
 	add_custom_target(abi_checks ALL DEPENDS ${abi_checks})
@@ -172,7 +197,8 @@ if(BUILD_TESTING)
 			$<TARGET_FILE:vfw-harness> ${PROJECT_SOURCE_DIR}/CMakeLists.txt
 			$<$<BOOL:${VFW_MINGW_CC}>:${VFW_FIXTURE_DIR}>
 			$<IF:$<BOOL:${VFW_SANITIZE}>,0,1>)
-	set_tests_properties(smoke PROPERTIES LABELS cli)
+	set_tests_properties(smoke PROPERTIES LABELS cli
+		ENVIRONMENT "VFW_EMULATOR=${vfw_emulator}")
 
 	# info and probe over codec DLLs you supply; the script itself is
 	# checked over the fixture DLLs.
@@ -180,19 +206,22 @@ if(BUILD_TESTING)
 		add_test(NAME samples_fixtures
 			COMMAND sh ${PROJECT_SOURCE_DIR}/tests/samples.sh
 				$<TARGET_FILE:vfw-harness> ${VFW_FIXTURE_DIR})
-		set_tests_properties(samples_fixtures PROPERTIES LABELS cli)
+		set_tests_properties(samples_fixtures PROPERTIES LABELS cli
+			ENVIRONMENT "VFW_EMULATOR=${vfw_emulator}")
 	endif()
 	if(VFW_SAMPLES_DIR)
 		add_test(NAME samples
 			COMMAND sh ${PROJECT_SOURCE_DIR}/tests/samples.sh
 				$<TARGET_FILE:vfw-harness> ${VFW_SAMPLES_DIR})
-		set_tests_properties(samples PROPERTIES LABELS samples)
+		set_tests_properties(samples PROPERTIES LABELS samples
+			ENVIRONMENT "VFW_EMULATOR=${vfw_emulator}")
 	endif()
 
 	# The AVI and image code cross-checked with FFmpeg.
 	add_test(NAME validate_media
 		COMMAND sh ${PROJECT_SOURCE_DIR}/tests/validate_media.sh
 			${CMAKE_BINARY_DIR} ${CMAKE_BINARY_DIR}/media)
-	set_tests_properties(validate_media PROPERTIES LABELS media)
+	set_tests_properties(validate_media PROPERTIES LABELS media
+		ENVIRONMENT "VFW_EMULATOR=${vfw_emulator}")
 	skippable(validate_media ${VFW_REQUIRE_FFMPEG})
 endif()

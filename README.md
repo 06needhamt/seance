@@ -26,10 +26,18 @@ Work is split into phases; see [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION
 ## Prerequisites
 
 The codecs are i386 code, so the harness is built as a 32-bit Linux program.
-On a 64-bit host the kernel must support running 32-bit programs, which most
-distributions enable by default.
+On a 64-bit x86 host the kernel must support running 32-bit programs, which
+most distributions enable by default.
 
-- GCC with 32-bit support (`gcc-multilib` on Debian and Ubuntu)
+- A C compiler that builds i386 programs, one of:
+  - GCC with 32-bit support (`gcc-multilib` on Debian and Ubuntu);
+  - an i686 Linux cross compiler (`gcc-i686-linux-gnu`, with
+    `libc6-dev-i386-cross`). On Debian and Ubuntu it conflicts with
+    `gcc-multilib`, so install one or the other;
+  - clang with an i386 sysroot.
+
+  On a host that isn't x86 (aarch64, say) only the last two work, and the
+  tests need qemu-user (`qemu-i386`) to run.
 - CMake 3.20 or later (3.25 for the presets) and Ninja or make
 - Optional: the mingw-w64 i686 cross compiler (`mingw-w64`). It builds the
   test fixture DLLs and runs the ABI cross-check; without it those tests are
@@ -53,8 +61,30 @@ cmake --preset asan && cmake --build --preset asan && ctest --preset asan
                               # in build-asan/
 ```
 
-The harness is always built as an i386 program (`-m32`); configuring fails
-early if the compiler can't produce one. Useful CMake options:
+The harness is always built as an i386 program. Before anything else,
+configuring picks a compiler for that ([`cmake/i386.cmake`](cmake/i386.cmake)),
+trying each until one links a 32-bit program with the headers the harness
+needs:
+
+1. With a toolchain file, the toolchain file decides.
+2. A compiler you give with `-DCMAKE_C_COMPILER=...` or `$CC` is used with
+   `-m32`.
+3. On an x86 host (x86_64 or i386), the default compiler with `-m32`.
+4. An i686 cross compiler: `i686-linux-gnu-gcc` or another of its usual
+   names.
+5. `clang --target=i686-linux-gnu`.
+
+Configuring fails early, saying what to install, if none of them works. The
+choice is kept in the cache (delete the build directory to choose again),
+and the configure output names it.
+
+On a host that isn't x86 this is a cross build. The tests then run through
+`qemu-i386` when it is installed (or binfmt_misc, if it runs i386 programs
+directly). If neither is available, `BUILD_TESTING` defaults to off, since
+nothing built could run. Under qemu-user all the tests pass, except that
+`test_lowmem` skips: the guest's memory is all below 2 GB anyway.
+
+Useful CMake options:
 
 | Option | Effect |
 | --- | --- |
@@ -63,6 +93,7 @@ early if the compiler can't produce one. Useful CMake options:
 | `VFW_SANITIZE=ON` | build with ASan and UBSan |
 | `VFW_MINGW_PREFIX=...` | the cross tools' prefix (`i686-w64-mingw32-`) |
 | `VFW_SAMPLES_DIR=<dir>` | add a `samples` test: `info` and `probe` over the codec DLLs in `<dir>` |
+| `VFW_HOST_ARCH=...` | the host architecture as `uname -m` spells it, if detecting it goes wrong |
 
 The `ci` preset turns on both `REQUIRE` options. Tests carry the CTest
 labels `unit`, `abi`, `cli`, `media` and `samples`, so `ctest --preset default -L unit`
