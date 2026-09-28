@@ -547,6 +547,116 @@ static void test_builtins(struct module *codec)
 	CHECK_EQ(codec_opens(), 0);
 }
 
+/* ICImageCompress / ICImageDecompress, through msvfw32's export table. */
+static void test_image(void)
+{
+	struct module *vfw = mod_load("msvfw32.dll", NULL);
+	struct module *k32 = mod_load("kernel32.dll", NULL);
+	CHECK(vfw && k32);
+	if (!vfw || !k32)
+		return;
+	HANDLE (WINAPI *compress)(HIC, UINT, BITMAPINFO *, void *, BITMAPINFO *,
+				  LONG, LONG *) = mod_get_proc(vfw, "ICImageCompress");
+	HANDLE (WINAPI *decompress)(HIC, UINT, BITMAPINFO *, void *,
+				    BITMAPINFO *) = mod_get_proc(vfw, "ICImageDecompress");
+	LPVOID (WINAPI *lock)(HGLOBAL) = mod_get_proc(k32, "GlobalLock");
+	BOOL (WINAPI *unlock)(HGLOBAL) = mod_get_proc(k32, "GlobalUnlock");
+	HGLOBAL (WINAPI *gfree)(HGLOBAL) = mod_get_proc(k32, "GlobalFree");
+	SIZE_T (WINAPI *gsize)(HGLOBAL) = mod_get_proc(k32, "GlobalSize");
+	CHECK(compress && decompress && lock && unlock && gfree && gsize);
+	if (!compress || !decompress || !lock || !unlock || !gfree || !gsize)
+		return;
+
+	const LONG w = 33, h = 17;
+	BITMAPINFOHEADER in = rgb(w, h, 24);
+	BYTE *src = malloc(in.biSizeImage);
+	picture(src, w, h, 2);
+
+	/* A compressor found by format, its default output, a quality. */
+	LONG size = 0;
+	HANDLE c = compress(NULL, 0, (BITMAPINFO *)&in, src, NULL, 6000, &size);
+	CHECK(c != NULL);
+	if (!c) {
+		free(src);
+		return;
+	}
+	CHECK_EQ(codec_quality(), 6000);
+	BITMAPINFOHEADER *ch = lock(c);
+	size_t chdr = vfw_format_size(ch);
+	BYTE *cbits = (BYTE *)ch + chdr;
+	CHECK(ch->biCompression == TST0 && ch->biWidth == w && ch->biHeight == h);
+	CHECK(size > 0 && ch->biSizeImage == (DWORD)size);
+	CHECK(gsize(c) >= chdr + (SIZE_T)size);
+
+	/* Back through a decompressor found by format, to its default. */
+	HANDLE d = decompress(NULL, 0, (BITMAPINFO *)ch, cbits, NULL);
+	CHECK(d != NULL);
+	if (d) {
+		BITMAPINFOHEADER *dh = lock(d);
+		CHECK(dh->biCompression == BI_RGB && dh->biBitCount == 24 &&
+		      dh->biWidth == w && dh->biHeight == h);
+		CHECK_EQ(dh->biSizeImage, in.biSizeImage);
+		CHECK(!memcmp((BYTE *)dh + dh->biSize, src, in.biSizeImage));
+		unlock(d);
+		CHECK(gfree(d) == NULL);
+	}
+
+	/* The caller's decompressor, to BGR32 top-down; it stays open. */
+	HIC dec = ic_open(ICTYPE_VIDEO, TST0, ICMODE_DECOMPRESS);
+	BITMAPINFOHEADER o32 = rgb(w, -h, 32);
+	d = decompress(dec, 0, (BITMAPINFO *)ch, cbits, (BITMAPINFO *)&o32);
+	CHECK(d != NULL && ic_valid(dec));
+	if (d) {
+		BITMAPINFOHEADER *dh = lock(d);
+		const BYTE *px = (BYTE *)dh + sizeof(*dh);
+		size_t stride = ((size_t)w * 3 + 3) & ~(size_t)3;
+		int bad = 0;
+		CHECK(dh->biBitCount == 32 && dh->biHeight == -h);
+		for (LONG y = 0; y < h; y++)
+			for (LONG x = 0; x < w; x++)
+				bad |= memcmp(px + ((size_t)y * w + x) * 4,
+					      src + (h - 1 - y) * stride + 3 * x, 3);
+		CHECK(!bad);
+		unlock(d);
+		gfree(d);
+	}
+	ic_close(dec);
+
+	/* The caller's compressor and format; the size goes to the codec. */
+	HIC enc = ic_open(ICTYPE_VIDEO, TST0, ICMODE_COMPRESS);
+	LRESULT err;
+	BITMAPINFOHEADER *cfmt = enc ? ic_compress_get_format(enc, &in, &err) : NULL;
+	CHECK(cfmt != NULL);
+	if (cfmt) {
+		LONG size2 = 100000;
+		HANDLE c2 = compress(enc, 0, (BITMAPINFO *)&in, src,
+				     (BITMAPINFO *)cfmt, ICQUALITY_DEFAULT, &size2);
+		CHECK(c2 != NULL && size2 == size && ic_valid(enc));
+		CHECK_EQ(codec_quality(), (DWORD)ICQUALITY_DEFAULT);
+		gfree(c2);
+		free(cfmt);
+	}
+	ic_close(enc);
+
+	/* Failures, with nothing left open. */
+	BITMAPINFOHEADER mjpg = *ch, bad_out = rgb(w, h, 24);
+	mjpg.biCompression = FCC('M', 'J', 'P', 'G');
+	bad_out.biSize = 20;
+	CHECK(!compress(NULL, 1, (BITMAPINFO *)&in, src, NULL, 5000, &size));
+	CHECK(!compress(NULL, 0, (BITMAPINFO *)&in, NULL, NULL, 5000, &size));
+	CHECK(!decompress(NULL, 0, (BITMAPINFO *)&mjpg, cbits, NULL));
+	CHECK(!decompress(NULL, 0, (BITMAPINFO *)ch, cbits,
+			  (BITMAPINFO *)&bad_out));
+	CHECK(!decompress(NULL, 0, (BITMAPINFO *)ch, NULL, NULL));
+	CHECK_EQ(codec_opens(), 0);
+
+	unlock(c);
+	gfree(c);
+	free(src);
+	mod_free(k32);
+	mod_free(vfw);
+}
+
 /* Runs a command with stdout captured; returns its status and output. */
 static int run_captured(int (*cmd)(int, char **), int argc, char **argv,
 			char *out, size_t size)
@@ -1018,6 +1128,7 @@ int main(void)
 		test_builtins(m);
 		test_probe_cli(codec);
 		test_seq();
+		test_image();
 		test_format_size();
 		test_codec_cli(codec);
 	}

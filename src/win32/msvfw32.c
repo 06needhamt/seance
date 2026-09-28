@@ -1,8 +1,9 @@
 /*
  * msvfw32.dll: the ICM API from src/vfw/icm.c, for codecs that call back
- * into it (wrappers opening another codec, for instance), and the
- * ICSeqCompressFrame* sequence API. DrawDib*, MCIWnd*, ICCompressorChoose
- * and the rest of the GUI side are left as traps.
+ * into it (wrappers opening another codec, for instance), the
+ * ICSeqCompressFrame* sequence API, and ICImageCompress/ICImageDecompress.
+ * DrawDib*, MCIWnd*, ICCompressorChoose and the rest of the GUI side are
+ * left as traps.
  */
 #include "vfw/icm.h"
 #include "win32/internal.h"
@@ -33,6 +34,8 @@ static const struct builtin_export exports[] = {
 	{ "ICDrawBegin", 0, (void *)vfw_ICDrawBegin },
 	{ "ICGetDisplayFormat", 0, (void *)ic_get_display_format },
 	{ "ICGetInfo", 0, (void *)ic_get_info },
+	{ "ICImageCompress", 0, (void *)ic_image_compress },
+	{ "ICImageDecompress", 0, (void *)ic_image_decompress },
 	{ "ICInfo", 0, (void *)ic_info },
 	{ "ICInstall", 0, (void *)ic_install },
 	{ "ICLocate", 0, (void *)ic_locate },

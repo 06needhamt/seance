@@ -104,11 +104,13 @@ The stub list is based on what VfW codecs use in general (with Wine and MPlayer'
 
 Status: done. `driver.c`, `registry.c` (`vfw.ini`) and `icm.c`, the winmm
 and msvfw32 built-ins, `probe` and `list`, and `testcodec.dll` with
-`test_vfw`, and ICSeqCompressFrameStart/Frame/End and ICCompressorFree
-(`seq.c`), which `encode` uses. Still open:
-- ICImageCompress/ICImageDecompress (they return global-memory DIBs;
-  kernel32's GlobalAlloc, which they were waiting for, now exists) and
-  ICCompressorChoose (a dialog).
+`test_vfw`, ICSeqCompressFrameStart/Frame/End and ICCompressorFree
+(`seq.c`), which `encode` uses, and ICImageCompress/ICImageDecompress
+(`image.c`: one image to a packed DIB in a GMEM_MOVEABLE block, with the
+codec found by format when none is given; ICImageDecompress after Wine,
+ICImageCompress, which Wine only stubs, as documented, passing the size
+asked for to the codec as its target). Still open:
+- ICCompressorChoose (a dialog).
 - DrawDib* and the ICM_DRAW path (drawing is reported as unsupported).
 - The remaining placeholder DLLs (oleaut32, shell32, comctl32, comdlg32)
   have no functions yet.

@@ -104,6 +104,16 @@ BITMAPINFOHEADER *ic_compress_get_format(HIC hic, const BITMAPINFOHEADER *in,
 					 LRESULT *err);
 
 /*
+ * ICImageCompress and ICImageDecompress (src/vfw/image.c): a packed DIB in
+ * a GMEM_MOVEABLE block, or NULL with vfw_error().
+ */
+HANDLE STUB_WINAPI ic_image_compress(HIC hic, UINT flags, BITMAPINFO *in,
+				     void *bits, BITMAPINFO *out_fmt,
+				     LONG quality, LONG *size);
+HANDLE STUB_WINAPI ic_image_decompress(HIC hic, UINT flags, BITMAPINFO *in,
+				       void *bits, BITMAPINFO *out_fmt);
+
+/*
  * Sequence compression through a COMPVARS (src/vfw/seq.c). The caller
  * fills cbSize, hic, lKey (keyframe interval, 0 for only the first),
  * lDataRate (KB/s, 0 for none) and lQ (0..10000 or ICQUALITY_DEFAULT),
