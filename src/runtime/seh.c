@@ -133,6 +133,35 @@ static void __attribute__((noreturn, noinline)) resume_context(const CONTEXT *c)
 	__builtin_unreachable();
 }
 
+/*
+ * Calls a chain handler as Windows' own dispatcher does, restoring %esp
+ * afterwards: MSVC's _except_handler3/4 (the handler behind almost every
+ * frame, from msvcrt or statically linked into the DLL) are cdecl and
+ * leave their arguments on the stack, while hand-written handlers are
+ * often stdcall and pop them. %ebx, %esi and %edi are the handler's to
+ * preserve, as the ABI says either way.
+ */
+__asm__(
+	".text\n"
+	".type seh_call_handler, @function\n"
+	"seh_call_handler:\n\t"
+	"pushl %ebp\n\t"
+	"movl %esp, %ebp\n\t"
+	"pushl 24(%ebp)\n\t"		/* dispatcher context */
+	"pushl 20(%ebp)\n\t"		/* context */
+	"pushl 16(%ebp)\n\t"		/* frame */
+	"pushl 12(%ebp)\n\t"		/* record */
+	"call *8(%ebp)\n\t"
+	"movl %ebp, %esp\n\t"
+	"popl %ebp\n\t"
+	"ret\n\t"
+	".size seh_call_handler, .-seh_call_handler\n"
+);
+EXCEPTION_DISPOSITION seh_call_handler(PEXCEPTION_ROUTINE handler,
+				       EXCEPTION_RECORD *rec, void *frame,
+				       CONTEXT *ctx, void *dispatch)
+	__asm__("seh_call_handler") __attribute__((cdecl));
+
 /* Walks teb's fs:[0] chain, calling each handler until one returns
  * ExceptionContinueExecution (then resumes ctx, never returning) or the
  * chain ends. Returns if nothing handled it, for the caller to report. */
@@ -142,7 +171,8 @@ static void walk_chain(struct win_teb *teb, EXCEPTION_RECORD *rec, CONTEXT *ctx)
 
 	while (frame_plausible(teb, frame)) {
 		PEXCEPTION_REGISTRATION_RECORD next = frame->Next;
-		EXCEPTION_DISPOSITION d = frame->Handler(rec, frame, ctx, NULL);
+		EXCEPTION_DISPOSITION d =
+			seh_call_handler(frame->Handler, rec, frame, ctx, NULL);
 
 		if (d == ExceptionContinueExecution) {
 			/*
@@ -277,8 +307,8 @@ void WINAPI seh_RaiseException(DWORD code, DWORD flags, DWORD nargs,
 		PEXCEPTION_REGISTRATION_RECORD frame = teb->ExceptionList;
 		while (frame_plausible(teb, frame)) {
 			PEXCEPTION_REGISTRATION_RECORD next = frame->Next;
-			EXCEPTION_DISPOSITION d =
-				frame->Handler(&rec, frame, &ctx, NULL);
+			EXCEPTION_DISPOSITION d = seh_call_handler(
+				frame->Handler, &rec, frame, &ctx, NULL);
 			if (d == ExceptionContinueExecution) {
 				dispatching = 0;
 				return;
@@ -330,7 +360,8 @@ void WINAPI seh_RtlUnwind(PEXCEPTION_REGISTRATION_RECORD target_frame,
 	PEXCEPTION_REGISTRATION_RECORD frame = teb->ExceptionList;
 	while (frame_plausible(teb, frame) && frame != target_frame) {
 		PEXCEPTION_REGISTRATION_RECORD next = frame->Next;
-		frame->Handler(&unwind_rec, frame, &ctx, target_frame);
+		seh_call_handler(frame->Handler, &unwind_rec, frame, &ctx,
+				 target_frame);
 		frame = next;
 	}
 	teb->ExceptionList = target_frame ? target_frame : SEH_CHAIN_END;
