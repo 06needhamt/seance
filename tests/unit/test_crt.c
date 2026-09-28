@@ -23,6 +23,116 @@ static void *get(const char *name)
 	return p;
 }
 
+static WCHAR *w16(const char *s)
+{
+	static WCHAR buf[4][128];
+	static int next;
+	WCHAR *w = buf[next++ % 4];
+	size_t i = 0;
+
+	for (; s[i] && i < 127; i++)
+		w[i] = (BYTE)s[i];
+	w[i] = 0;
+	return w;
+}
+
+static int w16_is(const WCHAR *w, const char *s)
+{
+	while (*s && *w == (BYTE)*s)
+		w++, s++;
+	return !*s && !*w;
+}
+
+static int w16_starts(const WCHAR *w, const char *s)
+{
+	while (*s && *w == (BYTE)*s)
+		w++, s++;
+	return !*s;
+}
+
+/* msvcrt.dll's printf dialect. */
+static void test_printf(void)
+{
+	int (*sprintf_)(char *, const char *, ...) = get("sprintf");
+	int (*snprintf_)(char *, size_t, const char *, ...) = get("_snprintf");
+	int (*scprintf)(const char *, ...) = get("_scprintf");
+	int (*swprintf_)(WCHAR *, const WCHAR *, ...) = get("swprintf");
+	int (*snwprintf)(WCHAR *, size_t, const WCHAR *, ...) = get("_snwprintf");
+	int (*scwprintf)(const WCHAR *, ...) = get("_scwprintf");
+	char b[128];
+	WCHAR w[128];
+	static const WCHAR euro_w[] = { 'a', 'b', 0x20ac, 0 };
+
+	/* 64-bit and explicitly sized integers. */
+	CHECK_EQ(sprintf_(b, "%I64d|%I64u|%I64x", -5000000000LL,
+			  18446744073709551615ULL, 0x123456789abcULL), 45);
+	CHECK_STR(b, "-5000000000|18446744073709551615|123456789abc");
+	CHECK_EQ(sprintf_(b, "%lld %I32d %Id %hd %hhu", 1LL << 40, -7, 8,
+			  70000, 300), 26);
+	CHECK_STR(b, "1099511627776 -7 8 4464 44");
+	sprintf_(b, "[%08I64X] [%-6I64d] [%+d] [% d] [%#x] [%#010x]",
+		 0xabcdULL, 42LL, 3, 3, 255, 255);
+	CHECK_STR(b, "[0000ABCD] [42    ] [+3] [ 3] [0xff] [0x000000ff]");
+	sprintf_(b, "[%*d] [%-*d] [%.*d] [%05.3d]", 4, 1, 3, 2, 3, 5, 7);
+	CHECK_STR(b, "[   1] [2  ] [005] [  007]");
+	sprintf_(b, "[%*d]", -4, 9);
+	CHECK_STR(b, "[9   ]");
+
+	/* Floats: L is a double, exponents have three digits. */
+	sprintf_(b, "%Lf %.2f %e %E %g %G", 1.5, 2.345, 12345.678, 0.00015,
+		 1e-10, 1e20);
+	CHECK_STR(b, "1.500000 2.35 1.234568e+004 1.500000E-004 1e-010 1E+020");
+	sprintf_(b, "[%10.2e] [%-12.1e] [%012.3f] [%+.1f]", 1234.5, -2.0,
+		 -3.25, 0.5);
+	CHECK_STR(b, "[ 1.23e+003] [-2.0e+000   ] [-0000003.250] [+0.5]");
+	sprintf_(b, "%g %g", 100.0, 1e100);
+	CHECK_STR(b, "100 1e+100");
+
+	/* Pointers, strings and characters. */
+	sprintf_(b, "%p [%12p]", (void *)0x1234abcd, (void *)0xff);
+	CHECK_STR(b, "1234ABCD [    000000FF]");
+	sprintf_(b, "%s|%.2s|%5s|%-5s|%hs", "abc", "abc", "ab", "ab", "hs");
+	CHECK_STR(b, "abc|ab|   ab|ab   |hs");
+	CHECK_EQ(sprintf_(b, "%S|%ls|%ws|%.2S", euro_w, euro_w, euro_w,
+			  euro_w), 14);
+	CHECK_STR(b, "ab\x80|ab\x80|ab\x80|ab");
+	sprintf_(b, "%s %S", (char *)NULL, (WCHAR *)NULL);
+	CHECK_STR(b, "(null) (null)");
+	CHECK_EQ(sprintf_(b, "%c%C%lc%3c", 'x', 0x20ac, 'y', 'z'), 6);
+	CHECK_STR(b, "x\x80y  z");
+	CHECK_EQ(sprintf_(b, "a%cb", 0), 3);
+	CHECK(!memcmp(b, "a\0b", 4));
+
+	/* %n, %%, an unknown conversion, a lone % at the end. */
+	int n = 0;
+	short h = 0;
+	sprintf_(b, "ab%ncd%hn", &n, &h);
+	CHECK(n == 2 && h == 4);
+	sprintf_(b, "100%% %y %");
+	CHECK_STR(b, "100% y ");
+
+	CHECK_EQ(scprintf("%I64d", 1234567890123LL), 13);
+	CHECK_EQ(snprintf_(b, 5, "%I64d", 1234567890123LL), -1);
+	CHECK(!memcmp(b, "12345", 5));
+
+	/* The wide family: %s is wide, %S narrow. */
+	CHECK_EQ(swprintf_(w, w16("%s/%S/%hs/%c/%C/%d"), euro_w, "nar", "h",
+			   0x20ac, 'n', 42), 16);
+	CHECK(w[0] == 'a' && w[1] == 'b' && w[2] == 0x20ac);
+	CHECK(w16_starts(w + 3, "/nar/h/") && w[10] == 0x20ac);
+	CHECK(w16_is(w + 11, "/n/42"));
+	CHECK_EQ(swprintf_(w, w16("%5.1f|%-4s|%I64x"), 2.25, w16("x"),
+			   0xfULL), 12);
+	CHECK(w16_is(w, "  2.2|x   |f") || w16_is(w, "  2.3|x   |f"));
+	CHECK_EQ(scwprintf(w16("%d%s"), 12, w16("abc")), 5);
+	for (int i = 0; i < 8; i++)
+		w[i] = 'q';
+	CHECK_EQ(snwprintf(w, 3, w16("%s"), w16("abcdef")), -1);
+	CHECK(w[0] == 'a' && w[2] == 'c' && w[3] == 'q');
+	CHECK_EQ(snwprintf(w, 8, w16("%d"), 7), 1);
+	CHECK(w16_is(w, "7"));
+}
+
 /* MSVCRT behaviour that differs from glibc's, called directly. */
 static void test_msvcrt_semantics(void)
 {
@@ -53,12 +163,8 @@ static void test_msvcrt_semantics(void)
 	CHECK_EQ(snprintf_(buf, 8, "%d", 12), 2);
 	CHECK_STR(buf, "12");
 
-	/*
-	 * A conversion the host can't do fails cleanly: %ls reads a 32-bit
-	 * wchar_t on Linux, so UTF-16 text is out of range for it.
-	 */
-	static const WCHAR utf16[] = { 'a', 'b', 0x20ac, 0 };
-	CHECK_EQ(fprintf_(iob + 32, "%ls", utf16), -1);	/* _iob[1], stdout */
+	/* An empty write to stdout through _iob[1]. */
+	CHECK_EQ(fprintf_(iob + 32, "%s", ""), 0);
 
 	/* A successful fseek clears end-of-file. */
 	void *f = fopen_("C:\\WINDOWS\\TEMP\\test_crt.tmp", "w+b");
@@ -120,6 +226,7 @@ int main(void)
 	CHECK(crt != NULL);
 	if (crt) {
 		test_msvcrt_semantics();
+	test_printf();
 		mod_free(crt);
 	}
 	/* The fixture, if it was built (the checks above need no mingw). */

@@ -23,6 +23,8 @@
 #include <unistd.h>
 
 #include "runtime/builtin.h"
+#include "win32/codepage.h"
+#include "win32/crt.h"
 #include "win32/internal.h"
 #include "win32/path.h"
 
@@ -205,46 +207,85 @@ CRTFN(int) crt_setvbuf(crt_FILE *f, char *buf, int mode, size_t size)
 	return 0;	/* unbuffered either way: every write reaches the fd. */
 }
 
-CRTFN(int) crt_vfprintf(crt_FILE *f, const char *fmt, va_list ap)
+/* Formatting is crt_printf.c's; a wide result is written as ANSI. */
+static int print(crt_FILE *f, int wide, const void *fmt, va_list ap)
 {
-	char stack_buf[256], *buf = stack_buf;
-	va_list ap2;
-	va_copy(ap2, ap);
-	int n = vsnprintf(stack_buf, sizeof(stack_buf), fmt, ap);
-	if (n < 0) {
-		/* A conversion the host couldn't do (e.g. %ls on UTF-16). */
-		va_end(ap2);
+	void *out;
+	size_t len;
+
+	if (crt_vformat(wide, fmt, ap, &out, &len))
 		return -1;
-	}
-	if (n >= (int)sizeof(stack_buf)) {
-		buf = malloc((size_t)n + 1);
-		if (!buf) {
-			va_end(ap2);
+	char *text = out;
+	size_t n = len;
+	if (wide && len) {
+		int an = cp_from_utf16(CP_ACP, out, (int)len, NULL, 0, '?', NULL);
+		text = an > 0 ? malloc((size_t)an) : NULL;
+		if (!text) {
+			free(out);
 			return -1;
 		}
-		vsnprintf(buf, (size_t)n + 1, fmt, ap2);
+		cp_from_utf16(CP_ACP, out, (int)len, text, an, '?', NULL);
+		n = (size_t)an;
 	}
-	va_end(ap2);
-	size_t w = crt_fwrite(buf, 1, (size_t)n, f);
-	if (buf != stack_buf)
-		free(buf);
-	return w == (size_t)n ? n : -1;
+	size_t w = crt_fwrite(text, 1, n, f);
+	if (text != out)
+		free(text);
+	free(out);
+	return w == n ? (int)len : -1;
+}
+
+CRTFN(int) crt_vfprintf(crt_FILE *f, const char *fmt, va_list ap)
+{
+	return print(f, 0, fmt, ap);
 }
 
 CRTFN(int) crt_fprintf(crt_FILE *f, const char *fmt, ...)
 {
 	va_list ap;
 	va_start(ap, fmt);
-	int r = crt_vfprintf(f, fmt, ap);
+	int r = print(f, 0, fmt, ap);
 	va_end(ap);
 	return r;
+}
+
+CRTFN(int) crt_vprintf(const char *fmt, va_list ap)
+{
+	return print(&crt_iob[1], 0, fmt, ap);
 }
 
 CRTFN(int) crt_printf(const char *fmt, ...)
 {
 	va_list ap;
 	va_start(ap, fmt);
-	int r = crt_vfprintf(&crt_iob[1], fmt, ap);
+	int r = print(&crt_iob[1], 0, fmt, ap);
+	va_end(ap);
+	return r;
+}
+
+CRTFN(int) crt_vfwprintf(crt_FILE *f, const WCHAR *fmt, va_list ap)
+{
+	return print(f, 1, fmt, ap);
+}
+
+CRTFN(int) crt_fwprintf(crt_FILE *f, const WCHAR *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	int r = print(f, 1, fmt, ap);
+	va_end(ap);
+	return r;
+}
+
+CRTFN(int) crt_vwprintf(const WCHAR *fmt, va_list ap)
+{
+	return print(&crt_iob[1], 1, fmt, ap);
+}
+
+CRTFN(int) crt_wprintf(const WCHAR *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	int r = print(&crt_iob[1], 1, fmt, ap);
 	va_end(ap);
 	return r;
 }
@@ -252,63 +293,6 @@ CRTFN(int) crt_printf(const char *fmt, ...)
 CRTFN(int) crt_puts(const char *s)
 {
 	return crt_fputs(s, &crt_iob[1]) == 0 && crt_fputc('\n', &crt_iob[1]) != EOF ? 0 : EOF;
-}
-
-CRTFN(int) crt_sprintf(char *buf, const char *fmt, ...)
-{
-	va_list ap;
-	va_start(ap, fmt);
-	int r = vsprintf(buf, fmt, ap);
-	va_end(ap);
-	return r;
-}
-
-/*
- * MSVCRT's _vsnprintf: when the output is longer than n it writes n
- * characters with no terminator and returns -1; when it is exactly n,
- * no terminator either. glibc's vsnprintf always terminates and returns
- * the full length, so format in full first and copy what fits.
- */
-static int msvc_vsnprintf(char *buf, size_t n, const char *fmt, va_list ap)
-{
-	va_list ap2;
-	va_copy(ap2, ap);
-	int len = vsnprintf(NULL, 0, fmt, ap);
-	if (len < 0) {
-		va_end(ap2);
-		return -1;
-	}
-	char *tmp = malloc((size_t)len + 1);
-	if (!tmp) {
-		va_end(ap2);
-		return -1;
-	}
-	vsnprintf(tmp, (size_t)len + 1, fmt, ap2);
-	va_end(ap2);
-	size_t copy = (size_t)len < n ? (size_t)len + 1 : n;
-	if (buf && copy)
-		memcpy(buf, tmp, copy);
-	free(tmp);
-	return (size_t)len <= n ? len : -1;
-}
-
-CRTFN(int) crt__snprintf(char *buf, size_t n, const char *fmt, ...)
-{
-	va_list ap;
-	va_start(ap, fmt);
-	int r = msvc_vsnprintf(buf, n, fmt, ap);
-	va_end(ap);
-	return r;
-}
-
-CRTFN(int) crt_vsprintf(char *buf, const char *fmt, va_list ap)
-{
-	return vsprintf(buf, fmt, ap);
-}
-
-CRTFN(int) crt__vsnprintf(char *buf, size_t n, const char *fmt, va_list ap)
-{
-	return msvc_vsnprintf(buf, n, fmt, ap);
 }
 
 CRTFN(crt_FILE *) crt___iob_func(void) { return crt_iob; }
@@ -389,8 +373,8 @@ const struct builtin_export crt_stdio_exports[] = {
 	E(fopen), E(fclose), E(fread), E(fwrite), E(fputc), E(fgetc),
 	E(fputs), E(fgets), E(fflush), E(feof), E(ferror), E(clearerr),
 	E(ftell), E(fseek), E(rewind), E(setvbuf), E(remove),
-	E(fprintf), E(vfprintf), E(printf), E(puts),
-	E(sprintf), E(_snprintf), E(vsprintf), E(_vsnprintf),
+	E(fprintf), E(vfprintf), E(printf), E(vprintf), E(puts),
+	E(fwprintf), E(vfwprintf), E(wprintf), E(vwprintf),
 	E(__iob_func), E(_fileno),
 	E(isalpha), E(isupper), E(islower), E(isdigit), E(isxdigit),
 	E(isspace), E(ispunct), E(iscntrl), E(isalnum), E(isprint),
