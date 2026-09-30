@@ -71,6 +71,21 @@ LONG reg_save(void);
  */
 void reg_reload(void);
 
+/* Counts reloads of the tree (for views kept in step with it). */
+unsigned reg_generation(void);
+
+/* The full path of k, as reg_open() takes it; malloc()ed. */
+char *reg_key_path(const struct reg_key *k);
+
+/*
+ * Called with the lock held after each change: REG_NOTIFY_CHANGE_NAME on
+ * a key when a subkey is added or removed, _LAST_SET when a value is set
+ * or removed, and REG_CHANGE_DELETED on a key about to be deleted. Not
+ * called while the file is read.
+ */
+#define REG_CHANGE_DELETED 0x80000000u
+extern void (*reg_change_hook)(const struct reg_key *k, DWORD what);
+
 /*
  * Imports .reg text (any of the encodings above) into the tree, as regedit
  * would; unparseable lines are skipped with a warning. Returns the number

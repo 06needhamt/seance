@@ -50,6 +50,15 @@ int vfw_register(FOURCC type, FOURCC handler, const char *path);
 /* Adds or replaces a run-time entry served by a driver procedure. */
 int vfw_register_proc(FOURCC type, FOURCC handler, DRIVERPROC proc);
 
+/*
+ * Adds or replaces a run-time entry from a value as an ini line gives it
+ * (a Windows path, a path relative to the ini file, or a bare DLL name).
+ */
+int vfw_register_value(FOURCC type, FOURCC handler, const char *value);
+
+/* Counts changes to the table, for views kept in step with it. */
+unsigned vfw_registry_generation(void);
+
 /* Removes an entry. Returns 0, or -1 if there was none. */
 int vfw_unregister(FOURCC type, FOURCC handler);
 

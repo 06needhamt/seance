@@ -18,7 +18,17 @@
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static struct reg_key root;	/* unnamed; its subkeys are the hives */
 static int loaded;
+static int loading;		/* no change reports while reading the file */
+static unsigned generation;	/* counts reloads */
 static char file[4096];		/* "" to keep the registry in memory only */
+
+void (*reg_change_hook)(const struct reg_key *k, DWORD what);
+
+static void changed(const struct reg_key *k, DWORD what)
+{
+	if (reg_change_hook && !loading)
+		reg_change_hook(k, what);
+}
 
 static const char *const hives[] = {
 	"HKEY_LOCAL_MACHINE", "HKEY_CURRENT_USER", "HKEY_USERS",
@@ -107,6 +117,7 @@ static struct reg_key *add_sub(struct reg_key *k, const char *name, size_t len,
 	c->parent = k;
 	c->is_volatile = is_volatile;
 	c->modified = now();
+	changed(k, REG_NOTIFY_CHANGE_NAME);
 	return c;
 }
 
@@ -116,10 +127,12 @@ static void detach(struct reg_key *k)
 	int found;
 	size_t i = find_sub(p, k->name, strlen(k->name), &found);
 
+	changed(k, REG_CHANGE_DELETED);
 	if (found) {
 		memmove(&p->sub[i], &p->sub[i + 1], (p->nsub - i - 1) * sizeof(*p->sub));
 		p->nsub--;
 		p->modified = now();
+		changed(p, REG_NOTIFY_CHANGE_NAME);
 	}
 	free_key(k);
 }
@@ -219,18 +232,47 @@ static void load(void)
 	size_t len;
 
 	loaded = 1;
+	loading = 1;
+	generation++;
 	for (size_t i = 0; i < sizeof(hives) / sizeof(hives[0]); i++)
 		walk(hives[i], 1, 0, NULL, NULL);
 	walk("HKEY_LOCAL_MACHINE\\Software\\Classes", 1, 0, NULL, NULL);
 
 	compute_file();
-	if (!*file || vfw_read_file(file, &buf, &len))
-		return;
-	TRACE("registry: loading %s", file);
-	int bad = reg_import(buf, len);
-	if (bad)
-		vfw_warn("registry: skipped %d line(s) of %s", bad, file);
-	free(buf);
+	if (*file && !vfw_read_file(file, &buf, &len)) {
+		TRACE("registry: loading %s", file);
+		int bad = reg_import(buf, len);
+		if (bad)
+			vfw_warn("registry: skipped %d line(s) of %s", bad,
+				 file);
+		free(buf);
+	}
+	loading = 0;
+}
+
+unsigned reg_generation(void)
+{
+	return generation;
+}
+
+char *reg_key_path(const struct reg_key *k)
+{
+	size_t n = 0;
+
+	for (const struct reg_key *p = k; p && p != &root; p = p->parent)
+		n += strlen(p->name) + 1;
+	char *out = malloc(n ? n : 1);
+	if (!out)
+		return NULL;
+	out[n ? n - 1 : 0] = '\0';
+	for (const struct reg_key *p = k; p && p != &root; p = p->parent) {
+		size_t len = strlen(p->name);
+		n -= len + 1;
+		memcpy(out + n, p->name, len);
+		if (n)
+			out[n - 1] = '\\';
+	}
+	return out;
 }
 
 void reg_lock(void)
@@ -438,6 +480,7 @@ LONG reg_set(struct reg_key *k, const char *name, DWORD type,
 	v->data = copy;
 	v->size = size;
 	k->modified = now();
+	changed(k, REG_NOTIFY_CHANGE_LAST_SET);
 	return ERROR_SUCCESS;
 }
 
@@ -453,6 +496,7 @@ LONG reg_unset(struct reg_key *k, const char *name)
 	memmove(&k->val[i], &k->val[i + 1], (k->nval - i - 1) * sizeof(*v));
 	k->nval--;
 	k->modified = now();
+	changed(k, REG_NOTIFY_CHANGE_LAST_SET);
 	return ERROR_SUCCESS;
 }
 

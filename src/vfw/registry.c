@@ -20,6 +20,7 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static struct vfw_codec *codecs;
 static unsigned ncodecs;
 static int loaded;
+static unsigned generation;	/* counts changes to the table */
 static char ini_path[PATH_MAX];
 
 static FOURCC upper(FOURCC f)
@@ -116,6 +117,7 @@ static char *resolve(const char *value)
 static int add(FOURCC type, FOURCC handler, char *path, DRIVERPROC proc,
 	       int from_ini)
 {
+	generation++;
 	for (unsigned i = 0; i < ncodecs; i++)
 		if (same(codecs[i].type, type) && same(codecs[i].handler, handler)) {
 			free(codecs[i].path);
@@ -143,6 +145,7 @@ static void load_ini(void)
 
 	compute_ini_path();
 	loaded = 1;
+	generation++;
 	if (!(f = fopen(ini_path, "r")))
 		return;
 	while (fgets(line, sizeof(line), f)) {
@@ -298,9 +301,31 @@ int vfw_unregister(FOURCC type, FOURCC handler)
 		if (same(codecs[i].type, type) && same(codecs[i].handler, handler)) {
 			free(codecs[i].path);
 			codecs[i] = codecs[--ncodecs];
+			generation++;
 			r = 0;
 			break;
 		}
 	pthread_mutex_unlock(&lock);
 	return r;
+}
+
+int vfw_register_value(FOURCC type, FOURCC handler, const char *value)
+{
+	pthread_mutex_lock(&lock);
+	ensure_loaded();
+	char *path = resolve(value);
+	int r = path ? add(type, handler, path, NULL, 0) : -1;
+	pthread_mutex_unlock(&lock);
+	if (r)
+		vfw_set_error("out of memory");
+	return r;
+}
+
+unsigned vfw_registry_generation(void)
+{
+	pthread_mutex_lock(&lock);
+	ensure_loaded();
+	unsigned g = generation;
+	pthread_mutex_unlock(&lock);
+	return g;
 }

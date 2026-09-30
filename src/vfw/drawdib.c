@@ -14,6 +14,7 @@
  * palettised buffer.
  */
 #include <pthread.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -89,11 +90,14 @@ static struct hdd *get(HDRAWDIB h)
 	return d;
 }
 
-/* Colour-table entries (or bitfield masks) after a format's header. */
+/*
+ * Colour-table entries (or bitfield masks) after a format's header. A V4
+ * or V5 header (52 bytes or more) holds the masks itself.
+ */
 static DWORD num_colours(const BITMAPINFOHEADER *bi)
 {
 	if (bi->biCompression == BI_BITFIELDS)
-		return 3;
+		return bi->biSize < 52 ? 3 : 0;
 	if (bi->biClrUsed)
 		return bi->biClrUsed <= 256 ? bi->biClrUsed : 256;
 	return bi->biBitCount <= 8 ? 1u << bi->biBitCount : 0;
@@ -102,6 +106,22 @@ static DWORD num_colours(const BITMAPINFOHEADER *bi)
 static size_t fmt_size(const BITMAPINFOHEADER *bi)
 {
 	return bi->biSize + num_colours(bi) * sizeof(RGBQUAD);
+}
+
+/*
+ * Whether a is still the format b was begun with: the header, whatever
+ * follows it (a colour table, masks, a codec's own data), but not
+ * biSizeImage, which a player sets to each compressed frame's size.
+ */
+static int same_format(const BITMAPINFOHEADER *a, const BITMAPINFOHEADER *b)
+{
+	size_t n = fmt_size(a);
+
+	if (n != fmt_size(b) ||
+	    memcmp(a, b, offsetof(BITMAPINFOHEADER, biSizeImage)))
+		return 0;
+	size_t rest = offsetof(BITMAPINFOHEADER, biXPelsPerMeter);
+	return !memcmp((const BYTE *)a + rest, (const BYTE *)b + rest, n - rest);
 }
 
 static LONG abs_height(const BITMAPINFOHEADER *bi)
@@ -326,8 +346,7 @@ WINFN(BOOL) vfw_DrawDibDraw(HDRAWDIB h, HDC hdc, int x_dst, int y_dst,
 	int reopen = !d->begun;
 	if (!reopen && !(flags & DDF_SAME_HDC) && hdc != d->hdc)
 		reopen = 1;
-	if (!reopen && !(flags & DDF_SAME_DRAW) &&
-	    (bi != d->in && memcmp(bi, d->in, sizeof(*bi))))
+	if (!reopen && !(flags & DDF_SAME_DRAW) && !same_format(bi, d->in))
 		reopen = 1;
 	if (!reopen && !(flags & DDF_SAME_DRAW) &&
 	    (dx_src != d->dx_src || dy_src != d->dy_src ||

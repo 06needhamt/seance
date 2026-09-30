@@ -33,6 +33,8 @@ typedef int32_t  INT;
 typedef uint32_t UINT;
 typedef int32_t  BOOL;
 typedef char     CHAR;
+typedef uint8_t  UCHAR;
+typedef uint8_t  BOOLEAN;
 typedef uint16_t WCHAR;
 
 /*
@@ -60,6 +62,8 @@ typedef WORD      LANGID;
 typedef void        *LPVOID, *PVOID;
 typedef const void  *LPCVOID;
 typedef BYTE        *LPBYTE, *PBYTE;
+typedef UCHAR       *PUCHAR;
+typedef BOOLEAN     *PBOOLEAN;
 typedef WORD        *LPWORD, *PWORD;
 typedef DWORD       *LPDWORD, *PDWORD;
 typedef LONG        *LPLONG, *PLONG;

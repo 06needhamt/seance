@@ -23,6 +23,7 @@
 #define ERROR_INVALID_DATA             13
 #define ERROR_OUTOFMEMORY              14
 #define ERROR_NO_MORE_FILES            18
+#define ERROR_GEN_FAILURE              31
 #define ERROR_SHARING_VIOLATION        32
 #define ERROR_HANDLE_EOF               38
 #define ERROR_NOT_SUPPORTED            50

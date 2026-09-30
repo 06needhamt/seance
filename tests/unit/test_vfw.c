@@ -870,6 +870,41 @@ static void test_drawdib(void)
 	if (c)
 		global_free(c);
 
+	/*
+	 * A keyframe then a delta, each with its own biSizeImage as a player
+	 * sets it: the same stream, so the decompressor carries on.
+	 */
+	COMPVARS cv;
+	memset(&cv, 0, sizeof(cv));
+	cv.cbSize = sizeof(cv);
+	cv.hic = ic_open(ICTYPE_VIDEO, TST0, ICMODE_COMPRESS);
+	cv.lKey = 15;
+	cv.lQ = ICQUALITY_DEFAULT;
+	CHECK(ic_seq_start(&cv, (BITMAPINFO *)&in));
+	if (cv.lpbiOut) {
+		BITMAPINFOHEADER sf = cv.lpbiOut->bmiHeader;
+		BOOL key0 = FALSE, key1 = TRUE;
+		LONG n0 = 0, n1 = 0;
+		BYTE *f = ic_seq_frame(&cv, 0, src, &key0, &n0);
+		BYTE *k0 = f ? malloc(n0) : NULL;
+		if (k0)
+			memcpy(k0, f, n0);
+		BYTE *k1 = ic_seq_frame(&cv, 0, src2, &key1, &n1);
+		CHECK(k0 && k1 && key0 && !key1 && n0 != n1);
+		if (k0 && k1) {
+			sf.biSizeImage = (DWORD)n0;
+			CHECK(draw(hdd, hdc, 0, 0, w, h, &sf, k0, 0, 0, w, h, 0));
+			CHECK(shows(t, tw, 0, 0, w, h, src, w, h));
+			sf.biSizeImage = (DWORD)n1;
+			CHECK(draw(hdd, hdc, 0, 0, w, h, &sf, k1, 0, 0, w, h,
+				   DDF_NOTKEYFRAME));
+			CHECK(shows(t, tw, 0, 0, w, h, src2, w, h));
+		}
+		free(k0);
+		ic_seq_end(&cv);
+	}
+	ic_compressor_free(&cv);
+
 	/* Palettised: two colours, then colour 0 changed. */
 	struct {
 		BITMAPINFOHEADER h;
@@ -887,6 +922,29 @@ static void test_drawdib(void)
 		   DDF_SAME_HDC | DDF_SAME_DRAW));
 	CHECK_EQ(bgr32_at(t, tw, 0, 1), 0x00ff00);
 	CHECK_EQ(bgr32_at(t, tw, 1, 1), 0x0000ff);
+	/* A new colour table is a new format, though the header is the same. */
+	p8.pal[1] = (RGBQUAD){ 0, 0xff, 0xff, 0 };
+	CHECK(draw(hdd, hdc, 0, 0, 4, 2, &p8.h, idx, 0, 0, 4, 2, 0));
+	CHECK_EQ(bgr32_at(t, tw, 0, 1), 0xff0000);
+	CHECK_EQ(bgr32_at(t, tw, 1, 1), 0xffff00);
+
+	/* A V5 header holds its masks: the bits follow it directly. */
+	BYTE v5[124 + 8 * 4];
+	memset(v5, 0, sizeof(v5));
+	BITMAPINFOHEADER *vh = (BITMAPINFOHEADER *)v5;
+	*vh = rgb(4, -2, 32);
+	vh->biSize = 124;
+	vh->biCompression = BI_BITFIELDS;
+	const DWORD masks[3] = { 0xff0000, 0xff00, 0xff };
+	memcpy(v5 + 40, masks, sizeof(masks));
+	for (DWORD i = 0; i < 8; i++) {
+		DWORD v = 0x010203 * (i + 1);
+		memcpy(v5 + 124 + 4 * i, &v, 4);
+	}
+	memset(t, 0, (size_t)tw * th * 4);
+	CHECK(draw(hdd, hdc, 0, 0, 4, 2, vh, NULL, 0, 0, 4, 2, 0));
+	CHECK_EQ(bgr32_at(t, tw, 0, 0), 0x010203);
+	CHECK_EQ(bgr32_at(t, tw, 3, 1), 0x081018);
 	/* A halftone palette, which the true-colour display doesn't need. */
 	CHECK_EQ(realize(hdd, hdc, FALSE), 0);
 	CHECK(get_palette(hdd) != NULL);

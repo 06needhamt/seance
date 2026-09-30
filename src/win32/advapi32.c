@@ -1,21 +1,37 @@
 /*
  * advapi32.dll: the registry functions (on src/win32/reg.c) and
- * GetUserName. Reg* return their Win32 error instead of setting the
+ * GetUserName; the security and CryptoAPI functions are in
+ * adv_security.c. Reg* return their Win32 error instead of setting the
  * last error, as on Windows.
  *
  * An open HKEY is a kernel-object handle holding the key's path, so a key
  * deleted while open reads as ERROR_KEY_DELETED rather than dangling.
  * HKEY_CLASSES_ROOT is HKEY_LOCAL_MACHINE\Software\Classes; there is no
  * per-user merge.
+ *
+ * HKLM\Software\Microsoft\Windows NT\CurrentVersion\Drivers32, where
+ * msvfw32 on NT finds codecs, is a view of the codec table (vfw.ini's
+ * [drivers32] and run-time registrations): it lists each codec as
+ * "vidc.TST0" = its DLL, and setting or deleting such a value there
+ * registers or removes that codec for the process. The key is never
+ * saved; vfw.ini is where codecs are kept. Codec entries in a Drivers32
+ * key read from the registry file are registered too.
  */
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
+#include "vfw/registry.h"
 #include "win32/codepage.h"
 #include "win32/handle.h"
 #include "win32/internal.h"
+#include "win32/path.h"
 #include "win32/reg.h"
+#include "win32/security.h"
+
+extern const struct builtin_dll builtin_kernel32;
 
 struct hkey_obj {
 	struct kobject obj;
@@ -81,6 +97,113 @@ static char *sub_path(HKEY h, const char *sub, LONG *err)
 	return p;
 }
 
+/* The Drivers32 view of the codec table. */
+
+#define DRIVERS32_PARENT \
+	"HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows NT\\CurrentVersion"
+#define DRIVERS32 DRIVERS32_PARENT "\\Drivers32"
+
+static unsigned d32_reg = ~0u, d32_vfw = ~0u;
+
+/* Whether a value name names a codec ("vidc.TST0"), and which. */
+static int codec_value(const char *name, FOURCC *type, FOURCC *handler)
+{
+	return name && strchr(name, '.') && !vfw_parse_fourcc(name, type, handler);
+}
+
+/* A string value's data as UTF-8 (malloc()ed), NUL or not. */
+static char *value_utf8(const BYTE *data, DWORD size)
+{
+	WCHAR *w = malloc(size + sizeof(WCHAR));
+
+	if (!w)
+		return NULL;
+	memcpy(w, data, size);
+	w[size / sizeof(WCHAR)] = 0;
+	char *u = utf16_to_utf8_dup(w);
+	free(w);
+	return u;
+}
+
+/*
+ * Brings the Drivers32 key in step with the codec table, when either has
+ * changed. Called with the registry locked.
+ */
+static void drivers32_sync(void)
+{
+	static int busy;
+	unsigned rg = reg_generation();
+
+	if (busy || (rg == d32_reg && vfw_registry_generation() == d32_vfw))
+		return;
+	busy = 1;
+	struct reg_key *k;
+	FOURCC type, handler;
+	if (rg != d32_reg && (k = reg_open(DRIVERS32)) && !k->is_volatile) {
+		/* Read from the file: its codecs join the table. */
+		for (size_t i = 0; i < k->nval; i++) {
+			const struct reg_value *v = &k->val[i];
+			if (!codec_value(v->name, &type, &handler) ||
+			    (v->type != REG_SZ && v->type != REG_EXPAND_SZ))
+				continue;
+			char *u = value_utf8(v->data, v->size);
+			if (u && *u)
+				vfw_register_value(type, handler, u);
+			free(u);
+		}
+	}
+	int created;
+	LONG err;
+	reg_create(DRIVERS32_PARENT, 0, &created, &err);
+	if ((k = reg_create(DRIVERS32, 1, &created, &err))) {
+		k->is_volatile = 1;
+		for (size_t i = k->nval; i-- > 0;)
+			if (codec_value(k->val[i].name, &type, &handler))
+				reg_unset(k, k->val[i].name);
+		const struct vfw_codec *c;
+		for (unsigned i = 0; (c = vfw_enum(0, i)); i++) {
+			if (!c->path)
+				continue;
+			char name[10];
+			int n = 4;
+			while (n > 1 && ((c->handler >> (8 * (n - 1))) & 0xff) == ' ')
+				n--;
+			snprintf(name, sizeof(name), "%.4s.%.*s",
+				 (const char *)&c->type, n,
+				 (const char *)&c->handler);
+			char *win = c->path[0] == '/' ? path_to_windows(c->path) :
+				    strdup(c->path);
+			WCHAR *w = win ? utf8_to_utf16_dup(win) : NULL;
+			if (w)
+				reg_set(k, name, REG_SZ, w,
+					(wstrlen(w) + 1) * sizeof(WCHAR));
+			free(w);
+			free(win);
+		}
+	}
+	d32_reg = reg_generation();
+	d32_vfw = vfw_registry_generation();
+	busy = 0;
+}
+
+/* After a value of key path is set or deleted: the codec table follows. */
+static void drivers32_changed(const char *path, const char *name,
+			      DWORD type, const BYTE *data, DWORD size)
+{
+	FOURCC t, h;
+
+	if (!path || strcasecmp(path, DRIVERS32) || !codec_value(name, &t, &h))
+		return;
+	if (!data) {
+		vfw_unregister(t, h);
+	} else if (type == REG_SZ || type == REG_EXPAND_SZ) {
+		char *u = value_utf8(data, size);
+		if (u && *u)
+			vfw_register_value(t, h, u);
+		free(u);
+	}
+}
+
 /* The key behind h, with the registry locked; unlock with reg_unlock(). */
 static struct reg_key *lock_key(HKEY h, LONG *err)
 {
@@ -89,6 +212,7 @@ static struct reg_key *lock_key(HKEY h, LONG *err)
 	if (!path)
 		return NULL;
 	reg_lock();
+	drivers32_sync();
 	struct reg_key *k = reg_open(path);
 	free(path);
 	if (!k) {
@@ -115,10 +239,7 @@ static HKEY new_handle(const char *path)
 		return NULL;
 	}
 	kobj_init(&k->obj, KOBJ_KEY, key_destroy);
-	HKEY h = handle_new(&k->obj);
-	if (!h)
-		kobj_unref(&k->obj);
-	return h;
+	return handle_new(&k->obj);	/* which drops k if it fails */
 }
 
 /* Opening, creating, closing and deleting keys. */
@@ -138,6 +259,7 @@ static LONG open_key(HKEY h, const char *sub, int create, DWORD options,
 		return err;
 	}
 	reg_lock();
+	drivers32_sync();
 	struct reg_key *k = NULL;
 	if (!reg_open(base))
 		err = ERROR_KEY_DELETED;
@@ -229,6 +351,8 @@ WINFN(LONG) adv_RegCreateKeyW(HKEY h, LPCWSTR sub, HKEY *out)
 				   out, NULL);
 }
 
+static void watches_closed(HKEY h);
+
 WINFN(LONG) adv_RegCloseKey(HKEY h)
 {
 	if (is_predefined(h))
@@ -237,6 +361,7 @@ WINFN(LONG) adv_RegCloseKey(HKEY h)
 	if (!o)
 		return ERROR_INVALID_HANDLE;
 	kobj_unref(o);
+	watches_closed(h);
 	handle_close(h);
 	return ERROR_SUCCESS;
 }
@@ -436,6 +561,13 @@ static LONG set_value(HKEY h, const char *name, int ansi, DWORD type,
 	}
 	TRACE("RegSetValueEx(%s, type %u, %u bytes) = %ld", name ? name : "",
 	      type, cb, (long)err);
+	if (!err) {
+		LONG e;
+		char *path = key_path(h, &e);
+		drivers32_changed(path, name, type, data ? data : (const BYTE *)"",
+				  cb);
+		free(path);
+	}
 	free(conv);
 	return err;
 }
@@ -469,6 +601,12 @@ static LONG delete_value(HKEY h, const char *name)
 	if (!err)
 		reg_save();
 	reg_unlock();
+	if (!err) {
+		LONG e;
+		char *path = key_path(h, &e);
+		drivers32_changed(path, name, 0, NULL, 0);
+		free(path);
+	}
 	return err;
 }
 
@@ -788,6 +926,359 @@ WINFN(LONG) adv_RegQueryInfoKeyW(HKEY h, LPWSTR cls, LPDWORD cchcls,
 			  maxname, maxdata, secdesc, ft);
 }
 
+/* RegGetValue: RegQueryValueEx with a subkey, type filter and expansion. */
+
+static DWORD type_flag(DWORD type)
+{
+	switch (type) {
+	case REG_NONE:      return RRF_RT_REG_NONE;
+	case REG_SZ:        return RRF_RT_REG_SZ;
+	case REG_EXPAND_SZ: return RRF_RT_REG_EXPAND_SZ;
+	case REG_BINARY:    return RRF_RT_REG_BINARY;
+	case REG_DWORD:     return RRF_RT_REG_DWORD;
+	case REG_MULTI_SZ:  return RRF_RT_REG_MULTI_SZ;
+	case REG_QWORD:     return RRF_RT_REG_QWORD;
+	}
+	return 0;
+}
+
+/* Expands %VARS% in string data through kernel32 (malloc()ed). */
+static BYTE *expand(const BYTE *data, int ansi, DWORD *size)
+{
+	DWORD (WINAPI *fa)(LPCSTR, LPSTR, DWORD) =
+		builtin_export(&builtin_kernel32, "ExpandEnvironmentStringsA");
+	DWORD (WINAPI *fw)(LPCWSTR, LPWSTR, DWORD) =
+		builtin_export(&builtin_kernel32, "ExpandEnvironmentStringsW");
+	DWORD unit = ansi ? 1 : sizeof(WCHAR);
+	DWORD n = ansi ? fa((LPCSTR)data, NULL, 0) : fw((LPCWSTR)data, NULL, 0);
+	BYTE *out = n ? malloc((size_t)n * unit) : NULL;
+
+	if (!out)
+		return NULL;
+	n = ansi ? fa((LPCSTR)data, (LPSTR)out, n) :
+		   fw((LPCWSTR)data, (LPWSTR)out, n);
+	*size = n * unit;
+	return out;
+}
+
+static LONG get_value_ex(HKEY h, const char *sub, const char *name,
+			 DWORD flags, LPDWORD type, void *data, LPDWORD cb,
+			 int ansi)
+{
+	DWORD any = flags & RRF_RT_ANY;
+
+	if ((data && !cb) || !any)
+		return ERROR_INVALID_PARAMETER;
+	/* Expanding would change the type, so only with RRF_RT_ANY. */
+	if ((flags & RRF_RT_REG_EXPAND_SZ) && !(flags & RRF_NOEXPAND) &&
+	    any != RRF_RT_ANY)
+		return ERROR_INVALID_PARAMETER;
+
+	HKEY k = h;
+	LONG err = ERROR_SUCCESS;
+	DWORD t = REG_NONE, size = 0, cap = cb ? *cb : 0;
+	BYTE *buf = NULL;
+	if (sub && *sub)
+		err = open_key(h, sub, 0, 0, &k, NULL);
+	if (!err) {
+		err = get_value(k, name, ansi, &t, &buf, &size);
+		if (k != h)
+			adv_RegCloseKey(k);
+	}
+
+	if (!err && (t == REG_SZ || t == REG_EXPAND_SZ || t == REG_MULTI_SZ)) {
+		/*
+		 * Strings come back NUL-terminated, whatever was stored; a
+		 * multi-string with the empty string that ends it too.
+		 */
+		DWORD unit = ansi ? 1 : sizeof(WCHAR);
+		DWORD want = t == REG_MULTI_SZ ? 2 : 1, have = 0;
+		while (have < want && size >= (have + 1) * unit &&
+		       !memcmp(buf + size - (have + 1) * unit, "\0\0", unit))
+			have++;
+		if (have < want) {
+			DWORD add = (want - have) * unit;
+			BYTE *b = realloc(buf, size + add);
+			if (!b) {
+				err = ERROR_NOT_ENOUGH_MEMORY;
+			} else {
+				memset(b + size, 0, add);
+				buf = b;
+				size += add;
+			}
+		}
+		if (!err && t == REG_EXPAND_SZ && !(flags & RRF_NOEXPAND)) {
+			BYTE *x = expand(buf, ansi, &size);
+			if (!x) {
+				err = ERROR_NOT_ENOUGH_MEMORY;
+			} else {
+				free(buf);
+				buf = x;
+				t = REG_SZ;
+			}
+		}
+	}
+	if (!err) {
+		DWORD f = type_flag(t);
+		if (f ? !(flags & f) : any != RRF_RT_ANY)
+			err = ERROR_UNSUPPORTED_TYPE;
+		else if (t == REG_BINARY && ((any == RRF_RT_DWORD && size != 4) ||
+					     (any == RRF_RT_QWORD && size != 8)))
+			err = ERROR_DATATYPE_MISMATCH;
+	}
+	if (!err)
+		err = copy_data(buf, size, data, cb);
+	if (err && data && cap && (flags & RRF_ZEROONFAILURE))
+		memset(data, 0, cap);
+	if (type)
+		*type = t;
+	free(buf);
+	TRACE("RegGetValue(%s, %s, 0x%x) = %ld", sub ? sub : "",
+	      name ? name : "", flags, (long)err);
+	return err;
+}
+
+WINFN(LONG) adv_RegGetValueA(HKEY h, LPCSTR sub, LPCSTR name, DWORD flags,
+			     LPDWORD type, PVOID data, LPDWORD cb)
+{
+	char *s = sub ? acp_to_utf8(sub) : NULL, *n = name ? acp_to_utf8(name) : NULL;
+	LONG r = get_value_ex(h, s, n, flags, type, data, cb, 1);
+	free(s);
+	free(n);
+	return r;
+}
+
+WINFN(LONG) adv_RegGetValueW(HKEY h, LPCWSTR sub, LPCWSTR name, DWORD flags,
+			     LPDWORD type, PVOID data, LPDWORD cb)
+{
+	char *s = sub ? utf16_to_utf8_dup(sub) : NULL;
+	char *n = name ? utf16_to_utf8_dup(name) : NULL;
+	LONG r = get_value_ex(h, s, n, flags, type, data, cb, 0);
+	free(s);
+	free(n);
+	return r;
+}
+
+/*
+ * RegNotifyChangeKeyValue. A watch fires once: on the change its filter
+ * names in its key (or, with subtree, below it), when the key is deleted,
+ * or when the handle it was set on is closed. An asynchronous one signals
+ * its event; a synchronous one returns.
+ */
+struct watch {
+	struct watch *next;
+	char *path;
+	HKEY key;
+	int subtree;
+	DWORD filter;
+	HANDLE event;	/* a handle of our own to the caller's event */
+	int fired;
+};
+
+static pthread_mutex_t watch_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t watch_cond = PTHREAD_COND_INITIALIZER;
+static struct watch *watches;
+
+/* Whether path is top or below it. */
+static int within(const char *path, const char *top, int subtree)
+{
+	size_t n = strlen(top);
+
+	if (!strcasecmp(path, top))
+		return 1;
+	return subtree && !strncasecmp(path, top, n) && path[n] == '\\';
+}
+
+/* Fires w, taken off the list; with watch_lock held. */
+static void fire(struct watch *w)
+{
+	w->fired = 1;
+	if (w->event) {
+		BOOL (WINAPI *set)(HANDLE) =
+			builtin_export(&builtin_kernel32, "SetEvent");
+		if (set)
+			set(w->event);
+		handle_close(w->event);
+		free(w->path);
+		free(w);	/* nobody waits on an asynchronous watch */
+	}
+	pthread_cond_broadcast(&watch_cond);
+}
+
+/* Fires, and removes, the watches match says to. */
+static void fire_where(int (*match)(const struct watch *, const void *),
+		       const void *arg)
+{
+	pthread_mutex_lock(&watch_lock);
+	for (struct watch **pw = &watches; *pw;) {
+		struct watch *w = *pw;
+		if (match(w, arg)) {
+			*pw = w->next;
+			fire(w);
+		} else {
+			pw = &w->next;
+		}
+	}
+	pthread_mutex_unlock(&watch_lock);
+}
+
+struct change {
+	const char *path;
+	DWORD what;
+};
+
+static int changed_here(const struct watch *w, const void *arg)
+{
+	const struct change *c = arg;
+
+	if (c->what == REG_CHANGE_DELETED)
+		return within(c->path, w->path, w->subtree);
+	return (w->filter & c->what) && within(c->path, w->path, w->subtree);
+}
+
+/* reg_change_hook: called with the registry locked. */
+static void on_change(const struct reg_key *k, DWORD what)
+{
+	char *path = watches ? reg_key_path(k) : NULL;
+
+	if (path) {
+		struct change c = { path, what };
+		fire_where(changed_here, &c);
+		free(path);
+	}
+}
+
+static int on_key(const struct watch *w, const void *arg)
+{
+	return w->key == (HKEY)arg;
+}
+
+/* A key handle closing ends the watches set on it. */
+static void watches_closed(HKEY h)
+{
+	fire_where(on_key, h);
+}
+
+WINFN(LONG) adv_RegNotifyChangeKeyValue(HKEY h, BOOL subtree, DWORD filter,
+					HANDLE event, BOOL async)
+{
+	const DWORD thread_agnostic = 0x10000000;
+	DWORD f = filter & ~thread_agnostic;
+	LONG err = ERROR_SUCCESS;
+
+	if (!f || (f & ~0xfu) || (async && !event))
+		return ERROR_INVALID_PARAMETER;
+	char *path = key_path(h, &err);
+	if (!path)
+		return err;
+	struct watch *w = calloc(1, sizeof(*w));
+	if (!w) {
+		free(path);
+		return ERROR_NOT_ENOUGH_MEMORY;
+	}
+	w->path = path;
+	w->key = h;
+	w->subtree = subtree != 0;
+	w->filter = f;
+	if (async) {
+		/* A handle of our own; a failed handle_new drops the reference. */
+		struct kobject *o = handle_ref(event, KOBJ_EVENT);
+		if (o)
+			w->event = handle_new(o);
+		if (!w->event) {
+			free(path);
+			free(w);
+			return o ? ERROR_TOO_MANY_OPEN_FILES : ERROR_INVALID_HANDLE;
+		}
+	}
+
+	reg_lock();
+	if (!reg_open(path)) {
+		reg_unlock();
+		if (w->event)
+			handle_close(w->event);
+		free(path);
+		free(w);
+		return ERROR_KEY_DELETED;
+	}
+	reg_change_hook = on_change;
+	pthread_mutex_lock(&watch_lock);
+	w->next = watches;
+	watches = w;
+	pthread_mutex_unlock(&watch_lock);
+	reg_unlock();
+	TRACE("RegNotifyChangeKeyValue(%s, 0x%x%s)", path, f,
+	      async ? ", async" : "");
+	if (async)
+		return ERROR_SUCCESS;
+
+	pthread_mutex_lock(&watch_lock);
+	while (!w->fired)
+		pthread_cond_wait(&watch_cond, &watch_lock);
+	pthread_mutex_unlock(&watch_lock);
+	free(w->path);
+	free(w);
+	return ERROR_SUCCESS;
+}
+
+/* Keys' security: the one descriptor every object here has. */
+
+WINFN(LONG) adv_RegGetKeySecurity(HKEY h, SECURITY_INFORMATION which,
+				  PSECURITY_DESCRIPTOR sd, LPDWORD cb)
+{
+	LONG err = ERROR_SUCCESS;
+
+	if (!cb)
+		return ERROR_INVALID_PARAMETER;
+	if (!lock_key(h, &err))
+		return err;
+	reg_unlock();
+	DWORD size;
+	void *d = sec_default_descriptor(which, &size);
+	if (!d)
+		return ERROR_NOT_ENOUGH_MEMORY;
+	if (!sd || *cb < size)
+		err = ERROR_INSUFFICIENT_BUFFER;
+	else
+		memcpy(sd, d, size);
+	*cb = size;
+	free(d);
+	return err;
+}
+
+/* Accepted without changing anything, but watchers hear of it. */
+WINFN(LONG) adv_RegSetKeySecurity(HKEY h, SECURITY_INFORMATION which,
+				  PSECURITY_DESCRIPTOR sd)
+{
+	LONG err = ERROR_SUCCESS;
+
+	if (!sec_valid_descriptor(sd))
+		return ERROR_INVALID_PARAMETER;
+	struct reg_key *k = lock_key(h, &err);
+	if (!k)
+		return err;
+	if (reg_change_hook)
+		reg_change_hook(k, REG_NOTIFY_CHANGE_SECURITY);
+	reg_unlock();
+	return ERROR_SUCCESS;
+}
+
+WINFN(LONG) adv_RegOpenCurrentUser(REGSAM sam, PHKEY out)
+{
+	return open_key(HKEY_CURRENT_USER, NULL, 0, 0, out, NULL);
+}
+
+/* There is no cache of predefined keys to disable. */
+WINFN(LONG) adv_RegDisablePredefinedCache(void)
+{
+	return ERROR_SUCCESS;
+}
+
+WINFN(LONG) adv_RegDisablePredefinedCacheEx(void)
+{
+	return ERROR_SUCCESS;
+}
+
 /* GetUserName: $USER, else "user"; *size counts the NUL. */
 static BOOL user_name(void *buf, LPDWORD size, int wide)
 {
@@ -842,6 +1333,8 @@ static const struct builtin_export exports[] = {
 	E(RegDeleteKeyW),
 	E(RegDeleteValueA),
 	E(RegDeleteValueW),
+	E(RegDisablePredefinedCache),
+	E(RegDisablePredefinedCacheEx),
 	E(RegEnumKeyA),
 	E(RegEnumKeyExA),
 	E(RegEnumKeyExW),
@@ -849,6 +1342,11 @@ static const struct builtin_export exports[] = {
 	E(RegEnumValueA),
 	E(RegEnumValueW),
 	E(RegFlushKey),
+	E(RegGetKeySecurity),
+	E(RegGetValueA),
+	E(RegGetValueW),
+	E(RegNotifyChangeKeyValue),
+	E(RegOpenCurrentUser),
 	E(RegOpenKeyA),
 	E(RegOpenKeyExA),
 	E(RegOpenKeyExW),
@@ -859,6 +1357,7 @@ static const struct builtin_export exports[] = {
 	E(RegQueryValueExA),
 	E(RegQueryValueExW),
 	E(RegQueryValueW),
+	E(RegSetKeySecurity),
 	E(RegSetValueA),
 	E(RegSetValueExA),
 	E(RegSetValueExW),
@@ -866,6 +1365,8 @@ static const struct builtin_export exports[] = {
 	BUILTIN_END
 };
 
-static const struct builtin_export *const tables[] = { exports, NULL };
+static const struct builtin_export *const tables[] = {
+	exports, adv_security_exports, NULL
+};
 
 const struct builtin_dll builtin_advapi32 = { "advapi32.dll", NULL, tables, 0 };
