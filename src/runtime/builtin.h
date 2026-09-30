@@ -36,10 +36,8 @@ struct builtin_dll {
 	const struct builtin_export *const *tables;	/* NULL-terminated */
 	/*
 	 * Used only when no DLL of that name is found on disk, so a native
-	 * copy (say of msvcrt.dll) placed on the search path wins. Set for the
-	 * system DLLs the harness has no implementation of yet: codecs
-	 * importing them still load, and calling one of their functions stops
-	 * at a trap that names it.
+	 * copy placed on the search path wins. Set for the CRT (msvcrt.dll
+	 * and its versioned names), which codecs sometimes ship themselves.
 	 */
 	int fallback;
 };

@@ -229,6 +229,7 @@ typedef struct tagMONITORINFO {
 #define WM_GETMINMAXINFO     0x0024
 #define WM_SETFONT           0x0030
 #define WM_GETFONT           0x0031
+#define WM_NOTIFY            0x004E
 #define WM_WINDOWPOSCHANGING 0x0046
 #define WM_WINDOWPOSCHANGED  0x0047
 #define WM_NCCREATE          0x0081
@@ -350,5 +351,22 @@ typedef struct tagMONITORINFO {
 #define UOI_NAME    2
 #define UOI_TYPE    3
 #define WSF_VISIBLE 0x0001
+
+/* WM_NOTIFY's header, and _TrackMouseEvent's request. */
+typedef struct tagNMHDR {
+	HWND hwndFrom;
+	UINT_PTR idFrom;
+	UINT code;
+} NMHDR, *LPNMHDR;
+
+typedef struct tagTRACKMOUSEEVENT {
+	DWORD cbSize;
+	DWORD dwFlags;
+	HWND hwndTrack;
+	DWORD dwHoverTime;
+} TRACKMOUSEEVENT, *LPTRACKMOUSEEVENT;
+
+#define CS_GLOBALCLASS 0x4000
+#define IDCLOSE        8
 
 #endif /* VFW_WIN32_WINUSER_H */

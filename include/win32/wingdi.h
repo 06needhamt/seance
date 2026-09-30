@@ -303,6 +303,11 @@ typedef struct tagTEXTMETRICW {
 #define FW_BOLD        700
 #define ANSI_CHARSET    0
 #define DEFAULT_CHARSET 1
+#define OUT_DEFAULT_PRECIS  0
+#define CLIP_DEFAULT_PRECIS 0
+#define DEFAULT_QUALITY     0
+#define VARIABLE_PITCH      2
+#define FF_SWISS            0x20
 
 /* BITMAPFILEHEADER is 2-byte packed on Windows (14 bytes). */
 #pragma pack(push, 2)

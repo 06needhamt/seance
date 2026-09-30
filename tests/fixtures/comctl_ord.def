@@ -1,0 +1,21 @@
+; comctl32 imported by ordinal only, as MSVC-built code imports the
+; functions comctl32.lib names only by ordinal (DPA, DSA, Alloc,
+; subclassing); a name at the wrong ordinal would call the wrong one.
+LIBRARY comctl32.dll
+EXPORTS
+	InitCommonControls@0 @17 NONAME
+	Alloc@4 @71 NONAME
+	Free@4 @73 NONAME
+	Str_SetPtrA@8 @234 NONAME
+	DSA_Create@8 @320 NONAME
+	DSA_Destroy@4 @321 NONAME
+	DSA_GetItemPtr@8 @323 NONAME
+	DSA_InsertItem@12 @324 NONAME
+	DPA_Create@4 @328 NONAME
+	DPA_Destroy@4 @329 NONAME
+	DPA_GetPtr@8 @332 NONAME
+	DPA_InsertPtr@12 @334 NONAME
+	DPA_Sort@12 @338 NONAME
+	SetWindowSubclass@16 @410 NONAME
+	RemoveWindowSubclass@12 @412 NONAME
+	DefSubclassProc@16 @413 NONAME
