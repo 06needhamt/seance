@@ -4,8 +4,9 @@
 #
 # They are built without a C runtime, so each imports only what it names:
 # nothing, each other, or system DLLs such as kernel32, user32, gdi32,
-# advapi32, version, ole32, oleaut32, shell32, winmm and msvfw32 (whose mingw import
-# libraries the harness's built-in DLLs stand in for).
+# advapi32, version, ole32, oleaut32, shell32, comctl32, comdlg32, winmm and
+# msvfw32 (whose mingw import libraries the harness's built-in DLLs stand in
+# for).
 cmake_minimum_required(VERSION 3.20)
 project(vfw-harness-fixtures C RC)
 
@@ -56,6 +57,7 @@ import_library(zz_nosuch)
 import_library(vfw_missing)
 import_library(sehcrt)
 import_library(oleaut_ord)
+import_library(comctl_ord)
 
 fixture(pe_basic pe_basic.c pe_basic.def pe_basic.rc)
 fixture(pe_reloc pe_reloc.c)
@@ -103,6 +105,10 @@ fixture(pe_shell pe_shell.c LIBS shell32 kernel32
 
 # Uses oleaut32 imported by ordinal only, as MSVC-built code imports it.
 fixture(pe_oleaut pe_oleaut.c LIBS oleaut_ord_imports kernel32
+	OPTIONS -mpreferred-stack-boundary=2 -fno-builtin)
+
+# Uses comctl32 imported by ordinal only, and comdlg32 by name.
+fixture(pe_comctl pe_comctl.c LIBS comctl_ord_imports comdlg32 user32 kernel32
 	OPTIONS -mpreferred-stack-boundary=2 -fno-builtin)
 
 # An in-process COM server that also calls version.dll and ole32 itself.

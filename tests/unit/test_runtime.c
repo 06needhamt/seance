@@ -127,14 +127,12 @@ static void test_builtin_tables(void)
 		int unique = 1;
 
 		/*
-		 * Every DLL that isn't a bare placeholder has exports.
-		 * msvcrt.dll is the one fallback DLL that's also
-		 * implemented: fallback governs precedence (a real DLL of
-		 * that name on the search path still wins), not whether
-		 * there's anything behind it.
+		 * Every DLL has exports. fallback (msvcrt.dll's) governs
+		 * precedence (a real DLL of that name on the search path
+		 * still wins), not whether there's anything behind it.
 		 */
-		int placeholder = dll->fallback && strcmp(dll->name, "msvcrt.dll");
-		CHECK(placeholder ? n == 0 : n > 0);
+		CHECK(n > 0);
+		CHECK(!dll->fallback || !strcmp(dll->name, "msvcrt.dll"));
 		for (size_t i = 0; i < n; i++) {
 			const struct builtin_export *e = builtin_entry(dll, i);
 			const struct builtin_export *prev =
@@ -177,6 +175,8 @@ static void test_builtin_tables(void)
 	CHECK(!builtin_find("ole32.dll")->fallback);
 	CHECK(!builtin_find("shell32.dll")->fallback);
 	CHECK(!builtin_find("oleaut32.dll")->fallback);
+	CHECK(!builtin_find("comdlg32.dll")->fallback);
+	CHECK(!builtin_find("comctl32.dll")->fallback);
 	CHECK(builtin_find("msvcr90.dll") == builtin_find("msvcrt.dll"));
 	CHECK(builtin_find("msvcrt.dll")->fallback);
 	CHECK(builtin_find("msvcr.dll") == NULL);
@@ -188,10 +188,10 @@ static void test_builtin_tables(void)
  */
 static void test_fallback_builtins(void)
 {
-	struct module *m = mod_load("COMDLG32", NULL);
+	struct module *m = mod_load("MSVCR71", NULL);
 	CHECK(m && m->builtin && m->builtin->fallback && !m->img);
 	if (m)
-		CHECK(mod_get_proc(m, "GetOpenFileNameA") == NULL);
+		CHECK(mod_get_proc(m, "printf") != NULL);
 	mod_free(m);
 
 	char dir[4096], dst[4200];
@@ -201,7 +201,7 @@ static void test_fallback_builtins(void)
 		CHECK(0);
 		return;
 	}
-	snprintf(dst, sizeof(dst), "%s/comdlg32.dll", dir);
+	snprintf(dst, sizeof(dst), "%s/msvcr71.dll", dir);
 	void *data;
 	size_t len;
 	CHECK_EQ(vfw_read_file(fixture("pe_basic.dll"), &data, &len), 0);
@@ -212,7 +212,7 @@ static void test_fallback_builtins(void)
 	free(data);
 
 	setenv("VFW_PATH", dir, 1);
-	m = mod_load("comdlg32.dll", NULL);
+	m = mod_load("msvcr71.dll", NULL);
 	CHECK(m && !m->builtin && m->img);
 	mod_free(m);
 	unsetenv("VFW_PATH");

@@ -44,6 +44,9 @@ HANDLE file_std_handle(DWORD which);
 DWORD copy_out_a(const char *s, LPSTR buf, DWORD size);
 DWORD copy_out_w(const char *s, LPWSTR buf, DWORD size);
 
+/* GetFullPathName's answer for a UTF-8 name (malloc()ed), or NULL. */
+char *k32_full_path(const char *name);
+
 /* Runs Fls callbacks and thread cleanup for the exiting thread. */
 void thread_exit_cleanup(void);
 

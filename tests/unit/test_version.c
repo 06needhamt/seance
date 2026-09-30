@@ -253,7 +253,7 @@ static void test_builtin(void)
 	CHECK(len == 4 && trans && trans[0] == 0x409 && trans[1] == 1200);
 	free(block);
 
-	/* By system path too, and the placeholders (no DLL on disk). */
+	/* By system path too, and by bare name (no DLL on disk). */
 	const char *path = "C:\\WINDOWS\\system32\\KERNEL32.DLL";
 	size = GetFileVersionInfoSizeExA(0, path, NULL);
 	CHECK(size > 0);

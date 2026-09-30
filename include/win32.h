@@ -15,6 +15,8 @@
 #include "win32/oleauto.h"
 #include "win32/shellapi.h"
 #include "win32/shlobj.h"
+#include "win32/commctrl.h"
+#include "win32/commdlg.h"
 #include "win32/mmsystem.h"
 #include "win32/vfw.h"
 #include "win32/aviriff.h"

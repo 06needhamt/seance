@@ -896,7 +896,7 @@ WINFN(UINT) k32_GetTempFileNameW(LPCWSTR dir, LPCWSTR prefix, UINT unique,
 }
 
 /* The full Windows form of name: absolute, with . and .. resolved. */
-static char *full_path(const char *name)
+char *k32_full_path(const char *name)
 {
 	char buf[PATH_MAX * 2];
 	char *cwd = path_getcwd();
@@ -956,7 +956,7 @@ static DWORD full_path_name(const void *name, int wide, DWORD size, void *buf,
 			    void **filepart)
 {
 	char *u = wide ? utf16_to_utf8_dup(name) : acp_to_utf8(name);
-	char *full = u ? full_path(u) : NULL;
+	char *full = u ? k32_full_path(u) : NULL;
 	DWORD r = 0;
 
 	free(u);
