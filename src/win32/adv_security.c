@@ -361,15 +361,13 @@ static struct token *token_ref(HANDLE h)
 	return (struct token *)o;
 }
 
+/* A handle to t, taking over one reference (which a failure drops). */
 static BOOL give_handle(struct token *t, PHANDLE out)
 {
 	HANDLE h = handle_new(&t->obj);
 
-	if (!h) {
-		kobj_unref(&t->obj);
-		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
-		return FALSE;
-	}
+	if (!h)
+		return FALSE;	/* handle_new set the error */
 	*out = h;
 	return TRUE;
 }
@@ -2176,12 +2174,17 @@ WINFN(BOOL) adv_SetFileSecurityW(LPCWSTR name, SECURITY_INFORMATION which,
 
 /* CryptoAPI: providers only for their random numbers. */
 
-#define PROV_MAGIC 0x50524f56	/* "PROV" */
-
+/*
+ * Providers live in a list, so a handle that was never one, or was
+ * released, is refused rather than followed.
+ */
 struct provider {
-	DWORD magic;
+	struct provider *next;
 	LONG refs;
 };
+
+static pthread_mutex_t prov_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct provider *providers;
 
 static int known_type(DWORD type)
 {
@@ -2225,8 +2228,11 @@ static BOOL acquire(HCRYPTPROV *out, DWORD type, DWORD flags)
 		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
 		return FALSE;
 	}
-	p->magic = PROV_MAGIC;
 	p->refs = 1;
+	pthread_mutex_lock(&prov_lock);
+	p->next = providers;
+	providers = p;
+	pthread_mutex_unlock(&prov_lock);
 	*out = (HCRYPTPROV)p;
 	return TRUE;
 }
@@ -2243,41 +2249,49 @@ WINFN(BOOL) adv_CryptAcquireContextW(HCRYPTPROV *out, LPCWSTR container,
 	return acquire(out, type, flags);
 }
 
-static struct provider *provider(HCRYPTPROV h)
+/* The live provider h, with prov_lock held; NULL (unlocked) if none. */
+static struct provider *lock_provider(HCRYPTPROV h)
 {
-	struct provider *p = (struct provider *)h;
-
-	if (!p || p->magic != PROV_MAGIC) {
-		win_set_error(ERROR_INVALID_PARAMETER);
-		return NULL;
-	}
-	return p;
+	pthread_mutex_lock(&prov_lock);
+	for (struct provider *p = providers; p; p = p->next)
+		if ((HCRYPTPROV)p == h)
+			return p;
+	pthread_mutex_unlock(&prov_lock);
+	win_set_error(ERROR_INVALID_PARAMETER);
+	return NULL;
 }
 
 WINFN(BOOL) adv_CryptContextAddRef(HCRYPTPROV h, DWORD *reserved, DWORD flags)
 {
-	struct provider *p = provider(h);
+	struct provider *p = lock_provider(h);
 
 	if (!p)
 		return FALSE;
-	__atomic_add_fetch(&p->refs, 1, __ATOMIC_RELAXED);
+	p->refs++;
+	pthread_mutex_unlock(&prov_lock);
 	return TRUE;
 }
 
 WINFN(BOOL) adv_CryptReleaseContext(HCRYPTPROV h, DWORD flags)
 {
-	struct provider *p = provider(h);
+	struct provider *p = lock_provider(h);
 
 	if (!p)
 		return FALSE;
 	if (flags) {
+		pthread_mutex_unlock(&prov_lock);
 		win_set_error((DWORD)NTE_BAD_FLAGS);
 		return FALSE;
 	}
-	if (!__atomic_sub_fetch(&p->refs, 1, __ATOMIC_ACQ_REL)) {
-		p->magic = 0;
+	if (!--p->refs) {
+		for (struct provider **pp = &providers; *pp; pp = &(*pp)->next)
+			if (*pp == p) {
+				*pp = p->next;
+				break;
+			}
 		free(p);
 	}
+	pthread_mutex_unlock(&prov_lock);
 	return TRUE;
 }
 
@@ -2298,8 +2312,9 @@ static int fill_random(BYTE *buf, DWORD len)
 
 WINFN(BOOL) adv_CryptGenRandom(HCRYPTPROV h, DWORD len, BYTE *buf)
 {
-	if (!provider(h))
+	if (!lock_provider(h))
 		return FALSE;
+	pthread_mutex_unlock(&prov_lock);
 	if (len && !buf) {
 		win_set_error(ERROR_NOACCESS);
 		return FALSE;

@@ -614,11 +614,66 @@ static void test_crypt(void)
 	CHECK(CryptReleaseContext(p, 0));
 	CHECK(CryptGenRandom(p, 4, a));	/* still referenced */
 	CHECK(CryptReleaseContext(p, 0));
+	/* Released, and never a provider: refused, not followed. */
+	CHECK(!CryptGenRandom(p, 4, a));
+	CHECK_EQ(win_get_error(), ERROR_INVALID_PARAMETER);
+	CHECK(!CryptReleaseContext(p, 0));
+	CHECK(!CryptGenRandom((HCRYPTPROV)0x1234, 4, a));
+	CHECK(!CryptContextAddRef((HCRYPTPROV)0x1234, NULL, 0));
 	HCRYPTPROV gone = 1;
 	CHECK(CryptAcquireContextA(&gone, "c", NULL, PROV_RSA_AES,
 				   CRYPT_DELETEKEYSET) && !gone);
 	memset(a, 0, sizeof(a));
 	CHECK(SystemFunction036(a, sizeof(a)) && memcmp(a, zero, sizeof(a)));
+}
+
+/*
+ * With the handle table full, what fails to get a handle is left intact:
+ * the process token, a key, an event a watch would have signalled.
+ */
+static void test_handles_full(void)
+{
+	FN(BOOL, OpenProcessToken, HANDLE, DWORD, PHANDLE);
+	FN(BOOL, GetTokenInformation, HANDLE, TOKEN_INFORMATION_CLASS, LPVOID,
+	   DWORD, PDWORD);
+	FN(LONG, RegCreateKeyExA, HKEY, LPCSTR, DWORD, LPSTR, DWORD, REGSAM,
+	   void *, HKEY *, LPDWORD);
+	FN(LONG, RegOpenKeyExA, HKEY, LPCSTR, DWORD, REGSAM, HKEY *);
+	FN(LONG, RegNotifyChangeKeyValue, HKEY, BOOL, DWORD, HANDLE, BOOL);
+	FN(LONG, RegCloseKey, HKEY);
+	HANDLE (WINAPI *create_event)(void *, BOOL, BOOL, LPCSTR) =
+		get_from(k32, "CreateEventA");
+	DWORD (WINAPI *wait)(HANDLE, DWORD) =
+		get_from(k32, "WaitForSingleObject");
+	HANDLE tok = NULL, ev = create_event(NULL, TRUE, FALSE, NULL);
+	HKEY key = NULL, k2 = NULL;
+	BYTE buf[256];
+	DWORD len;
+
+	CHECK_EQ(RegCreateKeyExA(HKEY_CURRENT_USER, "Software\\Full", 0, NULL,
+				 0, KEY_ALL_ACCESS, NULL, &key, NULL), 0);
+	size_t cap = 70000, n = 0;
+	HANDLE *fill = malloc(cap * sizeof(*fill));
+	while (fill && n < cap && (fill[n] = create_event(NULL, TRUE, FALSE,
+							  NULL)))
+		n++;
+	CHECK(n > 0 && n < cap);
+
+	CHECK(!OpenProcessToken((HANDLE)(LONG_PTR)-1, TOKEN_QUERY, &tok));
+	CHECK(RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Full", 0, KEY_READ,
+			    &k2) != ERROR_SUCCESS && !k2);
+	CHECK_EQ(RegNotifyChangeKeyValue(key, FALSE, REG_NOTIFY_CHANGE_LAST_SET,
+					 ev, TRUE), ERROR_TOO_MANY_OPEN_FILES);
+
+	while (n)
+		close_handle(fill[--n]);
+	free(fill);
+	CHECK_EQ(wait(ev, 0), WAIT_TIMEOUT);	/* the event is still there */
+	CHECK(OpenProcessToken((HANDLE)(LONG_PTR)-1, TOKEN_QUERY, &tok));
+	CHECK(GetTokenInformation(tok, TokenUser, buf, sizeof(buf), &len));
+	close_handle(tok);
+	close_handle(ev);
+	RegCloseKey(key);
 }
 
 int main(void)
@@ -647,6 +702,7 @@ int main(void)
 	test_descriptors();
 	test_objects();
 	test_crypt();
+	test_handles_full();
 
 	mod_free(k32);
 	mod_free(adv);

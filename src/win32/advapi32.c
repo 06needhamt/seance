@@ -239,10 +239,7 @@ static HKEY new_handle(const char *path)
 		return NULL;
 	}
 	kobj_init(&k->obj, KOBJ_KEY, key_destroy);
-	HKEY h = handle_new(&k->obj);
-	if (!h)
-		kobj_unref(&k->obj);
-	return h;
+	return handle_new(&k->obj);	/* which drops k if it fails */
 }
 
 /* Opening, creating, closing and deleting keys. */
@@ -979,26 +976,35 @@ static LONG get_value_ex(HKEY h, const char *sub, const char *name,
 
 	HKEY k = h;
 	LONG err = ERROR_SUCCESS;
-	if (sub && *sub &&
-	    (err = open_key(h, sub, 0, 0, &k, NULL)) != ERROR_SUCCESS)
-		return err;
 	DWORD t = REG_NONE, size = 0, cap = cb ? *cb : 0;
 	BYTE *buf = NULL;
-	err = get_value(k, name, ansi, &t, &buf, &size);
-	if (k != h)
-		adv_RegCloseKey(k);
+	if (sub && *sub)
+		err = open_key(h, sub, 0, 0, &k, NULL);
+	if (!err) {
+		err = get_value(k, name, ansi, &t, &buf, &size);
+		if (k != h)
+			adv_RegCloseKey(k);
+	}
 
 	if (!err && (t == REG_SZ || t == REG_EXPAND_SZ || t == REG_MULTI_SZ)) {
-		/* Strings come back NUL-terminated, whatever was stored. */
+		/*
+		 * Strings come back NUL-terminated, whatever was stored; a
+		 * multi-string with the empty string that ends it too.
+		 */
 		DWORD unit = ansi ? 1 : sizeof(WCHAR);
-		if (size < unit || memcmp(buf + size - unit, "\0\0", unit)) {
-			BYTE *b = realloc(buf, size + unit);
+		DWORD want = t == REG_MULTI_SZ ? 2 : 1, have = 0;
+		while (have < want && size >= (have + 1) * unit &&
+		       !memcmp(buf + size - (have + 1) * unit, "\0\0", unit))
+			have++;
+		if (have < want) {
+			DWORD add = (want - have) * unit;
+			BYTE *b = realloc(buf, size + add);
 			if (!b) {
 				err = ERROR_NOT_ENOUGH_MEMORY;
 			} else {
-				memset(b + size, 0, unit);
+				memset(b + size, 0, add);
 				buf = b;
-				size += unit;
+				size += add;
 			}
 		}
 		if (!err && t == REG_EXPAND_SZ && !(flags & RRF_NOEXPAND)) {
@@ -1175,13 +1181,14 @@ WINFN(LONG) adv_RegNotifyChangeKeyValue(HKEY h, BOOL subtree, DWORD filter,
 	w->subtree = subtree != 0;
 	w->filter = f;
 	if (async) {
+		/* A handle of our own; a failed handle_new drops the reference. */
 		struct kobject *o = handle_ref(event, KOBJ_EVENT);
-		if (o && !(w->event = handle_new(o)))
-			kobj_unref(o);
+		if (o)
+			w->event = handle_new(o);
 		if (!w->event) {
 			free(path);
 			free(w);
-			return o ? ERROR_NOT_ENOUGH_MEMORY : ERROR_INVALID_HANDLE;
+			return o ? ERROR_TOO_MANY_OPEN_FILES : ERROR_INVALID_HANDLE;
 		}
 	}
 

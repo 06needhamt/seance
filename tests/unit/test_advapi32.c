@@ -550,6 +550,39 @@ static void test_get_value(void)
 		 ERROR_FILE_NOT_FOUND);
 	CHECK_EQ(RegGetValueA(HKEY_CURRENT_USER, "Software\\NoSuchKey", "sz",
 			      RRF_RT_ANY, NULL, buf, &cb), ERROR_FILE_NOT_FOUND);
+	/* Zeroed on failure even when the subkey isn't there. */
+	memset(buf, 'x', sizeof(buf));
+	cb = 8;
+	CHECK_EQ(RegGetValueA(HKEY_CURRENT_USER, "Software\\NoSuchKey", "sz",
+			      RRF_RT_ANY | RRF_ZEROONFAILURE, NULL, buf, &cb),
+		 ERROR_FILE_NOT_FOUND);
+	CHECK(!memcmp(buf, "\0\0\0\0\0\0\0\0", 8) && buf[8] == 'x');
+
+	/* Multi-strings end with an empty string: two NULs. */
+	CHECK_EQ(RegSetValueExA(k, "ms", 0, REG_MULTI_SZ, (const BYTE *)"a\0b",
+				3), 0);
+	memset(buf, 'x', sizeof(buf));
+	cb = sizeof(buf);
+	CHECK_EQ(RegGetValueA(k, NULL, "ms", RRF_RT_REG_MULTI_SZ, &t, buf, &cb),
+		 0);
+	CHECK(cb == 5 && !memcmp(buf, "a\0b\0\0", 5));
+	CHECK_EQ(RegSetValueExA(k, "ms", 0, REG_MULTI_SZ,
+				(const BYTE *)"a\0b\0", 4), 0);
+	cb = sizeof(buf);
+	CHECK_EQ(RegGetValueA(k, NULL, "ms", RRF_RT_REG_MULTI_SZ, &t, buf, &cb),
+		 0);
+	CHECK(cb == 5 && !memcmp(buf, "a\0b\0\0", 5));
+	static const WCHAR ms_w[] = { 'm', 's', 0 }, one[] = { 'x' };
+	CHECK_EQ(RegSetValueExW(k, ms_w, 0, REG_MULTI_SZ, (const BYTE *)one,
+				sizeof(one)), 0);
+	cb = sizeof(wbuf);
+	CHECK_EQ(RegGetValueW(k, NULL, ms_w, RRF_RT_ANY, &t, wbuf, &cb), 0);
+	CHECK(cb == 6 && wbuf[0] == 'x' && !wbuf[1] && !wbuf[2]);
+	CHECK_EQ(RegSetValueExA(k, "ms", 0, REG_MULTI_SZ, (const BYTE *)"", 1),
+		 0);
+	cb = sizeof(buf);
+	CHECK_EQ(RegGetValueA(k, NULL, "ms", RRF_RT_ANY, &t, buf, &cb), 0);
+	CHECK(cb == 2 && !buf[0] && !buf[1]);
 	RegCloseKey(k);
 }
 
