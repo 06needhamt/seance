@@ -94,6 +94,7 @@ static void clear_cells(SAFEARRAY *psa, BYTE *p, ULONG n)
 			if (ri)
 				ri->lpVtbl->RecordClear(ri, p);
 		}
+		memset(p, 0, psa->cbElements);
 	}
 }
 
@@ -141,6 +142,18 @@ WINFN(HRESULT) oa_SafeArrayAllocDescriptor(UINT dims, SAFEARRAY **out)
 	return S_OK;
 }
 
+/* The features an element type brings. */
+static USHORT type_features(VARTYPE vt)
+{
+	switch (vt) {
+	case VT_BSTR:     return FADF_BSTR;
+	case VT_UNKNOWN:  return FADF_UNKNOWN;
+	case VT_DISPATCH: return FADF_DISPATCH;
+	case VT_VARIANT:  return FADF_VARIANT;
+	}
+	return 0;
+}
+
 WINFN(HRESULT) oa_SafeArrayAllocDescriptorEx(VARTYPE vt, UINT dims,
 					     SAFEARRAY **out)
 {
@@ -169,6 +182,7 @@ WINFN(HRESULT) oa_SafeArrayAllocDescriptorEx(VARTYPE vt, UINT dims,
 		*hidden_dword(psa) = vt;
 		break;
 	}
+	psa->fFeatures |= type_features(vt);
 	psa->cbElements = size;
 	return S_OK;
 }
@@ -185,18 +199,6 @@ WINFN(HRESULT) oa_SafeArrayAllocData(SAFEARRAY *psa)
 	return S_OK;
 }
 
-/* The features an element type brings. */
-static USHORT type_features(VARTYPE vt)
-{
-	switch (vt) {
-	case VT_BSTR:     return FADF_BSTR;
-	case VT_UNKNOWN:  return FADF_UNKNOWN;
-	case VT_DISPATCH: return FADF_DISPATCH;
-	case VT_VARIANT:  return FADF_VARIANT;
-	}
-	return 0;
-}
-
 static SAFEARRAY *create(VARTYPE vt, UINT dims, const SAFEARRAYBOUND *bounds,
 			 IRecordInfo *ri)
 {
@@ -206,7 +208,6 @@ static SAFEARRAY *create(VARTYPE vt, UINT dims, const SAFEARRAYBOUND *bounds,
 		return NULL;
 	if (FAILED(oa_SafeArrayAllocDescriptorEx(vt, dims, &psa)))
 		return NULL;
-	psa->fFeatures |= type_features(vt);
 	if (vt == VT_RECORD) {
 		ULONG size = 0;
 		ri->lpVtbl->GetSize(ri, &size);
@@ -269,10 +270,8 @@ WINFN(HRESULT) oa_SafeArrayDestroyData(SAFEARRAY *psa)
 		return S_OK;
 	ULONG n = cell_count(psa);
 	clear_cells(psa, psa->pvData, n);
-	if (psa->fFeatures & (FADF_STATIC | FADF_EMBEDDED)) {
-		memset(psa->pvData, 0, (size_t)n * psa->cbElements);
-		return S_OK;
-	}
+	if (psa->fFeatures & (FADF_STATIC | FADF_EMBEDDED))
+		return S_OK;	/* not ours to free; left zeroed */
 	mem_free(psa->pvData);
 	psa->pvData = NULL;
 	return S_OK;
@@ -487,6 +486,8 @@ WINFN(HRESULT) oa_SafeArrayCopyData(SAFEARRAY *src, SAFEARRAY *dst)
 	if (!src || !dst || !same_shape(src, dst) || !src->pvData ||
 	    !dst->pvData)
 		return E_INVALIDARG;
+	if (src == dst)
+		return S_OK;
 	ULONG n = cell_count(src);
 	clear_cells(dst, dst->pvData, n);
 	for (ULONG i = 0; i < n; i++) {

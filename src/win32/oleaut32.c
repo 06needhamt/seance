@@ -202,7 +202,9 @@ HRESULT STUB_WINAPI oa_VariantClear(VARIANTARG *v)
 		return hr;
 	if (!(v->vt & VT_BYREF)) {
 		if ((v->vt & VT_ARRAY) || v->vt == VT_SAFEARRAY) {
-			hr = oa_SafeArrayDestroy(v->parray);
+			/* A locked array stays, and so does the variant. */
+			if (FAILED(hr = oa_SafeArrayDestroy(v->parray)))
+				return hr;
 		} else if (v->vt == VT_BSTR) {
 			oa_SysFreeString(v->bstrVal);
 		} else if (v->vt == VT_RECORD) {

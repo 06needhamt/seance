@@ -771,6 +771,40 @@ static void test_safearrays(void)
 	CHECK(!h->pvData);
 	CHECK_EQ(SafeArrayDestroyDescriptor(h), S_OK);
 	SafeArrayDestroy(h2);
+
+	/* A BSTR descriptor made by hand owns its strings, as created ones do. */
+	CHECK_EQ(SafeArrayAllocDescriptorEx(VT_BSTR, 1, &h), S_OK);
+	CHECK_EQ(h->fFeatures, FADF_HAVEVARTYPE | FADF_BSTR);
+	h->rgsabound[0].cElements = 1;
+	CHECK_EQ(SafeArrayAllocData(h), S_OK);
+	s = SysAllocString(w("hand"));
+	CHECK_EQ(SafeArrayPutElement(h, &i0, s), S_OK);
+	CHECK(((BSTR *)h->pvData)[0] != s);
+	SysFreeString(s);
+	CHECK_STR(text(((BSTR *)h->pvData)[0]), "hand");
+	/* Copying onto itself keeps what it holds. */
+	CHECK_EQ(SafeArrayCopyData(h, h), S_OK);
+	CHECK_STR(text(((BSTR *)h->pvData)[0]), "hand");
+	/* Released cells are zeroed (a static array keeps its memory). */
+	h->fFeatures |= FADF_STATIC;
+	CHECK_EQ(SafeArrayDestroyData(h), S_OK);
+	CHECK(h->pvData && !((BSTR *)h->pvData)[0]);
+	h->fFeatures &= ~FADF_STATIC;
+	CHECK_EQ(SafeArrayDestroyData(h), S_OK);
+	CHECK_EQ(SafeArrayDestroyDescriptor(h), S_OK);
+	CHECK_EQ(SafeArrayAllocDescriptorEx(VT_VARIANT, 1, &h), S_OK);
+	CHECK_EQ(h->fFeatures, FADF_HAVEVARTYPE | FADF_VARIANT);
+	CHECK_EQ(SafeArrayDestroyDescriptor(h), S_OK);
+
+	/* A variant whose array is locked isn't cleared. */
+	v.vt = VT_ARRAY | VT_I4;
+	v.parray = SafeArrayCreateVector(VT_I4, 0, 1);
+	CHECK_EQ(SafeArrayLock(v.parray), S_OK);
+	CHECK_EQ(VariantClear(&v), DISP_E_ARRAYISLOCKED);
+	CHECK(v.vt == (VT_ARRAY | VT_I4) && v.parray);
+	CHECK_EQ(SafeArrayUnlock(v.parray), S_OK);
+	CHECK_EQ(VariantClear(&v), S_OK);
+	CHECK_EQ(v.vt, VT_EMPTY);
 	CHECK(!SafeArrayCreate(VT_EMPTY, 1, &one));
 	CHECK(!SafeArrayCreate(VT_I4, 1, NULL));
 }
