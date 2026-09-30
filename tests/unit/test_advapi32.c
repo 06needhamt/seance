@@ -1,14 +1,19 @@
 /*
  * The advapi32 registry, called through the export table the way a DLL's
- * imports reach it, and its .reg file.
+ * imports reach it, and its .reg file; RegGetValue, change notification,
+ * key security and the Drivers32 view of the codec table.
  */
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "common/error.h"
 #include "loader/modules.h"
 #include "runtime/runtime.h"
+#include "vfw/registry.h"
+#include "win32/internal.h"
 #include "win32/reg.h"
 #include "test.h"
 
@@ -462,6 +467,325 @@ static void test_fixture(void)
 	mod_free(m);
 }
 
+static void test_get_value(void)
+{
+	FN(LONG, RegCreateKeyExA, HKEY, LPCSTR, DWORD, LPSTR, DWORD, REGSAM,
+	   void *, HKEY *, LPDWORD);
+	FN(LONG, RegSetValueExA, HKEY, LPCSTR, DWORD, DWORD, const BYTE *, DWORD);
+	FN(LONG, RegSetValueExW, HKEY, LPCWSTR, DWORD, DWORD, const BYTE *, DWORD);
+	FN(LONG, RegGetValueA, HKEY, LPCSTR, LPCSTR, DWORD, LPDWORD, PVOID, LPDWORD);
+	FN(LONG, RegGetValueW, HKEY, LPCWSTR, LPCWSTR, DWORD, LPDWORD, PVOID,
+	   LPDWORD);
+	FN(LONG, RegCloseKey, HKEY);
+	HKEY k;
+	char buf[64];
+	DWORD t, cb, dw = 42;
+	static const WCHAR sz_w[] = { 's', 'z', 0 }, abc[] = { 'a', 'b', 'c' };
+	const BYTE bin4[4] = { 1, 2, 3, 4 }, bin3[3] = { 1, 2, 3 };
+
+	CHECK_EQ(RegCreateKeyExA(HKEY_CURRENT_USER, "Software\\GV", 0, NULL, 0,
+				 KEY_ALL_ACCESS, NULL, &k, NULL), 0);
+	/* "abc" stored without its NUL. */
+	CHECK_EQ(RegSetValueExW(k, sz_w, 0, REG_SZ, (const BYTE *)abc,
+				sizeof(abc)), 0);
+	CHECK_EQ(RegSetValueExA(k, "dw", 0, REG_DWORD, (BYTE *)&dw, 4), 0);
+	CHECK_EQ(RegSetValueExA(k, "bin4", 0, REG_BINARY, bin4, 4), 0);
+	CHECK_EQ(RegSetValueExA(k, "bin3", 0, REG_BINARY, bin3, 3), 0);
+	CHECK_EQ(RegSetValueExA(k, "ex", 0, REG_EXPAND_SZ,
+				(const BYTE *)"%SystemRoot%\\x", 15), 0);
+
+	/* Through a subkey, NUL-terminated. */
+	cb = sizeof(buf);
+	CHECK_EQ(RegGetValueA(HKEY_CURRENT_USER, "Software\\GV", "sz",
+			      RRF_RT_REG_SZ, &t, buf, &cb), 0);
+	CHECK_STR(buf, "abc");
+	CHECK(t == REG_SZ && cb == 4);
+	WCHAR wbuf[16];
+	cb = sizeof(wbuf);
+	CHECK_EQ(RegGetValueW(k, NULL, sz_w, RRF_RT_ANY, &t, wbuf, &cb), 0);
+	CHECK(cb == 8 && wbuf[2] == 'c' && wbuf[3] == 0);
+
+	/* The type filter. */
+	cb = sizeof(buf);
+	CHECK_EQ(RegGetValueA(k, NULL, "dw", RRF_RT_REG_SZ, &t, buf, &cb),
+		 ERROR_UNSUPPORTED_TYPE);
+	DWORD v = 0;
+	cb = sizeof(v);
+	CHECK_EQ(RegGetValueA(k, NULL, "dw", RRF_RT_DWORD, &t, &v, &cb), 0);
+	CHECK(v == 42 && t == REG_DWORD);
+	cb = sizeof(v);
+	CHECK_EQ(RegGetValueA(k, NULL, "bin4", RRF_RT_DWORD, &t, &v, &cb), 0);
+	CHECK(t == REG_BINARY && v == 0x04030201);
+	cb = sizeof(v);
+	CHECK_EQ(RegGetValueA(k, NULL, "bin3", RRF_RT_DWORD, &t, &v, &cb),
+		 ERROR_DATATYPE_MISMATCH);
+	CHECK_EQ(RegGetValueA(k, NULL, "dw", 0, &t, &v, &cb),
+		 ERROR_INVALID_PARAMETER);
+
+	/* Expansion, only when any type may come back. */
+	cb = sizeof(buf);
+	CHECK_EQ(RegGetValueA(k, NULL, "ex", RRF_RT_ANY, &t, buf, &cb), 0);
+	CHECK_STR(buf, "C:\\WINDOWS\\x");
+	CHECK(t == REG_SZ && cb == 13);
+	cb = sizeof(buf);
+	CHECK_EQ(RegGetValueA(k, NULL, "ex", RRF_RT_REG_EXPAND_SZ, &t, buf, &cb),
+		 ERROR_INVALID_PARAMETER);
+	cb = sizeof(buf);
+	CHECK_EQ(RegGetValueA(k, NULL, "ex", RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND,
+			      &t, buf, &cb), 0);
+	CHECK_STR(buf, "%SystemRoot%\\x");
+	CHECK_EQ(t, REG_EXPAND_SZ);
+
+	/* Sizes, short buffers and misses. */
+	cb = 0;
+	CHECK_EQ(RegGetValueA(k, NULL, "sz", RRF_RT_REG_SZ, NULL, NULL, &cb), 0);
+	CHECK_EQ(cb, 4);
+	memset(buf, 'x', sizeof(buf));
+	cb = 2;
+	CHECK_EQ(RegGetValueA(k, NULL, "sz", RRF_RT_REG_SZ | RRF_ZEROONFAILURE,
+			      NULL, buf, &cb), ERROR_MORE_DATA);
+	CHECK(cb == 4 && buf[0] == 0 && buf[1] == 0 && buf[2] == 'x');
+	cb = sizeof(buf);
+	CHECK_EQ(RegGetValueA(k, NULL, "nope", RRF_RT_ANY, NULL, buf, &cb),
+		 ERROR_FILE_NOT_FOUND);
+	CHECK_EQ(RegGetValueA(HKEY_CURRENT_USER, "Software\\NoSuchKey", "sz",
+			      RRF_RT_ANY, NULL, buf, &cb), ERROR_FILE_NOT_FOUND);
+	RegCloseKey(k);
+}
+
+/* Sets a value from a thread of its own, after a pause. */
+static void *set_later(void *arg)
+{
+	usleep(50000);
+	reg_lock();
+	struct reg_key *k = reg_open("HKEY_CURRENT_USER\\Software\\Watch");
+	if (k)
+		reg_set(k, "late", REG_DWORD, "\1\0\0\0", 4);
+	reg_unlock();
+	return NULL;
+}
+
+static void test_notify(void)
+{
+	FN(LONG, RegCreateKeyExA, HKEY, LPCSTR, DWORD, LPSTR, DWORD, REGSAM,
+	   void *, HKEY *, LPDWORD);
+	FN(LONG, RegOpenKeyExA, HKEY, LPCSTR, DWORD, REGSAM, HKEY *);
+	FN(LONG, RegSetValueExA, HKEY, LPCSTR, DWORD, DWORD, const BYTE *, DWORD);
+	FN(LONG, RegDeleteKeyA, HKEY, LPCSTR);
+	FN(LONG, RegNotifyChangeKeyValue, HKEY, BOOL, DWORD, HANDLE, BOOL);
+	FN(LONG, RegCloseKey, HKEY);
+	struct module *k32 = mod_load("kernel32.dll", NULL);
+	HANDLE (WINAPI *create_event)(void *, BOOL, BOOL, LPCSTR) =
+		mod_get_proc(k32, "CreateEventA");
+	DWORD (WINAPI *wait)(HANDLE, DWORD) =
+		mod_get_proc(k32, "WaitForSingleObject");
+	BOOL (WINAPI *reset)(HANDLE) = mod_get_proc(k32, "ResetEvent");
+	BOOL (WINAPI *close_handle)(HANDLE) = mod_get_proc(k32, "CloseHandle");
+	HKEY k, sub, other;
+	DWORD one = 1;
+
+	CHECK(create_event && wait && reset && close_handle);
+	if (!create_event || !wait || !reset || !close_handle)
+		return;
+	HANDLE ev = create_event(NULL, TRUE, FALSE, NULL);
+	CHECK_EQ(RegCreateKeyExA(HKEY_CURRENT_USER, "Software\\Watch", 0, NULL,
+				 0, KEY_ALL_ACCESS, NULL, &k, NULL), 0);
+
+	/* A value set: once. */
+	CHECK_EQ(RegNotifyChangeKeyValue(k, FALSE, REG_NOTIFY_CHANGE_LAST_SET,
+					 ev, TRUE), 0);
+	CHECK_EQ(wait(ev, 0), WAIT_TIMEOUT);
+	CHECK_EQ(RegSetValueExA(k, "a", 0, REG_DWORD, (BYTE *)&one, 4), 0);
+	CHECK_EQ(wait(ev, 0), WAIT_OBJECT_0);
+	reset(ev);
+	CHECK_EQ(RegSetValueExA(k, "b", 0, REG_DWORD, (BYTE *)&one, 4), 0);
+	CHECK_EQ(wait(ev, 0), WAIT_TIMEOUT);
+
+	/* The filter: names only, so a value isn't a change. */
+	CHECK_EQ(RegNotifyChangeKeyValue(k, FALSE, REG_NOTIFY_CHANGE_NAME, ev,
+					 TRUE), 0);
+	CHECK_EQ(RegSetValueExA(k, "c", 0, REG_DWORD, (BYTE *)&one, 4), 0);
+	CHECK_EQ(wait(ev, 0), WAIT_TIMEOUT);
+	CHECK_EQ(RegCreateKeyExA(k, "Sub", 0, NULL, 0, KEY_ALL_ACCESS, NULL,
+				 &sub, NULL), 0);
+	CHECK_EQ(wait(ev, 0), WAIT_OBJECT_0);
+	reset(ev);
+
+	/* Below the key, only with subtree. */
+	CHECK_EQ(RegNotifyChangeKeyValue(k, FALSE, REG_NOTIFY_CHANGE_LAST_SET,
+					 ev, TRUE), 0);
+	CHECK_EQ(RegSetValueExA(sub, "d", 0, REG_DWORD, (BYTE *)&one, 4), 0);
+	CHECK_EQ(wait(ev, 0), WAIT_TIMEOUT);
+	HANDLE ev2 = create_event(NULL, TRUE, FALSE, NULL);
+	CHECK_EQ(RegNotifyChangeKeyValue(k, TRUE, REG_NOTIFY_CHANGE_LAST_SET,
+					 ev2, TRUE), 0);
+	CHECK_EQ(RegSetValueExA(sub, "e", 0, REG_DWORD, (BYTE *)&one, 4), 0);
+	CHECK_EQ(wait(ev2, 0), WAIT_OBJECT_0);
+	/* The first watch is still there, and ends with its handle. */
+	CHECK_EQ(wait(ev, 0), WAIT_TIMEOUT);
+
+	/* Deleting the key watched, and closing the handle watched on. */
+	reset(ev2);
+	CHECK_EQ(RegNotifyChangeKeyValue(sub, FALSE, REG_NOTIFY_CHANGE_LAST_SET,
+					 ev2, TRUE), 0);
+	CHECK_EQ(RegDeleteKeyA(k, "Sub"), 0);
+	CHECK_EQ(wait(ev2, 0), WAIT_OBJECT_0);
+	RegCloseKey(sub);
+	CHECK_EQ(wait(ev, 0), WAIT_TIMEOUT);
+	CHECK_EQ(RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Watch", 0,
+			       KEY_READ, &other), 0);
+	reset(ev2);
+	CHECK_EQ(RegNotifyChangeKeyValue(other, FALSE, REG_NOTIFY_CHANGE_NAME,
+					 ev2, TRUE), 0);
+	RegCloseKey(other);
+	CHECK_EQ(wait(ev2, 0), WAIT_OBJECT_0);
+
+	/* Waiting, until another thread sets a value. */
+	pthread_t th;
+	CHECK_EQ(pthread_create(&th, NULL, set_later, NULL), 0);
+	CHECK_EQ(RegNotifyChangeKeyValue(k, FALSE, REG_NOTIFY_CHANGE_LAST_SET,
+					 NULL, FALSE), 0);
+	pthread_join(th, NULL);
+
+	CHECK_EQ(RegNotifyChangeKeyValue(k, FALSE, 0, ev, TRUE),
+		 ERROR_INVALID_PARAMETER);
+	CHECK_EQ(RegNotifyChangeKeyValue(k, FALSE, REG_NOTIFY_CHANGE_NAME, NULL,
+					 TRUE), ERROR_INVALID_PARAMETER);
+	RegCloseKey(k);
+	CHECK_EQ(wait(ev, 0), WAIT_OBJECT_0);	/* its handle closed */
+	close_handle(ev);
+	close_handle(ev2);
+	mod_free(k32);
+}
+
+static void test_key_security(void)
+{
+	FN(LONG, RegOpenKeyExA, HKEY, LPCSTR, DWORD, REGSAM, HKEY *);
+	FN(LONG, RegGetKeySecurity, HKEY, SECURITY_INFORMATION,
+	   PSECURITY_DESCRIPTOR, LPDWORD);
+	FN(LONG, RegSetKeySecurity, HKEY, SECURITY_INFORMATION,
+	   PSECURITY_DESCRIPTOR);
+	FN(BOOL, IsValidSecurityDescriptor, PSECURITY_DESCRIPTOR);
+	FN(LONG, RegOpenCurrentUser, REGSAM, HKEY *);
+	FN(LONG, RegGetValueA, HKEY, LPCSTR, LPCSTR, DWORD, LPDWORD, PVOID, LPDWORD);
+	FN(LONG, RegDisablePredefinedCache, void);
+	FN(LONG, RegCloseKey, HKEY);
+	HKEY k, cu;
+	BYTE sd[512];
+	DWORD cb = 0;
+	const SECURITY_INFORMATION all = OWNER_SECURITY_INFORMATION |
+		GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+
+	CHECK_EQ(RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\GV", 0, KEY_READ,
+			       &k), 0);
+	CHECK_EQ(RegGetKeySecurity(k, all, NULL, &cb), ERROR_INSUFFICIENT_BUFFER);
+	CHECK(cb > SECURITY_DESCRIPTOR_MIN_LENGTH && cb <= sizeof(sd));
+	DWORD need = cb;
+	CHECK_EQ(RegGetKeySecurity(k, all, sd, &cb), 0);
+	CHECK_EQ(cb, need);
+	CHECK(IsValidSecurityDescriptor(sd));
+	CHECK(((SECURITY_DESCRIPTOR_RELATIVE *)sd)->Control & SE_SELF_RELATIVE);
+	CHECK(((SECURITY_DESCRIPTOR_RELATIVE *)sd)->Control & SE_DACL_PRESENT);
+	CHECK_EQ(RegSetKeySecurity(k, DACL_SECURITY_INFORMATION, sd), 0);
+	CHECK_EQ(RegSetKeySecurity(k, DACL_SECURITY_INFORMATION, NULL),
+		 ERROR_INVALID_PARAMETER);
+	RegCloseKey(k);
+	CHECK_EQ(RegGetKeySecurity((HKEY)(ULONG_PTR)0x1234, all, sd, &cb),
+		 ERROR_INVALID_HANDLE);
+
+	char buf[16];
+	DWORD n = sizeof(buf);
+	CHECK_EQ(RegOpenCurrentUser(KEY_READ, &cu), 0);
+	CHECK_EQ(RegGetValueA(cu, "Software\\GV", "sz", RRF_RT_REG_SZ, NULL, buf,
+			      &n), 0);
+	CHECK_STR(buf, "abc");
+	RegCloseKey(cu);
+	CHECK_EQ(RegDisablePredefinedCache(), 0);
+}
+
+#define D32 "Software\\Microsoft\\Windows NT\\CurrentVersion\\Drivers32"
+
+static void test_drivers32(void)
+{
+	FN(LONG, RegOpenKeyExA, HKEY, LPCSTR, DWORD, REGSAM, HKEY *);
+	FN(LONG, RegQueryValueExA, HKEY, LPCSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD);
+	FN(LONG, RegSetValueExA, HKEY, LPCSTR, DWORD, DWORD, const BYTE *, DWORD);
+	FN(LONG, RegDeleteValueA, HKEY, LPCSTR);
+	FN(LONG, RegCloseKey, HKEY);
+	char ini[400], buf[300];
+	DWORD cb;
+	HKEY k;
+	const FOURCC vidc = mmioFOURCC('v', 'i', 'd', 'c');
+
+	snprintf(ini, sizeof(ini), "%s/vfw.ini", dir);
+	static const char text[] = "[drivers32]\n"
+		"vidc.ABCD=abcd.dll\n"
+		"vidc.WXYZ=/opt/codecs/wxyz.dll\n";
+	write_file(ini, text, sizeof(text) - 1);
+	setenv("VFW_INI", ini, 1);
+	vfw_registry_reload();
+
+	/* vfw.ini's codecs, by the names msvfw32 on NT looks for. */
+	CHECK_EQ(RegOpenKeyExA(HKEY_LOCAL_MACHINE, D32, 0, KEY_READ, &k), 0);
+	cb = sizeof(buf);
+	CHECK_EQ(RegQueryValueExA(k, "vidc.ABCD", NULL, NULL, (BYTE *)buf, &cb),
+		 0);
+	CHECK_STR(buf, "abcd.dll");
+	cb = sizeof(buf);
+	CHECK_EQ(RegQueryValueExA(k, "VIDC.wxyz", NULL, NULL, (BYTE *)buf, &cb),
+		 0);
+	CHECK_STR(buf, "Z:\\opt\\codecs\\wxyz.dll");
+
+	/* Registrations at run time show up... */
+	CHECK_EQ(vfw_register(vidc, mmioFOURCC('L', 'I', 'V', 'E'),
+			      "/x/live.dll"), 0);
+	cb = sizeof(buf);
+	CHECK_EQ(RegQueryValueExA(k, "vidc.LIVE", NULL, NULL, (BYTE *)buf, &cb),
+		 0);
+	CHECK_STR(buf, "Z:\\x\\live.dll");
+
+	/* ...and values set there register, or remove, codecs. */
+	CHECK_EQ(RegSetValueExA(k, "vidc.NEW1", 0, REG_SZ,
+				(const BYTE *)"Z:\\x\\new1.dll", 14), 0);
+	const struct vfw_codec *c = vfw_find(vidc, mmioFOURCC('N', 'E', 'W', '1'));
+	CHECK(c && c->path && !strcmp(c->path, "/x/new1.dll"));
+	CHECK_EQ(RegDeleteValueA(k, "vidc.ABCD"), 0);
+	CHECK(!vfw_find(vidc, mmioFOURCC('A', 'B', 'C', 'D')));
+	cb = sizeof(buf);
+	CHECK_EQ(RegQueryValueExA(k, "vidc.ABCD", NULL, NULL, (BYTE *)buf, &cb),
+		 ERROR_FILE_NOT_FOUND);
+	/* Other values stay as they are. */
+	CHECK_EQ(RegSetValueExA(k, "wavemapper", 0, REG_SZ,
+				(const BYTE *)"msacm32.drv", 12), 0);
+	cb = sizeof(buf);
+	CHECK_EQ(RegQueryValueExA(k, "wavemapper", NULL, NULL, (BYTE *)buf, &cb),
+		 0);
+	RegCloseKey(k);
+
+	/* Never saved: vfw.ini is where codecs live. */
+	char *saved = read_text(file);
+	CHECK(saved && !strstr(saved, "vidc.") && !strstr(saved, "Drivers32"));
+	free(saved);
+
+	/* A Drivers32 key in a registry file registers its codecs. */
+	static const char reg[] = "Windows Registry Editor Version 5.00\n\n"
+		"[HKEY_LOCAL_MACHINE\\" D32 "]\n"
+		"\"vidc.FILE\"=\"Z:\\\\x\\\\file.dll\"\n";
+	write_file(file, reg, sizeof(reg) - 1);
+	reg_reload();
+	CHECK_EQ(RegOpenKeyExA(HKEY_LOCAL_MACHINE, D32, 0, KEY_READ, &k), 0);
+	c = vfw_find(vidc, mmioFOURCC('F', 'I', 'L', 'E'));
+	CHECK(c && c->path && !strcmp(c->path, "/x/file.dll"));
+	cb = sizeof(buf);
+	CHECK_EQ(RegQueryValueExA(k, "vidc.WXYZ", NULL, NULL, (BYTE *)buf, &cb),
+		 0);
+	RegCloseKey(k);
+
+	unsetenv("VFW_INI");
+	unlink(ini);
+	vfw_registry_reload();
+}
+
 int main(void)
 {
 	const char *tmpdir = getenv("TMPDIR");
@@ -485,6 +809,10 @@ int main(void)
 	test_round_trip();
 	test_enum_delete();
 	test_user_name();
+	test_get_value();
+	test_notify();
+	test_key_security();
+	test_drivers32();
 	test_memory_only();
 	test_fixture();
 
