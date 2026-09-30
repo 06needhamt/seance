@@ -10,5 +10,7 @@
 #include <aviriff.h>
 #include <shlobj.h>
 #include <aclapi.h>
+#include <oleauto.h>
+#include <olectl.h>
 
 #include "abi_checks.inc"

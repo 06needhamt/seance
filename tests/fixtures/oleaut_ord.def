@@ -1,0 +1,22 @@
+; oleaut32 imported by ordinal only, as MSVC's oleaut32.lib has code
+; import most of it (a name at the wrong ordinal would call the wrong
+; function, so this checks the harness's numbering).
+LIBRARY oleaut32.dll
+EXPORTS
+	SysAllocString@4 @2 NONAME
+	SysFreeString@4 @6 NONAME
+	SysStringLen@4 @7 NONAME
+	VariantInit@4 @8 NONAME
+	VariantClear@4 @9 NONAME
+	VariantChangeType@16 @12 NONAME
+	SafeArrayDestroy@4 @16 NONAME
+	SafeArrayGetElement@12 @25 NONAME
+	SafeArrayPutElement@12 @26 NONAME
+	VarI4FromStr@16 @64 NONAME
+	VarBstrFromR8@20 @112 NONAME
+	SystemTimeToVariantTime@8 @184 NONAME
+	VariantTimeToSystemTime@12 @185 NONAME
+	GetErrorInfo@8 @200 NONAME
+	SetErrorInfo@8 @201 NONAME
+	CreateErrorInfo@4 @202 NONAME
+	SafeArrayCreateVector@12 @411 NONAME

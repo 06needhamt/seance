@@ -25,9 +25,9 @@ const struct builtin_dll *const builtin_dlls[] = {
 	&builtin_advapi32,
 	&builtin_version,
 	&builtin_ole32,
+	&builtin_oleaut32,
 	&builtin_shell32,
 	/* Placeholders (fallback only, no exports yet). */
-	&builtin_oleaut32,
 	&builtin_comctl32,
 	&builtin_comdlg32,
 	&builtin_msvcrt,

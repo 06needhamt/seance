@@ -21,6 +21,7 @@
 #include "win32/codepage.h"
 #include "win32/internal.h"
 #include "win32/k32.h"
+#include "win32/oleaut.h"
 #include "win32/path.h"
 #include "win32/reg.h"
 
@@ -668,6 +669,8 @@ static const struct builtin_export exports[] = {
 	BUILTIN_END
 };
 
-static const struct builtin_export *const tables[] = { exports, NULL };
+static const struct builtin_export *const tables[] = {
+	exports, oa_errinfo_ole32_exports, NULL
+};
 
 const struct builtin_dll builtin_ole32 = { "ole32.dll", NULL, tables, 0 };

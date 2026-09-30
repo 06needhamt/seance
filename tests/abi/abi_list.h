@@ -480,6 +480,34 @@
 	C(AclRevisionInformation) C(AclSizeInformation) \
 	C(SE_FILE_OBJECT) C(SE_REGISTRY_KEY) C(SE_KERNEL_OBJECT) \
 	C(SE_REGISTRY_WOW64_32KEY) \
+	/* wtypes.h, oaidl.h, oleauto.h, olectl.h: OLE Automation */ \
+	S(DOUBLE) A(DOUBLE) S(DATE) A(DATE) S(BSTR) S(VARTYPE) \
+	S(VARIANT_BOOL) S(SCODE) S(DISPID) S(OLE_COLOR) \
+	S(CY) A(CY) O(CY, Lo) O(CY, Hi) O(CY, int64) \
+	S(DECIMAL) A(DECIMAL) O(DECIMAL, wReserved) O(DECIMAL, scale) \
+	O(DECIMAL, sign) O(DECIMAL, signscale) O(DECIMAL, Hi32) \
+	O(DECIMAL, Lo32) O(DECIMAL, Mid32) O(DECIMAL, Lo64) \
+	S(VARIANT) A(VARIANT) O(VARIANT, vt) O(VARIANT, wReserved1) \
+	O(VARIANT, wReserved3) O(VARIANT, llVal) O(VARIANT, lVal) \
+	O(VARIANT, dblVal) O(VARIANT, bstrVal) O(VARIANT, cyVal) \
+	O(VARIANT, pvRecord) O(VARIANT, pRecInfo) O(VARIANT, decVal) \
+	S(SAFEARRAYBOUND) O(SAFEARRAYBOUND, cElements) \
+	O(SAFEARRAYBOUND, lLbound) \
+	S(SAFEARRAY) O(SAFEARRAY, cDims) O(SAFEARRAY, fFeatures) \
+	O(SAFEARRAY, cbElements) O(SAFEARRAY, cLocks) O(SAFEARRAY, pvData) \
+	O(SAFEARRAY, rgsabound) \
+	S(DISPPARAMS) O(DISPPARAMS, rgvarg) O(DISPPARAMS, rgdispidNamedArgs) \
+	O(DISPPARAMS, cArgs) O(DISPPARAMS, cNamedArgs) \
+	S(EXCEPINFO) O(EXCEPINFO, bstrSource) O(EXCEPINFO, dwHelpContext) \
+	O(EXCEPINFO, pfnDeferredFillIn) O(EXCEPINFO, scode) \
+	S(OCPFIPARAMS) O(OCPFIPARAMS, hWndOwner) O(OCPFIPARAMS, lpszCaption) \
+	O(OCPFIPARAMS, lplpUnk) O(OCPFIPARAMS, lpPages) \
+	O(OCPFIPARAMS, dispidInitialProperty) \
+	S(IDispatchVtbl) O(IDispatchVtbl, Invoke) \
+	S(IErrorInfoVtbl) O(IErrorInfoVtbl, GetHelpContext) \
+	S(ICreateErrorInfoVtbl) O(ICreateErrorInfoVtbl, SetHelpContext) \
+	O(IRecordInfoVtbl, RecordClear) O(IRecordInfoVtbl, RecordCopy) \
+	O(IRecordInfoVtbl, GetSize) \
 	/* winuser.h, wingdi.h, winreg.h */ \
 	S(HKEY) S(HBITMAP) S(HGDIOBJ) S(HICON) S(HCURSOR) S(ATOM) S(COLORREF) \
 	S(REGSAM) S(WNDPROC) S(DLGPROC) S(TIMERPROC) \

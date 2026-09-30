@@ -14,6 +14,5 @@ static const struct builtin_export *const tables[] = { none, NULL };
 
 static const char *const comctl_aliases[] = { "comctl32.ocx", NULL };
 
-PLACEHOLDER(builtin_oleaut32, "oleaut32.dll", NULL);
 PLACEHOLDER(builtin_comctl32, "comctl32.dll", comctl_aliases);
 PLACEHOLDER(builtin_comdlg32, "comdlg32.dll", NULL);
