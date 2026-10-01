@@ -217,6 +217,8 @@ struct catch_frame {
 	int left;
 };
 
+struct frame_info;
+
 static _Thread_local struct {
 	EXCEPTION_RECORD *rec;	/* what the innermost catch block handles */
 	CONTEXT *ctx;
@@ -224,6 +226,7 @@ static _Thread_local struct {
 	int processing_throw;	/* inside a frame handler's search */
 	void_fn terminate, unexpected;
 	translator_fn se_translator;
+	struct frame_info *registered;	/* __CxxRegisterExceptionObject's */
 } td;
 
 static void_fn purecall_handler;
@@ -1509,7 +1512,8 @@ CRTFN(int) crt___CxxExceptionFilter(EXCEPTION_POINTERS *ptrs,
 struct frame_info {
 	EXCEPTION_RECORD *rec;		/* the thread's before, or -1 */
 	CONTEXT *ctx;
-	void *unused[2];
+	void *object;			/* the exception object it holds */
+	struct frame_info *next;	/* the one registered before */
 };
 
 CRTFN(UINT) crt___CxxQueryExceptionSize(void)
@@ -1528,23 +1532,38 @@ CRTFN(int) crt___CxxRegisterExceptionObject(EXCEPTION_POINTERS *ep,
 	}
 	fi->rec = td.rec;
 	fi->ctx = td.ctx;
+	fi->object = is_cxx(ep->ExceptionRecord) ?
+		(void *)ep->ExceptionRecord->ExceptionInformation[1] : NULL;
+	fi->next = td.registered;
+	td.registered = fi;
 	td.rec = ep->ExceptionRecord;
 	td.ctx = ep->ContextRecord;
 	return 1;
 }
 
-/* ... and ends: its exception destroyed unless still in use. */
+/*
+ * ... and ends: its exception destroyed unless still in use, or held by
+ * another registered or running catch block.
+ */
 CRTFN(void) crt___CxxUnregisterExceptionObject(struct frame_info *fi,
 					       int in_use)
 {
 	if (fi->rec == (EXCEPTION_RECORD *)-1)
 		return;
+	for (struct frame_info **p = &td.registered; *p; p = &(*p)->next)
+		if (*p == fi) {
+			*p = fi->next;
+			break;
+		}
 	EXCEPTION_RECORD *rec = td.rec;
 	if (!in_use && rec && is_cxx(rec) && rec->ExceptionInformation[2]) {
 		const struct exception_type *type =
 			(const struct exception_type *)rec->ExceptionInformation[2];
 		void *object = (void *)rec->ExceptionInformation[1];
-		if (object && type->destructor && !held(NULL, object))
+		int kept = held(NULL, object);
+		for (const struct frame_info *f = td.registered; f; f = f->next)
+			kept |= f->object == object;
+		if (object && type->destructor && !kept)
 			((dtor_fn)type->destructor)(object);
 	}
 	td.rec = fi->rec;

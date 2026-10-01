@@ -97,6 +97,8 @@ static void test_printf(void)
 	sprintf_(b, "%.0f|%.1f|%.2f|%.3f|%.4f|%.10f", inf, inf, inf, inf, inf,
 		 inf);
 	CHECK_STR(b, "1|1.$|1.#J|1.#IO|1.#INF|1.#INF000000");
+	sprintf_(b, "%#.10g|%#g", inf, inf);	/* # keeps the zeros */
+	CHECK_STR(b, "1.#INF00000|1.#INF");
 	sprintf_(b, "%f %f %f %g %f", -inf, qnan, ind, ind, -qnan);
 	CHECK_STR(b, "-1.#INF00 1.#QNAN0 -1.#IND00 -1.#IND -1.#IND00");
 	sprintf_(b, "[%10f] [%+f] [%010f] [%.3g] [%-9g] [%e]", inf, inf, inf,

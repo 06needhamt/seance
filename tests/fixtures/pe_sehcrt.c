@@ -50,8 +50,8 @@ __asm__(
 	"movl %esp, -0x18(%ebp)\n"
 	".endm\n"
 
-	/* EH4's has the GS cookie at ebp-0x1c and the EH one at ebp-0x2c,
-	 * both XORed with %ebp. */
+	/* EH4's has the GS cookie at ebp-0x1c, XORed with ebp+8, and the EH
+	 * one at ebp-0x2c, XORed with ebp+4 (their tables say so). */
 	".macro EH4_PROLOGUE table\n\t"
 	"pushl %ebp\n\t"
 	"movl %esp, %ebp\n\t"
@@ -66,8 +66,11 @@ __asm__(
 	"pushl %edi\n\t"
 	"movl _eh4_cookie, %eax\n\t"
 	"xorl %eax, -8(%ebp)\n\t"
-	"xorl %ebp, %eax\n\t"
-	"movl %eax, -0x1c(%ebp)\n\t"
+	"leal 8(%ebp), %edx\n\t"
+	"xorl %eax, %edx\n\t"
+	"movl %edx, -0x1c(%ebp)\n\t"
+	"leal 4(%ebp), %edx\n\t"
+	"xorl %edx, %eax\n\t"
 	"pushl %eax\n\t"
 	"leal -0x10(%ebp), %eax\n\t"
 	"movl %eax, %fs:0\n\t"
@@ -391,14 +394,19 @@ __asm__(
 
 	/*
 	 * int eh3_setjmp(int old):
-	 * int r = old ? _setjmp(sj_buf) : setjmp(sj_buf);	(_setjmp3, 2 args)
-	 * if (r) return r * 10 + sj_count + 100 * sj_inner_count;
-	 * __try { sj_inner(); } __finally { sj_count++; }
+	 * __try {						level 0
+	 *	int r = old ? _setjmp(sj_buf) : setjmp(sj_buf);	(_setjmp3, 2 args)
+	 *	if (r) { r = r * 10 + sj_count + 100 * sj_inner_count;
+	 *		 (still at level 0) } else
+	 *	__try { sj_inner(); } __finally { sj_count++; }	level 1
+	 * } __finally { sj_count += 1000; }
+	 * return r + 1000;	(once the outer __finally has run)
 	 * with sj_inner: __try { longjmp(sj_buf, 3); } __finally { sj_inner_count++; }
 	 */
 	".globl _eh3_setjmp\n"
 	"_eh3_setjmp:\n\t"
 	"EH3_PROLOGUE t_sj\n\t"
+	"movl $0, -4(%ebp)\n\t"
 	"cmpl $0, 8(%ebp)\n\t"
 	"je 2f\n\t"
 	"pushl $_sj_buf\n\t"
@@ -406,7 +414,7 @@ __asm__(
 	"addl $4, %esp\n\t"
 	"jmp 3f\n"
 	"2:\n\t"
-	"pushl $-1\n\t"
+	"pushl $0\n\t"
 	"pushl __imp___seh_longjmp_unwind\n\t"
 	"pushl $2\n\t"
 	"pushl $_sj_buf\n\t"
@@ -415,7 +423,7 @@ __asm__(
 	"3:\n\t"
 	"testl %eax, %eax\n\t"
 	"jnz 4f\n\t"
-	"movl $0, -4(%ebp)\n\t"
+	"movl $1, -4(%ebp)\n\t"
 	"call _sj_inner\n\t"
 	"movl $-9, %eax\n\t"
 	"jmp 5f\n"
@@ -424,13 +432,24 @@ __asm__(
 	"addl _sj_count, %eax\n\t"
 	"imull $100, _sj_inner_count, %ecx\n\t"
 	"addl %ecx, %eax\n\t"
-	"cmpl $-1, -4(%ebp)\n\t"
-	"je 5f\n\t"
-	"movl $-8, %eax\n"
+	"cmpl $0, -4(%ebp)\n\t"
+	"je 6f\n\t"
+	"movl $-8, %eax\n\t"
+	"jmp 5f\n"
+	"6:\n\t"
+	"movl %eax, %esi\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"call f_sj0\n\t"
+	"movl %esi, %eax\n\t"
+	"addl _sj_count, %eax\n\t"
+	"subl $1, %eax\n"		/* sj_count is 1001 here */
 	"5:\n\t"
 	"EH_EPILOGUE\n"
 	"f_sj:\n\t"
 	"incl _sj_count\n\t"
+	"ret\n"
+	"f_sj0:\n\t"
+	"addl $1000, _sj_count\n\t"
 	"ret\n"
 	"_sj_inner:\n\t"
 	"EH3_PROLOGUE t_sji\n\t"
@@ -455,18 +474,19 @@ __asm__(
 	"t_inner: .long -1, 0, f_inner\n"
 	"t_ret: .long -1, 0, f_ret\n"
 	"t_ft: .long -1, 0, f_ft\n"
-	"t_sj: .long -1, 0, f_sj\n"
+	"t_sj: .long -1, 0, f_sj0\n\t"
+	".long 0, 0, f_sj\n"
 	"t_sji: .long -1, 0, f_sji\n"
 	/* EH4: GS cookie offset (-2: none), GS XOR, EH cookie, EH XOR. */
-	"t4_catch: .long -0x1c, 0, -0x2c, 0\n\t"
+	"t4_catch: .long -0x1c, 8, -0x2c, 4\n\t"
 	".long -2, _filter_ours, h4_catch\n"
-	"t4_smash: .long -0x1c, 0, -0x2c, 0\n\t"
+	"t4_smash: .long -0x1c, 8, -0x2c, 4\n\t"
 	".long -2, _filter_ours, h4_smashed\n"
-	"t4_nest: .long -2, 0, -0x2c, 0\n\t"
+	"t4_nest: .long -2, 0, -0x2c, 4\n\t"
 	".long -2, _filter_accept, h4_nest0\n\t"
 	".long 0, _filter_decline, h4_nest1\n\t"
 	".long 1, 0, f_nest\n"
-	"t4_ret: .long -2, 0, -0x2c, 0\n\t"
+	"t4_ret: .long -2, 0, -0x2c, 4\n\t"
 	".long -2, 0, f_ret\n"
 	".text\n"
 );
@@ -532,10 +552,10 @@ EXPORT int sehcrt_run(int raise)
 		return 15;
 	/* longjmp runs the __finally blocks it leaves, either setjmp. */
 	sj_count = sj_inner_count = 0;
-	if (eh3_setjmp(0) != 131)
+	if (eh3_setjmp(0) != 1131 || sj_count != 1001)
 		return 13;
 	sj_count = sj_inner_count = 0;
-	if (eh3_setjmp(1) != 131)
+	if (eh3_setjmp(1) != 1131 || sj_count != 1001)
 		return 14;
 	if (chain_head() != head)
 		return 10;

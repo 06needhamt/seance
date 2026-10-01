@@ -955,7 +955,7 @@ __asm__(
 	 * int catch_rtti(int which): try { rtti_thrower(which); }
 	 * catch (std::bad_cast &e) { grab(e); return 1; }
 	 * catch (__non_rtti_object &e) { grab(e); return 3; }
-	 * catch (exception &e) { grab(e); return 2; }
+	 * catch (std::exception &e) { grab(e); return 2; }
 	 */
 	".globl _catch_rtti\n"
 	"_catch_rtti:\n\t"
@@ -1052,7 +1052,7 @@ __asm__(
 	"CXX_HANDLER h_trt, _fi_trt\n"
 
 	/* int catch_any_exc(int which): try { rtti_thrower(which); }
-	 * catch (std::exception &e) { grab(e); return 2; } */
+	 * catch (exception &e) { grab(e); return 2; } - msvcrt's name */
 	".globl _catch_any_exc\n"
 	"_catch_any_exc:\n\t"
 	"CXX_PROLOGUE h_cax\n\t"
@@ -1225,7 +1225,7 @@ const struct func_info fi_cus = { VC6, 2, unwind2, 1, tb_cus };
 static const struct catch_block cb_rti[] = {
 	{ REF, &td_bad_cast, -0x14, rti_cast },
 	{ REF, &td_non_rtti, -0x14, rti_non },
-	{ REF, &td_exception, -0x14, rti_exc },
+	{ REF, &td_exception_std, -0x14, rti_exc },
 };
 static const struct try_block tb_rti[] = { { 0, 0, 1, 3, cb_rti } };
 const struct func_info fi_rti = { VC6, 2, unwind2, 1, tb_rti };
@@ -1234,7 +1234,7 @@ static const struct unwind_entry unwind_trt[] = { { -1, trt_dtor } };
 const struct func_info fi_trt = { VC6, 1, unwind_trt, 0, NULL };
 
 static const struct catch_block cb_cax[] = {
-	{ REF, &td_exception_std, -0x14, cax_catch } };
+	{ REF, &td_exception, -0x14, cax_catch } };
 static const struct try_block tb_cax[] = { { 0, 0, 1, 1, cb_cax } };
 const struct func_info fi_cax = { VC6, 2, unwind2, 1, tb_cax };
 

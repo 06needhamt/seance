@@ -280,6 +280,7 @@ static void test_subclasses(void)
 	CHECK(non_rtti_ctor(&n, "nr") == &n && n.vtable == non_rtti_vt);
 	struct type_desc typeid_d = { std_exc.vtable, NULL, ".?AVbad_typeid@@" };
 	CHECK(rtcast(&n, 0, rttypeid(&n), &typeid_d, 0) == &n);	/* its base */
+	CHECK(rtcast(&n, 0, rttypeid(&n), &std_exc, 0) == &n);
 	CHECK(!rtcast(&t, 0, rttypeid(&t), ti, 0));		/* not a bad_cast */
 
 	scalar_dtor(&n, 0);
@@ -558,10 +559,14 @@ static void test_cli(void)
 	CHECK_EQ(filter(&again_ep, &td_objbase, 8, slot), 1);
 	CHECK(slot[0] == &obj.value);
 	CHECK(detect(&again_ep) && again_ep.ExceptionRecord == &rec);
+	CHECK(!detect(&ep));	/* not a rethrow */
 	/* Nested, then both done: the object destroyed once, not in use. */
 	CHECK_EQ(reg(NULL, fi2), 1);
 	unreg(fi2, 0);
 	CHECK_EQ(dtor_calls, 0);
+	CHECK_EQ(reg(&ep, fi2), 1);	/* the same object, nested */
+	unreg(fi2, 0);
+	CHECK_EQ(dtor_calls, 0);	/* the outer one holds it */
 	unreg(fi, 1);
 	CHECK_EQ(dtor_calls, 0);	/* in use: kept */
 	CHECK_EQ(reg(&ep, fi), 1);
