@@ -56,6 +56,7 @@ import_library(pe_basic)
 import_library(zz_nosuch)
 import_library(vfw_missing)
 import_library(sehcrt)
+import_library(cxxcrt)
 import_library(oleaut_ord)
 import_library(comctl_ord)
 
@@ -89,6 +90,11 @@ fixture(pe_seh pe_seh.c LIBS kernel32 OPTIONS -mpreferred-stack-boundary=2)
 # _except_handler3 and _except_handler4_common, frames written out by hand.
 fixture(pe_sehcrt pe_sehcrt.c LIBS sehcrt_imports kernel32
 	OPTIONS -mpreferred-stack-boundary=2)
+
+# C++ exceptions laid out as cl compiles them, against msvcrt's
+# __CxxFrameHandler and _CxxThrowException.
+fixture(pe_cxxeh pe_cxxeh.c LIBS cxxcrt_imports kernel32
+	OPTIONS -mpreferred-stack-boundary=2 -fno-builtin)
 
 # Keeps settings in the registry (advapi32), as many codecs do.
 fixture(pe_reg pe_reg.c LIBS advapi32 OPTIONS -mpreferred-stack-boundary=2)
