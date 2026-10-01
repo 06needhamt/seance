@@ -462,6 +462,47 @@ __asm__(
 	"incl _sj_inner_count\n\t"
 	"ret\n"
 
+	/*
+	 * int eh4_setjmp(UINT_PTR *cookie): eh3_setjmp's setjmp case in an
+	 * EH4 frame, _setjmp3 given _seh_longjmp_unwind4 and the cookie's
+	 * address, as cl passes it (a wrong one: nothing is unwound).
+	 */
+	".globl _eh4_setjmp\n"
+	"_eh4_setjmp:\n\t"
+	"EH4_PROLOGUE t4_sj\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"pushl 8(%ebp)\n\t"
+	"pushl $0\n\t"
+	"pushl __imp___seh_longjmp_unwind4\n\t"
+	"pushl $3\n\t"
+	"pushl $_sj_buf\n\t"
+	"call *__imp___setjmp3\n\t"
+	"addl $20, %esp\n\t"
+	"testl %eax, %eax\n\t"
+	"jnz 4f\n\t"
+	"movl $1, -4(%ebp)\n\t"
+	"call _sj_inner\n\t"
+	"movl $-9, %eax\n\t"
+	"jmp 5f\n"
+	"4:\n\t"
+	"imull $10, %eax, %eax\n\t"
+	"addl _sj_count, %eax\n\t"
+	"imull $100, _sj_inner_count, %ecx\n\t"
+	"addl %ecx, %eax\n\t"
+	"cmpl $0, -4(%ebp)\n\t"
+	"je 6f\n\t"
+	"movl $-2, -4(%ebp)\n\t"	/* not unwound: no __finally now */
+	"negl %eax\n\t"
+	"jmp 5f\n"
+	"6:\n\t"
+	"movl %eax, %esi\n\t"
+	"movl $-2, -4(%ebp)\n\t"
+	"call f_sj0\n\t"
+	"movl %esi, %eax\n\t"
+	"addl $1000, %eax\n"
+	"5:\n\t"
+	"EH4_EPILOGUE\n"
+
 	/* Scope tables: enclosing level, filter (0 for __finally), block. */
 	".section .rdata\n"
 	".align 4\n"
@@ -486,6 +527,9 @@ __asm__(
 	".long -2, _filter_accept, h4_nest0\n\t"
 	".long 0, _filter_decline, h4_nest1\n\t"
 	".long 1, 0, f_nest\n"
+	"t4_sj: .long -0x1c, 8, -0x2c, 4\n\t"
+	".long -2, 0, f_sj0\n\t"
+	".long 0, 0, f_sj\n"
 	"t4_ret: .long -2, 0, -0x2c, 4\n\t"
 	".long -2, 0, f_ret\n"
 	".text\n"
@@ -502,6 +546,7 @@ int eh4_nested(void);
 int eh4_return(void);
 int eh4_smashed(int offset);
 int eh3_setjmp(int old);
+int eh4_setjmp(UINT_PTR *cookie);
 
 static void *chain_head(void)
 {
@@ -557,6 +602,13 @@ EXPORT int sehcrt_run(int raise)
 	sj_count = sj_inner_count = 0;
 	if (eh3_setjmp(1) != 1131 || sj_count != 1001)
 		return 14;
+	sj_count = sj_inner_count = 0;
+	if (eh4_setjmp(&eh4_cookie) != 1131 || sj_count != 1001)
+		return 16;
+	/* With some other address, the levels stay; only sj_inner's ran. */
+	sj_count = sj_inner_count = 0;
+	if (eh4_setjmp((UINT_PTR *)&cont_value) != -130 || sj_count != 0)
+		return 17;
 	if (chain_head() != head)
 		return 10;
 	return 0;

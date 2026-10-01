@@ -517,6 +517,7 @@ static void test_cli(void)
 	void (CDECL *unreg)(void *, int) = get("__CxxUnregisterExceptionObject");
 	void (WINAPI *call_dtor)(void *, void *) = get("__CxxCallUnwindDtor");
 	void (WINAPI *call_del)(void *, void *) = get("__CxxCallUnwindDelDtor");
+	void (WINAPI *call_std)(void *, void *) = get("__CxxCallUnwindStdDelDtor");
 	void (WINAPI *call_vec)(void *, void *, size_t, int, void *) =
 		get("__CxxCallUnwindVecDtor");
 	void (CDECL *(CDECL *set_translator)(void (CDECL *)(unsigned, void *)))(
@@ -579,9 +580,10 @@ static void test_cli(void)
 	dtor_calls = 0;
 	call_dtor((void *)count_dtor, &obj);
 	call_del((void *)count_del_dtor, &obj);
+	call_std((void *)count_del_dtor, &obj);
 	int arr[3];
 	call_vec((void *)vec_dtor, arr, sizeof(arr[0]), 3, (void *)count_dtor);
-	CHECK_EQ(dtor_calls, 14);
+	CHECK_EQ(dtor_calls, 24);
 
 	CHECK(set_translator(NULL) == NULL);
 

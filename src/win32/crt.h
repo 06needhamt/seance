@@ -41,4 +41,12 @@ struct jump_buffer {
 
 #define JMP_COOKIE 0x56433230	/* "VC20" */
 
+/*
+ * Runs fn(arg) as __try { fn(arg); } __except (an access violation) {}
+ * would (crt_cxx.c): 1 if it faulted, 0 if it returned. A fault only
+ * becomes an exception through the harness's fault handler
+ * (crash_install), so without it this still crashes.
+ */
+int crt_guarded(void (*fn)(void *), void *arg);
+
 #endif /* VFW_WIN32_CRT_H */

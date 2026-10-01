@@ -48,7 +48,9 @@
  * dynamic_cast by either finds them; their own RTTI names the former.
  *
  * Also the helpers behind C++/CLI and setjmp: __CxxExceptionFilter and
- * friends, the __CxxCallUnwind*Dtor guards, and __CxxLongjmpUnwind.
+ * friends, the __CxxCallUnwind*Dtor guards (StdDelDtor's destructor, managed
+ * code, called through its native entry like DelDtor's), and
+ * __CxxLongjmpUnwind.
  */
 #include <pthread.h>
 #include <setjmp.h>
@@ -1279,12 +1281,7 @@ throw_std(const struct vtable *vt, const struct exception_type *type,
 
 /* RTTI. */
 
-/*
- * Runs fn(arg) as __try { fn(arg); } __except (an access violation) {}
- * would: 1 if it faulted, 0 if it returned. A fault only becomes an
- * exception through the harness's fault handler (crash_install), so
- * without it this still crashes.
- */
+/* crt_guarded (see crt.h): a frame that takes access violations. */
 struct guard {
 	EXCEPTION_REGISTRATION_RECORD reg;	/* first */
 	jmp_buf jump;
@@ -1303,8 +1300,8 @@ static EXCEPTION_DISPOSITION STUB_CDECL guard_handler(EXCEPTION_RECORD *rec,
 	longjmp(g->jump, 1);
 }
 
-static int __attribute__((no_sanitize_address)) guarded(void (*fn)(void *),
-							void *arg)
+int __attribute__((no_sanitize_address)) crt_guarded(void (*fn)(void *),
+						     void *arg)
 {
 	struct win_teb *teb = teb_current();
 	struct guard g;
@@ -1404,7 +1401,7 @@ CRTFN(const struct type_info *) crt___RTtypeid(void *object)
 	if (!object)
 		throw_std(&bad_typeid_vtable, &ti_bad_typeid,
 			  "Attempted a typeid of NULL pointer!");
-	if (guarded(rtti_typeid, &q))
+	if (crt_guarded(rtti_typeid, &q))
 		throw_std(&non_rtti_vtable, &ti_non_rtti,
 			  "Bad read pointer - no RTTI data!");
 	return q.result;
@@ -1419,7 +1416,7 @@ CRTFN(void *) crt___RTDynamicCast(void *object, int vfdelta,
 
 	if (!object)
 		return NULL;
-	if (guarded(rtti_cast, &q))
+	if (crt_guarded(rtti_cast, &q))
 		throw_std(&non_rtti_vtable, &ti_non_rtti,
 			  "Access violation - no RTTI data!");
 	if (!q.result && is_reference)
@@ -1434,7 +1431,7 @@ CRTFN(void *) crt___RTCastToVoid(void *object)
 
 	if (!object)
 		return NULL;
-	if (guarded(rtti_complete, &q))
+	if (crt_guarded(rtti_complete, &q))
 		throw_std(&non_rtti_vtable, &ti_non_rtti,
 			  "Access violation - no RTTI data!");
 	return (void *)q.result;
@@ -1630,6 +1627,14 @@ crt___CxxCallUnwindDelDtor(void *dtor, void *object)
 	call_unwind_dtor(&c);
 }
 
+/* Its destructor is managed code, called through its native entry. */
+static void WINAPI __attribute__((force_align_arg_pointer))
+crt___CxxCallUnwindStdDelDtor(void *dtor, void *object)
+{
+	struct unwind_dtor_call c = { 1, dtor, object, 0, 0, NULL };
+	call_unwind_dtor(&c);
+}
+
 static void WINAPI __attribute__((force_align_arg_pointer))
 crt___CxxCallUnwindVecDtor(void *vec_dtor, void *array, size_t size, int count,
 			   void *dtor)
@@ -1692,6 +1697,7 @@ const struct builtin_export crt_cxx_exports[] = {
 	E(__CxxUnregisterExceptionObject),
 	E(__CxxCallUnwindDtor),
 	E(__CxxCallUnwindDelDtor),
+	E(__CxxCallUnwindStdDelDtor),
 	E(__CxxCallUnwindVecDtor),
 	E(__CxxLongjmpUnwind),
 	/* RTTI. */

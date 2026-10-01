@@ -11,4 +11,5 @@ EXPORTS
 	_setjmp
 	_setjmp3
 	_seh_longjmp_unwind
+	_seh_longjmp_unwind4
 	longjmp

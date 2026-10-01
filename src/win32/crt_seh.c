@@ -29,16 +29,15 @@
  * Also setjmp and longjmp, which take part: longjmp unwinds the frames
  * set up since its setjmp (their __finally blocks and destructors run),
  * and that frame's own levels down to setjmp's, through what _setjmp3 was
- * told to call (_seh_longjmp_unwind for a __try frame, __CxxLongjmpUnwind
- * for a C++ one).
+ * told to call (_seh_longjmp_unwind or _seh_longjmp_unwind4 for a __try
+ * frame, __CxxLongjmpUnwind for a C++ one).
  *
  * Not done: a nested exception during an unwind, which Windows handles
- * with its own frame around each __finally, and _seh_longjmp_unwind4 (for
- * setjmp inside an EH4 __try), whose argument for the image's cookie is
- * unknown here.
+ * with its own frame around each __finally.
  */
 #include <stdarg.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include "runtime/seh.h"
 #include "runtime/teb.h"
@@ -417,6 +416,46 @@ crt__seh_longjmp_unwind(const struct jump_buffer *jmp)
 	crt__local_unwind2((void *)jmp->registration, (int)jmp->trylevel);
 }
 
+/*
+ * The same for an EH4 frame, whose scope table needs the image's cookie:
+ * the compiler passes its address after the try level (unwind_data[0]),
+ * as it passes it to _local_unwind4. That is checked against the frame's
+ * EH cookie before the table is trusted (a table is 4-byte aligned, so a
+ * wrong cookie usually shows before anything is read); if it doesn't
+ * match, or can't be read, nothing is unwound and a warning says so.
+ */
+struct eh4_probe {
+	struct eh_frame *frame;
+	const UINT_PTR *cookie;
+	int ok;
+};
+
+static void probe_eh4(void *arg)
+{
+	struct eh4_probe *p = arg;
+	const struct eh4_table *t = eh4_table(p->cookie, p->frame);
+	BYTE *ebp = frame_ebp(p->frame);
+
+	if ((UINT_PTR)t & 3)
+		return;
+	p->ok = (*(UINT_PTR *)(ebp + t->eh_cookie_offset) ^
+		 (UINT_PTR)(ebp + t->eh_cookie_xor_offset)) == *p->cookie;
+}
+
+static void WINAPI __attribute__((force_align_arg_pointer))
+crt__seh_longjmp_unwind4(const struct jump_buffer *jmp)
+{
+	struct eh4_probe p = { (struct eh_frame *)jmp->registration,
+			       (const UINT_PTR *)jmp->unwind_data[0], 0 };
+
+	if (!p.cookie || crt_guarded(probe_eh4, &p) || !p.ok) {
+		fputs("vfw-harness: warning: longjmp: no cookie for an EH4 "
+		      "frame's __try levels, which stay as they are\n", stderr);
+		return;
+	}
+	crt__local_unwind4((UINT_PTR *)p.cookie, p.frame, (int)jmp->trylevel);
+}
+
 #define E(name) { #name, 0, crt_##name }
 
 const struct builtin_export crt_seh_exports[] = {
@@ -432,5 +471,6 @@ const struct builtin_export crt_seh_exports[] = {
 	{ "_longjmpex", 0, crt_longjmp },
 	{ "__intrinsic_setjmp", 0, crt__setjmp },
 	E(_seh_longjmp_unwind),
+	E(_seh_longjmp_unwind4),
 	BUILTIN_END
 };
