@@ -29,6 +29,10 @@ UINT_PTR eh4_cookie = 0x5eed1234;
 int eh4_checks, eh4_bad;
 int sj_count, sj_inner_count;
 int sj_buf[16];
+int coll_count, coll_inner_abn, coll_outer_abn, raw_calls;
+ULONG_PTR ff_address = 99;
+int self_abn, k_abn;
+int k_buf[16];
 
 #define RAISED_CODE 0xE0001234
 
@@ -503,6 +507,232 @@ __asm__(
 	"5:\n\t"
 	"EH4_EPILOGUE\n"
 
+	/*
+	 * int eh3_collide(int quiet):
+	 * __try { coll_f(quiet); return coll_count + 1000; }
+	 * __except (EXCEPTION_EXECUTE_HANDLER) { return coll_count; }
+	 * with coll_f(quiet):
+	 * __try {					level 0
+	 *	__try {					level 1
+	 *		if (!quiet) coll_e();
+	 *	} __finally { coll_inner_abn = AbnormalTermination();
+	 *		      coll_count += 1;
+	 *		      if (coll_inner_abn) RaiseException(0xE0000002); }
+	 * } __finally { coll_outer_abn = AbnormalTermination(); coll_count += 10; }
+	 * and coll_e under a raw frame that counts its handler's calls:
+	 * trigger(). The second exception, raised during the unwind, is
+	 * caught out in eh3_collide too.
+	 */
+	".globl _eh3_collide\n"
+	"_eh3_collide:\n\t"
+	"EH3_PROLOGUE t_cg\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"pushl 8(%ebp)\n\t"
+	"call _coll_f\n\t"
+	"addl $4, %esp\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"movl _coll_count, %eax\n\t"
+	"addl $1000, %eax\n\t"
+	"jmp 1f\n"
+	"h_cg:\n\t"
+	"movl -0x18(%ebp), %esp\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"movl _coll_count, %eax\n"
+	"1:\n\t"
+	"EH_EPILOGUE\n"
+	"_coll_f:\n\t"
+	"EH3_PROLOGUE t_cf\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"movl $1, -4(%ebp)\n\t"
+	"cmpl $0, 8(%ebp)\n\t"
+	"jne 2f\n\t"
+	"call _coll_e\n"
+	"2:\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"call f_ci\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"call f_co\n\t"
+	"EH_EPILOGUE\n"
+	"f_ci:\n\t"
+	"call *__imp___abnormal_termination\n\t"
+	"movl %eax, _coll_inner_abn\n\t"
+	"incl _coll_count\n\t"
+	"testl %eax, %eax\n\t"
+	"jz 3f\n\t"
+	"pushl $0\n\t"
+	"pushl $0\n\t"
+	"pushl $0\n\t"
+	"pushl $0xE0000002\n\t"
+	"call *__imp__RaiseException@16\n"
+	"3:\n\t"
+	"ret\n"
+	"f_co:\n\t"
+	"call *__imp___abnormal_termination\n\t"
+	"movl %eax, _coll_outer_abn\n\t"
+	"addl $10, _coll_count\n\t"
+	"ret\n"
+	"_coll_e:\n\t"
+	"pushl $_raw_handler\n\t"
+	"pushl %fs:0\n\t"
+	"movl %esp, %fs:0\n\t"
+	"call _trigger\n\t"
+	"popl %fs:0\n\t"
+	"addl $4, %esp\n\t"
+	"ret\n"
+	"_raw_handler:\n\t"
+	"incl _raw_calls\n\t"
+	"movl $1, %eax\n\t"		/* ExceptionContinueSearch */
+	"ret\n"
+
+	/*
+	 * int eh3_filter_fault(void): __try { trigger(); return -1; }
+	 * __except (probe()) { return 5; } with probe: __try { trigger(); }
+	 * __except (EXCEPTION_EXECUTE_HANDLER) { return 1; } return 0;
+	 * - the filter's own exception (a fault, unless raising) is caught
+	 * inside it while the first is being dispatched.
+	 */
+	".globl _eh3_filter_fault\n"
+	"_eh3_filter_fault:\n\t"
+	"EH3_PROLOGUE t_ff\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"call _trigger\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"movl $-1, %eax\n\t"
+	"jmp 1f\n"
+	"h_ff:\n\t"
+	"movl -0x18(%ebp), %esp\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"movl $5, %eax\n"
+	"1:\n\t"
+	"EH_EPILOGUE\n"
+	/* The filter: probe(), then the address its own exception's record
+	 * still gives (the first's, not probe's). */
+	"_filter_probe:\n\t"
+	"call _probe\n\t"
+	"movl -0x14(%ebp), %ecx\n\t"
+	"movl (%ecx), %ecx\n\t"		/* ExceptionRecord */
+	"movl 0x18(%ecx), %ecx\n\t"		/* ExceptionInformation[1] */
+	"movl %ecx, _ff_address\n\t"
+	"ret\n"
+	"_probe:\n\t"
+	"EH3_PROLOGUE t_pr\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"cmpl $0, _use_raise\n\t"
+	"jne 2f\n\t"
+	"movl $4, %eax\n\t"
+	"movl (%eax), %eax\n"		/* a fault at 4, not trigger's 0 */
+	"2:\n\t"
+	"call _trigger\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"xorl %eax, %eax\n\t"
+	"jmp 1f\n"
+	"h_pr:\n\t"
+	"movl -0x18(%ebp), %esp\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"movl $1, %eax\n"
+	"1:\n\t"
+	"EH_EPILOGUE\n"
+
+	/*
+	 * int eh3_selfcollide(int quiet):
+	 * __try { __try { if (!quiet) trigger(); }		levels 0, 1
+	 *	   __finally { self_abn = AbnormalTermination();
+	 *		       if (self_abn) RaiseException(0xE0000002); } }
+	 * __except (EXCEPTION_EXECUTE_HANDLER) { return 1; }
+	 * return 2 + self_abn * 10;
+	 * - the __finally an exception leaves is in the catching frame itself.
+	 */
+	".globl _eh3_selfcollide\n"
+	"_eh3_selfcollide:\n\t"
+	"EH3_PROLOGUE t_sc\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"movl $1, -4(%ebp)\n\t"
+	"cmpl $0, 8(%ebp)\n\t"
+	"jne 2f\n\t"
+	"call _trigger\n"
+	"2:\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"call f_sc\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"imull $10, _self_abn, %eax\n\t"
+	"addl $2, %eax\n\t"
+	"jmp 1f\n"
+	"h_sc:\n\t"
+	"movl -0x18(%ebp), %esp\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"movl $1, %eax\n"
+	"1:\n\t"
+	"EH_EPILOGUE\n"
+	"f_sc:\n\t"
+	"call *__imp___abnormal_termination\n\t"
+	"movl %eax, _self_abn\n\t"
+	"testl %eax, %eax\n\t"
+	"jz 3f\n\t"
+	"pushl $0\n\t"
+	"pushl $0\n\t"
+	"pushl $0\n\t"
+	"pushl $0xE0000002\n\t"
+	"call *__imp__RaiseException@16\n"
+	"3:\n\t"
+	"ret\n"
+
+	/*
+	 * int eh3_finally_jump(int quiet):
+	 * if (setjmp(k_buf)) return 100;		(_setjmp3, 2 args, level -1)
+	 * __try { k_fn(quiet); } __except (EXCEPTION_EXECUTE_HANDLER) { return 7; }
+	 * return 8;
+	 * with k_fn: __try { if (!quiet) trigger(); }
+	 * __finally { k_abn = AbnormalTermination(); if (k_abn) longjmp(k_buf, 1); }
+	 * - longjmp out of a __finally the unwind runs.
+	 */
+	".globl _eh3_finally_jump\n"
+	"_eh3_finally_jump:\n\t"
+	"EH3_PROLOGUE t_fj\n\t"
+	"pushl $-1\n\t"
+	"pushl __imp___seh_longjmp_unwind\n\t"
+	"pushl $2\n\t"
+	"pushl $_k_buf\n\t"
+	"call *__imp___setjmp3\n\t"
+	"addl $16, %esp\n\t"
+	"testl %eax, %eax\n\t"
+	"jz 2f\n\t"
+	"movl $100, %eax\n\t"
+	"jmp 1f\n"
+	"2:\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"pushl 8(%ebp)\n\t"
+	"call _k_fn\n\t"
+	"addl $4, %esp\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"movl $8, %eax\n\t"
+	"jmp 1f\n"
+	"h_fj:\n\t"
+	"movl -0x18(%ebp), %esp\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"movl $7, %eax\n"
+	"1:\n\t"
+	"EH_EPILOGUE\n"
+	"_k_fn:\n\t"
+	"EH3_PROLOGUE t_kf\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"cmpl $0, 8(%ebp)\n\t"
+	"jne 2f\n\t"
+	"call _trigger\n"
+	"2:\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"call f_kf\n\t"
+	"EH_EPILOGUE\n"
+	"f_kf:\n\t"
+	"call *__imp___abnormal_termination\n\t"
+	"movl %eax, _k_abn\n\t"
+	"testl %eax, %eax\n\t"
+	"jz 3f\n\t"
+	"pushl $1\n\t"
+	"pushl $_k_buf\n\t"
+	"call *__imp__longjmp\n"
+	"3:\n\t"
+	"ret\n"
+
 	/* Scope tables: enclosing level, filter (0 for __finally), block. */
 	".section .rdata\n"
 	".align 4\n"
@@ -515,6 +745,15 @@ __asm__(
 	"t_inner: .long -1, 0, f_inner\n"
 	"t_ret: .long -1, 0, f_ret\n"
 	"t_ft: .long -1, 0, f_ft\n"
+	"t_cg: .long -1, _filter_accept, h_cg\n"
+	"t_cf: .long -1, 0, f_co\n\t"
+	".long 0, 0, f_ci\n"
+	"t_ff: .long -1, _filter_probe, h_ff\n"
+	"t_fj: .long -1, _filter_accept, h_fj\n"
+	"t_kf: .long -1, 0, f_kf\n"
+	"t_sc: .long -1, _filter_accept, h_sc\n\t"
+	".long 0, 0, f_sc\n"
+	"t_pr: .long -1, _filter_accept, h_pr\n"
 	"t_sj: .long -1, 0, f_sj0\n\t"
 	".long 0, 0, f_sj\n"
 	"t_sji: .long -1, 0, f_sji\n"
@@ -547,6 +786,10 @@ int eh4_return(void);
 int eh4_smashed(int offset);
 int eh3_setjmp(int old);
 int eh4_setjmp(UINT_PTR *cookie);
+int eh3_collide(int quiet);
+int eh3_filter_fault(void);
+int eh3_selfcollide(int quiet);
+int eh3_finally_jump(int quiet);
 
 static void *chain_head(void)
 {
@@ -609,6 +852,28 @@ EXPORT int sehcrt_run(int raise)
 	sj_count = sj_inner_count = 0;
 	if (eh4_setjmp((UINT_PTR *)&cont_value) != -130 || sj_count != 0)
 		return 17;
+	/*
+	 * An exception out of a __finally run by the unwind, caught further
+	 * out: each frame's handler sees the first exception once each way,
+	 * and the abandoned __finally doesn't linger for the next call's
+	 * AbnormalTermination().
+	 */
+	coll_count = raw_calls = 0;
+	if (eh3_collide(0) != 11 || raw_calls != 2 || !coll_inner_abn ||
+	    !coll_outer_abn)
+		return 18;
+	coll_count = 0;
+	if (eh3_collide(1) != 1011 || coll_inner_abn || coll_outer_abn)
+		return 19;
+	if (eh3_selfcollide(0) != 1 || eh3_selfcollide(1) != 2)
+		return 21;
+	if (eh3_finally_jump(0) != 100 || !k_abn ||
+	    eh3_finally_jump(1) != 8 || k_abn)
+		return 22;
+	/* A filter's own exception, caught inside it, leaving its record be. */
+	ff_address = 99;
+	if (eh3_filter_fault() != 5 || (!use_raise && ff_address != 0))
+		return 20;
 	if (chain_head() != head)
 		return 10;
 	return 0;

@@ -11,3 +11,5 @@ EXPORTS
 	__CxxLongjmpUnwind
 	_setjmp3
 	longjmp
+	_except_handler3
+	_abnormal_termination

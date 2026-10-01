@@ -286,6 +286,9 @@ static struct type_desc td_bad_cast = { NULL, NULL, ".?AVbad_cast@std@@" };
 static struct type_desc td_non_rtti = { NULL, NULL, ".?AV__non_rtti_object@@" };
 static struct type_desc td_exception = { NULL, NULL, ".?AVexception@@" };
 static struct type_desc td_exception_std = { NULL, NULL, ".?AVexception@std@@" };
+static struct type_desc td_logic_error = { NULL, NULL, ".?AVlogic_error@std@@" };
+static struct type_desc td_runtime_error = { NULL, NULL, ".?AVruntime_error@std@@" };
+static struct type_desc td_bad_alloc = { NULL, NULL, ".?AVbad_alloc@std@@" };
 
 char caught_what[40];
 
@@ -302,17 +305,35 @@ void grab(void *e)
 	caught_at = e;
 }
 
+/* msvcp's throw helpers, as an STL container calls them. */
+static void call_x(const char *name, const char *what)
+{
+	void (__cdecl *f)(const char *) =
+		(void *)GetProcAddress(GetModuleHandleA("msvcrt.dll"), name);
+	if (f)
+		f(what);
+}
+
 void rtti_thrower(int which)
 {
 	if (which == 0)	/* dynamic_cast<B &>(an A) */
 		__RTDynamicCast(&a_obj, 0, &td_A, &td_B, 1);
 	else if (which == 1)	/* typeid(*(A *)NULL) */
 		__RTtypeid(NULL);
-	else
+	else if (which == 2)
 		__RTtypeid(&bad_obj);
+	else if (which == 3)
+		call_x("?_Xlength_error@std@@YAXPBD@Z", "vector too long");
+	else if (which == 4)
+		call_x("?_Xran@std@@YAXXZ", NULL);
+	else if (which == 5)
+		call_x("?_Xoverflow_error@std@@YAXPBD@Z", "too big");
+	else if (which == 6)
+		call_x("?_Xbad_alloc@std@@YAXXZ", NULL);
 }
 
 int sj_buf[16], sj_buf2[16];
+int k2_abn;
 
 void sj_jump(void)
 {
@@ -1083,6 +1104,141 @@ __asm__(
 	"CXX_EPILOGUE\n"
 	"CXX_HANDLER h_cax, _fi_cax\n"
 
+	/* void dt_mid(void): Obj o; throw_int(1); - o's destructor throws. */
+	"_dt_mid:\n\t"
+	"CXX_PROLOGUE h_dtm\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"pushl $1\n\t"
+	"call _throw_int\n\t"
+	"ud2\n"
+	"_dtm_dtor:\n\t"
+	"pushl $2\n\t"
+	"call _throw_int\n\t"
+	"ud2\n"
+	"CXX_HANDLER h_dtm, _fi_dtm\n"
+
+	/* void catch_dt(void): try { dt_mid(); } catch (...) { } */
+	"_catch_dt:\n\t"
+	"CXX_PROLOGUE h_cdt\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"call _dt_mid\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"jmp 1f\n"
+	"_cdt_catch:\n\t"
+	"movl $1f, %eax\n\t"
+	"ret\n"
+	"1:\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"CXX_EPILOGUE\n"
+	"CXX_HANDLER h_cdt, _fi_cdt\n"
+
+	/*
+	 * int catch_std(int which): try { rtti_thrower(which); }
+	 * catch (std::logic_error &e) { grab(e); return 4; }
+	 * catch (std::runtime_error &e) { grab(e); return 5; }
+	 * catch (std::bad_alloc &e) { grab(e); return 6; }
+	 */
+	".globl _catch_std\n"
+	"_catch_std:\n\t"
+	"CXX_PROLOGUE h_cst2\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"pushl 8(%ebp)\n\t"
+	"call _rtti_thrower\n\t"
+	"addl $4, %esp\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"movl $-99, %eax\n\t"
+	"jmp 1f\n"
+	"_cst2_logic:\n\t"
+	"movl $4, -0x18(%ebp)\n\t"
+	"jmp 3f\n"
+	"_cst2_runtime:\n\t"
+	"movl $5, -0x18(%ebp)\n\t"
+	"jmp 3f\n"
+	"_cst2_alloc:\n\t"
+	"movl $6, -0x18(%ebp)\n"
+	"3:\n\t"
+	"pushl -0x14(%ebp)\n\t"
+	"call _grab\n\t"
+	"addl $4, %esp\n\t"
+	"movl $2f, %eax\n\t"
+	"ret\n"
+	"2:\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"movl -0x18(%ebp), %eax\n"
+	"1:\n\t"
+	"CXX_EPILOGUE\n"
+	"CXX_HANDLER h_cst2, _fi_cst2\n"
+
+	/*
+	 * void k2_fn(int quiet), an SEH function as cl builds it (EH3):
+	 * __try { if (!quiet) throw_int(1); }
+	 * __finally { k2_abn = AbnormalTermination(); if (k2_abn) throw_int(2); }
+	 */
+	"_k2_fn:\n\t"
+	"pushl %ebp\n\t"
+	"movl %esp, %ebp\n\t"
+	"pushl $-1\n\t"
+	"pushl $t_k2\n\t"
+	"pushl __imp___except_handler3\n\t"
+	"pushl %fs:0\n\t"
+	"movl %esp, %fs:0\n\t"
+	"subl $8, %esp\n\t"
+	"pushl %ebx\n\t"
+	"pushl %esi\n\t"
+	"pushl %edi\n\t"
+	"movl %esp, -0x18(%ebp)\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"cmpl $0, 8(%ebp)\n\t"
+	"jne 2f\n\t"
+	"pushl $1\n\t"
+	"call _throw_int\n\t"
+	"addl $4, %esp\n"
+	"2:\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"call f_k2\n\t"
+	"leal -0x24(%ebp), %esp\n\t"
+	"movl -0x10(%ebp), %ecx\n\t"
+	"movl %ecx, %fs:0\n\t"
+	"popl %edi\n\t"
+	"popl %esi\n\t"
+	"popl %ebx\n\t"
+	"movl %ebp, %esp\n\t"
+	"popl %ebp\n\t"
+	"ret\n"
+	"f_k2:\n\t"
+	"call *__imp___abnormal_termination\n\t"
+	"movl %eax, _k2_abn\n\t"
+	"testl %eax, %eax\n\t"
+	"jz 3f\n\t"
+	"pushl $2\n\t"
+	"call _throw_int\n"
+	"3:\n\t"
+	"ret\n"
+
+	/* int catch_k2(int quiet): try { k2_fn(quiet); } catch (...) { return 3; } return 4; */
+	"_catch_k2:\n\t"
+	"CXX_PROLOGUE h_ck2\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"pushl 8(%ebp)\n\t"
+	"call _k2_fn\n\t"
+	"addl $4, %esp\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"movl $4, %eax\n\t"
+	"jmp 1f\n"
+	"_ck2_catch:\n\t"
+	"movl $2f, %eax\n\t"
+	"ret\n"
+	"2:\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"movl $3, %eax\n"
+	"1:\n\t"
+	"CXX_EPILOGUE\n"
+	"CXX_HANDLER h_ck2, _fi_ck2\n"
+
+	".section .rdata\n"
+	"t_k2: .long -1, 0, f_k2\n"
+	".text\n"
+
 	/* void noexcept_fn(void) noexcept (VC8): throw_int(1); */
 	".globl _noexcept_fn\n"
 	"_noexcept_fn:\n\t"
@@ -1101,7 +1257,8 @@ extern char int_catch[], base_catch[], copy_catch[], mid_dtor_a[],
 	loc_dtor[], loc_catch[], cst_plain[], cst_const[], trn_catch[],
 	trm_catch[], tro_catch[], esf_dtor[], ces_char[], ces_int[],
 	cus_catch[], rti_cast[], rti_non[], rti_exc[], sjm_dtor[], sjl_dtor[],
-	trt_dtor[], cax_catch[];
+	trt_dtor[], cax_catch[], dtm_dtor[], cdt_catch[], cst2_logic[],
+	cst2_runtime[], cst2_alloc[], ck2_catch[];
 
 /* A try at state 0 whose catch blocks run at state 1. */
 static const struct unwind_entry unwind2[] = { { -1, NULL }, { -1, NULL } };
@@ -1237,6 +1394,25 @@ static const struct catch_block cb_rti[] = {
 static const struct try_block tb_rti[] = { { 0, 0, 1, 3, cb_rti } };
 const struct func_info fi_rti = { VC6, 2, unwind2, 1, tb_rti };
 
+static const struct catch_block cb_cst2[] = {
+	{ REF, &td_logic_error, -0x14, cst2_logic },
+	{ REF, &td_runtime_error, -0x14, cst2_runtime },
+	{ REF, &td_bad_alloc, -0x14, cst2_alloc },
+};
+static const struct try_block tb_cst2[] = { { 0, 0, 1, 3, cb_cst2 } };
+const struct func_info fi_cst2 = { VC6, 2, unwind2, 1, tb_cst2 };
+
+static const struct catch_block cb_ck2[] = { { 0, NULL, 0, ck2_catch } };
+static const struct try_block tb_ck2[] = { { 0, 0, 1, 1, cb_ck2 } };
+const struct func_info fi_ck2 = { VC6, 2, unwind2, 1, tb_ck2 };
+
+static const struct unwind_entry unwind_dtm[] = { { -1, dtm_dtor } };
+const struct func_info fi_dtm = { VC6, 1, unwind_dtm, 0, NULL };
+
+static const struct catch_block cb_cdt[] = { { 0, NULL, 0, cdt_catch } };
+static const struct try_block tb_cdt[] = { { 0, 0, 1, 1, cb_cdt } };
+const struct func_info fi_cdt = { VC6, 2, unwind2, 1, tb_cdt };
+
 static const struct unwind_entry unwind_trt[] = { { -1, trt_dtor } };
 const struct func_info fi_trt = { VC6, 1, unwind_trt, 0, NULL };
 
@@ -1270,7 +1446,10 @@ int catch_es(int kind);
 int catch_custom(void);
 int catch_rtti(int which);
 int catch_any_exc(int which);
+int catch_std(int which);
+int catch_k2(int quiet);
 void sj_mid(void);
+void catch_dt(void);
 int sj_local(void);
 
 static int streq(const char *a, const char *b)
@@ -1432,10 +1611,29 @@ EXPORT int cxx_run(void)
 		return 26;
 	if (catch_any_exc(0) != 2 || catch_any_exc(1) != 2)
 		return 30;
+
+	/* msvcp's, through its throw helpers: by base, each with its what(). */
+	td_logic_error.vtable = td_runtime_error.vtable = td_bad_alloc.vtable =
+		type_info_vtable;
+	if (catch_std(3) != 4 || !streq(caught_what, "vector too long") ||
+	    catch_std(4) != 4 || !streq(caught_what, "invalid string position") ||
+	    catch_std(5) != 5 || !streq(caught_what, "too big") ||
+	    catch_std(6) != 6 || !streq(caught_what, "bad allocation") ||
+	    catch_any_exc(3) != 2 || catch_any_exc(6) != 2 ||
+	    catch_rtti(3) != 2 || catch_rtti(6) != 2)	/* as std::exception */
+		return 32;
 	if (__RTtypeid(&a_obj) != &td_A ||
 	    __RTDynamicCast(&a_obj, 0, &td_A, &td_A, 1) != &a_obj ||
 	    __RTDynamicCast(&a_obj, 0, &td_A, &td_B, 0))
 		return 27;
+
+	/*
+	 * A C++ exception out of a __finally the unwind runs, caught: that
+	 * __finally is over, so the next call's falls through normally.
+	 */
+	reset();
+	if (catch_k2(0) != 3 || !k2_abn || catch_k2(1) != 4 || k2_abn)
+		return 33;
 
 	/* longjmp: past a C++ frame, and within one, both unwound. */
 	reset();
@@ -1482,6 +1680,18 @@ EXPORT void cxx_es_terminate(void)
 		set_unexpected(on_unexpected_again);
 	}
 	catch_es(1);
+}
+
+/* A destructor throwing during the unwind: terminate(), not the catch. */
+EXPORT void cxx_dtor_throw(void)
+{
+	HMODULE crt = GetModuleHandleA("msvcrt.dll");
+	void (__cdecl *(__cdecl *set_terminate)(void (__cdecl *)(void)))(void) =
+		(void *)GetProcAddress(crt, "?set_terminate@@YAP6AXXZP6AXXZ@Z");
+	td_int.vtable = type_info_vtable;
+	if (set_terminate)
+		set_terminate(on_terminate);
+	catch_dt();
 }
 
 /* No catch anywhere: the harness reports it and aborts. */

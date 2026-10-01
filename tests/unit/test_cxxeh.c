@@ -98,6 +98,10 @@ static void test_fixture(void)
 	st = run_child(dll, "cxx_noexcept", err, sizeof(err), 0);
 	CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 42);	/* its terminate handler */
 
+	/* A destructor throwing during an unwind: terminate(). */
+	st = run_child(dll, "cxx_dtor_throw", err, sizeof(err), 0);
+	CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 42);
+
 	/* unexpected() throwing another disallowed type: terminate(), once. */
 	st = run_child(dll, "cxx_es_terminate", err, sizeof(err), 0);
 	CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 42);
@@ -239,7 +243,9 @@ static void test_subclasses(void)
 	ctor_fn typeid_default = get("??_Fbad_typeid@@QAEXXZ");
 	ctor_str_fn non_rtti_ctor = get("??0__non_rtti_object@std@@QAE@PBD@Z");
 	ctor_ref_fn exc_ctor = get("??0exception@std@@QAE@ABQBD@Z");
-	ctor_ref_fn exc_noalloc = (ctor_ref_fn)get("??0exception@@QAE@ABQBDH@Z");
+	struct exception *(THISCALL *exc_noalloc)(struct exception *,
+						  const char *const *, int) =
+		get("??0exception@@QAE@ABQBDH@Z");
 	copy_fn assign = get("??4exception@@QAEAAV0@ABV0@@Z");
 	vdtor_fn vector_dtor = get("??_Ebad_cast@@UAEPAXI@Z");
 	vdtor_fn scalar_dtor = get("??_G__non_rtti_object@@UAEPAXI@Z");
@@ -295,8 +301,30 @@ static void test_subclasses(void)
 	vector_dtor(&t, 0);
 	vector_dtor(&e, 0);
 
+	/* msvcp's: length_error is a logic_error and so a std::exception. */
+	ctor_str_fn len_ctor = get("??0length_error@std@@QAE@PBD@Z");
+	ctor_fn alloc_default = get("??0bad_alloc@std@@QAE@XZ");
+	what_fn logic_what = get("?what@logic_error@std@@UBEPBDXZ");
+	struct exception le, ba;
+	CHECK(len_ctor(&le, "too long") == &le &&
+	      le.vtable == get("??_7length_error@std@@6B@"));
+	CHECK_STR(logic_what(&le), "too long");
+	const void *le_ti = rttypeid(&le);
+	CHECK(le_ti != NULL);
+	if (le_ti)
+		CHECK_STR(ti_name(le_ti), "class std::length_error");
+	struct type_desc logic_d = { std_exc.vtable, NULL, ".?AVlogic_error@std@@" },
+			 runtime_d = { std_exc.vtable, NULL, ".?AVruntime_error@std@@" };
+	CHECK(rtcast(&le, 0, le_ti, &logic_d, 0) == &le);
+	CHECK(rtcast(&le, 0, le_ti, &std_exc, 0) == &le);
+	CHECK(!rtcast(&le, 0, le_ti, &runtime_d, 0));
+	CHECK(alloc_default(&ba) == &ba);
+	CHECK_STR(what(&ba), "bad allocation");
+	vector_dtor(&le, 0);
+	vector_dtor(&ba, 0);
+
 	/* exception(const char *const &, int): the name not copied. */
-	CHECK(exc_noalloc(&e, &msg) == &e && e.name == msg && !e.do_free);
+	CHECK(exc_noalloc(&e, &msg, 1) == &e && e.name == msg && !e.do_free);
 
 	/* delete[] through the vector deleting destructor: each, then the block. */
 	INT_PTR *block = malloc(sizeof(INT_PTR) + 2 * sizeof(struct exception));
