@@ -8,3 +8,7 @@ EXPORTS
 	_global_unwind2
 	_local_unwind2
 	_local_unwind4
+	_setjmp
+	_setjmp3
+	_seh_longjmp_unwind
+	longjmp

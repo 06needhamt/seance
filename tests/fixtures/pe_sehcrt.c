@@ -8,6 +8,11 @@
  * %ebp, __except blocks that restore %esp themselves, and
  * _local_unwind2/4 for a return out of a __try.
  *
+ * EH4 frames carry the GS and EH cookies, which _except_handler4_common
+ * has the DLL's own check function (here, one that counts) look at; and
+ * setjmp/longjmp unwind __try frames, through _seh_longjmp_unwind or, for
+ * the old _setjmp, on their own.
+ *
  * Each case can be triggered by an access violation or by RaiseException
  * (sehcrt_run's argument), the latter needing no signal handling.
  * sehcrt_run returns 0, or the number of the first check that failed.
@@ -21,6 +26,9 @@ int inner_count, inner_abnormal;
 int ret_count, ret_abnormal;
 int ft_count, ft_abnormal;
 UINT_PTR eh4_cookie = 0x5eed1234;
+int eh4_checks, eh4_bad;
+int sj_count, sj_inner_count;
+int sj_buf[16];
 
 #define RAISED_CODE 0xE0001234
 
@@ -42,6 +50,8 @@ __asm__(
 	"movl %esp, -0x18(%ebp)\n"
 	".endm\n"
 
+	/* EH4's has the GS cookie at ebp-0x1c and the EH one at ebp-0x2c,
+	 * both XORed with %ebp. */
 	".macro EH4_PROLOGUE table\n\t"
 	"pushl %ebp\n\t"
 	"movl %esp, %ebp\n\t"
@@ -50,14 +60,30 @@ __asm__(
 	"pushl $_eh4_handler\n\t"
 	"movl %fs:0, %eax\n\t"
 	"pushl %eax\n\t"
-	"movl _eh4_cookie, %eax\n\t"
-	"xorl %eax, -8(%ebp)\n\t"
-	"movl %esp, %fs:0\n\t"
-	"subl $8, %esp\n\t"
+	"subl $12, %esp\n\t"
 	"pushl %ebx\n\t"
 	"pushl %esi\n\t"
 	"pushl %edi\n\t"
+	"movl _eh4_cookie, %eax\n\t"
+	"xorl %eax, -8(%ebp)\n\t"
+	"xorl %ebp, %eax\n\t"
+	"movl %eax, -0x1c(%ebp)\n\t"
+	"pushl %eax\n\t"
+	"leal -0x10(%ebp), %eax\n\t"
+	"movl %eax, %fs:0\n\t"
 	"movl %esp, -0x18(%ebp)\n"
+	".endm\n"
+
+	".macro EH4_EPILOGUE\n\t"
+	"leal -0x28(%ebp), %esp\n\t"
+	"movl -0x10(%ebp), %ecx\n\t"
+	"movl %ecx, %fs:0\n\t"
+	"popl %edi\n\t"
+	"popl %esi\n\t"
+	"popl %ebx\n\t"
+	"movl %ebp, %esp\n\t"
+	"popl %ebp\n\t"
+	"ret\n"
 	".endm\n"
 
 	".macro EH_EPILOGUE\n\t"
@@ -278,7 +304,13 @@ __asm__(
 	"addl $24, %esp\n\t"
 	"popl %ebp\n\t"
 	"ret\n"
+	/* __security_check_cookie (fastcall): counts instead of ending it all. */
 	"_eh4_check:\n\t"
+	"incl _eh4_checks\n\t"
+	"cmpl _eh4_cookie, %ecx\n\t"
+	"je 1f\n\t"
+	"incl _eh4_bad\n"
+	"1:\n\t"
 	"ret\n"
 
 	/* int eh4_catch(void): as eh3_catch. */
@@ -295,7 +327,7 @@ __asm__(
 	"movl $-2, -4(%ebp)\n\t"
 	"movl $1, %eax\n"
 	"1:\n\t"
-	"EH_EPILOGUE\n"
+	"EH4_EPILOGUE\n"
 
 	/* int eh4_nested(void): as eh3_nested, counting into the same
 	 * variables. */
@@ -322,7 +354,7 @@ __asm__(
 	"imull $10, _nest_count, %eax\n\t"
 	"addl _nest_abnormal, %eax\n"
 	"1:\n\t"
-	"EH_EPILOGUE\n"
+	"EH4_EPILOGUE\n"
 
 	/* int eh4_return(void): as eh3_return, through _local_unwind4. */
 	".globl _eh4_return\n"
@@ -336,7 +368,80 @@ __asm__(
 	"call *__imp___local_unwind4\n\t"
 	"addl $12, %esp\n\t"
 	"movl $5, %eax\n\t"
+	"EH4_EPILOGUE\n"
+
+	/* int eh4_smashed(int offset): as eh4_catch, the cookie at
+	 * ebp+offset (GS -0x1c, EH -0x2c) overwritten. */
+	".globl _eh4_smashed\n"
+	"_eh4_smashed:\n\t"
+	"EH4_PROLOGUE t4_smash\n\t"
+	"movl 8(%ebp), %eax\n\t"
+	"notl (%ebp,%eax)\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"call _trigger\n\t"
+	"movl $-2, -4(%ebp)\n\t"
+	"xorl %eax, %eax\n\t"
+	"jmp 1f\n"
+	"h4_smashed:\n\t"
+	"movl -0x18(%ebp), %esp\n\t"
+	"movl $-2, -4(%ebp)\n\t"
+	"movl $1, %eax\n"
+	"1:\n\t"
+	"EH4_EPILOGUE\n"
+
+	/*
+	 * int eh3_setjmp(int old):
+	 * int r = old ? _setjmp(sj_buf) : setjmp(sj_buf);	(_setjmp3, 2 args)
+	 * if (r) return r * 10 + sj_count + 100 * sj_inner_count;
+	 * __try { sj_inner(); } __finally { sj_count++; }
+	 * with sj_inner: __try { longjmp(sj_buf, 3); } __finally { sj_inner_count++; }
+	 */
+	".globl _eh3_setjmp\n"
+	"_eh3_setjmp:\n\t"
+	"EH3_PROLOGUE t_sj\n\t"
+	"cmpl $0, 8(%ebp)\n\t"
+	"je 2f\n\t"
+	"pushl $_sj_buf\n\t"
+	"call *__imp___setjmp\n\t"
+	"addl $4, %esp\n\t"
+	"jmp 3f\n"
+	"2:\n\t"
+	"pushl $-1\n\t"
+	"pushl __imp___seh_longjmp_unwind\n\t"
+	"pushl $2\n\t"
+	"pushl $_sj_buf\n\t"
+	"call *__imp___setjmp3\n\t"
+	"addl $16, %esp\n"
+	"3:\n\t"
+	"testl %eax, %eax\n\t"
+	"jnz 4f\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"call _sj_inner\n\t"
+	"movl $-9, %eax\n\t"
+	"jmp 5f\n"
+	"4:\n\t"
+	"imull $10, %eax, %eax\n\t"
+	"addl _sj_count, %eax\n\t"
+	"imull $100, _sj_inner_count, %ecx\n\t"
+	"addl %ecx, %eax\n\t"
+	"cmpl $-1, -4(%ebp)\n\t"
+	"je 5f\n\t"
+	"movl $-8, %eax\n"
+	"5:\n\t"
 	"EH_EPILOGUE\n"
+	"f_sj:\n\t"
+	"incl _sj_count\n\t"
+	"ret\n"
+	"_sj_inner:\n\t"
+	"EH3_PROLOGUE t_sji\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"pushl $3\n\t"
+	"pushl $_sj_buf\n\t"
+	"call *__imp__longjmp\n\t"
+	"ud2\n"
+	"f_sji:\n\t"
+	"incl _sj_inner_count\n\t"
+	"ret\n"
 
 	/* Scope tables: enclosing level, filter (0 for __finally), block. */
 	".section .rdata\n"
@@ -350,14 +455,18 @@ __asm__(
 	"t_inner: .long -1, 0, f_inner\n"
 	"t_ret: .long -1, 0, f_ret\n"
 	"t_ft: .long -1, 0, f_ft\n"
+	"t_sj: .long -1, 0, f_sj\n"
+	"t_sji: .long -1, 0, f_sji\n"
 	/* EH4: GS cookie offset (-2: none), GS XOR, EH cookie, EH XOR. */
-	"t4_catch: .long -2, 0, -0x1c, 0\n\t"
+	"t4_catch: .long -0x1c, 0, -0x2c, 0\n\t"
 	".long -2, _filter_ours, h4_catch\n"
-	"t4_nest: .long -2, 0, -0x1c, 0\n\t"
+	"t4_smash: .long -0x1c, 0, -0x2c, 0\n\t"
+	".long -2, _filter_ours, h4_smashed\n"
+	"t4_nest: .long -2, 0, -0x2c, 0\n\t"
 	".long -2, _filter_accept, h4_nest0\n\t"
 	".long 0, _filter_decline, h4_nest1\n\t"
 	".long 1, 0, f_nest\n"
-	"t4_ret: .long -2, 0, -0x1c, 0\n\t"
+	"t4_ret: .long -2, 0, -0x2c, 0\n\t"
 	".long -2, 0, f_ret\n"
 	".text\n"
 );
@@ -371,6 +480,8 @@ int eh3_fallthrough(void);
 int eh4_catch(void);
 int eh4_nested(void);
 int eh4_return(void);
+int eh4_smashed(int offset);
+int eh3_setjmp(int old);
 
 static void *chain_head(void)
 {
@@ -385,6 +496,7 @@ EXPORT int sehcrt_run(int raise)
 	void *head = chain_head();
 
 	use_raise = raise;
+	eh4_checks = eh4_bad = 0;
 	if (eh3_catch() != 1)
 		return 1;
 	if (eh3_continue() != 77)
@@ -410,6 +522,21 @@ EXPORT int sehcrt_run(int raise)
 	ret_count = ret_abnormal = 0;
 	if (eh4_return() != 5 || ret_count != 1 || ret_abnormal != 1)
 		return 9;
+	/* Every check the cookies passed, then one smashed fails. */
+	if (eh4_checks < 4 || eh4_bad)
+		return 11;
+	if (eh4_smashed(-0x2c) != 1 || !eh4_bad)
+		return 12;
+	eh4_bad = 0;
+	if (eh4_smashed(-0x1c) != 1 || !eh4_bad)
+		return 15;
+	/* longjmp runs the __finally blocks it leaves, either setjmp. */
+	sj_count = sj_inner_count = 0;
+	if (eh3_setjmp(0) != 131)
+		return 13;
+	sj_count = sj_inner_count = 0;
+	if (eh3_setjmp(1) != 131)
+		return 14;
 	if (chain_head() != head)
 		return 10;
 	return 0;

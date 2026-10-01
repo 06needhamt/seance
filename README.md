@@ -18,7 +18,7 @@ Work is split into phases; see [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION
 |---|---|---|
 | 0 | Build skeleton, Win32 headers, ABI cross-check, CLI skeleton | done |
 | 1 | PE loader and `info` | done |
-| 2 | Win32 runtime (TEB, SEH, threads, stub DLLs) | in progress: TEB, built-in DLLs, kernel32, ntdll, SEH dispatch, delay-load binding, the msvcrt-family CRT (math/string/stdio/startup/64-bit arithmetic helpers), msvcrt's `__try`/`__except` handlers and C++ exceptions, its printf dialect and `_CI*` intrinsics, headless user32, gdi32 and advapi32 (registry, security), version, ole32, oleaut32, shell32, comctl32 and comdlg32 done |
+| 2 | Win32 runtime (TEB, SEH, threads, stub DLLs) | in progress: TEB, built-in DLLs, kernel32, ntdll, SEH dispatch, delay-load binding, the msvcrt-family CRT (math/string/stdio/startup/64-bit arithmetic helpers), msvcrt's `__try`/`__except` handlers, setjmp/longjmp, C++ exceptions and RTTI, its printf dialect and `_CI*` intrinsics, headless user32, gdi32 and advapi32 (registry, security), version, ole32, oleaut32, shell32, comctl32 and comdlg32 done |
 | 3 | VfW layer and `probe` | done: driver lifecycle, ICM API (including ICSeqCompressFrame*, ICImageCompress/ICImageDecompress and DrawDib*), winmm/msvfw32 built-ins, `probe`, `list` |
 | 4 | AVI / Y4M I/O, `decode` and `encode` | done: AVI reader and writer, Y4M/BMP/raw input and output, `avi`, `convert`, `decode`, `encode` |
 | 5 | Hardening and CI | done: DLL memory below 2 GB, crash and hang reports, SSE/FPU fixture, fuzzing, samples run, CI |

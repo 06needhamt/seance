@@ -8,8 +8,13 @@
  * destructors in the unwind map. Thrown objects live in the throwing C
  * function's frame, as a throw's temporary does.
  *
+ * Also an SE translator, an exception specification, an exception with
+ * a handler of its own (a later compiler's), the RTTI exceptions the CRT
+ * throws, and longjmp out of and within C++ frames.
+ *
  * cxx_run returns 0, or the number of the first check that failed.
- * cxx_unhandled and cxx_noexcept end the process, for a test to watch.
+ * cxx_unhandled and cxx_noexcept end the process, for a test to watch;
+ * cxx_rtti_fault needs the harness's fault handler.
  */
 #include "fixture.h"
 
@@ -73,12 +78,48 @@ struct throw_info {
 };
 
 #define VC6 0x19930520
+#define VC7 0x19930521
 #define VC8 0x19930522
 #define REF 8
 #define SIMPLE 1
 
 __declspec(dllimport) void __stdcall _CxxThrowException(void *, const void *);
 extern const void *const type_info_vtable __asm__("\"__imp_??_7type_info@@6B@\"");
+__declspec(dllimport) const void *__cdecl __RTtypeid(void *);
+__declspec(dllimport) void *__cdecl __RTDynamicCast(void *, int, void *, void *,
+						     int);
+__declspec(dllimport) int __cdecl _setjmp3(void *, int, ...)
+	__attribute__((returns_twice));
+__declspec(dllimport) void __cdecl longjmp(void *, int)
+	__attribute__((noreturn));
+
+/* An exception specification. */
+struct es_list {
+	int count;
+	const struct catch_block *types;
+};
+
+/* RTTI: what the slot before a vftable points to. */
+struct rtti_base {
+	const struct type_desc *type;
+	int nbases;
+	int this_offset, vbase_descr, vbase_offset;
+	UINT attributes;
+};
+
+struct rtti_hierarchy {
+	UINT signature, attributes;
+	int nbases;
+	const struct rtti_base *const *bases;
+};
+
+struct rtti_locator {
+	UINT signature;
+	int offset;
+	UINT cd_offset;
+	const struct type_desc *type;
+	const struct rtti_hierarchy *hierarchy;
+};
 
 /* What happened, in order. */
 char trail[32];
@@ -161,6 +202,119 @@ void throw_const_int(int v)
 void raise_seh(void)
 {
 	RaiseException(0xE0000001, 0, 0, NULL);
+}
+
+static const struct cxx_type ct_char = { SIMPLE, &td_char, 0, -1, 0, 1, NULL };
+static const struct type_table tt_char = { 1, { &ct_char } };
+static const struct throw_info ti_char = { 0, NULL, NULL, &tt_char };
+
+void throw_char(char v)
+{
+	char object = v;
+	_CxxThrowException(&object, &ti_char);
+}
+
+/* The SE translator: turns 0xE0000001 into Derived('t', 77). */
+int translations;
+
+void tr_throw(void);
+
+static void __cdecl translator(unsigned code, EXCEPTION_POINTERS *ep)
+{
+	translations++;
+	if (code == 0xE0000001 && ep->ExceptionRecord->ExceptionCode == code)
+		tr_throw();	/* through a frame of its own */
+}
+
+/* unexpected(): may throw something the specification allows. */
+static void __cdecl on_unexpected(void)
+{
+	note('u');
+	throw_char('q');
+}
+
+/* An exception from a later compiler, magic past VC8: its handler's. */
+int custom_calls;
+void *custom_frame, *custom_expect;
+const void *custom_descr;
+
+static EXCEPTION_DISPOSITION __cdecl custom_handler(EXCEPTION_RECORD *rec,
+						    void *frame, CONTEXT *ctx,
+						    void *dispatch,
+						    const void *descr,
+						    int trylevel, void *nested,
+						    DWORD unused)
+{
+	custom_calls++;
+	custom_frame = frame;
+	custom_descr = descr;
+	return ExceptionContinueExecution;
+}
+
+static const struct throw_info ti_custom = {
+	0, NULL, (void *)custom_handler, &tt_int };
+
+void raise_custom(void)
+{
+	int object = 3;
+	ULONG_PTR args[3] = { 0x19930523, (ULONG_PTR)&object,
+			      (ULONG_PTR)&ti_custom };
+	RaiseException(0xE06D7363, 0, 3, args);
+}
+
+/* RTTI: an A, which no B is. */
+static struct type_desc td_A = { NULL, NULL, ".?AVA@@" };
+static struct type_desc td_B = { NULL, NULL, ".?AVB@@" };
+static const struct rtti_base rb_A = { &td_A, 0, 0, -1, 0, 0 };
+static const struct rtti_base *const rh_A_bases[] = { &rb_A };
+static const struct rtti_hierarchy rh_A = { 0, 0, 1, rh_A_bases };
+static const struct rtti_locator rl_A = { 0, 0, 0, &td_A, &rh_A };
+static const void *const vt_A[2] = { &rl_A, NULL };
+static struct { const void *const *vtable; } a_obj = { &vt_A[1] };
+/* An object whose vftable pointer points nowhere: no RTTI to read. */
+static struct { const void *vtable; } bad_obj = { (void *)0x10 };
+
+/* The exceptions the CRT throws, caught by their names (see h_rti). */
+static struct type_desc td_bad_cast = { NULL, NULL, ".?AVbad_cast@std@@" };
+static struct type_desc td_non_rtti = { NULL, NULL, ".?AV__non_rtti_object@@" };
+static struct type_desc td_exception = { NULL, NULL, ".?AVexception@@" };
+static struct type_desc td_exception_std = { NULL, NULL, ".?AVexception@std@@" };
+
+char caught_what[40];
+
+/* In a catch block: what() of the std::exception caught. */
+void grab(void *e)
+{
+	const char *(THISCALL *what)(void *) = (*(void *const *const *)e)[1];
+	const char *w = what(e);
+	int i;
+
+	for (i = 0; i < 39 && w[i]; i++)
+		caught_what[i] = w[i];
+	caught_what[i] = 0;
+	caught_at = e;
+}
+
+void rtti_thrower(int which)
+{
+	if (which == 0)	/* dynamic_cast<B &>(an A) */
+		__RTDynamicCast(&a_obj, 0, &td_A, &td_B, 1);
+	else if (which == 1)	/* typeid(*(A *)NULL) */
+		__RTtypeid(NULL);
+	else
+		__RTtypeid(&bad_obj);
+}
+
+int sj_buf[16], sj_buf2[16];
+
+void sj_jump(void)
+{
+	longjmp(sj_buf, 4);
+}
+
+void sj_jump2(void)
+{
+	longjmp(sj_buf2, 6);
 }
 
 /* The functions, as cl lays them out. */
@@ -659,6 +813,269 @@ __asm__(
 	"CXX_EPILOGUE\n"
 	"CXX_HANDLER h_cst, _fi_cst\n"
 
+	/*
+	 * int catch_translated(void), /EHa: try { raise_seh(); }
+	 * catch (Base &b) { return b.value; } - which the translator makes.
+	 */
+	".globl _catch_translated\n"
+	"_catch_translated:\n\t"
+	"CXX_PROLOGUE h_trn\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"call _raise_seh\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"movl $-99, %eax\n\t"
+	"jmp 1f\n"
+	"_trn_catch:\n\t"
+	"movl -0x14(%ebp), %eax\n\t"
+	"movl (%eax), %eax\n\t"
+	"movl %eax, -0x18(%ebp)\n\t"
+	"movl $2f, %eax\n\t"
+	"ret\n"
+	"2:\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"movl -0x18(%ebp), %eax\n"
+	"1:\n\t"
+	"CXX_EPILOGUE\n"
+	"CXX_HANDLER h_trn, _fi_trn\n"
+
+	/* void tr_nomatch(void), /EHa: try { raise_seh(); } catch (char) { note('x'); } */
+	"_tr_nomatch:\n\t"
+	"CXX_PROLOGUE h_trm\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"call _raise_seh\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"jmp 1f\n"
+	"_trm_catch:\n\t"
+	"pushl $120\n\t"
+	"call _note\n\t"
+	"addl $4, %esp\n\t"
+	"movl $1f, %eax\n\t"
+	"ret\n"
+	"1:\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"CXX_EPILOGUE\n"
+	"CXX_HANDLER h_trm, _fi_trm\n"
+
+	/* int catch_tr_outer(void): try { tr_nomatch(); }
+	 * catch (Base &b) { return b.value * 10 + translations; } */
+	".globl _catch_tr_outer\n"
+	"_catch_tr_outer:\n\t"
+	"CXX_PROLOGUE h_tro\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"call _tr_nomatch\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"movl $-99, %eax\n\t"
+	"jmp 1f\n"
+	"_tro_catch:\n\t"
+	"movl -0x14(%ebp), %eax\n\t"
+	"imull $10, (%eax), %eax\n\t"
+	"addl _translations, %eax\n\t"
+	"movl %eax, -0x18(%ebp)\n\t"
+	"movl $2f, %eax\n\t"
+	"ret\n"
+	"2:\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"movl -0x18(%ebp), %eax\n"
+	"1:\n\t"
+	"CXX_EPILOGUE\n"
+	"CXX_HANDLER h_tro, _fi_tro\n"
+
+	/*
+	 * void es_fn(int kind) throw(char) (VC7 tables): Obj e('E');
+	 * kind ? throw_int(5) : throw_char('c');
+	 */
+	"_es_fn:\n\t"
+	"CXX_PROLOGUE h_esf\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"cmpl $0, 8(%ebp)\n\t"
+	"je 2f\n\t"
+	"pushl $5\n\t"
+	"call _throw_int\n\t"
+	"ud2\n"
+	"2:\n\t"
+	"pushl $99\n\t"
+	"call _throw_char\n\t"
+	"ud2\n"
+	"_esf_dtor:\n\t"
+	"pushl $69\n\t"
+	"call _note\n\t"
+	"addl $4, %esp\n\t"
+	"ret\n"
+	"CXX_HANDLER h_esf, _fi_esf\n"
+
+	/* int catch_es(int kind): try { es_fn(kind); }
+	 * catch (char c) { return c; } catch (int e) { return -e; } */
+	".globl _catch_es\n"
+	"_catch_es:\n\t"
+	"CXX_PROLOGUE h_ces\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"pushl 8(%ebp)\n\t"
+	"call _es_fn\n\t"
+	"ud2\n"
+	"_ces_char:\n\t"
+	"movsbl -0x14(%ebp), %eax\n\t"
+	"movl %eax, -0x18(%ebp)\n\t"
+	"movl $2f, %eax\n\t"
+	"ret\n"
+	"_ces_int:\n\t"
+	"movl -0x14(%ebp), %eax\n\t"
+	"negl %eax\n\t"
+	"movl %eax, -0x18(%ebp)\n\t"
+	"movl $2f, %eax\n\t"
+	"ret\n"
+	"2:\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"movl -0x18(%ebp), %eax\n\t"
+	"CXX_EPILOGUE\n"
+	"CXX_HANDLER h_ces, _fi_ces\n"
+
+	/* int catch_custom(void): try { raise_custom(); return 1; }
+	 * catch (...) { return -1; } - which its handler resumes. */
+	".globl _catch_custom\n"
+	"_catch_custom:\n\t"
+	"CXX_PROLOGUE h_cus\n\t"
+	"leal -0xc(%ebp), %eax\n\t"
+	"movl %eax, _custom_expect\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"call _raise_custom\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"movl $1, %eax\n\t"
+	"jmp 1f\n"
+	"_cus_catch:\n\t"
+	"movl $2f, %eax\n\t"
+	"ret\n"
+	"2:\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"movl $-1, %eax\n"
+	"1:\n\t"
+	"CXX_EPILOGUE\n"
+	"CXX_HANDLER h_cus, _fi_cus\n"
+
+	/*
+	 * int catch_rtti(int which): try { rtti_thrower(which); }
+	 * catch (std::bad_cast &e) { grab(e); return 1; }
+	 * catch (__non_rtti_object &e) { grab(e); return 3; }
+	 * catch (exception &e) { grab(e); return 2; }
+	 */
+	".globl _catch_rtti\n"
+	"_catch_rtti:\n\t"
+	"CXX_PROLOGUE h_rti\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"pushl 8(%ebp)\n\t"
+	"call _rtti_thrower\n\t"
+	"addl $4, %esp\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"movl $-99, %eax\n\t"
+	"jmp 1f\n"
+	"_rti_cast:\n\t"
+	"movl $1, -0x18(%ebp)\n\t"
+	"jmp 3f\n"
+	"_rti_non:\n\t"
+	"movl $3, -0x18(%ebp)\n\t"
+	"jmp 3f\n"
+	"_rti_exc:\n\t"
+	"movl $2, -0x18(%ebp)\n"
+	"3:\n\t"
+	"pushl -0x14(%ebp)\n\t"
+	"call _grab\n\t"
+	"addl $4, %esp\n\t"
+	"movl $2f, %eax\n\t"
+	"ret\n"
+	"2:\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"movl -0x18(%ebp), %eax\n"
+	"1:\n\t"
+	"CXX_EPILOGUE\n"
+	"CXX_HANDLER h_rti, _fi_rti\n"
+
+	/* void sj_mid(void): Obj m('M'); sj_jump(); - longjmp out past it. */
+	"_sj_mid:\n\t"
+	"CXX_PROLOGUE h_sjm\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"call _sj_jump\n\t"
+	"ud2\n"
+	"_sjm_dtor:\n\t"
+	"pushl $77\n\t"
+	"call _note\n\t"
+	"addl $4, %esp\n\t"
+	"ret\n"
+	"CXX_HANDLER h_sjm, _fi_sjm\n"
+
+	/*
+	 * int sj_local(void): if (int r = setjmp(sj_buf2)) return r * 10 +
+	 * (state is back to -1); Obj a('A'); sj_jump2(); - cl's setjmp in a
+	 * C++ function, _setjmp3 with __CxxLongjmpUnwind and its FuncInfo.
+	 */
+	".globl _sj_local\n"
+	"_sj_local:\n\t"
+	"CXX_PROLOGUE h_sjl\n\t"
+	"pushl $_fi_sjl\n\t"
+	"pushl $-1\n\t"
+	"pushl __imp____CxxLongjmpUnwind\n\t"
+	"pushl $3\n\t"
+	"pushl $_sj_buf2\n\t"
+	"call *__imp___setjmp3\n\t"
+	"addl $20, %esp\n\t"
+	"testl %eax, %eax\n\t"
+	"jnz 2f\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"call _sj_jump2\n\t"
+	"ud2\n"
+	"2:\n\t"
+	"imull $10, %eax, %eax\n\t"
+	"cmpl $-1, -4(%ebp)\n\t"
+	"jne 1f\n\t"
+	"incl %eax\n"
+	"1:\n\t"
+	"CXX_EPILOGUE\n"
+	"_sjl_dtor:\n\t"
+	"pushl $65\n\t"
+	"call _note\n\t"
+	"addl $4, %esp\n\t"
+	"ret\n"
+	"CXX_HANDLER h_sjl, _fi_sjl\n"
+
+	/* void tr_throw(void): Obj k('k'); throw_derived('t', 77); */
+	".globl _tr_throw\n"
+	"_tr_throw:\n\t"
+	"CXX_PROLOGUE h_trt\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"pushl $77\n\t"
+	"pushl $116\n\t"
+	"call _throw_derived\n\t"
+	"ud2\n"
+	"_trt_dtor:\n\t"
+	"pushl $107\n\t"
+	"call _note\n\t"
+	"addl $4, %esp\n\t"
+	"ret\n"
+	"CXX_HANDLER h_trt, _fi_trt\n"
+
+	/* int catch_any_exc(int which): try { rtti_thrower(which); }
+	 * catch (std::exception &e) { grab(e); return 2; } */
+	".globl _catch_any_exc\n"
+	"_catch_any_exc:\n\t"
+	"CXX_PROLOGUE h_cax\n\t"
+	"movl $0, -4(%ebp)\n\t"
+	"pushl 8(%ebp)\n\t"
+	"call _rtti_thrower\n\t"
+	"addl $4, %esp\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"movl $-99, %eax\n\t"
+	"jmp 1f\n"
+	"_cax_catch:\n\t"
+	"pushl -0x14(%ebp)\n\t"
+	"call _grab\n\t"
+	"addl $4, %esp\n\t"
+	"movl $2f, %eax\n\t"
+	"ret\n"
+	"2:\n\t"
+	"movl $-1, -4(%ebp)\n\t"
+	"movl $2, %eax\n"
+	"1:\n\t"
+	"CXX_EPILOGUE\n"
+	"CXX_HANDLER h_cax, _fi_cax\n"
+
 	/* void noexcept_fn(void) noexcept (VC8): throw_int(1); */
 	".globl _noexcept_fn\n"
 	"_noexcept_fn:\n\t"
@@ -674,7 +1091,10 @@ extern char int_catch[], base_catch[], copy_catch[], mid_dtor_a[],
 	mid_dtor_b[], unw_catch[], nom_catch[], out_catch[], rth_catch[],
 	crt_catch[], tic_catch[], cnw_catch[], cic_outer[], cic_inner[],
 	syn_catch[], seh_catch[], seh_typed[], acr_inner[], acr_outer[],
-	loc_dtor[], loc_catch[], cst_plain[], cst_const[];
+	loc_dtor[], loc_catch[], cst_plain[], cst_const[], trn_catch[],
+	trm_catch[], tro_catch[], esf_dtor[], ces_char[], ces_int[],
+	cus_catch[], rti_cast[], rti_non[], rti_exc[], sjm_dtor[], sjl_dtor[],
+	trt_dtor[], cax_catch[];
 
 /* A try at state 0 whose catch blocks run at state 1. */
 static const struct unwind_entry unwind2[] = { { -1, NULL }, { -1, NULL } };
@@ -776,6 +1196,54 @@ const struct func_info fi_cst = { VC6, 2, unwind2, 1, tb_cst };
 
 const struct func_info fi_nex = { VC8, 0, NULL, 0, NULL, 0, NULL, NULL, 4 };
 
+static const struct catch_block cb_trn[] = { { REF, &td_base, -0x14, trn_catch } };
+static const struct try_block tb_trn[] = { { 0, 0, 1, 1, cb_trn } };
+const struct func_info fi_trn = { VC8, 2, unwind2, 1, tb_trn };
+
+static const struct catch_block cb_trm[] = { { 0, &td_char, -0x14, trm_catch } };
+static const struct try_block tb_trm[] = { { 0, 0, 1, 1, cb_trm } };
+const struct func_info fi_trm = { VC6, 2, unwind2, 1, tb_trm };
+
+static const struct catch_block cb_tro[] = { { REF, &td_base, -0x14, tro_catch } };
+static const struct try_block tb_tro[] = { { 0, 0, 1, 1, cb_tro } };
+const struct func_info fi_tro = { VC6, 2, unwind2, 1, tb_tro };
+
+static const struct unwind_entry unwind_esf[] = { { -1, esf_dtor } };
+static const struct catch_block es_char_types[] = { { 0, &td_char, 0, NULL } };
+static const struct es_list es_char = { 1, es_char_types };
+const struct func_info fi_esf = { VC7, 1, unwind_esf, 0, NULL, 0, NULL, &es_char };
+
+static const struct catch_block cb_ces[] = {
+	{ 0, &td_char, -0x14, ces_char }, { 0, &td_int, -0x14, ces_int } };
+static const struct try_block tb_ces[] = { { 0, 0, 1, 2, cb_ces } };
+const struct func_info fi_ces = { VC6, 2, unwind2, 1, tb_ces };
+
+static const struct catch_block cb_cus[] = { { 0, NULL, 0, cus_catch } };
+static const struct try_block tb_cus[] = { { 0, 0, 1, 1, cb_cus } };
+const struct func_info fi_cus = { VC6, 2, unwind2, 1, tb_cus };
+
+static const struct catch_block cb_rti[] = {
+	{ REF, &td_bad_cast, -0x14, rti_cast },
+	{ REF, &td_non_rtti, -0x14, rti_non },
+	{ REF, &td_exception, -0x14, rti_exc },
+};
+static const struct try_block tb_rti[] = { { 0, 0, 1, 3, cb_rti } };
+const struct func_info fi_rti = { VC6, 2, unwind2, 1, tb_rti };
+
+static const struct unwind_entry unwind_trt[] = { { -1, trt_dtor } };
+const struct func_info fi_trt = { VC6, 1, unwind_trt, 0, NULL };
+
+static const struct catch_block cb_cax[] = {
+	{ REF, &td_exception_std, -0x14, cax_catch } };
+static const struct try_block tb_cax[] = { { 0, 0, 1, 1, cb_cax } };
+const struct func_info fi_cax = { VC6, 2, unwind2, 1, tb_cax };
+
+static const struct unwind_entry unwind_sjm[] = { { -1, sjm_dtor } };
+const struct func_info fi_sjm = { VC6, 1, unwind_sjm, 0, NULL };
+
+static const struct unwind_entry unwind_sjl[] = { { -1, sjl_dtor } };
+const struct func_info fi_sjl = { VC6, 1, unwind_sjl, 0, NULL };
+
 int catch_int(int v);
 int catch_base(void);
 int catch_copy(void);
@@ -789,6 +1257,14 @@ int catch_across(void);
 int catch_local(void);
 int catch_const(void);
 void noexcept_fn(void);
+int catch_translated(void);
+int catch_tr_outer(void);
+int catch_es(int kind);
+int catch_custom(void);
+int catch_rtti(int which);
+int catch_any_exc(int which);
+void sj_mid(void);
+int sj_local(void);
 
 static int streq(const char *a, const char *b)
 {
@@ -802,6 +1278,19 @@ static void reset(void)
 	trail[0] = 0;
 	dtors = copies = uncaught_in_dtor = dtors_in_catch = 0;
 	thrown_at = caught_at = NULL;
+	translations = 0;
+	caught_what[0] = 0;
+}
+
+typedef void (__cdecl *translator_fn)(unsigned, EXCEPTION_POINTERS *);
+
+/* longjmp out past a C++ frame: its destructors run. */
+static int sj_outer(void)
+{
+	if (_setjmp3(sj_buf, 0))
+		return streq(trail, "M") ? 4 : -2;
+	sj_mid();
+	return -1;
 }
 
 EXPORT int cxx_run(void)
@@ -878,10 +1367,92 @@ EXPORT int cxx_run(void)
 	if (catch_const() != 6 || trail[0])
 		return 15;
 
+	/*
+	 * The SE translator: its exception goes to the frame's catch blocks
+	 * (/EHa only), and one none takes is destroyed there, the SEH one
+	 * going on to be translated again.
+	 */
+	translator_fn (__cdecl *set_translator)(translator_fn) =
+		(void *)GetProcAddress(crt, "?_set_se_translator@@YAP6AXIPAU"
+				       "_EXCEPTION_POINTERS@@@ZP6AXI0@Z@Z");
+	if (!set_translator || set_translator(translator))
+		return 16;
+	reset();
+	if (catch_translated() != 77 || translations != 1 || dtors != 1)
+		return 17;
+	reset();
+	if (catch_tr_outer() != 772 || translations != 2 || dtors != 2 ||
+	    !streq(trail, "ktkt"))
+		return 18;
+	reset();
+	if (catch_seh() != 9 || translations != 1 || !streq(trail, "kat"))
+		return 19;
+	if (set_translator(NULL) != translator)
+		return 20;
+
+	/* An exception specification lets char out; int calls unexpected(). */
+	void (__cdecl *(__cdecl *set_unexpected)(void (__cdecl *)(void)))(void) =
+		(void *)GetProcAddress(crt, "?set_unexpected@@YAP6AXXZP6AXXZ@Z");
+	if (!set_unexpected)
+		return 21;
+	set_unexpected(on_unexpected);
+	reset();
+	if (catch_es(0) != 'c' || !streq(trail, "E"))
+		return 22;
+	reset();
+	if (catch_es(1) != 'q' || !streq(trail, "Eu"))
+		return 23;
+	set_unexpected(NULL);
+
+	/* A later compiler's exception: its own handler, with this frame. */
+	custom_calls = 0;
+	if (catch_custom() != 1 || custom_calls != 1 ||
+	    custom_frame != custom_expect || custom_descr != &fi_cus)
+		return 24;
+
+	/* The RTTI exceptions, caught by either name. */
+	td_A.vtable = td_B.vtable = td_bad_cast.vtable = td_non_rtti.vtable =
+		td_exception.vtable = td_exception_std.vtable = type_info_vtable;
+	reset();
+	if (catch_rtti(0) != 1 || !streq(caught_what, "Bad dynamic_cast!"))
+		return 25;
+	reset();
+	if (catch_rtti(1) != 2 ||
+	    !streq(caught_what, "Attempted a typeid of NULL pointer!"))
+		return 26;
+	if (catch_any_exc(0) != 2 || catch_any_exc(1) != 2)
+		return 30;
+	if (__RTtypeid(&a_obj) != &td_A ||
+	    __RTDynamicCast(&a_obj, 0, &td_A, &td_A, 1) != &a_obj ||
+	    __RTDynamicCast(&a_obj, 0, &td_A, &td_B, 0))
+		return 27;
+
+	/* longjmp: past a C++ frame, and within one, both unwound. */
+	reset();
+	if (sj_outer() != 4)
+		return 28;
+	reset();
+	if (sj_local() != 61 || !streq(trail, "A"))
+		return 29;
+
 	/* And after all that, catching still works (nothing left behind). */
 	reset();
 	if (catch_int(1) != 2 || catch_base() != 70)
 		return 12;
+	return 0;
+}
+
+/* RTTI that isn't there: reading it faults, which becomes __non_rtti_object. */
+EXPORT int cxx_rtti_fault(void)
+{
+	td_non_rtti.vtable = td_bad_cast.vtable = td_exception.vtable =
+		td_exception_std.vtable = type_info_vtable;
+	reset();
+	if (catch_rtti(2) != 3 ||
+	    !streq(caught_what, "Bad read pointer - no RTTI data!"))
+		return 1;
+	if (catch_any_exc(2) != 2)	/* and as a std::exception */
+		return 2;
 	return 0;
 }
 
