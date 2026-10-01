@@ -229,6 +229,7 @@ static _Thread_local struct {
 	void_fn terminate, unexpected;
 	translator_fn se_translator;
 	struct frame_info *registered;	/* __CxxRegisterExceptionObject's */
+	struct cxx_frame *in_unexpected;	/* whose specification called it */
 } td;
 
 static void_fn purecall_handler;
@@ -649,6 +650,8 @@ static EXCEPTION_DISPOSITION frame_handler(EXCEPTION_RECORD *rec,
 	if (rec->ExceptionFlags & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND)) {
 		if (d->nunwind && !nested)
 			local_unwind(frame, d, -1);
+		if (!nested && td.in_unexpected == frame)
+			td.in_unexpected = NULL;
 		return ExceptionContinueSearch;
 	}
 
@@ -688,11 +691,19 @@ static EXCEPTION_DISPOSITION frame_handler(EXCEPTION_RECORD *rec,
 		return ExceptionContinueSearch;
 	if (d->magic >= CXX_FRAME_MAGIC_VC8 && (d->flags & FUNC_DESCR_NOEXCEPT))
 		crt_terminate();
-	/* Leaving a function that has an exception specification against it. */
+	/*
+	 * Leaving a function that has an exception specification against it:
+	 * unexpected(), which may throw one it allows instead. Another it
+	 * doesn't allow ends the process (msvcrt has no bad_exception to put
+	 * in its place); the function's frame unwinding clears the mark.
+	 */
 	if (type && d->magic >= CXX_FRAME_MAGIC_VC7 && d->expect_list &&
 	    !in_spec(type, d->expect_list)) {
+		if (td.in_unexpected == frame)
+			crt_terminate();
 		seh_RtlUnwind(&frame->reg, NULL, rec, NULL);
 		local_unwind(frame, d, -1);
+		td.in_unexpected = frame;
 		crt_unexpected();
 	}
 	return ExceptionContinueSearch;
@@ -1342,21 +1353,51 @@ static void rtti_typeid(void *arg)
 	q->result = locator_of(q->object)->type;
 }
 
+/*
+ * The complete object, as MSVC's runtime finds it: less the vftable
+ * pointer's offset in it, plus a construction displacement (stored just
+ * before that pointer, while a virtual base's constructor or destructor
+ * runs) if the locator says there is one.
+ */
+static BYTE *complete_of(void *object, const struct rtti_locator *loc)
+{
+	BYTE *complete = (BYTE *)object - loc->offset;
+
+	if (loc->cd_offset)
+		complete += *(const int *)((BYTE *)object - loc->cd_offset);
+	return complete;
+}
+
 static void rtti_complete(void *arg)
 {
 	struct rtti_query *q = arg;
 
-	q->result = (BYTE *)q->object - locator_of(q->object)->offset;
+	q->result = complete_of(q->object, locator_of(q->object));
 }
 
-/* The base descriptor a dynamic_cast lands on, as MSVC's runtime picks it. */
+/*
+ * The base descriptor a dynamic_cast lands on, as MSVC's runtime picks
+ * it. The source is found first, by its type (and with multiple
+ * inheritance its offset): none is allowed from a base that isn't public.
+ */
 static const struct rtti_base *find_target(const struct rtti_query *q,
 					   const struct rtti_hierarchy *h,
 					   BYTE *complete)
 {
 	const struct rtti_base *const *b = h->bases;
+	int multi = h->attributes & CHD_MULTINH;
+	ptrdiff_t src_offset = (BYTE *)q->object - q->vfdelta - complete;
+	int src = -1;
 
-	if (!(h->attributes & CHD_MULTINH)) {
+	for (int i = 0; i < h->nbases && src < 0 && q->src; i++)
+		if (same_type(b[i]->type, q->src) &&
+		    (!multi || (BYTE *)this_pointer(&b[i]->offsets, complete) -
+			       complete == src_offset))
+			src = i;
+	if (src >= 0 && (b[src]->attributes & BCD_NOTVISIBLE))
+		return NULL;
+
+	if (!multi) {
 		/* Single inheritance: the one instance, if it is public. */
 		for (int i = 0; i < h->nbases; i++)
 			if (same_type(b[i]->type, q->dst))
@@ -1365,16 +1406,9 @@ static const struct rtti_base *find_target(const struct rtti_query *q,
 	}
 
 	/* A down-cast: the instance whose subobjects hold the source. */
-	ptrdiff_t src = (BYTE *)q->object - q->vfdelta - complete;
-	for (int i = 0; i < h->nbases; i++) {
-		if (!same_type(b[i]->type, q->dst))
-			continue;
-		for (int j = i + 1; j <= i + b[i]->nbases && j < h->nbases; j++)
-			if (q->src && same_type(b[j]->type, q->src) &&
-			    (BYTE *)this_pointer(&b[j]->offsets, complete) -
-			    complete == src)
-				return b[i];
-	}
+	for (int i = 0; i < src; i++)
+		if (same_type(b[i]->type, q->dst) && src <= i + b[i]->nbases)
+			return b[i];
 	/* Else a cross-cast: an instance that is public and the only one. */
 	for (int i = 0; i < h->nbases; i++)
 		if (same_type(b[i]->type, q->dst) &&
@@ -1387,7 +1421,7 @@ static void rtti_cast(void *arg)
 {
 	struct rtti_query *q = arg;
 	const struct rtti_locator *loc = locator_of(q->object);
-	BYTE *complete = (BYTE *)q->object - loc->offset;
+	BYTE *complete = complete_of(q->object, loc);
 	const struct rtti_base *b = find_target(q, loc->hierarchy, complete);
 
 	q->result = b ? this_pointer(&b->offsets, complete) : NULL;

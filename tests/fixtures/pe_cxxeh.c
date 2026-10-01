@@ -233,6 +233,13 @@ static void __cdecl on_unexpected(void)
 	throw_char('q');
 }
 
+/* ... or one it doesn't allow either: terminate(). */
+static void __cdecl on_unexpected_again(void)
+{
+	note('v');
+	throw_int(6);
+}
+
 /* An exception from a later compiler, magic past VC8: its handler's. */
 int custom_calls;
 void *custom_frame, *custom_expect;
@@ -1402,6 +1409,9 @@ EXPORT int cxx_run(void)
 	reset();
 	if (catch_es(1) != 'q' || !streq(trail, "Eu"))
 		return 23;
+	reset();	/* again: nothing left over from the first time */
+	if (catch_es(1) != 'q' || !streq(trail, "Eu"))
+		return 31;
 	set_unexpected(NULL);
 
 	/* A later compiler's exception: its own handler, with this frame. */
@@ -1454,6 +1464,24 @@ EXPORT int cxx_rtti_fault(void)
 	if (catch_any_exc(2) != 2)	/* and as a std::exception */
 		return 2;
 	return 0;
+}
+
+static void __cdecl on_terminate(void);
+
+/* unexpected() throwing another type the specification doesn't allow. */
+EXPORT void cxx_es_terminate(void)
+{
+	HMODULE crt = GetModuleHandleA("msvcrt.dll");
+	void (__cdecl *(__cdecl *set_terminate)(void (__cdecl *)(void)))(void) =
+		(void *)GetProcAddress(crt, "?set_terminate@@YAP6AXXZP6AXXZ@Z");
+	void (__cdecl *(__cdecl *set_unexpected)(void (__cdecl *)(void)))(void) =
+		(void *)GetProcAddress(crt, "?set_unexpected@@YAP6AXXZP6AXXZ@Z");
+	td_int.vtable = td_char.vtable = type_info_vtable;
+	if (set_terminate && set_unexpected) {
+		set_terminate(on_terminate);
+		set_unexpected(on_unexpected_again);
+	}
+	catch_es(1);
 }
 
 /* No catch anywhere: the harness reports it and aborts. */

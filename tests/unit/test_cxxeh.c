@@ -98,6 +98,10 @@ static void test_fixture(void)
 	st = run_child(dll, "cxx_noexcept", err, sizeof(err), 0);
 	CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 42);	/* its terminate handler */
 
+	/* unexpected() throwing another disallowed type: terminate(), once. */
+	st = run_child(dll, "cxx_es_terminate", err, sizeof(err), 0);
+	CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 42);
+
 	/* Sanitizer builds leave faults to the sanitizer. */
 	if (!VFW_SANITIZER_BUILD) {
 		st = run_child(dll, "cxx_rtti_fault", err, sizeof(err), 1);
@@ -374,6 +378,9 @@ static void test_rtti(void)
 	CHECK(rtcast(m8, 0, &td_y, &td_m, 0) == &m);	/* down */
 	CHECK(!rtcast(&m, 0, &td_x, &td_z, 0));
 	CHECK(!rtcast(&m, 0, &td_x, &td_s, 0));	/* not public */
+	/* From the private S (at 4, picked by vfdelta): no cast at all. */
+	CHECK(!rtcast(&m, -4, &td_s, &td_m, 0));
+	CHECK(!rtcast(&m, -4, &td_s, &td_x, 0));
 	CHECK(!rtcast(NULL, 0, &td_x, &td_y, 1));	/* NULL even for a reference */
 
 	/*
@@ -432,9 +439,21 @@ static void test_rtti(void)
 	CHECK(rtcast(&s, 0, &td_x, &td_s, 0) == &s);
 	CHECK(rtcast(&s, 0, &td_s, &td_x, 0) == &s);
 	CHECK(!rtcast(&s, 0, &td_x, &td_y, 0));
+	CHECK(!rtcast(&s, 0, &td_y, &td_s, 0));	/* from the private Y */
 	/* A type matched by name, as one from another module is. */
 	struct type_desc td_s2 = { tv, NULL, ".?AVS@@" };
 	CHECK(rtcast(&s, 0, &td_x, &td_s2, 0) == &s);
+
+	/*
+	 * A construction vftable (a virtual base's constructor running): the
+	 * displacement before the vftable pointer moves the complete object.
+	 */
+	const struct rtti_locator c_l = { 0, 0, 4, &td_s, &s_h };
+	const void *c_vt[2] = { &c_l, NULL };
+	struct { int disp; const void *vt; int a, b, c; } c = { 8, &c_vt[1], 0, 0, 0 };
+	char *c_complete = (char *)&c.vt + 8;
+	CHECK(to_void(&c.vt) == c_complete);
+	CHECK(rtcast(&c.vt, 0, &td_x, &td_s, 0) == c_complete);
 }
 
 static int dtor_calls;
