@@ -1,0 +1,8 @@
+; msvcrt's C++ exception support, imported as a VC6-VC8 /MD DLL with
+; C++ exceptions does (mingw's own libmsvcrt.a doesn't carry it).
+LIBRARY msvcrt.dll
+EXPORTS
+	_CxxThrowException@8
+	__CxxFrameHandler
+	__CxxFrameHandler3
+	??_7type_info@@6B@ DATA
