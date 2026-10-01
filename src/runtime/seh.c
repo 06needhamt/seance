@@ -16,6 +16,11 @@
  *
  * RaiseException and RtlUnwind use the same chain-walking loop, but need
  * none of this: they already run in ordinary context.
+ *
+ * A handler may itself raise an exception (a C++ throw out of a catch
+ * block, which runs inside the dispatch that found it, or out of an SE
+ * translator): that is dispatched from the head of the chain, as on
+ * Windows. A fault while a dispatch is under way is not; it crashes.
  */
 #include <stdio.h>
 #include <string.h>
@@ -35,7 +40,34 @@ static _Thread_local struct {
 	CONTEXT ctx;
 } pending;
 
-static _Thread_local int dispatching;	/* seh_run_chain() is on the stack */
+/*
+ * The dispatches under way on this thread, outermost first, each marked by
+ * its frame's place on the stack. An RtlUnwind to a frame ends every
+ * dispatch below it (deeper on the stack): the handler that asked is
+ * about to jump to that frame, abandoning them. One that jumped away
+ * without unwinding leaves a stale mark, dropped once the stack is back
+ * above it.
+ */
+#define MAX_DISPATCH 16
+static _Thread_local uintptr_t live[MAX_DISPATCH];
+static _Thread_local int nlive;
+
+/* Drops the dispatches below sp, which must have been abandoned. */
+static void drop_below(uintptr_t sp)
+{
+	while (nlive && live[nlive - 1] < sp)
+		nlive--;
+}
+
+/* A new dispatch at sp (its frame); its level, or -1 if nested too deep. */
+static int dispatch_begin(uintptr_t sp)
+{
+	drop_below(sp);
+	if (nlive == MAX_DISPATCH)
+		return -1;
+	live[nlive] = sp;
+	return nlive++;
+}
 
 static volatile LPTOP_LEVEL_EXCEPTION_FILTER top_filter;
 
@@ -165,7 +197,8 @@ EXCEPTION_DISPOSITION seh_call_handler(PEXCEPTION_ROUTINE handler,
 /* Walks teb's fs:[0] chain, calling each handler until one returns
  * ExceptionContinueExecution (then resumes ctx, never returning) or the
  * chain ends. Returns if nothing handled it, for the caller to report. */
-static void walk_chain(struct win_teb *teb, EXCEPTION_RECORD *rec, CONTEXT *ctx)
+static void walk_chain(struct win_teb *teb, EXCEPTION_RECORD *rec, CONTEXT *ctx,
+		       int level)
 {
 	PEXCEPTION_REGISTRATION_RECORD frame = teb->ExceptionList;
 
@@ -178,12 +211,11 @@ static void walk_chain(struct win_teb *teb, EXCEPTION_RECORD *rec, CONTEXT *ctx)
 			/*
 			 * Leaving SEH dispatch for good: resume_context()
 			 * never returns here, so this cannot be left to a
-			 * caller further up to reset once we're back - a
-			 * later, unrelated fault on this thread would
-			 * otherwise find `dispatching` stuck set and refuse
-			 * to be dispatched at all.
+			 * caller further up to end - a later, unrelated fault
+			 * on this thread would otherwise find it still under
+			 * way and refuse to be dispatched at all.
 			 */
-			dispatching = 0;
+			nlive = level;
 			resume_context(ctx);
 		}
 		/* ExceptionContinueSearch, or anything else: try the next. */
@@ -208,10 +240,12 @@ static void report_unhandled_exception(const EXCEPTION_RECORD *rec)
 static void __attribute__((noreturn)) seh_run_chain(void)
 {
 	struct win_teb *teb = teb_current();
+	int level = dispatch_begin((uintptr_t)__builtin_frame_address(0));
 
-	dispatching = 1;
-	walk_chain(teb, &pending.rec, &pending.ctx);
-	dispatching = 0;
+	if (level >= 0) {
+		walk_chain(teb, &pending.rec, &pending.ctx, level);
+		nlive = level;
+	}
 
 	EXCEPTION_POINTERS ep = { &pending.rec, &pending.ctx };
 	LPTOP_LEVEL_EXCEPTION_FILTER f = top_filter;
@@ -227,10 +261,14 @@ int seh_take_fault(int sig, siginfo_t *si, void *ucontext)
 	ucontext_t *uc = ucontext;
 	struct win_teb *teb = teb_current();
 
-	if (!teb || dispatching)
-		return 0;
-
 	greg_t *g = uc->uc_mcontext.gregs;
+
+	if (!teb)
+		return 0;
+	drop_below((uintptr_t)g[REG_UESP]);
+	if (nlive)
+		return 0;	/* a fault inside a dispatch */
+
 	memset(&pending.ctx, 0, sizeof(pending.ctx));
 	pending.sig = sig;
 	pending.ctx.ContextFlags = CONTEXT_FULL;
@@ -302,20 +340,20 @@ void WINAPI seh_RaiseException(DWORD code, DWORD flags, DWORD nargs,
 	capture_context(&ctx);
 	ctx.Eip = (DWORD)(uintptr_t)rec.ExceptionAddress;
 
-	if (teb && !dispatching) {
-		dispatching = 1;
+	int level = teb ? dispatch_begin((uintptr_t)__builtin_frame_address(0)) : -1;
+	if (level >= 0) {
 		PEXCEPTION_REGISTRATION_RECORD frame = teb->ExceptionList;
 		while (frame_plausible(teb, frame)) {
 			PEXCEPTION_REGISTRATION_RECORD next = frame->Next;
 			EXCEPTION_DISPOSITION d = seh_call_handler(
 				frame->Handler, &rec, frame, &ctx, NULL);
 			if (d == ExceptionContinueExecution) {
-				dispatching = 0;
+				nlive = level;
 				return;
 			}
 			frame = next;
 		}
-		dispatching = 0;
+		nlive = level;
 	}
 
 	EXCEPTION_POINTERS ep = { &rec, &ctx };
@@ -370,11 +408,15 @@ void WINAPI seh_RtlUnwind(PEXCEPTION_REGISTRATION_RECORD target_frame,
 	 * A compiler exception handler calls RtlUnwind immediately before it
 	 * restores the protected frame and jumps into the selected __except
 	 * body.  That non-local transfer means neither walk_chain() nor its
-	 * caller gets control back to clear this guard.  End the dispatch here,
-	 * once the unwind has finished, so a later fault in the same thread can
-	 * start a fresh dispatch.
+	 * caller gets control back to end the dispatches it abandons.  End
+	 * them here, once the unwind has finished, so a later fault in the
+	 * same thread can start a fresh dispatch; one above the target frame
+	 * (whose handler raised this exception) carries on.
 	 */
-	dispatching = 0;
+	if (target_frame)
+		drop_below((uintptr_t)target_frame);
+	else
+		nlive = 0;
 }
 
 LPTOP_LEVEL_EXCEPTION_FILTER WINAPI

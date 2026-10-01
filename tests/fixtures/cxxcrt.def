@@ -6,3 +6,8 @@ EXPORTS
 	__CxxFrameHandler
 	__CxxFrameHandler3
 	??_7type_info@@6B@ DATA
+	__RTtypeid
+	__RTDynamicCast
+	__CxxLongjmpUnwind
+	_setjmp3
+	longjmp

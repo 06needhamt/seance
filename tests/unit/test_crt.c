@@ -87,6 +87,27 @@ static void test_printf(void)
 	CHECK_STR(b, "[ 1.23e+003] [-2.0e+000   ] [-0000003.250] [+0.5]");
 	sprintf_(b, "%g %g", 100.0, 1e100);
 	CHECK_STR(b, "100 1e+100");
+	/*
+	 * Infinities and NaNs as msvcrt spells them, "#INF" cut (and
+	 * rounded) by the precision as if it were digits.
+	 */
+	double inf = __builtin_inf(), qnan = __builtin_nan(""), ind = -qnan;
+	sprintf_(b, "%f %e %E %g %G", inf, inf, inf, inf, inf);
+	CHECK_STR(b, "1.#INF00 1.#INF00e+000 1.#INF00E+000 1.#INF 1.#INF");
+	sprintf_(b, "%.0f|%.1f|%.2f|%.3f|%.4f|%.10f", inf, inf, inf, inf, inf,
+		 inf);
+	CHECK_STR(b, "1|1.$|1.#J|1.#IO|1.#INF|1.#INF000000");
+	sprintf_(b, "%#.10g|%#g", inf, inf);	/* # keeps the zeros */
+	CHECK_STR(b, "1.#INF00000|1.#INF");
+	sprintf_(b, "%f %f %f %g %f", -inf, qnan, ind, ind, -qnan);
+	CHECK_STR(b, "-1.#INF00 1.#QNAN0 -1.#IND00 -1.#IND -1.#IND00");
+	sprintf_(b, "[%10f] [%+f] [%010f] [%.3g] [%-9g] [%e]", inf, inf, inf,
+		 inf, inf, ind);
+	CHECK_STR(b, "[  1.#INF00] [+1.#INF00] [001.#INF00] [1.#J] "
+		  "[1.#INF   ] [-1.#IND00e+000]");
+	/* Native msvcrt's own, from Wine's tests. */
+	sprintf_(b, "%010.2f|%010.2f|%010.2f", ind, qnan, inf);
+	CHECK_STR(b, "-000001.#J|0000001.#R|0000001.#J");
 
 	/* Pointers, strings and characters. */
 	sprintf_(b, "%p [%12p]", (void *)0x1234abcd, (void *)0xff);
@@ -98,6 +119,14 @@ static void test_printf(void)
 	CHECK_STR(b, "ab\x80|ab\x80|ab\x80|ab");
 	sprintf_(b, "%s %S", (char *)NULL, (WCHAR *)NULL);
 	CHECK_STR(b, "(null) (null)");
+	/* %Z: an ANSI_STRING, or with w or l a UNICODE_STRING (bytes). */
+	struct counted {
+		unsigned short len, max;
+		const void *buf;
+	} as = { 3, 8, "abcdef" }, us = { 4, 8, euro_w }, none = { 0, 0, NULL };
+	sprintf_(b, "[%Z] [%5Z] [%.2Z] [%wZ] [%lZ] [%Z] [%Z]", &as, &as, &as,
+		 &us, &us, &none, (void *)NULL);
+	CHECK_STR(b, "[abc] [  abc] [ab] [ab] [ab] [(null)] [(null)]");
 	CHECK_EQ(sprintf_(b, "%c%C%lc%3c", 'x', 0x20ac, 'y', 'z'), 6);
 	CHECK_STR(b, "x\x80y  z");
 	CHECK_EQ(sprintf_(b, "a%cb", 0), 3);
@@ -377,6 +406,14 @@ int main(void)
 			int r = startup_check();
 			if (r)
 				fprintf(stderr, "crt_startup_check failed at %d\n", r);
+			CHECK_EQ(r, 0);
+		}
+		int (*setjmp_check)(void) = mod_get_proc(m, "crt_setjmp_check");
+		CHECK(setjmp_check != NULL);
+		if (setjmp_check) {
+			int r = setjmp_check();
+			if (r)
+				fprintf(stderr, "crt_setjmp_check failed at %d\n", r);
 			CHECK_EQ(r, 0);
 		}
 		mod_free(m);

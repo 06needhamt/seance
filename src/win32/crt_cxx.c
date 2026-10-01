@@ -30,15 +30,30 @@
  *
  * catch (...) also takes SEH exceptions (an access violation, say) in
  * code built with /EHa, as on Windows; /EHs code (FuncInfo's synchronous
- * flag) only takes C++ ones. A noexcept function an exception would leave
- * calls terminate().
+ * flag) only takes C++ ones. There, before any catch block is tried, the
+ * thread's SE translator (_set_se_translator) may throw a C++ exception
+ * in the SEH one's place, which this function's catch blocks get first.
+ * A noexcept function an exception would leave calls terminate(); one
+ * with an exception specification (throw(X), FuncInfo's list) calls
+ * unexpected() for a type the list hasn't. An exception from a later
+ * compiler's code (a magic past VC8) is left to its ThrowInfo's own
+ * handler.
  *
- * Not done: _set_se_translator, exception specifications (throw(X)),
- * managed (custom) exception handlers, __CxxExceptionFilter and
- * __CxxDetectRethrow, RTTI casts (__RTDynamicCast and friends), and the
- * std::exception subclasses (bad_cast and so on).
+ * RTTI: __RTtypeid and __RTDynamicCast read an object's complete object
+ * locator from the slot before its vftable, and throw bad_typeid,
+ * bad_cast or __non_rtti_object as MSVC's do (the last when reading it
+ * faults, which takes the harness's fault handler). The std::exception
+ * family's classes are one each, answering to both the msvcrt names
+ * (exception) and the msvcr80-on ones (std::exception), so a catch or
+ * dynamic_cast by either finds them; their own RTTI names the former.
+ *
+ * Also the helpers behind C++/CLI and setjmp: __CxxExceptionFilter and
+ * friends, the __CxxCallUnwind*Dtor guards (StdDelDtor's destructor, managed
+ * code, called through its native entry like DelDtor's), and
+ * __CxxLongjmpUnwind.
  */
 #include <pthread.h>
+#include <setjmp.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -68,6 +83,11 @@
 #define CLASS_IS_SIMPLE_TYPE          1
 #define CLASS_HAS_VIRTUAL_BASE_CLASS  4
 
+#define CHD_MULTINH    1	/* the hierarchy has multiple inheritance */
+#define CHD_VIRTINH    2	/* ... and virtual inheritance */
+#define BCD_NOTVISIBLE 1	/* a base not public in the complete object */
+#define BCD_AMBIGUOUS  2	/* one of several instances of a base */
+
 /* The compiler's tables. */
 
 struct type_info {
@@ -95,6 +115,12 @@ struct try_block {
 	const struct catch_block *catches;
 };
 
+/* An exception specification: the types a function may let out. */
+struct es_list {
+	int count;
+	const struct catch_block *types;
+};
+
 struct func_descr {
 	UINT magic;
 	UINT nunwind;
@@ -103,8 +129,8 @@ struct func_descr {
 	const struct try_block *tries;
 	UINT nipmap;
 	const void *ipmap;
-	const void *expect_list;	/* VC7 on */
-	UINT flags;			/* VC8 on */
+	const struct es_list *expect_list;	/* VC7 on */
+	UINT flags;				/* VC8 on */
 };
 
 struct this_offsets {
@@ -133,6 +159,30 @@ struct exception_type {		/* ThrowInfo */
 	const struct cxx_type_table *table;
 };
 
+/* RTTI, as cl lays it out for i386: absolute pointers. */
+struct rtti_base {
+	const struct type_info *type;
+	int nbases;		/* the entries after it that are its bases */
+	struct this_offsets offsets;
+	UINT attributes;	/* BCD_* */
+};
+
+struct rtti_hierarchy {
+	UINT signature;
+	UINT attributes;	/* CHD_* */
+	int nbases;		/* the class itself, then its bases */
+	const struct rtti_base *const *bases;
+};
+
+/* What the slot before a vftable points to. */
+struct rtti_locator {
+	UINT signature;
+	int offset;		/* of this vftable's pointer in the complete object */
+	UINT cd_offset;
+	const struct type_info *type;	/* of the complete object */
+	const struct rtti_hierarchy *hierarchy;
+};
+
 /* The frame, from its fs:[0] record up to the function's saved %ebp. */
 struct cxx_frame {
 	EXCEPTION_REGISTRATION_RECORD reg;
@@ -144,6 +194,10 @@ typedef void (THISCALL *dtor_fn)(void *);
 typedef void (THISCALL *copy_fn)(void *, const void *);
 typedef void (THISCALL *copy_vbase_fn)(void *, const void *, int);
 typedef void (STUB_CDECL *void_fn)(void);
+typedef void (STUB_CDECL *translator_fn)(UINT, EXCEPTION_POINTERS *);
+typedef EXCEPTION_DISPOSITION (STUB_CDECL *custom_handler_fn)(
+	EXCEPTION_RECORD *, void *, CONTEXT *, void *,
+	const struct func_descr *, int, void *, DWORD);
 
 /*
  * The frame a running catch block is called under: an fs:[0] record whose
@@ -165,12 +219,17 @@ struct catch_frame {
 	int left;
 };
 
+struct frame_info;
+
 static _Thread_local struct {
 	EXCEPTION_RECORD *rec;	/* what the innermost catch block handles */
 	CONTEXT *ctx;
 	struct catch_frame *catching;
 	int processing_throw;	/* inside a frame handler's search */
 	void_fn terminate, unexpected;
+	translator_fn se_translator;
+	struct frame_info *registered;	/* __CxxRegisterExceptionObject's */
+	struct cxx_frame *in_unexpected;	/* whose specification called it */
 } td;
 
 static void_fn purecall_handler;
@@ -329,15 +388,11 @@ static const struct cxx_type *caught_type(const struct exception_type *e,
 	return NULL;
 }
 
-/* Puts the object into the catch block's variable. */
-static void copy_exception(void *object, struct cxx_frame *frame,
-			   const struct catch_block *c, const struct cxx_type *t)
+/* Puts the object, as type t, where a catch of flags puts it. */
+static void copy_object(void *object, void **dest, UINT flags,
+			const struct cxx_type *t)
 {
-	if (!c->type || !c->type->mangled[0] || !c->offset)
-		return;
-	void **dest = (void **)((BYTE *)frame_ebp(frame) + c->offset);
-
-	if (c->flags & TYPE_FLAG_REFERENCE) {
+	if (flags & TYPE_FLAG_REFERENCE) {
 		*dest = this_pointer(&t->offsets, object);
 	} else if (t->flags & CLASS_IS_SIMPLE_TYPE) {
 		memmove(dest, object, t->size);
@@ -353,6 +408,16 @@ static void copy_exception(void *object, struct cxx_frame *frame,
 	} else {
 		memmove(dest, this_pointer(&t->offsets, object), t->size);
 	}
+}
+
+/* Puts the object into the catch block's variable. */
+static void copy_exception(void *object, struct cxx_frame *frame,
+			   const struct catch_block *c, const struct cxx_type *t)
+{
+	if (!c->type || !c->type->mangled[0] || !c->offset)
+		return;
+	copy_object(object, (void **)((BYTE *)frame_ebp(frame) + c->offset),
+		    c->flags, t);
 }
 
 /* Runs the destructors from the frame's state down to last. */
@@ -493,9 +558,85 @@ static void __attribute__((no_sanitize_address)) find_catch(EXCEPTION_RECORD *re
 	td.processing_throw--;
 }
 
+/* Whether an exception of this type may leave a function with list es. */
+static int in_spec(const struct exception_type *type, const struct es_list *es)
+{
+	for (int i = 0; i < es->count; i++)
+		if (es->types[i].type &&
+		    caught_type(type, es->types[i].type, es->types[i].flags))
+			return 1;
+	return 0;
+}
+
+/* The SE translator's frame: sees what it throws (see translate()). */
+struct translator_frame {
+	EXCEPTION_REGISTRATION_RECORD reg;	/* first */
+	struct cxx_frame *frame;
+	const struct func_descr *descr;
+	struct catch_frame *nested;
+	jmp_buf jump;
+};
+
+/*
+ * A C++ exception the translator threw goes to the catch blocks of the
+ * function the SEH exception reached; if none takes it, it ends there,
+ * and the SEH exception goes on (to be translated again further out).
+ */
+static EXCEPTION_DISPOSITION STUB_CDECL translator_handler(EXCEPTION_RECORD *rec,
+							   void *frame,
+							   CONTEXT *ctx,
+							   void *dispatch)
+{
+	struct translator_frame *t = frame;
+
+	if (rec->ExceptionFlags & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND))
+		return ExceptionContinueSearch;
+	const struct exception_type *type = is_cxx(rec) ?
+		(const struct exception_type *)rec->ExceptionInformation[2] :
+		NULL;
+	if (!type)
+		crt_terminate();	/* an SEH exception, or throw; with none */
+	find_catch(rec, ctx, t->frame, t->descr, t->nested, type);
+
+	seh_RtlUnwind(&t->reg, NULL, rec, NULL);
+	void *object = (void *)rec->ExceptionInformation[1];
+	if (object && type->destructor)
+		((dtor_fn)type->destructor)(object);
+	longjmp(t->jump, 1);
+}
+
+/*
+ * Calls the thread's SE translator on an SEH exception reaching frame,
+ * which has try blocks. Returns 1 if it threw (whatever became of that),
+ * 0 if it returned. Its frame is kept off AddressSanitizer's fake stack,
+ * as find_catch's is.
+ */
+static int __attribute__((no_sanitize_address))
+translate(EXCEPTION_RECORD *rec, CONTEXT *ctx, struct cxx_frame *frame,
+	  const struct func_descr *d, struct catch_frame *nested)
+{
+	struct win_teb *teb = teb_current();
+	struct translator_frame t;
+	EXCEPTION_POINTERS ep = { rec, ctx };
+
+	t.reg.Handler = (PEXCEPTION_ROUTINE)(void *)translator_handler;
+	t.reg.Next = teb->ExceptionList;
+	t.frame = frame;
+	t.descr = d;
+	t.nested = nested;
+	if (setjmp(t.jump)) {
+		teb->ExceptionList = t.reg.Next;
+		return 1;
+	}
+	teb->ExceptionList = &t.reg;
+	td.se_translator(rec->ExceptionCode, &ep);
+	teb->ExceptionList = t.reg.Next;
+	return 0;
+}
+
 static EXCEPTION_DISPOSITION frame_handler(EXCEPTION_RECORD *rec,
 					   struct cxx_frame *frame,
-					   CONTEXT *ctx,
+					   CONTEXT *ctx, void *dispatch,
 					   const struct func_descr *d,
 					   struct catch_frame *nested)
 {
@@ -509,6 +650,8 @@ static EXCEPTION_DISPOSITION frame_handler(EXCEPTION_RECORD *rec,
 	if (rec->ExceptionFlags & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND)) {
 		if (d->nunwind && !nested)
 			local_unwind(frame, d, -1);
+		if (!nested && td.in_unexpected == frame)
+			td.in_unexpected = NULL;
 		return ExceptionContinueSearch;
 	}
 
@@ -524,12 +667,45 @@ static EXCEPTION_DISPOSITION frame_handler(EXCEPTION_RECORD *rec,
 	const struct exception_type *type = is_cxx(rec) ?
 		(const struct exception_type *)rec->ExceptionInformation[2] :
 		NULL;
-	if (d->ntry)
+	if (d->ntry) {
+		/* A later compiler's exception, with a handler of its own. */
+		if (rec->ExceptionCode == CXX_EXCEPTION &&
+		    rec->NumberParameters >= 3 &&
+		    rec->ExceptionInformation[0] > CXX_FRAME_MAGIC_VC8) {
+			const struct exception_type *t =
+				(const struct exception_type *)rec->ExceptionInformation[2];
+			if (!t || !t->custom_handler)
+				return ExceptionContinueSearch;
+			return ((custom_handler_fn)t->custom_handler)(
+				rec, frame, ctx, dispatch, d,
+				nested ? nested->try->end_level + 1 : 0,
+				nested ? &nested->reg : NULL, 0);
+		}
+		if (!type && td.se_translator &&
+		    translate(rec, ctx, frame, d, nested))
+			return ExceptionContinueSearch;
 		find_catch(rec, ctx, frame, d, nested, type);
+	}
 
-	if (!nested && d->magic >= CXX_FRAME_MAGIC_VC8 &&
-	    (d->flags & FUNC_DESCR_NOEXCEPT))
+	if (nested)
+		return ExceptionContinueSearch;
+	if (d->magic >= CXX_FRAME_MAGIC_VC8 && (d->flags & FUNC_DESCR_NOEXCEPT))
 		crt_terminate();
+	/*
+	 * Leaving a function that has an exception specification against it:
+	 * unexpected(), which may throw one it allows instead. Another it
+	 * doesn't allow ends the process (msvcrt has no bad_exception to put
+	 * in its place); the function's frame unwinding clears the mark.
+	 */
+	if (type && d->magic >= CXX_FRAME_MAGIC_VC7 && d->expect_list &&
+	    !in_spec(type, d->expect_list)) {
+		if (td.in_unexpected == frame)
+			crt_terminate();
+		seh_RtlUnwind(&frame->reg, NULL, rec, NULL);
+		local_unwind(frame, d, -1);
+		td.in_unexpected = frame;
+		crt_unexpected();
+	}
 	return ExceptionContinueSearch;
 }
 
@@ -549,7 +725,7 @@ static EXCEPTION_DISPOSITION STUB_CDECL catch_handler(EXCEPTION_RECORD *rec,
 			    (void *)rec->ExceptionInformation[1] : NULL);
 		return ExceptionContinueSearch;
 	}
-	return frame_handler(rec, c->frame, ctx, c->descr, c);
+	return frame_handler(rec, c->frame, ctx, dispatch, c->descr, c);
 }
 
 /* Entered from "mov eax, FuncInfo; jmp __CxxFrameHandler". */
@@ -563,7 +739,7 @@ EXCEPTION_DISPOSITION STUB_CDECL crt_cxx_frame_handler(EXCEPTION_RECORD *rec,
 						       void *dispatch,
 						       const struct func_descr *d)
 {
-	return frame_handler(rec, frame, ctx, d, NULL);
+	return frame_handler(rec, frame, ctx, dispatch, d, NULL);
 }
 
 __asm__(
@@ -830,11 +1006,63 @@ static THISCALL void *crt_ti_vector_dtor(struct type_info *ti, unsigned flags)
 
 /* A vftable, with the RTTI locator slot MSVC keeps before it. */
 struct vtable {
-	const void *locator;
+	const struct rtti_locator *locator;
 	const void *fn[2];
 };
 
-static const struct vtable ti_vtable = { NULL, { (void *)crt_ti_vector_dtor } };
+static const struct vtable ti_vtable;
+
+/*
+ * The RTTI of the CRT's own classes, as cl would emit it: type
+ * descriptors (named once each way, see the top of the file), base
+ * descriptors and hierarchies (single inheritance only, so each
+ * descriptor's count of bases goes unread), and locators.
+ */
+#define TYPE_DESCR(id, str)						\
+	static struct {							\
+		const void *vtable;					\
+		char *name;						\
+		char mangled[sizeof(str)];				\
+	} id = { ti_vtable.fn, NULL, str }
+#define TD(id) ((const struct type_info *)(const void *)&id)
+#define BASE(id) \
+	static const struct rtti_base rb_##id = { TD(td_##id), 0, { 0, -1, 0 }, 0 }
+#define HIERARCHY(id, n, ...)						\
+	static const struct rtti_base *const rh_##id##_bases[n] = { __VA_ARGS__ }; \
+	static const struct rtti_hierarchy rh_##id = { 0, 0, n, rh_##id##_bases }; \
+	static const struct rtti_locator rl_##id = { 0, 0, 0, TD(td_##id), &rh_##id }
+
+TYPE_DESCR(td_type_info, ".?AVtype_info@@");
+TYPE_DESCR(td_exception, ".?AVexception@@");
+TYPE_DESCR(td_exception_std, ".?AVexception@std@@");
+TYPE_DESCR(td_bad_typeid, ".?AVbad_typeid@@");
+TYPE_DESCR(td_bad_typeid_std, ".?AVbad_typeid@std@@");
+TYPE_DESCR(td_bad_cast, ".?AVbad_cast@@");
+TYPE_DESCR(td_bad_cast_std, ".?AVbad_cast@std@@");
+TYPE_DESCR(td_non_rtti, ".?AV__non_rtti_object@@");
+TYPE_DESCR(td_non_rtti_std, ".?AV__non_rtti_object@std@@");
+
+BASE(type_info);
+BASE(exception);
+BASE(exception_std);
+BASE(bad_typeid);
+BASE(bad_typeid_std);
+BASE(bad_cast);
+BASE(bad_cast_std);
+BASE(non_rtti);
+BASE(non_rtti_std);
+
+HIERARCHY(type_info, 1, &rb_type_info);
+HIERARCHY(exception, 2, &rb_exception, &rb_exception_std);
+HIERARCHY(bad_typeid, 4, &rb_bad_typeid, &rb_bad_typeid_std, &rb_exception,
+	  &rb_exception_std);
+HIERARCHY(bad_cast, 4, &rb_bad_cast, &rb_bad_cast_std, &rb_exception,
+	  &rb_exception_std);
+HIERARCHY(non_rtti, 6, &rb_non_rtti, &rb_non_rtti_std, &rb_bad_typeid,
+	  &rb_bad_typeid_std, &rb_exception, &rb_exception_std);
+
+static const struct vtable ti_vtable = { &rl_type_info,
+					 { (void *)crt_ti_vector_dtor } };
 
 /* vcruntime140's type_info helpers, on the part after the vtable. */
 struct std_type_info_data {
@@ -866,7 +1094,11 @@ CRTFN(void) crt___std_type_info_destroy_list(void *list)
 {
 }
 
-/* std::exception, as msvcrt lays it out. */
+/*
+ * std::exception and its subclasses bad_typeid, bad_cast and
+ * __non_rtti_object (a bad_typeid), as msvcrt lays them out: none adds
+ * anything but its vftable.
+ */
 
 struct exception {
 	const void *vtable;
@@ -874,11 +1106,13 @@ struct exception {
 	int do_free;
 };
 
-static const struct vtable exception_vtable;
+static const struct vtable exception_vtable, bad_typeid_vtable,
+	bad_cast_vtable, non_rtti_vtable;
 
-static void exception_init(struct exception *e, const char *name, int copy)
+static void exception_init(struct exception *e, const struct vtable *vt,
+			   const char *name, int copy)
 {
-	e->vtable = exception_vtable.fn;
+	e->vtable = vt->fn;
 	e->name = NULL;
 	e->do_free = 0;
 	if (name && copy) {
@@ -891,21 +1125,30 @@ static void exception_init(struct exception *e, const char *name, int copy)
 
 static THISCALL struct exception *crt_exc_ctor(struct exception *e)
 {
-	exception_init(e, NULL, 0);
+	exception_init(e, &exception_vtable, NULL, 0);
 	return e;
 }
 
 static THISCALL struct exception *crt_exc_ctor_name(struct exception *e,
 						    const char *const *name)
 {
-	exception_init(e, name ? *name : NULL, 1);
+	exception_init(e, &exception_vtable, name ? *name : NULL, 1);
+	return e;
+}
+
+/* exception(const char *const &, int): the name kept, not copied. */
+static THISCALL struct exception *crt_exc_ctor_noalloc(struct exception *e,
+						       const char *const *name,
+						       int noalloc)
+{
+	exception_init(e, &exception_vtable, name ? *name : NULL, 0);
 	return e;
 }
 
 static THISCALL struct exception *crt_exc_copy(struct exception *e,
 					       const struct exception *rhs)
 {
-	exception_init(e, rhs->name, rhs->do_free);
+	exception_init(e, &exception_vtable, rhs->name, rhs->do_free);
 	return e;
 }
 
@@ -917,12 +1160,15 @@ static THISCALL void crt_exc_dtor(struct exception *e)
 	e->do_free = 0;
 }
 
+/* The left side keeps its own class. */
 static THISCALL struct exception *crt_exc_assign(struct exception *e,
 						 const struct exception *rhs)
 {
 	if (e != rhs) {
+		const void *vtable = e->vtable;
 		crt_exc_dtor(e);
-		exception_init(e, rhs->name, rhs->do_free);
+		exception_init(e, &exception_vtable, rhs->name, rhs->do_free);
+		e->vtable = vtable;
 	}
 	return e;
 }
@@ -932,7 +1178,8 @@ static THISCALL const char *crt_exc_what(const struct exception *e)
 	return e->name ? e->name : "Unknown exception";
 }
 
-static THISCALL void *crt_exc_vector_dtor(struct exception *e, unsigned flags)
+/* The scalar deleting destructor: delete e. */
+static THISCALL void *crt_exc_scalar_dtor(struct exception *e, unsigned flags)
 {
 	crt_exc_dtor(e);
 	if (flags & 1)
@@ -940,8 +1187,289 @@ static THISCALL void *crt_exc_vector_dtor(struct exception *e, unsigned flags)
 	return e;
 }
 
-static const struct vtable exception_vtable = { NULL, { (void *)crt_exc_vector_dtor,
-			       (void *)crt_exc_what } };
+/* The vector one, the vftable's: also delete[] e, its count before it. */
+static THISCALL void *crt_exc_vector_dtor(struct exception *e, unsigned flags)
+{
+	if (flags & 2) {
+		INT_PTR *count = (INT_PTR *)e - 1;
+		for (INT_PTR i = *count - 1; i >= 0; i--)
+			crt_exc_dtor(e + i);
+		free(count);
+		return e;
+	}
+	return crt_exc_scalar_dtor(e, flags);
+}
+
+/* A subclass's constructor from a name (copied), and copy constructor. */
+#define SUBCLASS(cls)							\
+	static THISCALL struct exception *crt_##cls##_ctor(		\
+		struct exception *e, const char *name)			\
+	{								\
+		exception_init(e, &cls##_vtable, name, 1);		\
+		return e;						\
+	}								\
+	static THISCALL struct exception *crt_##cls##_copy(		\
+		struct exception *e, const struct exception *rhs)	\
+	{								\
+		exception_init(e, &cls##_vtable, rhs->name, rhs->do_free); \
+		return e;						\
+	}
+
+SUBCLASS(bad_typeid)
+SUBCLASS(bad_cast)
+SUBCLASS(non_rtti)
+
+static THISCALL struct exception *crt_bad_typeid_default(struct exception *e)
+{
+	return crt_bad_typeid_ctor(e, "bad typeid");
+}
+
+static THISCALL struct exception *crt_bad_cast_ctor_ref(struct exception *e,
+							const char *const *name)
+{
+	return crt_bad_cast_ctor(e, name ? *name : NULL);
+}
+
+static THISCALL struct exception *crt_bad_cast_default(struct exception *e)
+{
+	return crt_bad_cast_ctor(e, "bad cast");
+}
+
+#define VTABLE(cls)							\
+	static const struct vtable cls##_vtable = { &rl_##cls,		\
+		{ (void *)crt_exc_vector_dtor, (void *)crt_exc_what } }
+
+VTABLE(exception);
+VTABLE(bad_typeid);
+VTABLE(bad_cast);
+VTABLE(non_rtti);
+
+/* ThrowInfo for the ones the CRT throws: the class, then its bases. */
+#define CXX_TYPE(id, copy)						\
+	static const struct cxx_type ct_##id = { 0, TD(td_##id),	\
+		{ 0, -1, 0 }, sizeof(struct exception), (void *)copy }
+#define THROW_INFO(id, n, ...)						\
+	static const struct {						\
+		UINT count;						\
+		const struct cxx_type *types[n];			\
+	} ti_##id##_table = { n, { __VA_ARGS__ } };			\
+	static const struct exception_type ti_##id = { 0,		\
+		(void *)crt_exc_dtor, NULL,				\
+		(const struct cxx_type_table *)(const void *)&ti_##id##_table }
+
+CXX_TYPE(exception, crt_exc_copy);
+CXX_TYPE(exception_std, crt_exc_copy);
+CXX_TYPE(bad_typeid, crt_bad_typeid_copy);
+CXX_TYPE(bad_typeid_std, crt_bad_typeid_copy);
+CXX_TYPE(bad_cast, crt_bad_cast_copy);
+CXX_TYPE(bad_cast_std, crt_bad_cast_copy);
+CXX_TYPE(non_rtti, crt_non_rtti_copy);
+CXX_TYPE(non_rtti_std, crt_non_rtti_copy);
+
+THROW_INFO(bad_typeid, 4, &ct_bad_typeid, &ct_bad_typeid_std, &ct_exception,
+	   &ct_exception_std);
+THROW_INFO(bad_cast, 4, &ct_bad_cast, &ct_bad_cast_std, &ct_exception,
+	   &ct_exception_std);
+THROW_INFO(non_rtti, 6, &ct_non_rtti, &ct_non_rtti_std, &ct_bad_typeid,
+	   &ct_bad_typeid_std, &ct_exception, &ct_exception_std);
+
+/*
+ * Throws one of these, as MSVC's runtime does. The object stays in this
+ * frame, which the catch block runs below, so like find_catch it is kept
+ * off AddressSanitizer's fake stack.
+ */
+static void __attribute__((noreturn, no_sanitize_address))
+throw_std(const struct vtable *vt, const struct exception_type *type,
+	  const char *what)
+{
+	struct exception e;
+
+	exception_init(&e, vt, what, 1);
+	crt__CxxThrowException(&e, type);
+	crt_terminate();	/* a handler resumed it */
+	__builtin_unreachable();
+}
+
+/* RTTI. */
+
+/* crt_guarded (see crt.h): a frame that takes access violations. */
+struct guard {
+	EXCEPTION_REGISTRATION_RECORD reg;	/* first */
+	jmp_buf jump;
+};
+
+static EXCEPTION_DISPOSITION STUB_CDECL guard_handler(EXCEPTION_RECORD *rec,
+						      void *frame, CONTEXT *ctx,
+						      void *dispatch)
+{
+	struct guard *g = frame;
+
+	if ((rec->ExceptionFlags & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND)) ||
+	    rec->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+		return ExceptionContinueSearch;
+	seh_RtlUnwind(&g->reg, NULL, rec, NULL);
+	longjmp(g->jump, 1);
+}
+
+int __attribute__((no_sanitize_address)) crt_guarded(void (*fn)(void *),
+						     void *arg)
+{
+	struct win_teb *teb = teb_current();
+	struct guard g;
+
+	g.reg.Handler = (PEXCEPTION_ROUTINE)(void *)guard_handler;
+	g.reg.Next = teb->ExceptionList;
+	if (setjmp(g.jump)) {
+		teb->ExceptionList = g.reg.Next;
+		return 1;
+	}
+	teb->ExceptionList = &g.reg;
+	fn(arg);
+	teb->ExceptionList = g.reg.Next;
+	return 0;
+}
+
+struct rtti_query {
+	void *object;		/* where its vftable pointer is */
+	int vfdelta;		/* that pointer's offset in the source type */
+	const struct type_info *src, *dst;
+	const void *result;
+};
+
+static const struct rtti_locator *locator_of(void *object)
+{
+	return (*(const struct rtti_locator *const *const *)object)[-1];
+}
+
+static int same_type(const struct type_info *a, const struct type_info *b)
+{
+	return a == b || !strcmp(a->mangled, b->mangled);
+}
+
+static void rtti_typeid(void *arg)
+{
+	struct rtti_query *q = arg;
+
+	q->result = locator_of(q->object)->type;
+}
+
+/*
+ * The complete object, as MSVC's runtime finds it: less the vftable
+ * pointer's offset in it, plus a construction displacement (stored just
+ * before that pointer, while a virtual base's constructor or destructor
+ * runs) if the locator says there is one.
+ */
+static BYTE *complete_of(void *object, const struct rtti_locator *loc)
+{
+	BYTE *complete = (BYTE *)object - loc->offset;
+
+	if (loc->cd_offset)
+		complete += *(const int *)((BYTE *)object - loc->cd_offset);
+	return complete;
+}
+
+static void rtti_complete(void *arg)
+{
+	struct rtti_query *q = arg;
+
+	q->result = complete_of(q->object, locator_of(q->object));
+}
+
+/*
+ * The base descriptor a dynamic_cast lands on, as MSVC's runtime picks
+ * it. The source is found first, by its type (and with multiple
+ * inheritance its offset): none is allowed from a base that isn't public.
+ */
+static const struct rtti_base *find_target(const struct rtti_query *q,
+					   const struct rtti_hierarchy *h,
+					   BYTE *complete)
+{
+	const struct rtti_base *const *b = h->bases;
+	int multi = h->attributes & CHD_MULTINH;
+	ptrdiff_t src_offset = (BYTE *)q->object - q->vfdelta - complete;
+	int src = -1;
+
+	for (int i = 0; i < h->nbases && src < 0 && q->src; i++)
+		if (same_type(b[i]->type, q->src) &&
+		    (!multi || (BYTE *)this_pointer(&b[i]->offsets, complete) -
+			       complete == src_offset))
+			src = i;
+	if (src >= 0 && (b[src]->attributes & BCD_NOTVISIBLE))
+		return NULL;
+
+	if (!multi) {
+		/* Single inheritance: the one instance, if it is public. */
+		for (int i = 0; i < h->nbases; i++)
+			if (same_type(b[i]->type, q->dst))
+				return b[i]->attributes & BCD_NOTVISIBLE ? NULL : b[i];
+		return NULL;
+	}
+
+	/* A down-cast: the instance whose subobjects hold the source. */
+	for (int i = 0; i < src; i++)
+		if (same_type(b[i]->type, q->dst) && src <= i + b[i]->nbases)
+			return b[i];
+	/* Else a cross-cast: an instance that is public and the only one. */
+	for (int i = 0; i < h->nbases; i++)
+		if (same_type(b[i]->type, q->dst) &&
+		    !(b[i]->attributes & (BCD_NOTVISIBLE | BCD_AMBIGUOUS)))
+			return b[i];
+	return NULL;
+}
+
+static void rtti_cast(void *arg)
+{
+	struct rtti_query *q = arg;
+	const struct rtti_locator *loc = locator_of(q->object);
+	BYTE *complete = complete_of(q->object, loc);
+	const struct rtti_base *b = find_target(q, loc->hierarchy, complete);
+
+	q->result = b ? this_pointer(&b->offsets, complete) : NULL;
+}
+
+/* typeid(*object). */
+CRTFN(const struct type_info *) crt___RTtypeid(void *object)
+{
+	struct rtti_query q = { .object = object };
+
+	if (!object)
+		throw_std(&bad_typeid_vtable, &ti_bad_typeid,
+			  "Attempted a typeid of NULL pointer!");
+	if (crt_guarded(rtti_typeid, &q))
+		throw_std(&non_rtti_vtable, &ti_non_rtti,
+			  "Bad read pointer - no RTTI data!");
+	return q.result;
+}
+
+/* dynamic_cast<dst>(object), object being a src; a reference's throws. */
+CRTFN(void *) crt___RTDynamicCast(void *object, int vfdelta,
+				  const struct type_info *src,
+				  const struct type_info *dst, int is_reference)
+{
+	struct rtti_query q = { object, vfdelta, src, dst, NULL };
+
+	if (!object)
+		return NULL;
+	if (crt_guarded(rtti_cast, &q))
+		throw_std(&non_rtti_vtable, &ti_non_rtti,
+			  "Access violation - no RTTI data!");
+	if (!q.result && is_reference)
+		throw_std(&bad_cast_vtable, &ti_bad_cast, "Bad dynamic_cast!");
+	return (void *)q.result;
+}
+
+/* dynamic_cast<void *>(object): the complete object. */
+CRTFN(void *) crt___RTCastToVoid(void *object)
+{
+	struct rtti_query q = { .object = object };
+
+	if (!object)
+		return NULL;
+	if (crt_guarded(rtti_complete, &q))
+		throw_std(&non_rtti_vtable, &ti_non_rtti,
+			  "Access violation - no RTTI data!");
+	return (void *)q.result;
+}
 
 /* vcruntime140's: the what() string of std::exception, copied or not. */
 struct std_exception_data {
@@ -969,6 +1497,205 @@ CRTFN(void) crt___std_exception_destroy(struct std_exception_data *d)
 	d->do_free = 0;
 }
 
+/*
+ * The helpers C++/CLI code calls to handle native C++ exceptions in its
+ * own filters.
+ */
+
+/* Whether ptrs is a rethrow (throw;), and if so the exception it means. */
+CRTFN(int) crt___CxxDetectRethrow(EXCEPTION_POINTERS *ptrs)
+{
+	if (!ptrs || !is_cxx(ptrs->ExceptionRecord) ||
+	    ptrs->ExceptionRecord->ExceptionInformation[2] || !td.rec)
+		return 0;
+	ptrs->ExceptionRecord = td.rec;
+	return 1;
+}
+
+/* A filter for catch (ti) (ti NULL for catch (...)), copying it to *copy. */
+CRTFN(int) crt___CxxExceptionFilter(EXCEPTION_POINTERS *ptrs,
+				    const struct type_info *ti, UINT flags,
+				    void **copy)
+{
+	if (!ptrs)
+		return EXCEPTION_CONTINUE_SEARCH;
+	if (!ti)
+		return EXCEPTION_EXECUTE_HANDLER;
+	EXCEPTION_RECORD *rec = ptrs->ExceptionRecord;
+	if (!is_cxx(rec))
+		return EXCEPTION_CONTINUE_SEARCH;
+	if (!rec->ExceptionInformation[1] && !rec->ExceptionInformation[2]) {
+		rec = td.rec;	/* throw; */
+		if (!rec || !is_cxx(rec))
+			return EXCEPTION_CONTINUE_SEARCH;
+	}
+	const struct exception_type *type =
+		(const struct exception_type *)rec->ExceptionInformation[2];
+	const struct cxx_type *t = caught_type(type, ti, flags);
+	if (!t)
+		return EXCEPTION_CONTINUE_SEARCH;
+	if (copy)
+		copy_object((void *)rec->ExceptionInformation[1], copy, flags, t);
+	return EXCEPTION_EXECUTE_HANDLER;
+}
+
+/* What __CxxRegisterExceptionObject keeps, in the caller's memory. */
+struct frame_info {
+	EXCEPTION_RECORD *rec;		/* the thread's before, or -1 */
+	CONTEXT *ctx;
+	void *object;			/* the exception object it holds */
+	struct frame_info *next;	/* the one registered before */
+};
+
+CRTFN(UINT) crt___CxxQueryExceptionSize(void)
+{
+	return sizeof(struct frame_info);
+}
+
+/* A catch block in managed code begins: ep is what it handles. */
+CRTFN(int) crt___CxxRegisterExceptionObject(EXCEPTION_POINTERS *ep,
+					    struct frame_info *fi)
+{
+	if (!ep || !ep->ExceptionRecord) {
+		fi->rec = (EXCEPTION_RECORD *)-1;
+		fi->ctx = (CONTEXT *)-1;
+		return 1;
+	}
+	fi->rec = td.rec;
+	fi->ctx = td.ctx;
+	fi->object = is_cxx(ep->ExceptionRecord) ?
+		(void *)ep->ExceptionRecord->ExceptionInformation[1] : NULL;
+	fi->next = td.registered;
+	td.registered = fi;
+	td.rec = ep->ExceptionRecord;
+	td.ctx = ep->ContextRecord;
+	return 1;
+}
+
+/*
+ * ... and ends: its exception destroyed unless still in use, or held by
+ * another registered or running catch block.
+ */
+CRTFN(void) crt___CxxUnregisterExceptionObject(struct frame_info *fi,
+					       int in_use)
+{
+	if (fi->rec == (EXCEPTION_RECORD *)-1)
+		return;
+	for (struct frame_info **p = &td.registered; *p; p = &(*p)->next)
+		if (*p == fi) {
+			*p = fi->next;
+			break;
+		}
+	EXCEPTION_RECORD *rec = td.rec;
+	if (!in_use && rec && is_cxx(rec) && rec->ExceptionInformation[2]) {
+		const struct exception_type *type =
+			(const struct exception_type *)rec->ExceptionInformation[2];
+		void *object = (void *)rec->ExceptionInformation[1];
+		int kept = held(NULL, object);
+		for (const struct frame_info *f = td.registered; f; f = f->next)
+			kept |= f->object == object;
+		if (object && type->destructor && !kept)
+			((dtor_fn)type->destructor)(object);
+	}
+	td.rec = fi->rec;
+	td.ctx = fi->ctx;
+}
+
+/*
+ * Destructors managed code runs during an unwind, which a C++ exception
+ * must not leave: that ends the process, as one leaving any destructor
+ * during an unwind does.
+ */
+static EXCEPTION_DISPOSITION STUB_CDECL unwind_dtor_handler(EXCEPTION_RECORD *rec,
+							    void *frame,
+							    CONTEXT *ctx,
+							    void *dispatch)
+{
+	if (!(rec->ExceptionFlags & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND)) &&
+	    rec->ExceptionCode == CXX_EXCEPTION)
+		crt_terminate();
+	return ExceptionContinueSearch;
+}
+
+struct unwind_dtor_call {
+	int kind;
+	void *fn, *object;
+	size_t size;
+	int count;
+	void *dtor;
+};
+
+typedef void (STUB_CDECL *cdecl_dtor_fn)(void *);
+typedef void (WINAPI *vec_dtor_fn)(void *, size_t, int, dtor_fn);
+
+static void __attribute__((no_sanitize_address))
+call_unwind_dtor(const struct unwind_dtor_call *c)
+{
+	struct win_teb *teb = teb_current();
+	EXCEPTION_REGISTRATION_RECORD reg = {
+		teb->ExceptionList, (PEXCEPTION_ROUTINE)(void *)unwind_dtor_handler
+	};
+
+	teb->ExceptionList = &reg;
+	if (c->kind == 0)
+		((dtor_fn)c->fn)(c->object);
+	else if (c->kind == 1)
+		((cdecl_dtor_fn)c->fn)(c->object);
+	else
+		((vec_dtor_fn)c->fn)(c->object, c->size, c->count,
+				     (dtor_fn)c->dtor);
+	teb->ExceptionList = reg.Next;
+}
+
+static void WINAPI __attribute__((force_align_arg_pointer))
+crt___CxxCallUnwindDtor(void *dtor, void *object)
+{
+	struct unwind_dtor_call c = { 0, dtor, object, 0, 0, NULL };
+	call_unwind_dtor(&c);
+}
+
+static void WINAPI __attribute__((force_align_arg_pointer))
+crt___CxxCallUnwindDelDtor(void *dtor, void *object)
+{
+	struct unwind_dtor_call c = { 1, dtor, object, 0, 0, NULL };
+	call_unwind_dtor(&c);
+}
+
+/* Its destructor is managed code, called through its native entry. */
+static void WINAPI __attribute__((force_align_arg_pointer))
+crt___CxxCallUnwindStdDelDtor(void *dtor, void *object)
+{
+	struct unwind_dtor_call c = { 1, dtor, object, 0, 0, NULL };
+	call_unwind_dtor(&c);
+}
+
+static void WINAPI __attribute__((force_align_arg_pointer))
+crt___CxxCallUnwindVecDtor(void *vec_dtor, void *array, size_t size, int count,
+			   void *dtor)
+{
+	struct unwind_dtor_call c = { 2, vec_dtor, array, size, count, dtor };
+	call_unwind_dtor(&c);
+}
+
+/*
+ * longjmp out of a function's C++ frame: its states down to the one
+ * setjmp was called in (the compiler passes this to _setjmp3).
+ */
+static void WINAPI __attribute__((force_align_arg_pointer))
+crt___CxxLongjmpUnwind(const struct jump_buffer *jmp)
+{
+	local_unwind((struct cxx_frame *)jmp->registration,
+		     (const struct func_descr *)jmp->unwind_data[0],
+		     (int)jmp->trylevel);
+}
+
+CRTFN(translator_fn) crt__set_se_translator(translator_fn f)
+{
+	translator_fn old = td.se_translator;
+	td.se_translator = f;
+	return old;
+}
+
 #define E(name) { #name, 0, (void *)crt_##name }
 #define M(mangled, fn) { mangled, 0, (void *)fn }
 
@@ -992,6 +1719,25 @@ const struct builtin_export crt_cxx_exports[] = {
 	{ "set_terminate", 0, (void *)crt_set_terminate },
 	E(_get_terminate),
 	E(_get_unexpected),
+	M("?_set_se_translator@@YAP6AXIPAU_EXCEPTION_POINTERS@@@ZP6AXI0@Z@Z",
+	  crt__set_se_translator),
+	/* The (int) one is for /clr's nullptr; 0 is NULL all the same. */
+	M("?_set_se_translator@@YAP6AXIPAU_EXCEPTION_POINTERS@@@ZH@Z",
+	  crt__set_se_translator),
+	E(__CxxDetectRethrow),
+	E(__CxxExceptionFilter),
+	E(__CxxQueryExceptionSize),
+	E(__CxxRegisterExceptionObject),
+	E(__CxxUnregisterExceptionObject),
+	E(__CxxCallUnwindDtor),
+	E(__CxxCallUnwindDelDtor),
+	E(__CxxCallUnwindStdDelDtor),
+	E(__CxxCallUnwindVecDtor),
+	E(__CxxLongjmpUnwind),
+	/* RTTI. */
+	E(__RTtypeid),
+	E(__RTDynamicCast),
+	E(__RTCastToVoid),
 	E(abort),
 	E(_purecall),
 	E(_set_purecall_handler),
@@ -1025,16 +1771,68 @@ const struct builtin_export crt_cxx_exports[] = {
 	E(__std_type_info_compare),
 	E(__std_type_info_hash),
 	E(__std_type_info_destroy_list),
-	/* std::exception. */
+	/* std::exception and its subclasses, by both names. */
 	M("??_7exception@@6B@", exception_vtable.fn),
+	M("??_7exception@std@@6B@", exception_vtable.fn),
 	M("??0exception@@QAE@XZ", crt_exc_ctor),
+	M("??0exception@std@@QAE@XZ", crt_exc_ctor),
 	M("??0exception@@QAE@ABQBD@Z", crt_exc_ctor_name),
+	M("??0exception@std@@QAE@ABQBD@Z", crt_exc_ctor_name),
+	M("??0exception@@QAE@ABQBDH@Z", crt_exc_ctor_noalloc),
+	M("??0exception@std@@QAE@ABQBDH@Z", crt_exc_ctor_noalloc),
 	M("??0exception@@QAE@ABV0@@Z", crt_exc_copy),
+	M("??0exception@std@@QAE@ABV01@@Z", crt_exc_copy),
 	M("??1exception@@UAE@XZ", crt_exc_dtor),
+	M("??1exception@std@@UAE@XZ", crt_exc_dtor),
 	M("??4exception@@QAEAAV0@ABV0@@Z", crt_exc_assign),
+	M("??4exception@std@@QAEAAV01@ABV01@@Z", crt_exc_assign),
 	M("?what@exception@@UBEPBDXZ", crt_exc_what),
+	M("?what@exception@std@@UBEPBDXZ", crt_exc_what),
 	M("??_Eexception@@UAEPAXI@Z", crt_exc_vector_dtor),
-	M("??_Gexception@@UAEPAXI@Z", crt_exc_vector_dtor),
+	M("??_Gexception@@UAEPAXI@Z", crt_exc_scalar_dtor),
+	M("??_7bad_typeid@@6B@", bad_typeid_vtable.fn),
+	M("??_7bad_typeid@std@@6B@", bad_typeid_vtable.fn),
+	M("??0bad_typeid@@QAE@PBD@Z", crt_bad_typeid_ctor),
+	M("??0bad_typeid@std@@QAE@PBD@Z", crt_bad_typeid_ctor),
+	M("??0bad_typeid@@QAE@ABV0@@Z", crt_bad_typeid_copy),
+	M("??0bad_typeid@std@@QAE@ABV01@@Z", crt_bad_typeid_copy),
+	M("??_Fbad_typeid@@QAEXXZ", crt_bad_typeid_default),
+	M("??_Fbad_typeid@std@@QAEXXZ", crt_bad_typeid_default),
+	M("??1bad_typeid@@UAE@XZ", crt_exc_dtor),
+	M("??1bad_typeid@std@@UAE@XZ", crt_exc_dtor),
+	M("??4bad_typeid@@QAEAAV0@ABV0@@Z", crt_exc_assign),
+	M("??4bad_typeid@std@@QAEAAV01@ABV01@@Z", crt_exc_assign),
+	M("??_Ebad_typeid@@UAEPAXI@Z", crt_exc_vector_dtor),
+	M("??_Gbad_typeid@@UAEPAXI@Z", crt_exc_scalar_dtor),
+	M("??_7bad_cast@@6B@", bad_cast_vtable.fn),
+	M("??_7bad_cast@std@@6B@", bad_cast_vtable.fn),
+	M("??0bad_cast@@QAE@PBD@Z", crt_bad_cast_ctor),
+	M("??0bad_cast@std@@QAE@PBD@Z", crt_bad_cast_ctor),
+	M("??0bad_cast@@AAE@PBQBD@Z", crt_bad_cast_ctor_ref),
+	M("??0bad_cast@std@@AAE@PBQBD@Z", crt_bad_cast_ctor_ref),
+	M("??0bad_cast@@QAE@ABQBD@Z", crt_bad_cast_ctor_ref),
+	M("??0bad_cast@@QAE@ABV0@@Z", crt_bad_cast_copy),
+	M("??0bad_cast@std@@QAE@ABV01@@Z", crt_bad_cast_copy),
+	M("??_Fbad_cast@@QAEXXZ", crt_bad_cast_default),
+	M("??_Fbad_cast@std@@QAEXXZ", crt_bad_cast_default),
+	M("??1bad_cast@@UAE@XZ", crt_exc_dtor),
+	M("??1bad_cast@std@@UAE@XZ", crt_exc_dtor),
+	M("??4bad_cast@@QAEAAV0@ABV0@@Z", crt_exc_assign),
+	M("??4bad_cast@std@@QAEAAV01@ABV01@@Z", crt_exc_assign),
+	M("??_Ebad_cast@@UAEPAXI@Z", crt_exc_vector_dtor),
+	M("??_Gbad_cast@@UAEPAXI@Z", crt_exc_scalar_dtor),
+	M("??_7__non_rtti_object@@6B@", non_rtti_vtable.fn),
+	M("??_7__non_rtti_object@std@@6B@", non_rtti_vtable.fn),
+	M("??0__non_rtti_object@@QAE@PBD@Z", crt_non_rtti_ctor),
+	M("??0__non_rtti_object@std@@QAE@PBD@Z", crt_non_rtti_ctor),
+	M("??0__non_rtti_object@@QAE@ABV0@@Z", crt_non_rtti_copy),
+	M("??0__non_rtti_object@std@@QAE@ABV01@@Z", crt_non_rtti_copy),
+	M("??1__non_rtti_object@@UAE@XZ", crt_exc_dtor),
+	M("??1__non_rtti_object@std@@UAE@XZ", crt_exc_dtor),
+	M("??4__non_rtti_object@@QAEAAV0@ABV0@@Z", crt_exc_assign),
+	M("??4__non_rtti_object@std@@QAEAAV01@ABV01@@Z", crt_exc_assign),
+	M("??_E__non_rtti_object@@UAEPAXI@Z", crt_exc_vector_dtor),
+	M("??_G__non_rtti_object@@UAEPAXI@Z", crt_exc_scalar_dtor),
 	E(__std_exception_copy),
 	E(__std_exception_destroy),
 	BUILTIN_END

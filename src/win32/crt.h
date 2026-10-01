@@ -24,4 +24,29 @@ int crt_vformat(int wide, const void *fmt, va_list ap, void **out,
  */
 int crt_malloc_retry(size_t size);
 
+/*
+ * MSVC's i386 jmp_buf, as _setjmp3 fills it (crt_seh.c): the registers,
+ * the fs:[0] frame and its try level at the time, and what longjmp calls
+ * to unwind that frame's own levels (__CxxLongjmpUnwind for a C++ frame,
+ * UnwindData[0] being its FuncInfo).
+ */
+struct jump_buffer {
+	unsigned long ebp, ebx, edi, esi, esp, eip;
+	unsigned long registration;
+	long trylevel;
+	unsigned long cookie;	/* JMP_COOKIE from _setjmp3 */
+	unsigned long unwind_func;
+	unsigned long unwind_data[6];
+};
+
+#define JMP_COOKIE 0x56433230	/* "VC20" */
+
+/*
+ * Runs fn(arg) as __try { fn(arg); } __except (an access violation) {}
+ * would (crt_cxx.c): 1 if it faulted, 0 if it returned. A fault only
+ * becomes an exception through the harness's fault handler
+ * (crash_install), so without it this still crashes.
+ */
+int crt_guarded(void (*fn)(void *), void *arg);
+
 #endif /* VFW_WIN32_CRT_H */

@@ -9,14 +9,16 @@
  *   kind, and h/l/w pick narrow or wide explicitly. Wide means UTF-16,
  *   converted through the ANSI code page where the output is narrow.
  * - %p is eight uppercase hex digits with no 0x; a NULL %s is "(null)".
+ * - %Z is a counted string: an ANSI_STRING, or with l or w a
+ *   UNICODE_STRING.
  * - %e, %E, and %g in exponent form have three exponent digits.
+ * - infinities and NaNs are 1.#INF, 1.#QNAN and 1.#IND (see put_special).
  * - an unknown conversion character is printed as itself.
  *
  * Integers and floats are still formatted by the host's snprintf, one
  * conversion at a time; strings, characters and padding are done here.
- * Not done: MSVC's 1.#INF / 1.#QNAN spellings (the host's inf and nan are
- * printed) and %Z.
  */
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -220,6 +222,71 @@ static void three_digit_exponent(char *a)
 	}
 }
 
+/*
+ * A field as msvcrt pads its pieces: the sign (if any) and fill before
+ * the text (zeros after the sign, spaces before it), or spaces after it
+ * when left-aligned. The width left after the sign is also what the
+ * right-hand fill counts against.
+ */
+static void put_field(struct sink *s, char sign, int width, int prec,
+		      int left, int zero, const char *text)
+{
+	int len = (int)strlen(text);
+
+	if (prec >= 0 && prec < len)
+		len = prec;
+	if (sign) {
+		width--;
+		if (zero)
+			put_ascii(s, &sign, 1);
+	}
+	if (!left && width > len)
+		put_fill(s, zero ? '0' : ' ', (size_t)(width - len));
+	if (sign && !zero)
+		put_ascii(s, &sign, 1);
+	put_ascii(s, text, (size_t)len);
+	if (left && width > len)
+		put_fill(s, ' ', (size_t)(width - len));
+}
+
+/*
+ * msvcrt's infinities and NaNs, after Wine's: 1.#INF, 1.#QNAN, or 1.#IND
+ * for the negative NaN the FPU makes, the part after the point treated
+ * as digits. So a precision cuts it, rounding the last one kept up (the
+ * next is always 5 or more, as a character): "%.2f" gives 1.#J and
+ * "%.1f" 1.$. Then come the zeros a number would have to reach its
+ * precision, and %e's exponent: "%f" gives 1.#INF00, "%e" 1.#INF00e+000.
+ * %g counts its precision one less (as msvcrt does) and adds no zeros.
+ */
+static void put_special(struct sink *s, struct spec sp, double v)
+{
+	char pfx[16], sfx[8] = "";
+	char sign = signbit(v) ? '-' : sp.plus ? '+' : sp.space ? ' ' : 0;
+	int g = sp.conv == 'g' || sp.conv == 'G';
+	int prec = sp.prec, width = sp.width > 0 ? sp.width : 0;
+
+	if (g)
+		prec--;
+	strcpy(pfx, isinf(v) ? "1.#INF" : sign == '-' ? "1.#IND" : "1.#QNAN");
+	int pfx_len = (int)strlen(pfx), frac_len = pfx_len - 2;
+	if (prec >= 0 && prec < frac_len)
+		pfx[1 + prec]++;
+	if (sp.conv == 'e' || sp.conv == 'E')
+		strcpy(sfx, sp.conv == 'e' ? "e+000" : "E+000");
+
+	int sfx_len = !sp.alt && g ? frac_len : prec;
+	if (sfx_len < 0 && !g)
+		sfx_len = 6;
+	sfx_len += (int)strlen(sfx) - frac_len;
+	if (sfx_len > 0)
+		width -= sfx_len;
+	if (prec >= 0)
+		prec = (prec ? prec : -1) + pfx_len - frac_len;
+
+	put_field(s, sign, width, prec, sp.left, sp.zero, pfx);
+	put_field(s, 0, sfx_len, -1, sp.left, 1, sfx);
+}
+
 static unsigned fmt_at(const void *fmt, int wide, size_t i)
 {
 	return wide ? ((const WCHAR *)fmt)[i] : ((const BYTE *)fmt)[i];
@@ -344,7 +411,12 @@ static void format(struct sink *s, const void *fmt, va_list *ap)
 		}
 		case 'e': case 'E': case 'f': case 'g': case 'G':
 		case 'a': case 'A': {
-			char *a = host_format(&sp, "", (char)c, va_arg(*ap, double));
+			double v = va_arg(*ap, double);
+			if (!isfinite(v) && c != 'a' && c != 'A') {
+				put_special(s, sp, v);
+				break;
+			}
+			char *a = host_format(&sp, "", (char)c, v);
 			if (!a) {
 				s->failed = 1;
 				return;
@@ -387,6 +459,24 @@ static void format(struct sink *s, const void *fmt, va_list *ap)
 				   strnlen(str, (size_t)sp.prec);
 			sp.zero = 0;
 			put_padded_text(s, &sp, str, n, w);
+			break;
+		}
+		case 'Z': {
+			/* UNICODE_STRING and ANSI_STRING: a length in bytes. */
+			const struct {
+				USHORT len, max;
+				const void *buf;
+			} *str = va_arg(*ap, const void *);
+			int w = sp.size == SZ_L || sp.size == SZ_W;
+			sp.zero = 0;
+			if (!str || !str->buf) {
+				put_padded_text(s, &sp, "(null)", 6, 0);
+				break;
+			}
+			size_t n = w ? str->len / sizeof(WCHAR) : str->len;
+			if (sp.prec >= 0 && (size_t)sp.prec < n)
+				n = (size_t)sp.prec;
+			put_padded_text(s, &sp, str->buf, n, w);
 			break;
 		}
 		case 'n': {

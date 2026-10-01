@@ -8,6 +8,7 @@
 
 #include "fixture.h"
 #include <ctype.h>
+#include <setjmp.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -155,6 +156,37 @@ EXPORT int crt_startup_check(void)
 
 	_lock(0);
 	_unlock(0);
+	return 0;
+}
+
+/* setjmp and longjmp as plain C uses them (mingw's setjmp is _setjmp3). */
+static jmp_buf jump;
+
+static void __attribute__((noinline)) jump_back(int value)
+{
+	longjmp(jump, value);
+}
+
+EXPORT int crt_setjmp_check(void)
+{
+	volatile int stage = 0;
+	int r = setjmp(jump);
+
+	if (!r) {
+		stage = 1;
+		jump_back(7);
+		return 1;
+	}
+	if (r != 7 || stage != 1)
+		return 2;
+	r = setjmp(jump);
+	if (!r) {
+		stage = 2;
+		jump_back(0);	/* comes back as 1 */
+		return 3;
+	}
+	if (r != 1 || stage != 2)
+		return 4;
 	return 0;
 }
 
