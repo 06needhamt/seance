@@ -17,10 +17,13 @@
  * RaiseException and RtlUnwind use the same chain-walking loop, but need
  * none of this: they already run in ordinary context.
  *
- * A handler may itself raise an exception (a C++ throw out of a catch
- * block, which runs inside the dispatch that found it, or out of an SE
- * translator): that is dispatched from the head of the chain, as on
- * Windows. A fault while a dispatch is under way is not; it crashes.
+ * A handler may itself raise an exception or fault (a C++ throw out of a
+ * catch block, which runs inside the dispatch that found it, or out of an
+ * SE translator; a filter that touches bad memory under a __try of its
+ * own): that is dispatched from the head of the chain, as on Windows, up
+ * to MAX_DISPATCH deep. So may a __finally or destructor run by an
+ * unwind, which takes each frame off the chain once its handler is done
+ * with it, as Windows does, so the new exception doesn't meet them again.
  */
 #include <stdio.h>
 #include <string.h>
@@ -236,24 +239,28 @@ static void report_unhandled_exception(const EXCEPTION_RECORD *rec)
 
 /* Runs on the faulting thread's own stack once seh_take_fault() has
  * redirected it there. Reads the fault from `pending`, as its caller (the
- * signal handler) has already returned and cannot pass it any other way. */
+ * signal handler) has already returned and cannot pass it any other way,
+ * then keeps its own copy: a handler may fault in turn. */
 static void __attribute__((noreturn)) seh_run_chain(void)
 {
 	struct win_teb *teb = teb_current();
+	int sig = pending.sig;
+	EXCEPTION_RECORD rec = pending.rec;
+	CONTEXT ctx = pending.ctx;
 	int level = dispatch_begin((uintptr_t)__builtin_frame_address(0));
 
 	if (level >= 0) {
-		walk_chain(teb, &pending.rec, &pending.ctx, level);
+		walk_chain(teb, &rec, &ctx, level);
 		nlive = level;
 	}
 
-	EXCEPTION_POINTERS ep = { &pending.rec, &pending.ctx };
+	EXCEPTION_POINTERS ep = { &rec, &ctx };
 	LPTOP_LEVEL_EXCEPTION_FILTER f = top_filter;
 	if (f && f(&ep) == EXCEPTION_CONTINUE_EXECUTION)
-		resume_context(&pending.ctx);
+		resume_context(&ctx);
 
-	crash_report_and_die(pending.sig, (const void *)(uintptr_t)pending.ctx.Eip,
-			     (const void *)(uintptr_t)pending.rec.ExceptionInformation[1]);
+	crash_report_and_die(sig, (const void *)(uintptr_t)ctx.Eip,
+			     (const void *)(uintptr_t)rec.ExceptionInformation[1]);
 }
 
 int seh_take_fault(int sig, siginfo_t *si, void *ucontext)
@@ -266,8 +273,6 @@ int seh_take_fault(int sig, siginfo_t *si, void *ucontext)
 	if (!teb)
 		return 0;
 	drop_below((uintptr_t)g[REG_UESP]);
-	if (nlive)
-		return 0;	/* a fault inside a dispatch */
 
 	memset(&pending.ctx, 0, sizeof(pending.ctx));
 	pending.sig = sig;
@@ -400,6 +405,7 @@ void WINAPI seh_RtlUnwind(PEXCEPTION_REGISTRATION_RECORD target_frame,
 		PEXCEPTION_REGISTRATION_RECORD next = frame->Next;
 		seh_call_handler(frame->Handler, &unwind_rec, frame, &ctx,
 				 target_frame);
+		teb->ExceptionList = next;	/* done with: off the chain */
 		frame = next;
 	}
 	teb->ExceptionList = target_frame ? target_frame : SEH_CHAIN_END;

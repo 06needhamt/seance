@@ -46,6 +46,11 @@
  * family's classes are one each, answering to both the msvcrt names
  * (exception) and the msvcr80-on ones (std::exception), so a catch or
  * dynamic_cast by either finds them; their own RTTI names the former.
+ * msvcp's logic_error and runtime_error families, bad_alloc and
+ * bad_function_call are here too (the CRT answers to msvcp*.dll), laid
+ * out as from VC8 on (exception's members only; VC6/7's kept a string,
+ * whose constructors from one aren't exported here), with the helpers
+ * its containers throw them through (std::_Xlength_error, _Xlen, ...).
  *
  * Also the helpers behind C++/CLI and setjmp: __CxxExceptionFilter and
  * friends, the __CxxCallUnwind*Dtor guards (StdDelDtor's destructor, managed
@@ -420,6 +425,54 @@ static void copy_exception(void *object, struct cxx_frame *frame,
 		    c->flags, t);
 }
 
+/*
+ * Destructors run during an unwind (the frame handler's, and those
+ * managed code runs through __CxxCallUnwind*Dtor), which a C++ exception
+ * must not leave: that ends the process, as the standard says.
+ */
+static EXCEPTION_DISPOSITION STUB_CDECL unwind_dtor_handler(EXCEPTION_RECORD *rec,
+							    void *frame,
+							    CONTEXT *ctx,
+							    void *dispatch)
+{
+	if (!(rec->ExceptionFlags & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND)) &&
+	    rec->ExceptionCode == CXX_EXCEPTION)
+		crt_terminate();
+	return ExceptionContinueSearch;
+}
+
+struct unwind_dtor_call {
+	int kind;	/* 0 thiscall, 1 cdecl, 2 vector, 3 a piece of a function */
+	void *fn, *object;
+	size_t size;
+	int count;
+	void *dtor;
+};
+
+typedef void (STUB_CDECL *cdecl_dtor_fn)(void *);
+typedef void (WINAPI *vec_dtor_fn)(void *, size_t, int, dtor_fn);
+
+static void __attribute__((no_sanitize_address))
+call_unwind_dtor(const struct unwind_dtor_call *c)
+{
+	struct win_teb *teb = teb_current();
+	EXCEPTION_REGISTRATION_RECORD reg = {
+		teb->ExceptionList, (PEXCEPTION_ROUTINE)(void *)unwind_dtor_handler
+	};
+
+	teb->ExceptionList = &reg;
+	if (c->kind == 3)
+		cxx_call_ebp(c->fn, c->object);
+	else if (c->kind == 0)
+		((dtor_fn)c->fn)(c->object);
+	else if (c->kind == 1)
+		((cdecl_dtor_fn)c->fn)(c->object);
+	else
+		((vec_dtor_fn)c->fn)(c->object, c->size, c->count,
+				     (dtor_fn)c->dtor);
+	teb->ExceptionList = reg.Next;
+}
+
 /* Runs the destructors from the frame's state down to last. */
 static void local_unwind(struct cxx_frame *frame, const struct func_descr *d,
 			 int last)
@@ -435,8 +488,11 @@ static void local_unwind(struct cxx_frame *frame, const struct func_descr *d,
 		const struct unwind_entry *u = &d->unwind[level];
 		/* Moved on first, so a destructor that throws isn't rerun. */
 		level = frame->trylevel = u->prev;
-		if (u->handler)
-			cxx_call_ebp(u->handler, frame_ebp(frame));
+		if (u->handler) {
+			struct unwind_dtor_call c = { 3, u->handler,
+						      frame_ebp(frame), 0, 0, NULL };
+			call_unwind_dtor(&c);
+		}
 	}
 }
 
@@ -548,6 +604,7 @@ static void __attribute__((no_sanitize_address)) find_catch(EXCEPTION_RECORD *re
 			cf.reg.Next = teb->ExceptionList;
 			teb->ExceptionList = &cf.reg;
 			DWORD saved_esp = ((DWORD *)frame)[-1];
+			crt_finally_abandon(frame_ebp(frame));
 			void *cont = cxx_call_ebp(c->handler, frame_ebp(frame));
 			teb->ExceptionList = cf.reg.Next;
 			((DWORD *)frame)[-1] = saved_esp;
@@ -1061,6 +1118,35 @@ HIERARCHY(bad_cast, 4, &rb_bad_cast, &rb_bad_cast_std, &rb_exception,
 HIERARCHY(non_rtti, 6, &rb_non_rtti, &rb_non_rtti_std, &rb_bad_typeid,
 	  &rb_bad_typeid_std, &rb_exception, &rb_exception_std);
 
+/* msvcp's, always in std: the logic_error and runtime_error families. */
+#define STD_CLASS(cls) \
+	TYPE_DESCR(td_##cls, ".?AV" #cls "@std@@"); \
+	BASE(cls)
+STD_CLASS(logic_error);
+STD_CLASS(domain_error);
+STD_CLASS(invalid_argument);
+STD_CLASS(length_error);
+STD_CLASS(out_of_range);
+STD_CLASS(runtime_error);
+STD_CLASS(overflow_error);
+STD_CLASS(underflow_error);
+STD_CLASS(range_error);
+STD_CLASS(bad_alloc);
+STD_CLASS(bad_function_call);
+
+#define EXC_BASES &rb_exception, &rb_exception_std
+HIERARCHY(logic_error, 3, &rb_logic_error, EXC_BASES);
+HIERARCHY(domain_error, 4, &rb_domain_error, &rb_logic_error, EXC_BASES);
+HIERARCHY(invalid_argument, 4, &rb_invalid_argument, &rb_logic_error, EXC_BASES);
+HIERARCHY(length_error, 4, &rb_length_error, &rb_logic_error, EXC_BASES);
+HIERARCHY(out_of_range, 4, &rb_out_of_range, &rb_logic_error, EXC_BASES);
+HIERARCHY(runtime_error, 3, &rb_runtime_error, EXC_BASES);
+HIERARCHY(overflow_error, 4, &rb_overflow_error, &rb_runtime_error, EXC_BASES);
+HIERARCHY(underflow_error, 4, &rb_underflow_error, &rb_runtime_error, EXC_BASES);
+HIERARCHY(range_error, 4, &rb_range_error, &rb_runtime_error, EXC_BASES);
+HIERARCHY(bad_alloc, 3, &rb_bad_alloc, EXC_BASES);
+HIERARCHY(bad_function_call, 3, &rb_bad_function_call, EXC_BASES);
+
 static const struct vtable ti_vtable = { &rl_type_info,
 					 { (void *)crt_ti_vector_dtor } };
 
@@ -1107,7 +1193,11 @@ struct exception {
 };
 
 static const struct vtable exception_vtable, bad_typeid_vtable,
-	bad_cast_vtable, non_rtti_vtable;
+	bad_cast_vtable, non_rtti_vtable, logic_error_vtable,
+	domain_error_vtable, invalid_argument_vtable, length_error_vtable,
+	out_of_range_vtable, runtime_error_vtable, overflow_error_vtable,
+	underflow_error_vtable, range_error_vtable, bad_alloc_vtable,
+	bad_function_call_vtable;
 
 static void exception_init(struct exception *e, const struct vtable *vt,
 			   const char *name, int copy)
@@ -1218,6 +1308,22 @@ static THISCALL void *crt_exc_vector_dtor(struct exception *e, unsigned flags)
 SUBCLASS(bad_typeid)
 SUBCLASS(bad_cast)
 SUBCLASS(non_rtti)
+SUBCLASS(logic_error)
+SUBCLASS(domain_error)
+SUBCLASS(invalid_argument)
+SUBCLASS(length_error)
+SUBCLASS(out_of_range)
+SUBCLASS(runtime_error)
+SUBCLASS(overflow_error)
+SUBCLASS(underflow_error)
+SUBCLASS(range_error)
+SUBCLASS(bad_alloc)
+SUBCLASS(bad_function_call)
+
+static THISCALL struct exception *crt_bad_alloc_default(struct exception *e)
+{
+	return crt_bad_alloc_ctor(e, "bad allocation");
+}
 
 static THISCALL struct exception *crt_bad_typeid_default(struct exception *e)
 {
@@ -1243,6 +1349,17 @@ VTABLE(exception);
 VTABLE(bad_typeid);
 VTABLE(bad_cast);
 VTABLE(non_rtti);
+VTABLE(logic_error);
+VTABLE(domain_error);
+VTABLE(invalid_argument);
+VTABLE(length_error);
+VTABLE(out_of_range);
+VTABLE(runtime_error);
+VTABLE(overflow_error);
+VTABLE(underflow_error);
+VTABLE(range_error);
+VTABLE(bad_alloc);
+VTABLE(bad_function_call);
 
 /* ThrowInfo for the ones the CRT throws: the class, then its bases. */
 #define CXX_TYPE(id, copy)						\
@@ -1273,6 +1390,24 @@ THROW_INFO(bad_cast, 4, &ct_bad_cast, &ct_bad_cast_std, &ct_exception,
 THROW_INFO(non_rtti, 6, &ct_non_rtti, &ct_non_rtti_std, &ct_bad_typeid,
 	   &ct_bad_typeid_std, &ct_exception, &ct_exception_std);
 
+CXX_TYPE(logic_error, crt_logic_error_copy);
+CXX_TYPE(length_error, crt_length_error_copy);
+CXX_TYPE(out_of_range, crt_out_of_range_copy);
+CXX_TYPE(invalid_argument, crt_invalid_argument_copy);
+CXX_TYPE(runtime_error, crt_runtime_error_copy);
+CXX_TYPE(overflow_error, crt_overflow_error_copy);
+CXX_TYPE(bad_alloc, crt_bad_alloc_copy);
+CXX_TYPE(bad_function_call, crt_bad_function_call_copy);
+
+#define CT_EXC &ct_exception, &ct_exception_std
+THROW_INFO(length_error, 4, &ct_length_error, &ct_logic_error, CT_EXC);
+THROW_INFO(out_of_range, 4, &ct_out_of_range, &ct_logic_error, CT_EXC);
+THROW_INFO(invalid_argument, 4, &ct_invalid_argument, &ct_logic_error, CT_EXC);
+THROW_INFO(runtime_error, 3, &ct_runtime_error, CT_EXC);
+THROW_INFO(overflow_error, 4, &ct_overflow_error, &ct_runtime_error, CT_EXC);
+THROW_INFO(bad_alloc, 3, &ct_bad_alloc, CT_EXC);
+THROW_INFO(bad_function_call, 3, &ct_bad_function_call, CT_EXC);
+
 /*
  * Throws one of these, as MSVC's runtime does. The object stays in this
  * frame, which the catch block runs below, so like find_catch it is kept
@@ -1288,6 +1423,57 @@ throw_std(const struct vtable *vt, const struct exception_type *type,
 	crt__CxxThrowException(&e, type);
 	crt_terminate();	/* a handler resumed it */
 	__builtin_unreachable();
+}
+
+/*
+ * msvcp's helpers that throw for its containers and strings: std::_Xlen
+ * and _Xran (VC6 to VC9), and _Xlength_error and the rest (from VC8).
+ */
+CRTFN(void) crt__Xlength_error(const char *what)
+{
+	throw_std(&length_error_vtable, &ti_length_error, what);
+}
+
+CRTFN(void) crt__Xout_of_range(const char *what)
+{
+	throw_std(&out_of_range_vtable, &ti_out_of_range, what);
+}
+
+CRTFN(void) crt__Xinvalid_argument(const char *what)
+{
+	throw_std(&invalid_argument_vtable, &ti_invalid_argument, what);
+}
+
+CRTFN(void) crt__Xruntime_error(const char *what)
+{
+	throw_std(&runtime_error_vtable, &ti_runtime_error, what);
+}
+
+CRTFN(void) crt__Xoverflow_error(const char *what)
+{
+	throw_std(&overflow_error_vtable, &ti_overflow_error, what);
+}
+
+CRTFN(void) crt__Xlen(void)
+{
+	throw_std(&length_error_vtable, &ti_length_error, "string too long");
+}
+
+CRTFN(void) crt__Xran(void)
+{
+	throw_std(&out_of_range_vtable, &ti_out_of_range,
+		  "invalid string position");
+}
+
+CRTFN(void) crt__Xbad_alloc(void)
+{
+	throw_std(&bad_alloc_vtable, &ti_bad_alloc, "bad allocation");
+}
+
+CRTFN(void) crt__Xbad_function_call(void)
+{
+	throw_std(&bad_function_call_vtable, &ti_bad_function_call,
+		  "bad function call");
 }
 
 /* RTTI. */
@@ -1601,52 +1787,6 @@ CRTFN(void) crt___CxxUnregisterExceptionObject(struct frame_info *fi,
 	td.ctx = fi->ctx;
 }
 
-/*
- * Destructors managed code runs during an unwind, which a C++ exception
- * must not leave: that ends the process, as one leaving any destructor
- * during an unwind does.
- */
-static EXCEPTION_DISPOSITION STUB_CDECL unwind_dtor_handler(EXCEPTION_RECORD *rec,
-							    void *frame,
-							    CONTEXT *ctx,
-							    void *dispatch)
-{
-	if (!(rec->ExceptionFlags & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND)) &&
-	    rec->ExceptionCode == CXX_EXCEPTION)
-		crt_terminate();
-	return ExceptionContinueSearch;
-}
-
-struct unwind_dtor_call {
-	int kind;
-	void *fn, *object;
-	size_t size;
-	int count;
-	void *dtor;
-};
-
-typedef void (STUB_CDECL *cdecl_dtor_fn)(void *);
-typedef void (WINAPI *vec_dtor_fn)(void *, size_t, int, dtor_fn);
-
-static void __attribute__((no_sanitize_address))
-call_unwind_dtor(const struct unwind_dtor_call *c)
-{
-	struct win_teb *teb = teb_current();
-	EXCEPTION_REGISTRATION_RECORD reg = {
-		teb->ExceptionList, (PEXCEPTION_ROUTINE)(void *)unwind_dtor_handler
-	};
-
-	teb->ExceptionList = &reg;
-	if (c->kind == 0)
-		((dtor_fn)c->fn)(c->object);
-	else if (c->kind == 1)
-		((cdecl_dtor_fn)c->fn)(c->object);
-	else
-		((vec_dtor_fn)c->fn)(c->object, c->size, c->count,
-				     (dtor_fn)c->dtor);
-	teb->ExceptionList = reg.Next;
-}
-
 static void WINAPI __attribute__((force_align_arg_pointer))
 crt___CxxCallUnwindDtor(void *dtor, void *object)
 {
@@ -1833,6 +1973,38 @@ const struct builtin_export crt_cxx_exports[] = {
 	M("??4__non_rtti_object@std@@QAEAAV01@ABV01@@Z", crt_exc_assign),
 	M("??_E__non_rtti_object@@UAEPAXI@Z", crt_exc_vector_dtor),
 	M("??_G__non_rtti_object@@UAEPAXI@Z", crt_exc_scalar_dtor),
+	/* msvcp's classes (one layout: exception's, as from VC8 on). */
+#define STD_EXPORTS(cls)						\
+	M("??_7" #cls "@std@@6B@", cls##_vtable.fn),			\
+	M("??0" #cls "@std@@QAE@PBD@Z", crt_##cls##_ctor),		\
+	M("??0" #cls "@std@@QAE@ABV01@@Z", crt_##cls##_copy),		\
+	M("??1" #cls "@std@@UAE@XZ", crt_exc_dtor),			\
+	M("??4" #cls "@std@@QAEAAV01@ABV01@@Z", crt_exc_assign),	\
+	M("??_E" #cls "@std@@UAEPAXI@Z", crt_exc_vector_dtor),		\
+	M("??_G" #cls "@std@@UAEPAXI@Z", crt_exc_scalar_dtor)
+	STD_EXPORTS(logic_error),
+	STD_EXPORTS(domain_error),
+	STD_EXPORTS(invalid_argument),
+	STD_EXPORTS(length_error),
+	STD_EXPORTS(out_of_range),
+	STD_EXPORTS(runtime_error),
+	STD_EXPORTS(overflow_error),
+	STD_EXPORTS(underflow_error),
+	STD_EXPORTS(range_error),
+	STD_EXPORTS(bad_alloc),
+	STD_EXPORTS(bad_function_call),
+	M("?what@logic_error@std@@UBEPBDXZ", crt_exc_what),
+	M("?what@runtime_error@std@@UBEPBDXZ", crt_exc_what),
+	M("??0bad_alloc@std@@QAE@XZ", crt_bad_alloc_default),
+	M("?_Xlength_error@std@@YAXPBD@Z", crt__Xlength_error),
+	M("?_Xout_of_range@std@@YAXPBD@Z", crt__Xout_of_range),
+	M("?_Xinvalid_argument@std@@YAXPBD@Z", crt__Xinvalid_argument),
+	M("?_Xruntime_error@std@@YAXPBD@Z", crt__Xruntime_error),
+	M("?_Xoverflow_error@std@@YAXPBD@Z", crt__Xoverflow_error),
+	M("?_Xlen@std@@YAXXZ", crt__Xlen),
+	M("?_Xran@std@@YAXXZ", crt__Xran),
+	M("?_Xbad_alloc@std@@YAXXZ", crt__Xbad_alloc),
+	M("?_Xbad_function_call@std@@YAXXZ", crt__Xbad_function_call),
 	E(__std_exception_copy),
 	E(__std_exception_destroy),
 	BUILTIN_END

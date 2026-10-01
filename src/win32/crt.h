@@ -49,4 +49,11 @@ struct jump_buffer {
  */
 int crt_guarded(void (*fn)(void *), void *arg);
 
+/*
+ * Control goes on in the frame whose %ebp is ebp, after an exception or
+ * longjmp (crt_seh.c): the __finally blocks an exception left in it and
+ * deeper frames are over, for _abnormal_termination's sake.
+ */
+void crt_finally_abandon(const void *ebp);
+
 #endif /* VFW_WIN32_CRT_H */

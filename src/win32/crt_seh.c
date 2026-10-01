@@ -32,8 +32,9 @@
  * told to call (_seh_longjmp_unwind or _seh_longjmp_unwind4 for a __try
  * frame, __CxxLongjmpUnwind for a C++ one).
  *
- * Not done: a nested exception during an unwind, which Windows handles
- * with its own frame around each __finally.
+ * An exception out of a __finally that an unwind runs is dispatched as
+ * any other (see runtime/seh.c); when it is caught, the abandoned
+ * __finally is forgotten for _abnormal_termination's sake.
  */
 #include <stdarg.h>
 #include <stdint.h>
@@ -137,6 +138,18 @@ static void call_finally(void *fn, void *ebp)
 		nunwinding = slot;
 }
 
+/*
+ * Control goes on in the frame at ebp (an __except block, a catch block,
+ * longjmp's target): a __finally still listed for it or a deeper frame
+ * was left by an exception out of it, and is over.
+ */
+void crt_finally_abandon(const void *ebp)
+{
+	while (nunwinding &&
+	       (uintptr_t)unwinding[nunwinding - 1] <= (uintptr_t)ebp)
+		nunwinding--;
+}
+
 /* Runs the __finally blocks from f's current try level out to stop. */
 static void local_unwind(struct eh_frame *f, const struct scope_entry *table,
 			 int stop, int none)
@@ -215,6 +228,7 @@ static EXCEPTION_DISPOSITION handle(EXCEPTION_RECORD *rec, struct eh_frame *f,
 			local_unwind(f, table, level, none);
 			f->try_level = e->enclosing;
 			check_cookies(cookies, ebp);
+			crt_finally_abandon(ebp);
 			crt_seh_jump(e->handler, ebp);
 		}
 	}
@@ -406,6 +420,7 @@ CRTFN(void) crt_longjmp(const struct jump_buffer *jmp, int value)
 		else if (jmp->unwind_func)
 			((jmp_unwind_fn)jmp->unwind_func)(jmp);
 	}
+	crt_finally_abandon((const void *)jmp->ebp);
 	crt_longjmp_jump(jmp, value ? value : 1);
 }
 
