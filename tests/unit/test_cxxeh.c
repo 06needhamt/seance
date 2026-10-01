@@ -216,6 +216,14 @@ static void test_misc(void)
 	void *(CDECL *op_new)(size_t) = get("??2@YAPAXI@Z");
 	void (CDECL *op_delete)(void *) = get("??3@YAXPAX@Z");
 	void *(CDECL *op_new_array)(size_t) = get("??_U@YAPAXI@Z");
+	void (CDECL *op_delete_sized)(void *, size_t) = get("??3@YAXPAXI@Z");
+	void (CDECL *op_delete_array_sized)(void *, size_t) = get("??_V@YAXPAXI@Z");
+	int (CDECL *set_new_mode)(int) = get("_set_new_mode");
+	int (CDECL *callnewh)(size_t) = get("_callnewh");
+	void *(CDECL *crt_malloc)(size_t) = get("malloc");
+	void *(CDECL *crt_calloc)(size_t, size_t) = get("calloc");
+	void *(CDECL *crt_realloc)(void *, size_t) = get("realloc");
+	void (CDECL *crt_free)(void *) = get("free");
 	int (CDECL *(CDECL *set_new_handler)(int (CDECL *)(size_t)))(size_t) =
 		get("?_set_new_handler@@YAP6AHI@ZP6AHI@Z@Z");
 	void (CDECL *(CDECL *set_terminate)(void (CDECL *)(void)))(void) =
@@ -231,6 +239,10 @@ static void test_misc(void)
 	op_delete(p);
 	CHECK((p = op_new_array(32)) != NULL);
 	op_delete(p);
+	CHECK((p = op_new(24)) != NULL);
+	op_delete_sized(p, 24);
+	CHECK((p = op_new_array(48)) != NULL);
+	op_delete_array_sized(p, 48);
 
 	/*
 	 * Out of memory: the new handler is asked until it gives up. (The
@@ -241,7 +253,32 @@ static void test_misc(void)
 		CHECK(op_new((size_t)-64) == NULL);
 		CHECK_EQ(handler_calls, 3);
 	}
+	handler_calls = 0;
+	CHECK_EQ(callnewh(1), 1);
+	CHECK_EQ(handler_calls, 1);
+
+	/* malloc, calloc and realloc ask it only under _set_new_mode(1). */
+	if (!VFW_SANITIZER_BUILD) {
+		handler_calls = 0;
+		CHECK(crt_malloc((size_t)-64) == NULL);
+		CHECK_EQ(handler_calls, 0);
+		CHECK_EQ(set_new_mode(1), 0);
+		CHECK(crt_malloc((size_t)-64) == NULL);
+		CHECK_EQ(handler_calls, 3);
+		handler_calls = 0;
+		CHECK(crt_calloc((size_t)-64, 1) == NULL);
+		CHECK_EQ(handler_calls, 3);
+		handler_calls = 0;
+		CHECK(crt_calloc(0x10000, 0x10000) == NULL);	/* overflows */
+		CHECK_EQ(handler_calls, 0);
+		CHECK((p = crt_malloc(16)) != NULL);
+		CHECK(crt_realloc(p, (size_t)-64) == NULL);
+		CHECK_EQ(handler_calls, 3);
+		crt_free(p);
+		CHECK_EQ(set_new_mode(0), 1);
+	}
 	CHECK(set_new_handler(NULL) == new_handler);
+	CHECK_EQ(callnewh(1), 0);
 
 	CHECK(set_terminate(term_a) == NULL);
 	CHECK(set_terminate(term_b) == term_a);

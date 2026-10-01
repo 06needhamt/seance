@@ -47,6 +47,7 @@
 
 #include "runtime/seh.h"
 #include "runtime/teb.h"
+#include "win32/crt.h"
 #include "win32/internal.h"
 
 #define CRTFN(ret) static ret STUB_CDECL
@@ -592,19 +593,28 @@ crt__CxxThrowException(void *object, const struct exception_type *type)
 
 /* operator new and delete. */
 
+typedef int (STUB_CDECL *new_handler_fn)(size_t);
+
+/* Calls the new handler: nonzero if it says to try again. */
+CRTFN(int) crt__callnewh(size_t size)
+{
+	new_handler_fn f = new_handler;
+	return f && f(size);
+}
+
 static void *cxx_new(size_t size)
 {
 	for (;;) {
 		void *p = malloc(size ? size : 1);
-		if (p || !new_handler || !new_handler(size))
+		if (p || !crt__callnewh(size))
 			return p;
 	}
 }
 
 CRTFN(void *) crt_operator_new(size_t size) { return cxx_new(size); }
 CRTFN(void) crt_operator_delete(void *p) { free(p); }
-
-typedef int (STUB_CDECL *new_handler_fn)(size_t);
+/* The sized forms (/Zc:sizedDealloc) ignore the size. */
+CRTFN(void) crt_operator_delete_sized(void *p, size_t size) { free(p); }
 
 CRTFN(new_handler_fn) crt__set_new_handler(new_handler_fn f)
 {
@@ -623,6 +633,11 @@ CRTFN(int) crt__set_new_mode(int mode)
 }
 
 CRTFN(int) crt__query_new_mode(void) { return new_mode; }
+
+int crt_malloc_retry(size_t size)
+{
+	return new_mode && crt__callnewh(size);
+}
 
 /* type_info. */
 
@@ -986,6 +1001,8 @@ const struct builtin_export crt_cxx_exports[] = {
 	M("??_U@YAPAXI@Z", crt_operator_new),
 	M("??3@YAXPAX@Z", crt_operator_delete),
 	M("??_V@YAXPAX@Z", crt_operator_delete),
+	M("??3@YAXPAXI@Z", crt_operator_delete_sized),
+	M("??_V@YAXPAXI@Z", crt_operator_delete_sized),
 	M("?_set_new_handler@@YAP6AHI@ZP6AHI@Z@Z", crt__set_new_handler),
 	M("?_query_new_handler@@YAP6AHI@ZXZ", crt__query_new_handler),
 	M("?_set_new_mode@@YAHH@Z", crt__set_new_mode),
@@ -994,6 +1011,7 @@ const struct builtin_export crt_cxx_exports[] = {
 	E(_set_new_mode),
 	E(_query_new_handler),
 	E(_query_new_mode),
+	E(_callnewh),
 	/* type_info. */
 	M("??_7type_info@@6B@", ti_vtable.fn),
 	M("??1type_info@@UAE@XZ", crt_ti_dtor),

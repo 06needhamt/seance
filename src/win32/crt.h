@@ -17,4 +17,11 @@
 int crt_vformat(int wide, const void *fmt, va_list ap, void **out,
 		size_t *len);
 
+/*
+ * After the CRT's malloc, calloc or realloc failed to get size bytes:
+ * nonzero to try again, when _set_new_mode(1) is in effect and the new
+ * handler (see crt_cxx.c) says it freed some memory.
+ */
+int crt_malloc_retry(size_t size);
+
 #endif /* VFW_WIN32_CRT_H */
