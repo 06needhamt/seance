@@ -1,3 +1,4 @@
+; SPDX-License-Identifier: GPL-2.0-only
 ; comctl32 imported by ordinal only, as MSVC-built code imports the
 ; functions comctl32.lib names only by ordinal (DPA, DSA, Alloc,
 ; subclassing); a name at the wrong ordinal would call the wrong one.

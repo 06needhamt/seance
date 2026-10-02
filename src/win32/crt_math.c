@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * msvcrt: <math.h>. Standard-name functions forward straight to libm; the
  * MSVC-only names (leading underscore, or a different spelling of the same

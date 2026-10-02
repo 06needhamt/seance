@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * advapi32's security functions, for one pretend machine with one user:
  * the Unix user, as GetUserName names them, an administrator on Windows

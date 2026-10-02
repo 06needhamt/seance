@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * version.dll, called through its export table: version blocks from
  * files, loaded modules and the built-in DLLs, and VerQueryValue on them.

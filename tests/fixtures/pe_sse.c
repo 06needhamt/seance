@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Code built the way GCC-built and SIMD codecs are: SSE2, and a 16-byte
  * stack boundary assumed on entry, so aligned stack spills (movaps) fault

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * seance probe <dll|fourcc> [in.avi]: open a codec and report what it
  * says about itself and which formats it accepts.

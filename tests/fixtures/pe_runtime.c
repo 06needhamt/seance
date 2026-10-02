@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Checks the runtime from the Win32 side: the TEB behind %fs, GetLastError
  * through it, the x87 control word, and imports of unimplemented functions.

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * ntdll.dll: the few Rtl functions DLLs import directly.
  */

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Holds absolute pointers that are only correct after relocation. Built
  * twice: pe_reloc.dll keeps its .reloc section, pe_noreloc.dll strips it.

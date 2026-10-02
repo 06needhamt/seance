@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * An in-process COM server that also uses version.dll and ole32 from the
  * Win32 side, as a codec with a COM part would. com_run() creates its own

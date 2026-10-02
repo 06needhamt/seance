@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * seance convert <in.avi> -o <out>: write an AVI's uncompressed video
  * as Y4M, BMP files or raw frames, without a codec.

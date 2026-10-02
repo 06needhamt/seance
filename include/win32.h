@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Umbrella header for the Win32 definitions used by libseance.
  */

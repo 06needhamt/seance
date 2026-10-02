@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
 # Cross-checks the AVI reader, the AVI writer and the output writers against
 # FFmpeg:
 #   - FFmpeg reads the AVIs our writer produced (AVI 1.0 and OpenDML) and

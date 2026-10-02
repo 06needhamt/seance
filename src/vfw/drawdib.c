@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * DrawDib: drawing DIBs, compressed or not, onto a DC, after Wine's
  * dlls/msvfw32/drawdib.c. A compressed DIB is decompressed by a codec

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * PE parsing without loading: headers, exports, imports, TLS, resources,
  * version info, and robustness against truncated and corrupted files.

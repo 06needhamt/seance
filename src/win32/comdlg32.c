@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * comdlg32.dll, headless: the common dialogs, answered without a GUI.
  *

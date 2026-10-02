@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 # Runs a command and writes its standard output to a file:
 #
 #   cmake -DOUTPUT=<file> -P capture.cmake <command> [args...]

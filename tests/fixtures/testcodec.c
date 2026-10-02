@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * testcodec.dll: a small lossless VfW codec, FOURCC 'TST0', for testing
  * the harness's driver and ICM layers the way a real codec would use them.

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * SAFEARRAYs, laid out as Windows lays them out (after Wine's
  * safearray.c): the bounds are stored last dimension first

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * COM definitions used by ole32 (guiddef.h, winerror.h, wtypes.h,
  * unknwn.h, objidl.h, objbase.h). Interfaces are declared the way the

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * OLE Automation (oleaut32): BSTRs, VARIANTs, SAFEARRAYs, the date and
  * currency types, and the IDispatch and error-info interfaces they

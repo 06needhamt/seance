@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * The VfW layer: the codec registry, the installable-driver lifecycle, the
  * ICM API and the winmm / msvfw32 built-ins, driven against testcodec.dll.

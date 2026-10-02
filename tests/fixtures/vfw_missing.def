@@ -1,3 +1,4 @@
+; SPDX-License-Identifier: GPL-2.0-only
 ; An import library for functions no kernel32 has, to test trap thunks.
 LIBRARY kernel32.dll
 EXPORTS

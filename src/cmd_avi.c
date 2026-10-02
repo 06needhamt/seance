@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * seance avi <file.avi> [--chunks]: describe an AVI file's headers,
  * streams and index.

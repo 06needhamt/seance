@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * comctl32: dynamic pointer and structure arrays (DPA, DSA), the Alloc
  * family and Str_GetPtr/Str_SetPtr, after Wine's dpa.c and dsa.c.

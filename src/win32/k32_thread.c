@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * kernel32: threads, TLS and FLS slots, sleeping, process exit.
  */

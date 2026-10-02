@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * kernel32: version and system information, environment, command line,
  * startup info, debug output, error mode and FormatMessage.

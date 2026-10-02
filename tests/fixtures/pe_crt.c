@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Exercises msvcrt's math and string functions, imported the way a codec
  * built with a dynamic CRT (/MD) would.

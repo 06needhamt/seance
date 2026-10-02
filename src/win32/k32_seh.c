@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * kernel32: RaiseException and the top-level (Unhandled)ExceptionFilter
  * pair. RtlUnwind, mainly an ntdll export, is also given here since some

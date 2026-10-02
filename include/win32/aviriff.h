@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * AVI file format definitions (aviriff.h): chunk ids, header flags, index
  * types, and the main and stream headers. The index chunks are parsed field

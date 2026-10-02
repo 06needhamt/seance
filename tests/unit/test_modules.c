@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Loading DLLs with their dependencies: import binding by name, ordinal and
  * data, forwarders, reference counts, DllMain and TLS notifications, page

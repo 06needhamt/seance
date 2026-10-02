@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * seance info <dll>: describe a PE image without loading or running it.
  */

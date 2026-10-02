@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Module table: search, load with dependencies, resolve exports, unload.
  */

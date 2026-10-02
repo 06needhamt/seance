@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Round-trips codec settings through the registry from the Win32 side:
  * reg_write stores them, and reg_read (run after the harness has reloaded

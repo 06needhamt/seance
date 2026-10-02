@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * __try/__except/__finally as MSVC compiles them for a DLL with a dynamic
  * CRT, against msvcrt's _except_handler3 (VC6-style frames) and

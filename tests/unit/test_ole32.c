@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * ole32, called through its export table: apartments, task memory, GUID
  * strings, and class objects, both registered in-process and loaded from

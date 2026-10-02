@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * seance encode <codec> <input> -o <out.avi>: compress video with a
  * VfW codec into an AVI, through the ICSeqCompressFrame* sequence API.

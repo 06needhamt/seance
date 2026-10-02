@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
 # A quick run of every CLI command: the usage paths, failures on files that
 # aren't what a command wants, and, when the fixture DLLs were built, info
 # and probe on them.

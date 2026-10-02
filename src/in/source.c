@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Frame sources: Y4M, AVI, BMP files and raw frames.
  */

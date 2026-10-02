@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * msvcrt.dll and the whole family of names real Windows CRTs ship under
  * (msvcr70-msvcr140, msvcp*, vcruntime140, ucrtbase, the api-ms-win-crt-*

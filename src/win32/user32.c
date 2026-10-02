@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * user32.dll: message boxes, system metrics and colours, DCs and
  * painting, rectangles, input state, icons, cursors and bitmaps, window

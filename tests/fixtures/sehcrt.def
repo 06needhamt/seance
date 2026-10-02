@@ -1,3 +1,4 @@
+; SPDX-License-Identifier: GPL-2.0-only
 ; msvcrt's SEH helpers, imported as a VC6-VC8 /MD DLL does (mingw's own
 ; libmsvcrt.a doesn't carry all of them).
 LIBRARY msvcrt.dll

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * msvcrt: the handlers behind MSVC's __try/__except/__finally on i386,
  * for DLLs built with a dynamic CRT (/MD). Such a DLL puts msvcrt's

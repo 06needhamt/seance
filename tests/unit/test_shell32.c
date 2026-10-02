@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * shell32, called through its export table: special folders, item ID
  * lists, CommandLineToArgvW, the headless ShellExecute and dialogs,

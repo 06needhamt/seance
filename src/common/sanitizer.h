@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * VFW_SANITIZER_BUILD: 1 in AddressSanitizer builds, whose memory layout
  * and fault handling the harness leaves alone.

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Shared by the test fixture DLLs. They are built with -nostdlib, so they
  * link against nothing but each other; <windows.h> is used for types only.

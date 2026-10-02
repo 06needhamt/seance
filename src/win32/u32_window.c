@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * user32: window classes, windows, message queues and timers - headless.
  *

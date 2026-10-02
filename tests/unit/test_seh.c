@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * SEH dispatch: pe_seh.dll installs fs:[0] frames by hand and faults under
  * them; the harness has to build EXCEPTION_RECORD/CONTEXT, walk the chain,

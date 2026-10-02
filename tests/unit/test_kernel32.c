@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * The kernel32 stubs, called through the export table the way a DLL's
  * imports reach them.

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * shell32 definitions from shlobj.h, shtypes.h and shobjidl.h: special
  * folders (CSIDL), item ID lists and folder attributes.

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * gdi32 internals, shared between its source files and with user32 (whose
  * GetDC hands out display DCs, and whose FillRect paints with brushes).

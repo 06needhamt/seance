@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * msvcrt: <string.h>, <stdlib.h>'s string/number conversions, and the
  * handful of MSVC-only spellings (a leading underscore, or "i" for a

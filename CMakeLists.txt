@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 # libseance build.
 #
 #   cmake -B build            configure (or: cmake --preset default)

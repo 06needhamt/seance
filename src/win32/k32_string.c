@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * kernel32: code pages, lstr*, string comparison and mapping, character
  * types and locale information. The locale is always en-US (0x409).

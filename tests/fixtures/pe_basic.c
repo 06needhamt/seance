@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Exports by name, by ordinal only, and a data export; counts DllMain calls.
  */

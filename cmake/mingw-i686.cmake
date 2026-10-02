@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 # Toolchain for the test fixture DLLs: 32-bit Windows with mingw-w64.
 #
 # The prefix can be changed with -DVFW_MINGW_PREFIX=... (default

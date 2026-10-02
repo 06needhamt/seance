@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * oleaut32 internals, shared between oleaut32.c (BSTRs, VARIANTs and the
  * rest), oleaut_conv.c (conversions and dates), oleaut_array.c

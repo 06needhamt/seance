@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * C++ exceptions as MSVC compiles them for a DLL with a dynamic CRT,
  * against msvcrt's __CxxFrameHandler and _CxxThrowException. mingw has

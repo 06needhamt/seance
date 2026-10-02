@@ -1,3 +1,4 @@
+; SPDX-License-Identifier: GPL-2.0-only
 ; oleaut32 imported by ordinal only, as MSVC's oleaut32.lib has code
 ; import most of it (a name at the wrong ordinal would call the wrong
 ; function, so this checks the harness's numbering).

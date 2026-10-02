@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Crash and hang reports: testcodec.dll faults or hangs on request, in a
  * child process, and the report has to say where and in which call.

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Frame sinks: Y4M, BMP sequences and raw streams.
  */

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Checks the include/win32 headers against known Windows values. This runs
  * without mingw-w64; tests/abi/ does a fuller cross-check when it is present.

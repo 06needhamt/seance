@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Structured exception handling: dispatch through the fs:[0] chain of
  * EXCEPTION_REGISTRATION_RECORDs.

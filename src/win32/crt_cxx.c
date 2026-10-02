@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * msvcrt: C++ exceptions as MSVC compiles them for i386, after Wine's
  * except_i386.c and cppexcept.c, for DLLs built with a dynamic CRT (/MD,

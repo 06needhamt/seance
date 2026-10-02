@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * kernel32: files, standard handles, directories, search, temporary files,
  * paths, drives, console output and file mappings.

@@ -1,6 +1,7 @@
+<!-- SPDX-License-Identifier: GPL-2.0-only -->
 # libseance
 
-[![CI](https://github.com/06needhamt/vfw-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/06needhamt/vfw-harness/actions/workflows/ci.yml)
+[![CI](https://github.com/06needhamt/libseance/actions/workflows/ci.yml/badge.svg)](https://github.com/06needhamt/libseance/actions/workflows/ci.yml)
 
 libseance is a harness for loading and running 32-bit Video for Windows
 (VfW / ICM) codec DLLs natively on Linux, without Wine. It maps the PE image

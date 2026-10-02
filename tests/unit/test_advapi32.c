@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * The advapi32 registry, called through the export table the way a DLL's
  * imports reach it, and its .reg file; RegGetValue, change notification,

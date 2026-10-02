@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * gdi32, called through the export table the way a DLL's imports reach it:
  * objects and DCs, DIB sections and conversions, blits, palettes, text.

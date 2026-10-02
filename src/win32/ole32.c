@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * ole32.dll, the part codecs use: apartments (CoInitialize and friends,
  * counted per thread but otherwise without effect), task memory, GUID

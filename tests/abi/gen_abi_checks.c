@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Prints one _Static_assert per entry in abi_list.h, using the sizes,
  * offsets, alignments and values from our own include/win32 headers.

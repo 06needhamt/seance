@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * The installed codecs: which DLL serves each type.handler pair, the way
  * the [drivers32] section of system.ini (or the Drivers32 registry key)

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * msvcrt: the compiler-generated helpers MSVC emits calls to for 64-bit
  * integer arithmetic and float-to-int truncation on i386, where there's no

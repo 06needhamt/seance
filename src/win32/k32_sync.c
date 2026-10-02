@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * kernel32: critical sections, interlocked operations, events, mutexes,
  * semaphores and waiting.

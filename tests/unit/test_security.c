@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * advapi32's security functions, called through its export table: tokens
  * and privileges, SIDs and account names, ACLs and security descriptors,

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Crash and hang reports. When DLL code faults, the harness says where
  * (module+offset), what it touched, and which call into the DLL was in

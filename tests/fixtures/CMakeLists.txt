@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 # The test fixture DLLs, cross-compiled with mingw-w64. The top-level build
 # configures this directory as an external project with
 # cmake/mingw-i686.cmake as its toolchain; the DLLs go to VFW_FIXTURE_DIR.

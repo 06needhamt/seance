@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * PE32 image format: the on-disk structures and constants the loader uses.
  */

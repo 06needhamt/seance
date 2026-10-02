@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * PE32 parsing, mapping, relocation, import/export/TLS/resource walking.
  */

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * The registry behind advapi32: a tree of keys and values, kept in memory
  * and saved after every change to a .reg file in the format regedit

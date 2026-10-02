@@ -1,3 +1,4 @@
+; SPDX-License-Identifier: GPL-2.0-only
 LIBRARY pe_dep.dll
 EXPORTS
 	dep_compute @1

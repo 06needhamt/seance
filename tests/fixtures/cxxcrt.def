@@ -1,3 +1,4 @@
+; SPDX-License-Identifier: GPL-2.0-only
 ; msvcrt's C++ exception support, imported as a VC6-VC8 /MD DLL with
 ; C++ exceptions does (mingw's own libmsvcrt.a doesn't carry it).
 LIBRARY msvcrt.dll

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * msvcrt: CRT startup support a dynamically linked codec's compiler-
  * generated init code calls before/after its own DllMain, plus the small

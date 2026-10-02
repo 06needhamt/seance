@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Common dialog definitions (commdlg.h, cderr.h). On 32-bit Windows the
  * structures in commdlg.h are byte-packed (pshpack1.h), which moves

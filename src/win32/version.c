@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * version.dll: GetFileVersionInfo* and VerQueryValue, over a file's
  * RT_VERSION resource.

@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
 # Runs `info` and `probe` over every DLL in a directory of codecs you supply
 # (*.dll, *.drv, *.ax, *.acm, any case), and reports for each whether it
 # parses, which of its imports aren't implemented, and whether it opens and

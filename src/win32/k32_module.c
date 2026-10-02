@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * kernel32: LoadLibrary and friends, module handles and names, resources.
  */

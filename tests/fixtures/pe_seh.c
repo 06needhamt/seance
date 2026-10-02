@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Exercises the harness's SEH dispatch: installing frames on the fs:[0]
  * chain by hand (the compiler's own __try/__except needs a CRT we don't

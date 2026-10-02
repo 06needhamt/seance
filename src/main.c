@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * seance: load and run 32-bit Video for Windows codecs on Linux.
  */

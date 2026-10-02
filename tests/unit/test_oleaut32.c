@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * oleaut32 through its export table: BSTRs, VARIANTs and their
  * conversions, dates, SAFEARRAYs, error information (also through

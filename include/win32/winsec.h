@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Security definitions for advapi32: SIDs, tokens, privileges, access
  * control lists and security descriptors (winnt.h, accctrl.h), and the

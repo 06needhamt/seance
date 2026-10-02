@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * comctl32 through its export table: dynamic arrays, the Alloc and Str_
  * helpers, the controls' state, window subclassing, image lists, the

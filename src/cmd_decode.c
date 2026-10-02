@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * seance decode <codec> <in.avi> -o <out>: decompress an AVI's video
  * stream with a VfW codec and write the frames as Y4M, BMP files or raw.

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * The runtime core: TEBs behind %fs, TLS slots, built-in modules and trap
  * thunks for unimplemented imports.

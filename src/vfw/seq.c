@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * ICSeqCompressFrameStart / ICSeqCompressFrame / ICSeqCompressFrameEnd and
  * ICCompressorFree, after Wine's dlls/msvfw32/msvideo_main.c: compressing

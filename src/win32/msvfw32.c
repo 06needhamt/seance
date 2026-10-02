@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * msvfw32.dll: the ICM API from src/vfw/icm.c, for codecs that call back
  * into it (wrappers opening another codec, for instance), the

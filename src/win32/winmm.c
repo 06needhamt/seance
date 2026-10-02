@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * winmm.dll: the installable-driver functions codecs use (DefDriverProc
  * above all), on top of src/vfw/driver.c, and the multimedia timer.
