@@ -166,7 +166,7 @@ static int crt_fmode, crt_commode = 1;	/* _O_TEXT, and full buffering */
  * friends): report it and stop, as msvcrt's own _amsg_exit does. */
 CRTFN(void) crt__amsg_exit(int code)
 {
-	fprintf(stderr, "vfw-harness: msvcrt runtime error %d\n", code);
+	fprintf(stderr, "seance: msvcrt runtime error %d\n", code);
 	fflush(stderr);
 	_exit(255);
 }

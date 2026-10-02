@@ -1,5 +1,5 @@
 /*
- * Umbrella header for the Win32 definitions used by the VfW harness.
+ * Umbrella header for the Win32 definitions used by libseance.
  */
 #ifndef VFW_WIN32_H
 #define VFW_WIN32_H

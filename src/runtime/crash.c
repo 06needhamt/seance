@@ -78,7 +78,7 @@ static void report_call(const struct slot *s)
 		snprintf(name, sizeof(name), "%u", s->cur.code);
 		code = name;
 	}
-	snprintf(line, sizeof(line), "vfw-harness:   in %s(%s) of %s\n",
+	snprintf(line, sizeof(line), "seance:   in %s(%s) of %s\n",
 		 s->cur.what, code, where);
 	put(line);
 }
@@ -100,10 +100,10 @@ static void report_fault(int sig, const void *pc, const void *fault_addr)
 
 	describe(pc, where, sizeof(where));
 	if (sig == SIGSEGV || sig == SIGBUS)
-		snprintf(line, sizeof(line), "vfw-harness: crash: %s at %s, "
+		snprintf(line, sizeof(line), "seance: crash: %s at %s, "
 			 "accessing %p\n", signame(sig), where, fault_addr);
 	else
-		snprintf(line, sizeof(line), "vfw-harness: crash: %s at %s\n",
+		snprintf(line, sizeof(line), "seance: crash: %s at %s\n",
 			 signame(sig), where);
 	put(line);
 	report_call(mine);
@@ -157,7 +157,7 @@ static void *watchdog(void *arg)
 			if (!s->used || !s->depth || elapsed(&s->start) < timeout_secs)
 				continue;
 			char line[160];
-			snprintf(line, sizeof(line), "vfw-harness: timeout: a call "
+			snprintf(line, sizeof(line), "seance: timeout: a call "
 				 "into a DLL took more than %d s (VFW_TIMEOUT)\n",
 				 timeout_secs);
 			put(line);
@@ -175,7 +175,7 @@ int crash_install(void)
 		char *end;
 		long v = strtol(t, &end, 10);
 		if (*end || v <= 0 || v > 86400) {
-			fprintf(stderr, "vfw-harness: VFW_TIMEOUT wants seconds, not "
+			fprintf(stderr, "seance: VFW_TIMEOUT wants seconds, not "
 				"'%s'\n", t);
 			return -1;
 		}
@@ -201,7 +201,7 @@ int crash_install(void)
 		int err = pthread_create(&w, &attr, watchdog, NULL);
 		pthread_attr_destroy(&attr);
 		if (err) {
-			fprintf(stderr, "vfw-harness: cannot start the watchdog: %s\n",
+			fprintf(stderr, "seance: cannot start the watchdog: %s\n",
 				strerror(err));
 			return -1;
 		}

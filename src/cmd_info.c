@@ -1,5 +1,5 @@
 /*
- * vfw-harness info <dll>: describe a PE image without loading or running it.
+ * seance info <dll>: describe a PE image without loading or running it.
  */
 #include <stdio.h>
 #include <string.h>
@@ -342,13 +342,13 @@ static void print_resources(const struct pe_image *img)
 int cmd_info(int argc, char **argv)
 {
 	if (argc != 2) {
-		fprintf(stderr, "usage: vfw-harness info <dll>\n");
+		fprintf(stderr, "usage: seance info <dll>\n");
 		return 2;
 	}
 
 	struct pe_image *img = pe_open(argv[1]);
 	if (!img) {
-		fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+		fprintf(stderr, "seance: %s\n", vfw_error());
 		return 1;
 	}
 

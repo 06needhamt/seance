@@ -15,7 +15,7 @@
 
 #define WINDOWS_DIR "C:\\WINDOWS"
 #define SYSTEM_DIR  "C:\\WINDOWS\\system32"
-#define COMPUTER    "VFWHARNESS"
+#define COMPUTER    "SEANCE"
 
 DWORD copy_out_a(const char *s, LPSTR buf, DWORD size)
 {
@@ -547,7 +547,7 @@ WINFN(DWORD) k32_ExpandEnvironmentStringsW(LPCWSTR src, LPWSTR dst, DWORD size)
 
 /* Command line and startup info. */
 
-static char cmdline_a[] = "vfw-harness.exe";
+static char cmdline_a[] = "seance.exe";
 static WCHAR cmdline_w[] = { 'v', 'f', 'w', '-', 'h', 'a', 'r', 'n', 'e', 's',
 			     's', '.', 'e', 'x', 'e', 0 };
 

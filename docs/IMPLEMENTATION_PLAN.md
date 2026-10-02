@@ -1,4 +1,4 @@
-# VfW Harness: audit and implementation plan
+# libseance: audit and implementation plan
 
 ## Context
 
@@ -27,7 +27,7 @@ Everything was missing then: the PE loader, the Win32 runtime, the ICM layer, AV
 The harness is one 32-bit C11 program (`gcc -m32`), because the codecs are i386 code:
 
 ```
-cli: vfw-harness info | probe | decode | encode | list
+cli: seance info | probe | decode | encode | list
  ├─ avi/     RIFF AVI + OpenDML reader/writer
  ├─ out/     y4m / bmp / raw writers, colour conversion
  ├─ vfw/     mini msvfw32: driver registry, ICOpen/ICLocate/ICSendMessage + typed wrappers
@@ -203,6 +203,6 @@ All milestones are checked against **test fixtures built in the repo**, never ag
 ## Verification
 
 - `apt install gcc-multilib cmake ninja-build mingw-w64`, then `cmake --preset default`, `cmake --build --preset default` and `ctest --preset default`. This runs the unit tests (reloc math, AVI parser, colour conversion) and the fixture-DLL integration tests from Phases 1–4.
-- `VFW_TRACE=1 ./vfw-harness probe tests/fixtures/testcodec.dll` shows the full DRV/ICM sequence with no trap hits.
-- Round trip: `./vfw-harness encode testcodec.dll in.y4m -o t.avi && ./vfw-harness decode testcodec.dll t.avi -o out.y4m && cmp in.y4m out.y4m`.
-- Optional manual check against any real codec: `./vfw-harness info <any.dll>` to see import coverage, then `probe` and `decode` on a matching AVI.
+- `VFW_TRACE=1 ./seance probe tests/fixtures/testcodec.dll` shows the full DRV/ICM sequence with no trap hits.
+- Round trip: `./seance encode testcodec.dll in.y4m -o t.avi && ./seance decode testcodec.dll t.avi -o out.y4m && cmp in.y4m out.y4m`.
+- Optional manual check against any real codec: `./seance info <any.dll>` to see import coverage, then `probe` and `decode` on a matching AVI.

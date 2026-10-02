@@ -6,7 +6,7 @@
  * a real Windows export (UTF-16 or REGEDIT4 files are read too).
  *
  * The file is $VFW_REGISTRY, else $VFW_ROOT/registry.reg (default
- * ~/.vfw-harness/registry.reg). VFW_REGISTRY set but empty keeps the
+ * ~/.seance/registry.reg). VFW_REGISTRY set but empty keeps the
  * registry in memory only.
  *
  * Keys are named by full paths from a hive, e.g.

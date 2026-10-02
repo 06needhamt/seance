@@ -69,7 +69,7 @@ static void compute_ini_path(void)
 	else if (root && *root)
 		snprintf(ini_path, sizeof(ini_path), "%s/vfw.ini", root);
 	else
-		snprintf(ini_path, sizeof(ini_path), "%s/.vfw-harness/vfw.ini",
+		snprintf(ini_path, sizeof(ini_path), "%s/.seance/vfw.ini",
 			 home && *home ? home : "/tmp");
 }
 

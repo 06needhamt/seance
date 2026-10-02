@@ -1,5 +1,5 @@
 /*
- * vfw-harness avi <file.avi> [--chunks]: describe an AVI file's headers,
+ * seance avi <file.avi> [--chunks]: describe an AVI file's headers,
  * streams and index.
  */
 #include <stdio.h>
@@ -171,7 +171,7 @@ static void print_stream(const struct avi_file *avi, unsigned i, int chunks)
 
 static int usage(void)
 {
-	fprintf(stderr, "usage: vfw-harness avi <file.avi> [--chunks]\n");
+	fprintf(stderr, "usage: seance avi <file.avi> [--chunks]\n");
 	return 2;
 }
 
@@ -193,7 +193,7 @@ int cmd_avi(int argc, char **argv)
 
 	struct avi_file *avi = avi_open(path);
 	if (!avi) {
-		fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+		fprintf(stderr, "seance: %s\n", vfw_error());
 		return 1;
 	}
 

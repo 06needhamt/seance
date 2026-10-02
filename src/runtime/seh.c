@@ -231,7 +231,7 @@ static void report_unhandled_exception(const EXCEPTION_RECORD *rec)
 	char where[160], line[256];
 
 	mod_describe_address(rec->ExceptionAddress, where, sizeof(where));
-	snprintf(line, sizeof(line), "vfw-harness: crash: unhandled exception "
+	snprintf(line, sizeof(line), "seance: crash: unhandled exception "
 		 "0x%08lX at %s\n", (unsigned long)rec->ExceptionCode, where);
 	fputs(line, stderr);
 	fflush(stderr);

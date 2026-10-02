@@ -5,11 +5,11 @@
 # answers ICM_GETINFO. Nothing specific to any codec is checked. It fails
 # only if the harness itself crashes or hangs, or a file can't be parsed.
 #
-# usage: tests/samples.sh <vfw-harness> <dir> [<timeout in seconds>]
+# usage: tests/samples.sh <seance> <dir> [<timeout in seconds>]
 set -u
 
-harness=${1:?usage: $0 <vfw-harness> <dir> [<timeout>]}
-dir=${2:?usage: $0 <vfw-harness> <dir> [<timeout>]}
+harness=${1:?usage: $0 <seance> <dir> [<timeout>]}
+dir=${2:?usage: $0 <seance> <dir> [<timeout>]}
 timeout=${3:-30}
 failures=0
 count=0
@@ -51,7 +51,7 @@ for f in "$dir"/*; do
 	rc=$?
 	if bad_status $rc; then
 		echo "FAIL $name: probe crashed or hung (exit $rc)"
-		sed 's/^/     /' "$out" | grep 'vfw-harness:' | tail -n 5
+		sed 's/^/     /' "$out" | grep 'seance:' | tail -n 5
 		failures=$((failures + 1))
 		continue
 	fi
@@ -59,8 +59,8 @@ for f in "$dir"/*; do
 	if [ $rc -eq 0 ]; then
 		state="opens as '${handler:-?}'"
 	else
-		state="doesn't open: $(grep 'vfw-harness:' "$out" | head -n 1 |
-			sed 's/^vfw-harness: //')"
+		state="doesn't open: $(grep 'seance:' "$out" | head -n 1 |
+			sed 's/^seance: //')"
 	fi
 	echo "ok   $name: $traps unimplemented import(s), $native DLL(s)" \
 		"needed from disk, $state"

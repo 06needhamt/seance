@@ -6,10 +6,10 @@
 # With lowmem=1 it also checks, through testcodec's strict mode, that the
 # codec never sees a pointer at or above 2 GB.
 #
-# usage: tests/smoke.sh <vfw-harness> <not a DLL or AVI> [<fixture dir> [lowmem]]
+# usage: tests/smoke.sh <seance> <not a DLL or AVI> [<fixture dir> [lowmem]]
 set -eu
 
-usage="usage: $0 <vfw-harness> <file> [<fixture dir> [lowmem]]"
+usage="usage: $0 <seance> <file> [<fixture dir> [lowmem]]"
 harness=${1:?$usage}
 junk=${2:?$usage}
 fixtures=${3:-}

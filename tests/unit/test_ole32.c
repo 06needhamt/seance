@@ -185,26 +185,26 @@ static void test_guids(void)
 	CHECK(g.Data1 == 0 && g.Data4[7] == 0);
 
 	/* ProgIDs, per-user classes winning over the machine's. */
-	set_class_value("HKEY_LOCAL_MACHINE\\Software\\Classes\\VfwHarness.Test\\CLSID",
+	set_class_value("HKEY_LOCAL_MACHINE\\Software\\Classes\\Seance.Test\\CLSID",
 			"{00000000-0000-0000-0000-000000000001}");
-	set_class_value("HKEY_CURRENT_USER\\Software\\Classes\\VfwHarness.Test\\CLSID",
+	set_class_value("HKEY_CURRENT_USER\\Software\\Classes\\Seance.Test\\CLSID",
 			CLSID_TEST);
 	set_class_value("HKEY_LOCAL_MACHINE\\Software\\Classes\\CLSID\\" CLSID_TEST
-			"\\ProgID", "VfwHarness.Test");
-	w = wide("VfwHarness.Test");
+			"\\ProgID", "Seance.Test");
+	w = wide("Seance.Test");
 	CHECK_EQ(CLSIDFromProgID(w, &g), S_OK);
 	CHECK(IsEqualGUID(&g, &clsid_test));
 	memset(&g, 0, sizeof(g));
 	CHECK_EQ(CLSIDFromString(w, &g), S_OK);
 	CHECK(IsEqualGUID(&g, &clsid_test));
 	free(w);
-	w = wide("VfwHarness.Nothing");
+	w = wide("Seance.Nothing");
 	CHECK_EQ(CLSIDFromProgID(w, &g), CO_E_CLASSSTRING);
 	CHECK_EQ(CLSIDFromString(w, &g), CO_E_CLASSSTRING);
 	free(w);
 	CHECK_EQ(ProgIDFromCLSID(&clsid_test, &str), S_OK);
 	s = narrow(str);
-	CHECK_STR(s, "VfwHarness.Test");
+	CHECK_STR(s, "Seance.Test");
 	free(s);
 	CoTaskMemFree(str);
 	CHECK_EQ(ProgIDFromCLSID(&iid_other, &str), REGDB_E_CLASSNOTREG);

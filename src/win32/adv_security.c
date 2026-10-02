@@ -119,7 +119,7 @@ static void computer_init(void)
 	DWORD n = sizeof(computer);
 
 	if (!get || !get(computer, &n))
-		strcpy(computer, "VFWHARNESS");
+		strcpy(computer, "SEANCE");
 }
 
 /* As GetComputerName reports it. */

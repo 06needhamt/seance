@@ -464,7 +464,7 @@ crt__seh_longjmp_unwind4(const struct jump_buffer *jmp)
 			       (const UINT_PTR *)jmp->unwind_data[0], 0 };
 
 	if (!p.cookie || crt_guarded(probe_eh4, &p) || !p.ok) {
-		fputs("vfw-harness: warning: longjmp: no cookie for an EH4 "
+		fputs("seance: warning: longjmp: no cookie for an EH4 "
 		      "frame's __try levels, which stay as they are\n", stderr);
 		return;
 	}

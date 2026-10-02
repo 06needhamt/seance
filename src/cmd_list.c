@@ -1,5 +1,5 @@
 /*
- * vfw-harness list [--no-open]: the codecs registered in vfw.ini.
+ * seance list [--no-open]: the codecs registered in vfw.ini.
  */
 #include <stdio.h>
 #include <string.h>
@@ -20,12 +20,12 @@ int cmd_list(int argc, char **argv)
 		if (!strcmp(argv[i], "--no-open")) {
 			open = 0;
 		} else {
-			fprintf(stderr, "usage: vfw-harness list [--no-open]\n");
+			fprintf(stderr, "usage: seance list [--no-open]\n");
 			return 2;
 		}
 	}
 	if (runtime_enter()) {
-		fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+		fprintf(stderr, "seance: %s\n", vfw_error());
 		return 1;
 	}
 

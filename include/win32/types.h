@@ -1,5 +1,5 @@
 /*
- * Basic Win32 types for the VfW harness.
+ * Basic Win32 types for libseance.
  *
  * These describe the ABI that 32-bit Windows DLLs expect. They are written
  * for a Linux i386 build: LONG is always 32-bit and WCHAR is always UTF-16,
@@ -12,7 +12,7 @@
 #include <stdint.h>
 
 #if !defined(__i386__) && !defined(VFW_ALLOW_NON_I386)
-#error "the VfW harness must be built for i386 (gcc -m32)"
+#error "libseance must be built for i386 (gcc -m32)"
 #endif
 
 /* Calling conventions. */

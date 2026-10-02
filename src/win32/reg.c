@@ -222,7 +222,7 @@ static void compute_file(void)
 	else if (root_dir && *root_dir)
 		snprintf(file, sizeof(file), "%s/registry.reg", root_dir);
 	else
-		snprintf(file, sizeof(file), "%s/.vfw-harness/registry.reg",
+		snprintf(file, sizeof(file), "%s/.seance/registry.reg",
 			 home && *home ? home : "/tmp");
 }
 

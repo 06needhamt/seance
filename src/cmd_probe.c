@@ -1,5 +1,5 @@
 /*
- * vfw-harness probe <dll|fourcc> [in.avi]: open a codec and report what it
+ * seance probe <dll|fourcc> [in.avi]: open a codec and report what it
  * says about itself and which formats it accepts.
  */
 #include <stdio.h>
@@ -17,7 +17,7 @@
 static int usage(void)
 {
 	fprintf(stderr,
-		"usage: vfw-harness probe <codec.dll | fourcc> [in.avi] [options]\n"
+		"usage: seance probe <codec.dll | fourcc> [in.avi] [options]\n"
 		"\n"
 		"  --fourcc <XXXX>    the handler to open a DLL as (default: from\n"
 		"                     vfw.ini, else 0, then what the codec reports)\n"
@@ -165,12 +165,12 @@ int cmd_probe(int argc, char **argv)
 	const BITMAPINFOHEADER *in = NULL;
 	if (avi_path) {
 		if (!(avi = avi_open(avi_path))) {
-			fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+			fprintf(stderr, "seance: %s\n", vfw_error());
 			return 1;
 		}
 		int s = avi_video_stream(avi);
 		if (s < 0 || !(in = avi_stream_bih(&avi->streams[s]))) {
-			fprintf(stderr, "vfw-harness: %s: no video stream\n", avi_path);
+			fprintf(stderr, "seance: %s: no video stream\n", avi_path);
 			avi_close(avi);
 			return 1;
 		}
@@ -254,7 +254,7 @@ int cmd_probe(int argc, char **argv)
 	ic_close(hic);
 	avi_close(avi);
 	if (!got)
-		fprintf(stderr, "vfw-harness: the codec did not answer ICM_GETINFO (%s)\n",
+		fprintf(stderr, "seance: the codec did not answer ICM_GETINFO (%s)\n",
 			icerr_name(got, err));
 	return got ? 0 : 1;
 }

@@ -8,7 +8,7 @@
 # msvfw32 (whose mingw import libraries the harness's built-in DLLs stand in
 # for).
 cmake_minimum_required(VERSION 3.20)
-project(vfw-harness-fixtures C RC)
+project(libseance-fixtures C RC)
 
 if(NOT VFW_FIXTURE_DIR)
 	set(VFW_FIXTURE_DIR ${CMAKE_BINARY_DIR}/dlls)

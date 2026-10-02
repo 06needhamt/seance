@@ -1,5 +1,5 @@
 /*
- * vfw-harness: load and run 32-bit Video for Windows codecs on Linux.
+ * seance: load and run 32-bit Video for Windows codecs on Linux.
  */
 #include <stdio.h>
 #include <string.h>
@@ -8,8 +8,8 @@
 #include "runtime/crash.h"
 #include "runtime/lowmem.h"
 
-#ifndef VFW_HARNESS_VERSION
-#define VFW_HARNESS_VERSION "0.1.0-dev"
+#ifndef SEANCE_VERSION
+#define SEANCE_VERSION "0.1.0-dev"
 #endif
 
 struct command {
@@ -40,8 +40,8 @@ static const struct command commands[] = {
 static void usage(FILE *out)
 {
 	fprintf(out,
-		"usage: vfw-harness <command> [args]\n"
-		"       vfw-harness --help | --version\n"
+		"usage: seance <command> [args]\n"
+		"       seance --help | --version\n"
 		"\n"
 		"commands:\n");
 	for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
@@ -65,7 +65,7 @@ int main(int argc, char **argv)
 		return 0;
 	}
 	if (!strcmp(cmd, "--version")) {
-		printf("vfw-harness %s\n", VFW_HARNESS_VERSION);
+		printf("seance %s\n", SEANCE_VERSION);
 		return 0;
 	}
 
@@ -74,7 +74,7 @@ int main(int argc, char **argv)
 		if (strcmp(cmd, c->name))
 			continue;
 		if (!c->run) {
-			fprintf(stderr, "vfw-harness: '%s' is not implemented yet\n",
+			fprintf(stderr, "seance: '%s' is not implemented yet\n",
 				cmd);
 			return 2;
 		}
@@ -85,7 +85,7 @@ int main(int argc, char **argv)
 		return lowmem_run(c->run, argc - 1, argv + 1);
 	}
 
-	fprintf(stderr, "vfw-harness: unknown command '%s'\n\n", cmd);
+	fprintf(stderr, "seance: unknown command '%s'\n\n", cmd);
 	usage(stderr);
 	return 2;
 }

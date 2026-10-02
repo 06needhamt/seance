@@ -330,8 +330,8 @@ static void test_accounts(void)
 	CHECK(ConvertStringSidToSidA(MACHINE "-1000", &s));
 	CHECK(LookupAccountSidA(NULL, s, name, &cn, domain, &cd, &use));
 	CHECK_STR(name, user());
-	CHECK_STR(domain, "VFWHARNESS");
-	CHECK(use == SidTypeUser && cn == strlen(user()) && cd == 10);
+	CHECK_STR(domain, "SEANCE");
+	CHECK(use == SidTypeUser && cn == strlen(user()) && cd == 6);
 	local_free(s);
 	CHECK(ConvertStringSidToSidA("S-1-1-0", &s));
 	cn = sizeof(name);
@@ -365,7 +365,7 @@ static void test_accounts(void)
 				 &cd, &use));
 	CHECK_SID(sid, "S-1-5-18");
 	char qualified[128];
-	snprintf(qualified, sizeof(qualified), "vfwharness\\%s", user());
+	snprintf(qualified, sizeof(qualified), "seance\\%s", user());
 	cb = sizeof(sid);
 	cd = sizeof(domain);
 	CHECK(LookupAccountNameA(NULL, qualified, sid, &cb, domain, &cd, &use));
@@ -384,7 +384,7 @@ static void test_accounts(void)
 	cb = sizeof(sid);
 	cd = 32;
 	CHECK(LookupAccountNameW(NULL, none, sid, &cb, wd, &cd, &use));
-	CHECK(use == SidTypeGroup && cd == 10 && wd[0] == 'V' && wd[10] == 0);
+	CHECK(use == SidTypeGroup && cd == 6 && wd[0] == 'S' && wd[6] == 0);
 	CHECK_SID(sid, MACHINE "-513");
 }
 

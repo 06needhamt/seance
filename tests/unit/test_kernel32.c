@@ -654,7 +654,7 @@ static void test_system(void)
 	CHECK_EQ(GetLastError(), ERROR_BUFFER_OVERFLOW);
 	len = sizeof(buf);
 	CHECK(GetComputerNameA(buf, &len));
-	CHECK_STR(buf, "VFWHARNESS");
+	CHECK_STR(buf, "SEANCE");
 
 	CHECK_EQ(GetEnvironmentVariableA("WINDIR", buf, sizeof(buf)), 10);
 	CHECK_STR(buf, "C:\\WINDOWS");
@@ -935,8 +935,8 @@ static void test_modules(void)
 	CHECK_EQ(GetLastError(), ERROR_MOD_NOT_FOUND);
 
 	CHECK(GetModuleHandleA(NULL) == (HMODULE)mod_main()->base);
-	CHECK_EQ(GetModuleFileNameA(NULL, buf, sizeof(buf)), 35);
-	CHECK_STR(buf, "C:\\WINDOWS\\system32\\vfw-harness.exe");
+	CHECK_EQ(GetModuleFileNameA(NULL, buf, sizeof(buf)), 30);
+	CHECK_STR(buf, "C:\\WINDOWS\\system32\\seance.exe");
 	CHECK_EQ(GetModuleFileNameA(h, buf, 8), 8);
 	CHECK_STR(buf, "C:\\WIND");
 	CHECK_EQ(GetLastError(), ERROR_INSUFFICIENT_BUFFER);

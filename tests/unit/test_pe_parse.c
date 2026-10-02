@@ -252,11 +252,11 @@ static int check_version(void *ctx, const char *table, const char *key,
 
 	CHECK_STR(table, "040904b0");
 	if (!strcmp(key, "FileDescription")) {
-		CHECK_STR(value, "vfw-harness PE test fixture");
+		CHECK_STR(value, "libseance PE test fixture");
 		v->description = 1;
 	}
 	if (!strcmp(key, "ProductName")) {
-		CHECK_STR(value, "vfw-harness");
+		CHECK_STR(value, "libseance");
 		v->product = 1;
 	}
 	return 0;

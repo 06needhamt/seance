@@ -22,9 +22,9 @@ BEGIN
 	BEGIN
 		BLOCK "040904b0"
 		BEGIN
-			VALUE "FileDescription", "vfw-harness PE test fixture"
+			VALUE "FileDescription", "libseance PE test fixture"
 			VALUE "FileVersion", "1.2.3.4"
-			VALUE "ProductName", "vfw-harness"
+			VALUE "ProductName", "libseance"
 		END
 	END
 	BLOCK "VarFileInfo"

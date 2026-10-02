@@ -67,7 +67,7 @@ int main(void)
 	} else {
 		int st = run_child(codec, TESTCODEC_CRASH, NULL, err, sizeof(err));
 		CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV);
-		CHECK(strstr(err, "vfw-harness: crash: SIGSEGV at testcodec.dll+0x"));
+		CHECK(strstr(err, "seance: crash: SIGSEGV at testcodec.dll+0x"));
 		CHECK(strstr(err, "accessing (nil)") || strstr(err, "accessing 0x0"));
 		CHECK(strstr(err, "in DriverProc(DRV_USER+0x") &&
 		      strstr(err, ") of testcodec.dll"));
@@ -77,7 +77,7 @@ int main(void)
 	int st = run_child(codec, TESTCODEC_HANG, "1", err, sizeof(err));
 	printf("timeout report:\n%s", err);
 	CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 124);
-	CHECK(strstr(err, "vfw-harness: timeout: a call into a DLL took more "
+	CHECK(strstr(err, "seance: timeout: a call into a DLL took more "
 		      "than 1 s"));
 	CHECK(strstr(err, "in DriverProc(DRV_USER+0x") &&
 	      strstr(err, ") of testcodec.dll"));
