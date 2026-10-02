@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Installable drivers: what winmm's OpenDriver / SendDriverMessage /
  * CloseDriver do. A driver is a DLL exporting DriverProc (or, for

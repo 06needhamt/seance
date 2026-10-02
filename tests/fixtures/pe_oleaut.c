@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Uses oleaut32 from Win32 code, importing it by ordinal only (see
  * oleaut_ord.def): BSTRs, a VARIANT converted in place, a SAFEARRAY of

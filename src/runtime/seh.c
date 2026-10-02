@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Structured exception handling: dispatch through the fs:[0] chain of
  * EXCEPTION_REGISTRATION_RECORDs.
@@ -231,7 +232,7 @@ static void report_unhandled_exception(const EXCEPTION_RECORD *rec)
 	char where[160], line[256];
 
 	mod_describe_address(rec->ExceptionAddress, where, sizeof(where));
-	snprintf(line, sizeof(line), "vfw-harness: crash: unhandled exception "
+	snprintf(line, sizeof(line), "seance: crash: unhandled exception "
 		 "0x%08lX at %s\n", (unsigned long)rec->ExceptionCode, where);
 	fputs(line, stderr);
 	fflush(stderr);

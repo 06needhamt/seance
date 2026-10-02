@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 #include <dirent.h>
 #include <errno.h>
 #include <limits.h>
@@ -38,7 +39,7 @@ static void init_root(void)
 	if (root && *root)
 		snprintf(drive_c, sizeof(drive_c), "%s/drive_c", root);
 	else
-		snprintf(drive_c, sizeof(drive_c), "%s/.vfw-harness/drive_c",
+		snprintf(drive_c, sizeof(drive_c), "%s/.seance/drive_c",
 			 home && *home ? home : "/tmp");
 	snprintf(dir, sizeof(dir), "%s/windows/system32", drive_c);
 	mkdirs(dir);

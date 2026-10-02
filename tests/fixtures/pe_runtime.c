@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Checks the runtime from the Win32 side: the TEB behind %fs, GetLastError
  * through it, the x87 control word, and imports of unimplemented functions.
@@ -38,12 +39,12 @@ EXPORT WORD rt_fpu_control(void)
 }
 
 /* Declared by vfw_missing.def: kernel32 has no such function. */
-DWORD WINAPI VfwHarnessTestMissing(void);
+DWORD WINAPI SeanceTestMissing(void);
 
 EXPORT DWORD rt_call_missing(void)
 {
 	/* Not a tail call, so the trap sees a return address in this DLL. */
-	return VfwHarnessTestMissing() + 1;
+	return SeanceTestMissing() + 1;
 }
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)

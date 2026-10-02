@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * ICImageCompress and ICImageDecompress: one image in, one packed DIB out
  * (the format, its palette or masks, then the bits) in a GMEM_MOVEABLE

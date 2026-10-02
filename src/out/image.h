@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Conversion of uncompressed DIB frames to the two layouts the output
  * writers use: packed BGR24 and planar I420 (YUV 4:2:0), both top-down.

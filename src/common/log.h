@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Diagnostics: VFW_TRACE=1 logs calls into the Win32 stubs to stderr.
  */

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * AVI reader and writer: round trips through every index kind, OpenDML
  * files with several RIFF chunks, and damaged files.

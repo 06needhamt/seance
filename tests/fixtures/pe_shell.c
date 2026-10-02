@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Uses shell32 from Win32 code the way a codec might: its settings folder
  * under Application Data, a copy and delete through SHFileOperation, the

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Video Compression Manager (ICM) definitions: the message numbers, flags and
  * structures exchanged with a codec's DriverProc.

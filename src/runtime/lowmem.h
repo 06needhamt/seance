@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Keeping the memory DLL code sees below 2 GB, as Windows does for programs
  * that are not large-address aware. See lowmem.c.

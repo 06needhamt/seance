@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Exercises user32 and gdi32 from the Win32 side, with the 4-byte stack
  * alignment old MSVC code has: strings and wsprintf, a hidden window with

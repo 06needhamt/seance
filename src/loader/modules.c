@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Module table: search, load with dependencies, resolve exports, unload.
  */
@@ -601,7 +602,7 @@ struct module *mod_main(void)
 {
 	LOCK();
 	if (!main_module) {
-		struct module *m = new_module("vfw-harness.exe", NULL);
+		struct module *m = new_module("seance.exe", NULL);
 		if (m && (m->base = builtin_fake_image())) {
 			m->attached = 1;
 			main_module = m;

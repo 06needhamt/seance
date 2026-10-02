@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * user32: strings - LoadString, the wsprintf family, and the Char*
  * functions (case mapping and classification through kernel32's Latin-1

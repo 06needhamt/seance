@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * ICCompressorChoose without its dialog. The harness has no GUI, so, as
  * MessageBox answers with its default button, this answers as if OK were

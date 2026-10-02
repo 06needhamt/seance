@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * msvcrt: the handlers behind MSVC's __try/__except/__finally on i386,
  * for DLLs built with a dynamic CRT (/MD). Such a DLL puts msvcrt's
@@ -464,7 +465,7 @@ crt__seh_longjmp_unwind4(const struct jump_buffer *jmp)
 			       (const UINT_PTR *)jmp->unwind_data[0], 0 };
 
 	if (!p.cookie || crt_guarded(probe_eh4, &p) || !p.ok) {
-		fputs("vfw-harness: warning: longjmp: no cookie for an EH4 "
+		fputs("seance: warning: longjmp: no cookie for an EH4 "
 		      "frame's __try levels, which stay as they are\n", stderr);
 		return;
 	}

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * advapi32 registry definitions (winreg.h, winnt.h).
  */

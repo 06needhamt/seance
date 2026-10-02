@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * advapi32.dll: the registry functions (on src/win32/reg.c) and
  * GetUserName; the security and CryptoAPI functions are in

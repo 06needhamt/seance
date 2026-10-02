@@ -1,3 +1,4 @@
+; SPDX-License-Identifier: GPL-2.0-only
 LIBRARY zz_nosuch.dll
 EXPORTS
 	nosuch_function

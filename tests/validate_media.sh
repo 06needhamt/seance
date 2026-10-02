@@ -1,9 +1,10 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
 # Cross-checks the AVI reader, the AVI writer and the output writers against
 # FFmpeg:
 #   - FFmpeg reads the AVIs our writer produced (AVI 1.0 and OpenDML) and
 #     the Y4M and BMP files the output writers produced;
-#   - `vfw-harness convert` on AVIs FFmpeg wrote in each uncompressed format
+#   - `seance convert` on AVIs FFmpeg wrote in each uncompressed format
 #     gives the same pictures FFmpeg's own decoding does;
 #   - with the fixture DLLs built, `encode` with testcodec.dll takes what
 #     FFmpeg writes (Y4M, BMP files, AVI) and writes AVIs FFmpeg reads, and
@@ -14,7 +15,7 @@ set -eu
 
 build=${1:?usage: $0 <build dir> <work dir>}
 work=${2:?usage: $0 <build dir> <work dir>}
-harness=$build/vfw-harness
+harness=$build/seance
 # On a cross build, what runs i386 programs (qemu-i386), from CMake.
 emu=${VFW_EMULATOR:-}
 failures=0
@@ -105,7 +106,7 @@ make_avi() {
 	shift
 	ffmpeg -v error -y -f lavfi -i "$src" "$@" "$f/$name.avi"
 	if ! $emu "$harness" avi "$f/$name.avi" >"$f/$name.txt"; then
-		fail "$name: vfw-harness avi"
+		fail "$name: seance avi"
 	fi
 }
 
@@ -175,12 +176,12 @@ fi
 $emu "$harness" convert $f/bgr24.avi -o - --format y4m 2>/dev/null >$f/stdout.y4m
 expect "Y4M on stdout" "$(frames $f/stdout.y4m)" 10
 
-echo "== Our AVI writer's files through vfw-harness"
+echo "== Our AVI writer's files through seance"
 $emu "$harness" avi $u/odml.avi >$f/odml.txt
 if grep -q "Index: OpenDML" $f/odml.txt && grep -q "150 frames" $f/odml.txt; then
-	pass "vfw-harness avi odml.avi"
+	pass "seance avi odml.avi"
 else
-	fail "vfw-harness avi odml.avi"
+	fail "seance avi odml.avi"
 fi
 
 codec=$build/fixtures/testcodec.dll

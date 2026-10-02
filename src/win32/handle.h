@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Kernel objects behind Win32 HANDLEs, and waiting on them.
  *

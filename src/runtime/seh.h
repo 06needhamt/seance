@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Structured exception handling: the i386 fs:[0] chain of
  * EXCEPTION_REGISTRATION_RECORDs that __try/__except and __finally compile

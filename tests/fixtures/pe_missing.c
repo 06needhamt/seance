@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Imports from pe_basic.dll and from zz_nosuch.dll, which does not exist, so
  * loading it must fail and release pe_basic again.

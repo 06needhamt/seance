@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * CLI subcommands. Each gets argv starting at the command name.
  */

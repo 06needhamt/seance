@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Base relocation arithmetic, and mapping images at and away from their
  * preferred base.

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * user32 structures and constants (winuser.h): what headless codecs touch
  * - windows and messages, message boxes, system metrics and colours.

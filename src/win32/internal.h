@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Shared by the built-in DLL implementations in src/win32.
  */

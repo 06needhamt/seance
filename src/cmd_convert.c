@@ -1,5 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * vfw-harness convert <in.avi> -o <out>: write an AVI's uncompressed video
+ * seance convert <in.avi> -o <out>: write an AVI's uncompressed video
  * as Y4M, BMP files or raw frames, without a codec.
  */
 #include <stdio.h>
@@ -16,7 +17,7 @@
 static int usage(void)
 {
 	fprintf(stderr,
-		"usage: vfw-harness convert <in.avi> -o <out> [options]\n"
+		"usage: seance convert <in.avi> -o <out> [options]\n"
 		"\n"
 		"  -o <out>           output: .y4m, .yuv (I420), .bgr (BGR24),\n"
 		"                     .raw (frames as stored) or \"-\" for stdout;\n"
@@ -61,13 +62,13 @@ int cmd_convert(int argc, char **argv)
 		return usage();
 	if (format ? output_kind_from_name(format, &kind) :
 		     output_kind_from_path(out, &kind)) {
-		fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+		fprintf(stderr, "seance: %s\n", vfw_error());
 		return 2;
 	}
 
 	struct avi_file *avi = avi_open(in);
 	if (!avi) {
-		fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+		fprintf(stderr, "seance: %s\n", vfw_error());
 		return 1;
 	}
 
@@ -79,7 +80,7 @@ int cmd_convert(int argc, char **argv)
 	int sn = stream == (unsigned long)-1 ? avi_video_stream(avi) :
 		 stream < avi->nstreams ? (int)stream : -1;
 	if (sn < 0) {
-		fprintf(stderr, "vfw-harness: %s: %s\n", in,
+		fprintf(stderr, "seance: %s: %s\n", in,
 			stream == (unsigned long)-1 ? "no video stream" :
 			"no such stream");
 		goto done;
@@ -87,11 +88,11 @@ int cmd_convert(int argc, char **argv)
 	const struct avi_stream *s = &avi->streams[sn];
 	const BITMAPINFOHEADER *bih = avi_stream_bih(s);
 	if (!bih) {
-		fprintf(stderr, "vfw-harness: %s: stream %d is not video\n", in, sn);
+		fprintf(stderr, "seance: %s: stream %d is not video\n", in, sn);
 		goto done;
 	}
 	if (!(conv = image_conv_new(bih, s->format_size))) {
-		fprintf(stderr, "vfw-harness: %s: %s\n", in, vfw_error());
+		fprintf(stderr, "seance: %s: %s\n", in, vfw_error());
 		goto done;
 	}
 
@@ -109,7 +110,7 @@ int cmd_convert(int argc, char **argv)
 	o = output_open(out, kind, image_width(conv), image_height(conv),
 			rate, scale, want == 1);
 	if (!o) {
-		fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+		fprintf(stderr, "seance: %s\n", vfw_error());
 		goto done;
 	}
 
@@ -128,19 +129,19 @@ int cmd_convert(int argc, char **argv)
 		if (k->size > cap) {
 			BYTE *b = realloc(buf, k->size);
 			if (!b) {
-				fprintf(stderr, "vfw-harness: out of memory\n");
+				fprintf(stderr, "seance: out of memory\n");
 				goto done;
 			}
 			buf = b;
 			cap = k->size;
 		}
 		if (k->size && avi_read_chunk(avi, k, buf)) {
-			fprintf(stderr, "vfw-harness: %s: %s\n", in, vfw_error());
+			fprintf(stderr, "seance: %s: %s\n", in, vfw_error());
 			goto done;
 		}
 		if (!is_frame) {
 			if (image_palette_change(conv, buf, k->size))
-				fprintf(stderr, "vfw-harness: %s: chunk %zu: %s\n",
+				fprintf(stderr, "seance: %s: chunk %zu: %s\n",
 					in, c, vfw_error());
 			continue;
 		}
@@ -153,7 +154,7 @@ int cmd_convert(int argc, char **argv)
 		else
 			r = output_write(o, conv, buf, k->size);
 		if (r) {
-			fprintf(stderr, "vfw-harness: frame %lu: %s\n", frame,
+			fprintf(stderr, "seance: frame %lu: %s\n", frame,
 				vfw_error());
 			goto done;
 		}
@@ -164,14 +165,14 @@ int cmd_convert(int argc, char **argv)
 	int r = output_close(o);
 	o = NULL;
 	if (r) {
-		fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+		fprintf(stderr, "seance: %s\n", vfw_error());
 		goto done;
 	}
 	fprintf(stderr, "%s: %lu frame%s, %dx%d %s -> %s\n", out, written,
 		written == 1 ? "" : "s", image_width(conv), image_height(conv),
 		image_format_name(conv), output_kind_name(kind));
 	if (avi->truncated)
-		fprintf(stderr, "vfw-harness: warning: %s is truncated or "
+		fprintf(stderr, "seance: warning: %s is truncated or "
 			"damaged; some frames were missing\n", in);
 	status = 0;
 

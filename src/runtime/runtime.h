@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * The Win32 runtime: per-process and per-thread setup that must happen
  * before any DLL code runs.

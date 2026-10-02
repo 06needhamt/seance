@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * kernel32.dll: shared helpers, errors, handles and the export table list.
  * The rest lives in k32_*.c, one file per area.

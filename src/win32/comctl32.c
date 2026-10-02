@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * comctl32.dll, headless: the common controls, after Wine's comctl32.
  *

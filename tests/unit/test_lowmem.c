@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * lowmem: after lowmem_reserve(), everything allocated from then on - heap
  * blocks large and small, mmap()s, thread stacks, TEBs, VirtualAlloc, DLL

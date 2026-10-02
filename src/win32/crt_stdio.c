@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * msvcrt: <stdio.h> and <ctype.h>'s _pctype.
  *

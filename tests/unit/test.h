@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Minimal unit-test helpers. Each test program includes this, runs CHECKs,
  * and returns test_summary() from main().

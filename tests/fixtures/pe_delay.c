@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Delay-loads, from pe_basic.dll, basic_add by name and by ordinal and a
  * function it doesn't have, and from zz_nosuch.dll, which doesn't exist,

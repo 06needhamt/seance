@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Frame sources for encoding: Y4M, raw frames, BMP files and uncompressed
  * AVI, including the ways each can be malformed.

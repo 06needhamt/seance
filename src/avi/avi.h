@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * AVI files: a reader for RIFF AVI including OpenDML (AVI 2.0, over 1 GB),
  * and a writer for single-video-stream files.

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Exercises kernel32 from the Win32 side. Built with a 4-byte preferred
  * stack boundary, as old MSVC code is, so calls reach the stubs misaligned.

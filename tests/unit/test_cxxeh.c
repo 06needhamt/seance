@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * msvcrt's C++ exception support: pe_cxxeh.dll throws and catches as cl
  * compiles C++ (by value, by reference to a base, catch (...), rethrow,

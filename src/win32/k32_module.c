@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * kernel32: LoadLibrary and friends, module handles and names, resources.
  */
@@ -149,7 +150,7 @@ static struct module *find_by_name(const char *name)
 	for (const char *p = name; *p; p++)
 		if (*p == '\\' || *p == '/')
 			base = p + 1;
-	if (!strcasecmp(base, "vfw-harness.exe") || !strcasecmp(base, "vfw-harness"))
+	if (!strcasecmp(base, "seance.exe") || !strcasecmp(base, "seance"))
 		return mod_main();
 	return mod_find(base);
 }

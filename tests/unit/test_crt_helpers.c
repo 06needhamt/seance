@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * The msvcrt 64-bit arithmetic/truncation helpers MSVC-compiled code calls
  * for __int64 math and float-to-int conversion. Called directly here

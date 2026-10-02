@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Keeping the memory DLL code sees below 2 GB.
  *
@@ -167,7 +168,7 @@ int lowmem_run(int (*fn)(int argc, char **argv), int argc, char **argv)
 	int err = pthread_create(&t, &attr, run_job, &j);
 	pthread_attr_destroy(&attr);
 	if (err) {
-		fprintf(stderr, "vfw-harness: cannot start the worker thread: %s\n",
+		fprintf(stderr, "seance: cannot start the worker thread: %s\n",
 			strerror(err));
 		return 1;
 	}

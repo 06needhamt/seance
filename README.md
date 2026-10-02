@@ -1,12 +1,14 @@
-# vfw-harness
+<!-- SPDX-License-Identifier: GPL-2.0-only -->
+# libseance
 
-[![CI](https://github.com/06needhamt/vfw-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/06needhamt/vfw-harness/actions/workflows/ci.yml)
+[![CI](https://github.com/06needhamt/libseance/actions/workflows/ci.yml/badge.svg)](https://github.com/06needhamt/libseance/actions/workflows/ci.yml)
 
-A harness for loading and running 32-bit Video for Windows (VfW / ICM) codec
-DLLs natively on Linux, without Wine. It maps the PE image itself, provides a
-small Win32 runtime, and drives the codec's `DriverProc` through a minimal
-reimplementation of the msvfw32 ICM API. The goal is to test codecs and to
-decode or encode real AVI files with them.
+libseance is a harness for loading and running 32-bit Video for Windows
+(VfW / ICM) codec DLLs natively on Linux, without Wine. It maps the PE image
+itself, provides a small Win32 runtime, and drives the codec's `DriverProc`
+through a minimal reimplementation of the msvfw32 ICM API. The goal is to test
+codecs and to decode or encode real AVI files with them. Its command-line
+tool is `seance`.
 
 It is generic: nothing in it depends on a particular codec.
 
@@ -101,7 +103,7 @@ runs only the unit tests and `-LE media` leaves out the FFmpeg checks.
 
 The media checks (`validate_media`) need `ffmpeg` and `ffprobe`. FFmpeg
 reads the AVI, Y4M and BMP files the harness writes, and
-`vfw-harness convert` has to reproduce FFmpeg's own decoding of AVIs FFmpeg
+`seance convert` has to reproduce FFmpeg's own decoding of AVIs FFmpeg
 wrote in each uncompressed format. Setting `VFW_KEEP_TEST_FILES=<dir>` when
 running `test_avi` or `test_image` keeps the files they write.
 
@@ -122,8 +124,8 @@ of them differ.
 ## Usage
 
 ```sh
-build/vfw-harness --help
-build/vfw-harness info some-codec.dll
+build/seance --help
+build/seance info some-codec.dll
 ```
 
 `info` parses a DLL without loading or running it. It prints the headers,
@@ -134,10 +136,10 @@ its other imports; one whose DLL or function can't be found is bound to a
 trap that says why if the codec ever calls it.
 
 ```sh
-build/vfw-harness avi clip.avi [--chunks]
-build/vfw-harness convert clip.avi -o clip.y4m
-build/vfw-harness convert clip.avi -o 'frame%05d.bmp' --start 100 --frames 10
-build/vfw-harness convert clip.avi -o - --format y4m | ffplay -
+build/seance avi clip.avi [--chunks]
+build/seance convert clip.avi -o clip.y4m
+build/seance convert clip.avi -o 'frame%05d.bmp' --start 100 --frames 10
+build/seance convert clip.avi -o - --format y4m | ffplay -
 ```
 
 `avi` shows an AVI file's main header, its streams and formats, and which
@@ -170,10 +172,10 @@ Compressed streams need a codec: see `decode`.
 ### Codecs: `probe` and `list`
 
 ```sh
-build/vfw-harness probe codec.dll              # what the codec is and accepts
-build/vfw-harness probe codec.dll clip.avi     # can it decode this file, and to what
-build/vfw-harness probe XVID                   # a codec registered in vfw.ini
-build/vfw-harness list
+build/seance probe codec.dll         # what the codec is and accepts
+build/seance probe codec.dll clip.avi # can it decode this file, and to what
+build/seance probe XVID              # a codec registered in vfw.ini
+build/seance list
 ```
 
 `probe` opens a codec the way msvfw32's `ICOpen` does. It loads the DLL,
@@ -207,7 +209,7 @@ vidc.CVID=C:\windows\system32\iccvid.dll
 ```
 
 The file is `$VFW_INI`, else `$VFW_ROOT/vfw.ini` (default
-`~/.vfw-harness/vfw.ini`). Relative paths are taken from the file's
+`~/.seance/vfw.ini`). Relative paths are taken from the file's
 directory, and Windows paths go through the drive mapping (`C:` is
 `$VFW_ROOT/drive_c`, `Z:` is `/`). `list` shows the entries and opens each
 one to show its name.
@@ -297,7 +299,7 @@ harness with a message naming it.
 
 Codecs that keep their settings in the registry get one that persists
 between runs, in `$VFW_REGISTRY`, else `$VFW_ROOT/registry.reg` (default
-`~/.vfw-harness/registry.reg`). It is saved after every change, in the
+`~/.seance/registry.reg`). It is saved after every change, in the
 format regedit exports, so it can be read, edited or seeded by hand, and a
 `.reg` file exported from Windows (UTF-16 or REGEDIT4) can be dropped in:
 
@@ -316,14 +318,14 @@ each run.
 ### Decoding and encoding: `decode` and `encode`
 
 ```sh
-build/vfw-harness decode codec.dll clip.avi -o clip.y4m
-build/vfw-harness decode auto clip.avi -o 'frame%05d.bmp' --start 250 --frames 10
-build/vfw-harness decode XVID clip.avi -o clip.yuv --output-format YV12
+build/seance decode codec.dll clip.avi -o clip.y4m
+build/seance decode auto clip.avi -o 'frame%05d.bmp' --start 250 --frames 10
+build/seance decode XVID clip.avi -o clip.yuv --output-format YV12
 
-build/vfw-harness encode codec.dll in.y4m -o out.avi --keyint 30 --quality 8000
-build/vfw-harness encode TST0 'shot%04d.bmp' -o out.avi --rate 30000/1001
-build/vfw-harness encode codec.dll in.yuv -o out.avi --input-format I420 --size 720x576
-ffmpeg -i any.mkv -f yuv4mpegpipe - | build/vfw-harness encode codec.dll - -o out.avi
+build/seance encode codec.dll in.y4m -o out.avi --keyint 30 --quality 8000
+build/seance encode TST0 'shot%04d.bmp' -o out.avi --rate 30000/1001
+build/seance encode codec.dll in.yuv -o out.avi --input-format I420 --size 720x576
+ffmpeg -i any.mkv -f yuv4mpegpipe - | build/seance encode codec.dll - -o out.avi
 ```
 
 `decode` runs an AVI's video stream through a codec's decompressor
@@ -371,7 +373,7 @@ and `validate_media` check for Y4M, BMP, raw and AVI input.
 ### Real codecs: the samples run
 
 ```sh
-tests/samples.sh build/vfw-harness ~/codecs        # or -DVFW_SAMPLES_DIR=~/codecs
+tests/samples.sh build/seance ~/codecs   # or -DVFW_SAMPLES_DIR=~/codecs
 ```
 
 `tests/samples.sh` runs `info` and `probe` over every DLL in a directory
@@ -394,8 +396,8 @@ hangs on one.
   and the process then dies of the signal:
 
   ```
-  vfw-harness: crash: SIGSEGV at testcodec.dll+0x178e, accessing (nil)
-  vfw-harness:   in DriverProc(DRV_USER+0x64) of testcodec.dll
+  seance: crash: SIGSEGV at testcodec.dll+0x178e, accessing (nil)
+  seance:   in DriverProc(DRV_USER+0x64) of testcodec.dll
   ```
 - **Hangs.** With `VFW_TIMEOUT=<seconds>`, a single call into a DLL that
   takes longer is reported the same way, and the harness exits with 124.
@@ -406,7 +408,7 @@ hangs on one.
 |---|---|
 | `VFW_PATH` | `:`-separated directories to search for DLLs, after the importing DLL's own directory |
 | `VFW_FORCE_RELOC=1` | Load every image away from its preferred base, to exercise relocations |
-| `VFW_ROOT` | The harness's Windows world: `drive_c`, `vfw.ini` and `registry.reg` (default `~/.vfw-harness`) |
+| `VFW_ROOT` | The harness's Windows world: `drive_c`, `vfw.ini` and `registry.reg` (default `~/.seance`) |
 | `VFW_INI` | The codec registry file (default `$VFW_ROOT/vfw.ini`) |
 | `VFW_REGISTRY` | The Windows registry file (default `$VFW_ROOT/registry.reg`); empty keeps it in memory only |
 | `VFW_TRACE=1` | Log calls into the built-in DLLs and every driver message to stderr |

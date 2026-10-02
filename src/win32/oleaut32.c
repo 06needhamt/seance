@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * oleaut32.dll: OLE Automation's data types, after Wine's oleaut32.
  *

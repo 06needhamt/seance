@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Installable-driver definitions (the parts of mmsystem.h / mmiscapi.h that
  * VfW codecs use).

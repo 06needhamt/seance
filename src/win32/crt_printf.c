@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * msvcrt: the printf family's formatting, as msvcrt.dll does it, which
  * glibc's differs from in ways a codec's log or file names would show:

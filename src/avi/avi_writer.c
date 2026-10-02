@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * AVI writer: one video stream, AVI 1.0 idx1 plus OpenDML indexes.
  *

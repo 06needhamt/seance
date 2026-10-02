@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Code page conversion: the ANSI code page is Windows-1252, the OEM code
  * page 437, plus UTF-8, Latin-1 and ASCII.

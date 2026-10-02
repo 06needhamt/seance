@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * testcodec.dll: a small lossless VfW codec, FOURCC 'TST0', for testing
  * the harness's driver and ICM layers the way a real codec would use them.
@@ -258,7 +259,7 @@ static int rle_decode(const BYTE *src, DWORD len, BYTE *dst, DWORD n, int xor)
 static LRESULT get_info(ICINFO *info, DWORD size)
 {
 	static const char name[] = "TST0";
-	static const char desc[] = "vfw-harness test codec";
+	static const char desc[] = "libseance test codec";
 	int i;
 
 	if (!info || size < sizeof(*info))

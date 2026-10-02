@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * A DLL whose DllMain refuses DLL_PROCESS_ATTACH.
  */

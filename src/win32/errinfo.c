@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Error information: CreateErrorInfo, SetErrorInfo and GetErrorInfo,
  * which ole32 exports and oleaut32 forwards to it. One object is both the

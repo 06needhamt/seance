@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Imports pe_basic.dll by name and by ordinal, and forwards one export to it.
  */

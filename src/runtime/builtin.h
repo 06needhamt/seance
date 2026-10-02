@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Built-in DLLs: the harness's own implementations of the Win32 system
  * DLLs (kernel32, msvcrt, user32, ...). A bare DLL name that matches one of

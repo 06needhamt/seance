@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * msvcrt: C++ exceptions as MSVC compiles them for i386, after Wine's
  * except_i386.c and cppexcept.c, for DLLs built with a dynamic CRT (/MD,
@@ -287,7 +288,7 @@ static void *frame_ebp(struct cxx_frame *f)
 
 CRTFN(void) crt_abort(void)
 {
-	fputs("vfw-harness: crash: a DLL called abort()\n", stderr);
+	fputs("seance: crash: a DLL called abort()\n", stderr);
 	fflush(stderr);
 	_exit(3);	/* as msvcrt's abort exits */
 }
@@ -298,7 +299,7 @@ CRTFN(void) crt_terminate(void)
 
 	if (f)
 		f();
-	fputs("vfw-harness: crash: terminate() called (an unhandled C++ "
+	fputs("seance: crash: terminate() called (an unhandled C++ "
 	      "exception, or one where none may be)\n", stderr);
 	crt_abort();
 }
@@ -335,7 +336,7 @@ CRTFN(void) crt__purecall(void)
 
 	if (f)
 		f();
-	fputs("vfw-harness: crash: a DLL called a pure virtual function\n",
+	fputs("seance: crash: a DLL called a pure virtual function\n",
 	      stderr);
 	crt_abort();
 }
@@ -481,7 +482,7 @@ static void local_unwind(struct cxx_frame *frame, const struct func_descr *d,
 
 	while (level != last) {
 		if (level < 0 || level >= (int)d->nunwind) {
-			fprintf(stderr, "vfw-harness: C++ unwind: bad state %d "
+			fprintf(stderr, "seance: C++ unwind: bad state %d "
 				"(of %u)\n", level, d->nunwind);
 			crt_terminate();
 		}

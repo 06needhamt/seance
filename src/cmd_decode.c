@@ -1,5 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * vfw-harness decode <codec> <in.avi> -o <out>: decompress an AVI's video
+ * seance decode <codec> <in.avi> -o <out>: decompress an AVI's video
  * stream with a VfW codec and write the frames as Y4M, BMP files or raw.
  */
 #include <stdio.h>
@@ -21,7 +22,7 @@
 static int usage(void)
 {
 	fprintf(stderr,
-		"usage: vfw-harness decode <codec.dll | fourcc | auto> <in.avi> "
+		"usage: seance decode <codec.dll | fourcc | auto> <in.avi> "
 		"-o <out> [options]\n"
 		"\n"
 		"  -o <out>             output: .y4m, .yuv (I420), .bgr (BGR24),\n"
@@ -182,13 +183,13 @@ int cmd_decode(int argc, char **argv)
 		return usage();
 	if (format ? output_kind_from_name(format, &kind) :
 		     output_kind_from_path(out_path, &kind)) {
-		fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+		fprintf(stderr, "seance: %s\n", vfw_error());
 		return 2;
 	}
 
 	struct avi_file *avi = avi_open(path);
 	if (!avi) {
-		fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+		fprintf(stderr, "seance: %s\n", vfw_error());
 		return 1;
 	}
 
@@ -206,7 +207,7 @@ int cmd_decode(int argc, char **argv)
 	const struct avi_stream *s = sn >= 0 ? &avi->streams[sn] : NULL;
 	const BITMAPINFOHEADER *bih = s ? avi_stream_bih(s) : NULL;
 	if (!bih) {
-		fprintf(stderr, "vfw-harness: %s: %s\n", path,
+		fprintf(stderr, "seance: %s: %s\n", path,
 			stream == (unsigned long)-1 ? "no video stream" :
 			"no such video stream");
 		goto done;
@@ -215,7 +216,7 @@ int cmd_decode(int argc, char **argv)
 	size_t in_size = s->format_size > sizeof(*bih) ? s->format_size :
 			 sizeof(*bih);
 	if (!(in = calloc(1, in_size))) {
-		fprintf(stderr, "vfw-harness: out of memory\n");
+		fprintf(stderr, "seance: out of memory\n");
 		goto done;
 	}
 	memcpy(in, s->format, s->format_size);
@@ -225,13 +226,13 @@ int cmd_decode(int argc, char **argv)
 		       bih->biCompression;
 	if (!strcmp(target, "auto")) {
 		if (runtime_enter()) {
-			fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+			fprintf(stderr, "seance: %s\n", vfw_error());
 			goto done;
 		}
 		codec.hic = ic_locate(ICTYPE_VIDEO, guess, in, NULL,
 				      ICMODE_DECOMPRESS);
 		if (!codec.hic) {
-			fprintf(stderr, "vfw-harness: no registered codec decompresses "
+			fprintf(stderr, "seance: no registered codec decompresses "
 				"%s ('%s')\n", path, fourcc_str(bih->biCompression, fcc));
 			goto done;
 		}
@@ -244,21 +245,21 @@ int cmd_decode(int argc, char **argv)
 	}
 	LRESULT r = ic_send(codec.hic, ICM_DECOMPRESS_QUERY, (DWORD_PTR)in, 0);
 	if (r != ICERR_OK) {
-		fprintf(stderr, "vfw-harness: the codec doesn't decompress %s (%s)\n",
+		fprintf(stderr, "seance: the codec doesn't decompress %s (%s)\n",
 			cli_format_desc(in, desc, sizeof(desc)), icerr_name(r, err));
 		goto done;
 	}
 	if (state_path) {
 		size_t n;
 		if (!(state = read_file(state_path, &n))) {
-			fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+			fprintf(stderr, "seance: %s\n", vfw_error());
 			goto done;
 		}
 		/* The bytes of state used; 0 or an ICERR_* if refused. */
 		LRESULT used = ic_send(codec.hic, ICM_SETSTATE, (DWORD_PTR)state,
 				       (DWORD_PTR)n);
 		if (used <= 0) {
-			fprintf(stderr, "vfw-harness: %s: the codec refused this state "
+			fprintf(stderr, "seance: %s: the codec refused this state "
 				"(ICM_SETSTATE: %s)\n", state_path, icerr_name(used, err));
 			goto done;
 		}
@@ -266,12 +267,12 @@ int cmd_decode(int argc, char **argv)
 
 	/* The output format and its converter. */
 	if (!(out = choose_output(codec.hic, in, forced, kind))) {
-		fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+		fprintf(stderr, "seance: %s\n", vfw_error());
 		goto done;
 	}
 	r = ic_send(codec.hic, ICM_DECOMPRESS_BEGIN, (DWORD_PTR)in, (DWORD_PTR)out);
 	if (r != ICERR_OK) {
-		fprintf(stderr, "vfw-harness: ICM_DECOMPRESS_BEGIN: %s\n",
+		fprintf(stderr, "seance: ICM_DECOMPRESS_BEGIN: %s\n",
 			icerr_name(r, err));
 		goto done;
 	}
@@ -281,7 +282,7 @@ int cmd_decode(int argc, char **argv)
 			(DWORD_PTR)out);
 	conv = image_conv_new(out, vfw_format_size(out));
 	if (!conv && kind != OUT_RAW) {
-		fprintf(stderr, "vfw-harness: the codec's output (%s) can't be "
+		fprintf(stderr, "seance: the codec's output (%s) can't be "
 			"converted; try --output-format or --format raw\n",
 			cli_format_desc(out, desc, sizeof(desc)));
 		goto done;
@@ -290,7 +291,7 @@ int cmd_decode(int argc, char **argv)
 	if (out->biSizeImage > pic_size)
 		pic_size = out->biSizeImage;
 	if (!pic_size || !(pic = calloc(1, pic_size))) {
-		fprintf(stderr, "vfw-harness: %s\n", pic_size ? "out of memory" :
+		fprintf(stderr, "seance: %s\n", pic_size ? "out of memory" :
 			"the output format has no image size");
 		goto done;
 	}
@@ -324,7 +325,7 @@ int cmd_decode(int argc, char **argv)
 	LONG oh = out->biHeight < 0 ? -out->biHeight : out->biHeight;
 	if (!(o = output_open(out_path, kind, out->biWidth, oh, rate, scale,
 			      want == 1))) {
-		fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+		fprintf(stderr, "seance: %s\n", vfw_error());
 		goto done;
 	}
 
@@ -348,14 +349,14 @@ int cmd_decode(int argc, char **argv)
 		if (k->size > cap) {
 			BYTE *b = realloc(buf, k->size);
 			if (!b) {
-				fprintf(stderr, "vfw-harness: out of memory\n");
+				fprintf(stderr, "seance: out of memory\n");
 				goto done;
 			}
 			buf = b;
 			cap = k->size;
 		}
 		if (avi_read_chunk(avi, k, buf)) {
-			fprintf(stderr, "vfw-harness: %s: %s\n", path, vfw_error());
+			fprintf(stderr, "seance: %s: %s\n", path, vfw_error());
 			goto done;
 		}
 		in->biSizeImage = k->size;
@@ -371,7 +372,7 @@ int cmd_decode(int argc, char **argv)
 
 		if (dr < 0 || dr == ICERR_GOTOKEYFRAME) {
 			errors++;
-			fprintf(stderr, "vfw-harness: frame %lu: %s\n", frame,
+			fprintf(stderr, "seance: frame %lu: %s\n", frame,
 				icerr_name(dr, err));
 			if (!keep_going)
 				goto done;
@@ -390,7 +391,7 @@ int cmd_decode(int argc, char **argv)
 	int cr = output_close(o);
 	o = NULL;
 	if (cr) {
-		fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+		fprintf(stderr, "seance: %s\n", vfw_error());
 		goto done;
 	}
 	fprintf(stderr, "%s: %lu frame%s, %ldx%ld '%s' -> %s -> %s", out_path,
@@ -404,17 +405,17 @@ int cmd_decode(int argc, char **argv)
 		fprintf(stderr, ", %lu decoded to get there", decoded - written);
 	fprintf(stderr, "\n");
 	if (errors)
-		fprintf(stderr, "vfw-harness: %lu frame%s failed to decode and "
+		fprintf(stderr, "seance: %lu frame%s failed to decode and "
 			"%s repeated\n", errors, errors == 1 ? "" : "s",
 			errors == 1 ? "was" : "were");
 	if (avi->truncated)
-		fprintf(stderr, "vfw-harness: warning: %s is truncated or "
+		fprintf(stderr, "seance: warning: %s is truncated or "
 			"damaged; some frames were missing\n", path);
 	status = 0;
 	goto done;
 
 write_error:
-	fprintf(stderr, "vfw-harness: frame %lu: %s\n", frame, vfw_error());
+	fprintf(stderr, "seance: frame %lu: %s\n", frame, vfw_error());
 done:
 	if (o)
 		output_close(o);

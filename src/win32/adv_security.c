@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * advapi32's security functions, for one pretend machine with one user:
  * the Unix user, as GetUserName names them, an administrator on Windows
@@ -119,7 +120,7 @@ static void computer_init(void)
 	DWORD n = sizeof(computer);
 
 	if (!get || !get(computer, &n))
-		strcpy(computer, "VFWHARNESS");
+		strcpy(computer, "SEANCE");
 }
 
 /* As GetComputerName reports it. */

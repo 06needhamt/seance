@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * shell32.dll, headless: special folders, item ID lists, command lines,
  * and the parts of the shell a codec may touch without needing its UI.

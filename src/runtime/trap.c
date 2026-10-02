@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -43,10 +44,10 @@ void vfw_trap_report(const struct trap_record *r, const void *ret)
 	/* The call instruction is just before the return address. */
 	mod_describe_address((const BYTE *)ret - 1, where, sizeof(where));
 	if (r->why[0])
-		fprintf(stderr, "vfw-harness: %s called from %s, but %s\n",
+		fprintf(stderr, "seance: %s called from %s, but %s\n",
 			r->what, where, r->why);
 	else
-		fprintf(stderr, "vfw-harness: unimplemented function %s called "
+		fprintf(stderr, "seance: unimplemented function %s called "
 			"from %s\n", r->what, where);
 	fflush(stderr);
 	abort();

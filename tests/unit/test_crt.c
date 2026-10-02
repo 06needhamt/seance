@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * msvcrt: pe_crt.dll imports math and string functions, the way a codec
  * with a dynamic CRT (/MD) would; the harness's own builtin_msvcrt serves

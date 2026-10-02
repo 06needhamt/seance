@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * The module table: loads PE DLLs together with their dependencies, the
  * way LoadLibrary / GetProcAddress / FreeLibrary do. Names that match a

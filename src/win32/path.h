@@ -1,9 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Windows <-> Unix path mapping, like Wine's:
  *
  *   Z:\x\y       /x/y
  *   C:\x\y       $VFW_ROOT/drive_c/x/y  ($VFW_ROOT defaults to
- *                ~/.vfw-harness; C:\WINDOWS\system32 and C:\WINDOWS\TEMP
+ *                ~/.seance; C:\WINDOWS\system32 and C:\WINDOWS\TEMP
  *                are created on first use)
  *   x\y, \x\y    relative to the current directory / its drive
  *

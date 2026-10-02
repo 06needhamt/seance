@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * advapi32's security side (src/win32/adv_security.c), for the registry
  * functions in advapi32.c.

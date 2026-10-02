@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Supplies its own TLS directory (normally from the CRT's tlssup.c) with one
  * callback and some implicit TLS data, so the loader's TLS index, callback

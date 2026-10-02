@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Helpers the CLI commands share.
  */
@@ -23,7 +24,7 @@ int cli_parse_count(const char *opt, const char *s, unsigned long *out)
 	errno = 0;
 	unsigned long v = strtoul(s, &end, 10);
 	if (!*s || *end || errno || s[0] == '-') {
-		fprintf(stderr, "vfw-harness: %s wants a number, not '%s'\n", opt, s);
+		fprintf(stderr, "seance: %s wants a number, not '%s'\n", opt, s);
 		return -1;
 	}
 	*out = v;
@@ -37,7 +38,7 @@ int cli_parse_size(const char *opt, const char *s, LONG *w, LONG *h)
 
 	if (sscanf(s, "%ldx%ld%c", &x, &y, &end) != 2 || x <= 0 || y <= 0 ||
 	    x > 16384 || y > 16384) {
-		fprintf(stderr, "vfw-harness: %s wants WxH, not '%s'\n", opt, s);
+		fprintf(stderr, "seance: %s wants WxH, not '%s'\n", opt, s);
 		return -1;
 	}
 	*w = x;
@@ -75,7 +76,7 @@ int cli_parse_rate(const char *opt, const char *s, DWORD *rate, DWORD *scale)
 		}
 		return 0;
 	}
-	fprintf(stderr, "vfw-harness: %s wants a frame rate (25, 30000/1001, "
+	fprintf(stderr, "seance: %s wants a frame rate (25, 30000/1001, "
 		"29.97), not '%s'\n", opt, s);
 	return -1;
 }
@@ -136,20 +137,20 @@ int cli_open_codec(const char *arg, const char *fourcc, FOURCC guess,
 	else
 		snprintf(c->target, sizeof(c->target), "%s", arg);
 	if (runtime_enter()) {
-		fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+		fprintf(stderr, "seance: %s\n", vfw_error());
 		return 1;
 	}
 
 	c->is_dll = looks_like_dll(c->target);
 	if (fourcc) {
 		if (vfw_parse_fourcc(fourcc, &type, &handler)) {
-			fprintf(stderr, "vfw-harness: bad FOURCC '%s'\n", fourcc);
+			fprintf(stderr, "seance: bad FOURCC '%s'\n", fourcc);
 			return 2;
 		}
 		named = 1;
 	}
 	if (!c->is_dll && vfw_parse_fourcc(c->target, &type, &handler)) {
-		fprintf(stderr, "vfw-harness: '%s' is neither a DLL nor a FOURCC\n",
+		fprintf(stderr, "seance: '%s' is neither a DLL nor a FOURCC\n",
 			c->target);
 		return 2;
 	}
@@ -181,12 +182,12 @@ int cli_open_codec(const char *arg, const char *fourcc, FOURCC guess,
 	if (!c->hic) {
 		char fcc[FOURCC_STR_SIZE];
 		const char *e = first_error[0] ? first_error : vfw_error();
-		fprintf(stderr, "vfw-harness: %s\n", e);
+		fprintf(stderr, "seance: %s\n", e);
 		if (c->is_dll && !named && strstr(e, "DRV_OPEN"))
-			fprintf(stderr, "vfw-harness: some codecs only open under their "
+			fprintf(stderr, "seance: some codecs only open under their "
 				"FOURCC; try --fourcc\n");
 		else if (!c->is_dll && strstr(e, "no codec is registered"))
-			fprintf(stderr, "vfw-harness: codecs are registered in %s, "
+			fprintf(stderr, "seance: codecs are registered in %s, "
 				"as vidc.%s=<path to the DLL>\n", vfw_ini_path(),
 				fourcc_str(handler, fcc));
 		return 1;

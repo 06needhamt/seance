@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Trap thunks: what an import of an unimplemented built-in function is
  * bound to. The DLL still loads; only calling the function stops the

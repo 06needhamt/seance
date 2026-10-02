@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Uses comctl32 from Win32 code, importing it by ordinal only (see
  * comctl_ord.def): a sorted DPA with a comparison callback, a DSA,

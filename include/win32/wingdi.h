@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * GDI bitmap and palette definitions used by VfW codecs.
  */

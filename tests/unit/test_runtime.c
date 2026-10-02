@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * The runtime core: TEBs behind %fs, TLS slots, built-in modules and trap
  * thunks for unimplemented imports.
@@ -237,7 +238,7 @@ static void test_builtin_modules(void)
 	mod_free(k32);
 
 	CHECK(mod_get_proc(k32, "GetTickCount") != NULL);
-	CHECK(mod_get_proc(k32, "VfwHarnessTestMissing") == NULL);
+	CHECK(mod_get_proc(k32, "SeanceTestMissing") == NULL);
 	CHECK(strstr(vfw_error(), "not implemented") != NULL);
 	CHECK(mod_from_base(k32->base) == k32);
 	CHECK(mod_from_address(k32->base + 0x10) == k32);
@@ -309,8 +310,8 @@ static void test_fixture(void)
 	int status;
 	waitpid(pid, &status, 0);
 	CHECK(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
-	CHECK(strstr(msg, "unimplemented function kernel32.dll!VfwHarnessTestMissing") ||
-	      strstr(msg, "unimplemented function KERNEL32.dll!VfwHarnessTestMissing"));
+	CHECK(strstr(msg, "unimplemented function kernel32.dll!SeanceTestMissing") ||
+	      strstr(msg, "unimplemented function KERNEL32.dll!SeanceTestMissing"));
 	CHECK(strstr(msg, "called from pe_runtime.dll+0x") != NULL);
 	if (!strstr(msg, "called from pe_runtime.dll+0x"))
 		fprintf(stderr, "  child said: %s", msg);

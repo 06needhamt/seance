@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Common controls definitions (commctrl.h, prsht.h, and DLLVERSIONINFO
  * from shlwapi.h).

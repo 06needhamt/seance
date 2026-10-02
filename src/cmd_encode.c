@@ -1,5 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * vfw-harness encode <codec> <input> -o <out.avi>: compress video with a
+ * seance encode <codec> <input> -o <out.avi>: compress video with a
  * VfW codec into an AVI, through the ICSeqCompressFrame* sequence API.
  */
 #include <stdint.h>
@@ -21,7 +22,7 @@
 static int usage(void)
 {
 	fprintf(stderr,
-		"usage: vfw-harness encode <codec.dll | fourcc> <input> -o <out.avi> "
+		"usage: seance encode <codec.dll | fourcc> <input> -o <out.avi> "
 		"[options]\n"
 		"\n"
 		"  input                .y4m (4:2:0 or mono; \"-\" for stdin), an\n"
@@ -259,11 +260,11 @@ int cmd_encode(int argc, char **argv)
 	if (!target || !path || !out_path)
 		return usage();
 	if (quality != (unsigned long)-1 && quality > ICQUALITY_HIGH) {
-		fprintf(stderr, "vfw-harness: --quality is 0 to %d\n", ICQUALITY_HIGH);
+		fprintf(stderr, "seance: --quality is 0 to %d\n", ICQUALITY_HIGH);
 		return 2;
 	}
 	if (so.raw_format && !so.width) {
-		fprintf(stderr, "vfw-harness: --input-format needs --size\n");
+		fprintf(stderr, "seance: --input-format needs --size\n");
 		return 2;
 	}
 	if (stream != (unsigned long)-1)
@@ -271,7 +272,7 @@ int cmd_encode(int argc, char **argv)
 
 	struct source *src = source_open(path, &so);
 	if (!src) {
-		fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+		fprintf(stderr, "seance: %s\n", vfw_error());
 		return 1;
 	}
 
@@ -290,7 +291,7 @@ int cmd_encode(int argc, char **argv)
 		goto done;
 	}
 	if (choose_input(codec.hic, src, forced, &feed)) {
-		fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+		fprintf(stderr, "seance: %s\n", vfw_error());
 		goto done;
 	}
 
@@ -311,7 +312,7 @@ int cmd_encode(int argc, char **argv)
 	if (state_path) {
 		size_t n;
 		if (!(state = read_file(state_path, &n))) {
-			fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+			fprintf(stderr, "seance: %s\n", vfw_error());
 			goto done;
 		}
 		cv.lpState = state;
@@ -329,7 +330,7 @@ int cmd_encode(int argc, char **argv)
 	if (count != (unsigned long)-1 && (total < 0 || (unsigned long)frames > count))
 		frames = (long)count;
 	if (!ic_seq_start_ex(&cv, (BITMAPINFO *)&feed.fmt, rate, scale, frames)) {
-		fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+		fprintf(stderr, "seance: %s\n", vfw_error());
 		goto done;
 	}
 	started = 1;
@@ -341,7 +342,7 @@ int cmd_encode(int argc, char **argv)
 	w = avi_writer_open(out_path, ofmt, (DWORD)ic_seq_format_size(&cv),
 			    handler, rate, scale, &wo);
 	if (!w) {
-		fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+		fprintf(stderr, "seance: %s\n", vfw_error());
 		goto done;
 	}
 	/* What to report; lpbiOut goes with the sequence. */
@@ -359,7 +360,7 @@ int cmd_encode(int argc, char **argv)
 		size_t len;
 		int got = source_read(src, &frame, &len);
 		if (got < 0) {
-			fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+			fprintf(stderr, "seance: %s\n", vfw_error());
 			goto done;
 		}
 		if (!got)
@@ -372,7 +373,7 @@ int cmd_encode(int argc, char **argv)
 		}
 		void *bits = convert(&feed, frame, len);
 		if (!bits) {
-			fprintf(stderr, "vfw-harness: frame %lu: %s\n", read - 1,
+			fprintf(stderr, "seance: frame %lu: %s\n", read - 1,
 				vfw_error());
 			goto done;
 		}
@@ -382,11 +383,11 @@ int cmd_encode(int argc, char **argv)
 		void *data = ic_seq_frame(&cv, 0, bits, &key, &size);
 		busy += now() - t;
 		if (!data) {
-			fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+			fprintf(stderr, "seance: %s\n", vfw_error());
 			goto done;
 		}
 		if (avi_writer_add(w, data, (DWORD)size, key)) {
-			fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+			fprintf(stderr, "seance: %s\n", vfw_error());
 			goto done;
 		}
 		written++;
@@ -397,13 +398,13 @@ int cmd_encode(int argc, char **argv)
 	ic_seq_end(&cv);
 	started = 0;
 	if (save_path && save_state(codec.hic, save_path)) {
-		fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+		fprintf(stderr, "seance: %s\n", vfw_error());
 		goto done;
 	}
 	int cr = avi_writer_close(w);
 	w = NULL;
 	if (cr) {
-		fprintf(stderr, "vfw-harness: %s\n", vfw_error());
+		fprintf(stderr, "seance: %s\n", vfw_error());
 		goto done;
 	}
 	fprintf(stderr, "%s: %lu frame%s (%lu key), %s -> '%s' (%s)", out_path,
@@ -417,7 +418,7 @@ int cmd_encode(int argc, char **argv)
 	}
 	fprintf(stderr, "\n");
 	if (!written)
-		fprintf(stderr, "vfw-harness: warning: no frames were written\n");
+		fprintf(stderr, "seance: warning: no frames were written\n");
 	status = 0;
 
 done:

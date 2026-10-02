@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * kernel32 internals shared between its source files, and with the other
  * built-in DLLs (the CRT allocates from the process heap, for example).

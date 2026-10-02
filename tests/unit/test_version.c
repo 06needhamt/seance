@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * version.dll, called through its export table: version blocks from
  * files, loaded modules and the built-in DLLs, and VerQueryValue on them.
@@ -113,12 +114,12 @@ static void test_file(void)
 	s = NULL;
 	CHECK(VerQueryValueA(block, "StringFileInfo\\\\040904B0\\FILEDESCRIPTION",
 			     (void **)&s, &len));
-	CHECK_STR(s, "vfw-harness PE test fixture");
+	CHECK_STR(s, "libseance PE test fixture");
 
 	WCHAR *w = NULL;
 	CHECK(VerQueryValueW(block, product_w, (void **)&w, &len));
-	CHECK(w && wide_is(w, "vfw-harness"));
-	CHECK_EQ(len, 12);
+	CHECK(w && wide_is(w, "libseance"));
+	CHECK_EQ(len, 10);
 	CHECK((BYTE *)w > block && (BYTE *)w < block + total);
 
 	len = 5;
@@ -208,8 +209,8 @@ static void test_loaded_module(void)
 	UINT len = 0;
 	CHECK(VerQueryValueA(raw, "\\StringFileInfo\\040904b0\\ProductName",
 			     (void **)&s, &len));
-	CHECK_STR(s, "vfw-harness");
-	CHECK_EQ(len, 12);
+	CHECK_STR(s, "libseance");
+	CHECK_EQ(len, 10);
 	CHECK((const BYTE *)s < m->base || (const BYTE *)s >= m->base + m->img->map_len);
 	CHECK(!memcmp(copy, m->base, m->img->map_len));
 	free(copy);

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 # Harness-only names, and aliases of calling-convention attributes.
 IMAGE_DELAYLOAD_RVA_BASED
 CALLBACK

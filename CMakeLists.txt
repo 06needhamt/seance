@@ -1,7 +1,8 @@
-# vfw-harness build.
+# SPDX-License-Identifier: GPL-2.0-only
+# libseance build.
 #
 #   cmake -B build            configure (or: cmake --preset default)
-#   cmake --build build       build build/vfw-harness (i386) and, with
+#   cmake --build build       build build/seance (i386) and, with
 #                             mingw-w64, the fixture DLLs
 #   ctest --test-dir build    unit tests, ABI cross-check, CLI smoke test
 #                             and the FFmpeg media checks
@@ -25,10 +26,10 @@ cmake_minimum_required(VERSION 3.20)
 # checks use it too.
 include(cmake/i386.cmake)
 
-project(vfw-harness VERSION 0.1.0 LANGUAGES C)
+project(libseance VERSION 0.1.0 LANGUAGES C)
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
-	message(FATAL_ERROR "vfw-harness must be built as a 32-bit x86 "
+	message(FATAL_ERROR "libseance must be built as a 32-bit x86 "
 		"program; the compiler gives ${CMAKE_SIZEOF_VOID_P}-byte pointers. "
 		"Install gcc-multilib or an i686 cross compiler, or give a "
 		"toolchain file for i386.")
@@ -94,14 +95,14 @@ add_library(vfw_core STATIC ${core_sources})
 target_include_directories(vfw_core PUBLIC include src)
 target_link_libraries(vfw_core PUBLIC m)
 
-add_executable(vfw-harness src/main.c)
-target_link_libraries(vfw-harness PRIVATE vfw_core)
-target_compile_definitions(vfw-harness PRIVATE
-	VFW_HARNESS_VERSION="${PROJECT_VERSION}-dev")
-set_target_properties(vfw-harness PROPERTIES
+add_executable(seance src/main.c)
+target_link_libraries(seance PRIVATE vfw_core)
+target_compile_definitions(seance PRIVATE
+	SEANCE_VERSION="${PROJECT_VERSION}-dev")
+set_target_properties(seance PROPERTIES
 	RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
-install(TARGETS vfw-harness RUNTIME DESTINATION bin)
+install(TARGETS seance RUNTIME DESTINATION bin)
 
 # The fixture DLLs, cross-compiled as a separate project.
 
@@ -194,7 +195,7 @@ if(BUILD_TESTING)
 
 	add_test(NAME smoke
 		COMMAND sh ${PROJECT_SOURCE_DIR}/tests/smoke.sh
-			$<TARGET_FILE:vfw-harness> ${PROJECT_SOURCE_DIR}/CMakeLists.txt
+			$<TARGET_FILE:seance> ${PROJECT_SOURCE_DIR}/CMakeLists.txt
 			$<$<BOOL:${VFW_MINGW_CC}>:${VFW_FIXTURE_DIR}>
 			$<IF:$<BOOL:${VFW_SANITIZE}>,0,1>)
 	set_tests_properties(smoke PROPERTIES LABELS cli
@@ -205,14 +206,14 @@ if(BUILD_TESTING)
 	if(VFW_MINGW_CC)
 		add_test(NAME samples_fixtures
 			COMMAND sh ${PROJECT_SOURCE_DIR}/tests/samples.sh
-				$<TARGET_FILE:vfw-harness> ${VFW_FIXTURE_DIR})
+				$<TARGET_FILE:seance> ${VFW_FIXTURE_DIR})
 		set_tests_properties(samples_fixtures PROPERTIES LABELS cli
 			ENVIRONMENT "VFW_EMULATOR=${vfw_emulator}")
 	endif()
 	if(VFW_SAMPLES_DIR)
 		add_test(NAME samples
 			COMMAND sh ${PROJECT_SOURCE_DIR}/tests/samples.sh
-				$<TARGET_FILE:vfw-harness> ${VFW_SAMPLES_DIR})
+				$<TARGET_FILE:seance> ${VFW_SAMPLES_DIR})
 		set_tests_properties(samples PROPERTIES LABELS samples
 			ENVIRONMENT "VFW_EMULATOR=${vfw_emulator}")
 	endif()

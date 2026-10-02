@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Helpers the CLI commands share: option parsing, format descriptions and
  * opening the codec a command line names.

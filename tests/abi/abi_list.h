@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Everything in include/win32 whose layout or value must match Windows.
  *

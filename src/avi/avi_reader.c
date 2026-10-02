@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * AVI reader: RIFF structure, stream headers, and the chunk index.
  */

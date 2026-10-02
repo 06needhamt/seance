@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
 # Prints VFW_ABI_CONSTANTS(C), listing every object-like macro defined in
 # the given headers, so gen_abi_checks can compare each one's value with
 # the Windows headers. Include guards, calling-convention attributes and the

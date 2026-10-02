@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * SEH dispatch: pe_seh.dll installs fs:[0] frames by hand and faults under
  * them; the harness has to build EXCEPTION_RECORD/CONTEXT, walk the chain,
@@ -112,7 +113,7 @@ int main(void)
 		char err[4096];
 		int st = run_unhandled(dll, err, sizeof(err));
 		CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV);
-		CHECK(strstr(err, "vfw-harness: crash: SIGSEGV at pe_seh.dll+0x"));
+		CHECK(strstr(err, "seance: crash: SIGSEGV at pe_seh.dll+0x"));
 		CHECK(strstr(err, "accessing (nil)") || strstr(err, "accessing 0x0"));
 		if (test_failures)
 			fprintf(stderr, "child said:\n%s", err);

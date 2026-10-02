@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * kernel32 structures and constants (winbase.h, winnls.h, winerror.h).
  */

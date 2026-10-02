@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * user32, called through the export table the way a DLL's imports reach
  * it: classes, windows and messages, timers, strings, and the rest.

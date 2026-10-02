@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * The msvfw32 ICM API: opening codecs and talking to them. The ic_*
  * functions with Win32 names in comments are what msvfw32.dll exports

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * gdi32.dll: the object table, DCs, palettes, brushes, pens and fonts.
  * Bitmaps, DIBs and blits are in gdi_bitmap.c. See gdi.h for the model.

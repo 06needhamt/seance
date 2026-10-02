@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * gdi32: bitmaps (device-dependent ones and DIB sections), converting to
  * and from DIBs, and blits.

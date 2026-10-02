@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * VARIANT conversions (VariantChangeType(Ex) and the Var*From* family)
  * and the date functions, after Wine's variant.c and vartype.c.

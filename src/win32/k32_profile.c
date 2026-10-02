@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * kernel32: private profile (INI file) functions. Many VfW codecs keep
  * their settings in an INI file in C:\WINDOWS or next to themselves.

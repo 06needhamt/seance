@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * comdlg32 through its export table: the file dialogs answering from
  * $VFW_OPEN_FILE and $VFW_SAVE_FILE, GetFileTitle, the colour and font
