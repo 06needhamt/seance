@@ -25,6 +25,12 @@ Work is split into phases; see [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION
 | 4 | AVI / Y4M I/O, `decode` and `encode` | done: AVI reader and writer, Y4M/BMP/raw input and output, `avi`, `convert`, `decode`, `encode` |
 | 5 | Hardening and CI | done: DLL memory below 2 GB, crash and hang reports, SSE/FPU fixture, fuzzing, samples run, CI |
 
+DirectShow filters (`.ax`) are being added in phases of their own; see
+[docs/DIRECT_SHOW_PLAN.md](docs/DIRECT_SHOW_PLAN.md). So far: the headers
+and their ABI check, a built-in quartz.dll (filter mappers, device
+enumerator, `AMGetErrorText`), and finding and registering filters
+(`register`, `list`). Decoding and encoding through them are next.
+
 ## Prerequisites
 
 The codecs are i386 code, so the harness is built as a 32-bit Linux program.
@@ -315,6 +321,30 @@ Windows Registry Editor Version 5.00
 `VFW_REGISTRY=` (empty) keeps the registry in memory only, starting empty
 each run.
 
+### DirectShow filters: `register` and `unregister`
+
+```sh
+build/seance register --dry-run filter.ax  # what it would register
+build/seance register filter.ax
+build/seance list                          # ... then DirectShow filters
+build/seance unregister filter.ax
+```
+
+A DirectShow filter server (usually an `.ax` file, which `info` calls a COM
+server) registers its filters itself, from its `DllRegisterServer`, with
+quartz's filter mappers. `register` runs it, as `regsvr32` would, into the
+registry above; `unregister` runs `DllUnregisterServer`. Both print the
+filters registered: CLSID, name, whether it looks like a video decoder or
+encoder (from its pins' media types), merit, category and pins. With
+`--dry-run` it runs in a copy of the registry that is thrown away
+afterwards, so nothing changes.
+
+`list` shows the video decoders and encoders registered, from the
+filter categories and the older `HKCR\Filter` keys, with the DLL that
+serves each; `--all` shows every filter. A `.reg` file exported from
+Windows with filters in it can be dropped in as the registry; the
+filters' DLLs are then found through the drive mapping.
+
 ### Decoding and encoding: `decode` and `encode`
 
 ```sh
@@ -425,7 +455,8 @@ hangs on one.
 | `include/win32/` | Win32 types, PE image structures, GDI, window-manager and registry definitions, driver and ICM definitions, laid out to match 32-bit Windows |
 | `src/loader/` | PE parsing, mapping and relocation (`pe.c`); the module table and dependency loading (`modules.c`) |
 | `src/runtime/` | TEB and `%fs`, implicit TLS, the built-in DLL registry, trap thunks for unimplemented imports, the 2 GB limit (`lowmem.c`), crash and hang reports (`crash.c`) |
-| `src/win32/` | Built-in kernel32 (`k32_*.c`), ntdll, the msvcrt family (`crt_*.c`), user32 (`user32.c`, `u32_*.c`), gdi32 (`gdi32.c`, `gdi_bitmap.c`), advapi32 (`advapi32.c`, `adv_security.c`) and its registry (`reg.c`), version, ole32, oleaut32 (`oleaut32.c`, `oleaut_conv.c`, `oleaut_array.c`, `errinfo.c`), shell32 (`shell32.c`, `shell_file.c`), comctl32 (`comctl32.c`, `comctl_dpa.c`, `comctl_imagelist.c`, `comctl_sheet.c`), comdlg32, winmm and msvfw32 |
+| `src/win32/` | Built-in kernel32 (`k32_*.c`), ntdll, the msvcrt family (`crt_*.c`), user32 (`user32.c`, `u32_*.c`), gdi32 (`gdi32.c`, `gdi_bitmap.c`), advapi32 (`advapi32.c`, `adv_security.c`) and its registry (`reg.c`), version, ole32, oleaut32 (`oleaut32.c`, `oleaut_conv.c`, `oleaut_array.c`, `errinfo.c`), shell32 (`shell32.c`, `shell_file.c`), comctl32 (`comctl32.c`, `comctl_dpa.c`, `comctl_imagelist.c`, `comctl_sheet.c`), comdlg32, winmm, msvfw32 and quartz (`quartz.c`) |
+| `src/dshow/` | DirectShow: finding and registering filters (`discover.c`) |
 | `src/vfw/` | Installable drivers (`driver.c`), the codec registry (`registry.c`), the ICM API (`icm.c`), sequence compression (`seq.c`) |
 | `src/avi/` | AVI reader (AVI 1.0 and OpenDML) and writer |
 | `src/in/` | Frame sources for `encode`: Y4M, uncompressed AVI, BMP files, raw frames |
@@ -433,7 +464,7 @@ hangs on one.
 | `src/common/` | Error reporting, file, UTF-16 and FOURCC helpers |
 | `src/` | CLI entry point and commands (`main.c`, `cmd_*.c`, shared helpers in `cmd_util.c`) |
 | `tests/unit/` | Unit tests (`test_*.c`, each a standalone program) |
-| `tests/fixtures/` | Sources of the test DLLs, including `testcodec.c`, a lossless VfW codec (`TST0`) |
+| `tests/fixtures/` | Sources of the test DLLs, including `testcodec.c`, a lossless VfW codec (`TST0`), and `testfilter.c`, a DirectShow filter server |
 | `tests/abi/` | ABI cross-check against the mingw-w64 headers |
 | `tests/validate_media.sh` | Cross-check of the AVI and image code against FFmpeg |
 | `tests/smoke.sh` | A quick run of every CLI command |

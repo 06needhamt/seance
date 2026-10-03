@@ -37,10 +37,32 @@ fails $emu "$harness" decode
 fails $emu "$harness" encode
 fails $emu "$harness" decode TST0 "$junk" -o /dev/null --format raw
 fails $emu "$harness" encode TST0 "$junk" -o /dev/null
+fails $emu "$harness" register
+fails $emu "$harness" register --dry-run "$junk"
+fails $emu "$harness" unregister
 
 if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	$emu "$harness" info "$fixtures/pe_dep.dll" >/dev/null
 	$emu "$harness" probe "$fixtures/testcodec.dll" | grep -q "handler 'TST0'"
+	fails $emu "$harness" register --dry-run "$fixtures/testcodec.dll"
+
+	# DirectShow filters, registered in a registry of their own.
+	reg=$(mktemp)
+	rm -f "$reg"
+	export VFW_REGISTRY="$reg"
+	$emu "$harness" register --dry-run "$fixtures/testfilter.ax" |
+		grep -q "seance test decoder"
+	[ ! -e "$reg" ] || { echo "smoke: --dry-run wrote $reg" >&2; exit 1; }
+	$emu "$harness" register "$fixtures/testfilter.ax" >/dev/null
+	VFW_INI=/nonexistent $emu "$harness" list |
+		grep -q "seance test encoder"
+	$emu "$harness" unregister "$fixtures/testfilter.ax" >/dev/null
+	if VFW_INI=/nonexistent $emu "$harness" list | grep -q "seance test"; then
+		echo "smoke: unregister left filters behind" >&2
+		exit 1
+	fi
+	rm -f "$reg"
+	unset VFW_REGISTRY
 	fails $emu "$harness" decode "$fixtures/testcodec.dll" "$junk" -o /dev/null \
 		--format raw
 

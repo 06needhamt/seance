@@ -63,6 +63,9 @@ LONG reg_set(struct reg_key *k, const char *name, DWORD type,
 	     const void *data, DWORD size);
 LONG reg_unset(struct reg_key *k, const char *name);
 
+/* The file the registry is saved to, or "" if it is in memory only. */
+const char *reg_file_path(void);
+
 /* Saves the tree after a change; a Win32 error code. */
 LONG reg_save(void);
 

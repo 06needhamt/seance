@@ -12,5 +12,6 @@ int cmd_decode(int argc, char **argv);
 int cmd_encode(int argc, char **argv);
 int cmd_list(int argc, char **argv);
 int cmd_probe(int argc, char **argv);
+int cmd_register(int argc, char **argv);
 
 #endif /* VFW_COMMANDS_H */

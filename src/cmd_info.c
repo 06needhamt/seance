@@ -7,6 +7,7 @@
 #include <time.h>
 
 #include "commands.h"
+#include "dshow/discover.h"
 #include "common/error.h"
 #include "loader/pe.h"
 #include "runtime/builtin.h"
@@ -97,6 +98,12 @@ static void print_header(const char *path, const struct pe_image *img)
 	printf("file:            %s\n", path);
 	printf("type:            %s, i386\n",
 	       fh->Characteristics & IMAGE_FILE_DLL ? "DLL" : "executable");
+	struct pe_export e;
+	if (!pe_find_export(img, "DriverProc", 0, &e))
+		printf("kind:            VfW codec or driver (DriverProc)\n");
+	else if (dshow_is_server(img))
+		printf("kind:            COM server, perhaps DirectShow filters "
+		       "(seance register --dry-run lists them)\n");
 	printf("timestamp:       0x%08x%s\n", fh->TimeDateStamp, when);
 	printf("linker:          %u.%u\n", o->MajorLinkerVersion,
 	       o->MinorLinkerVersion);

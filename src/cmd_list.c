@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * seance list [--no-open]: the codecs registered in vfw.ini.
+ * seance list [--no-open] [--all]: the codecs registered in vfw.ini, and
+ * the DirectShow filters registered in the registry.
  */
 #include <stdio.h>
 #include <string.h>
@@ -9,33 +10,43 @@
 #include "common/error.h"
 #include "common/fourcc.h"
 #include "common/unicode.h"
+#include "dshow/discover.h"
 #include "runtime/runtime.h"
 #include "vfw/icm.h"
 #include "vfw/registry.h"
+#include "win32/reg.h"
 
-int cmd_list(int argc, char **argv)
+/* The DirectShow filters registered, video ones unless all. */
+static void list_filters(int all)
 {
-	int open = 1;
+	struct dshow_registered *r = NULL;
+	size_t n = dshow_registered_filters(&r), shown = 0;
+	const char *file = reg_file_path();
 
-	for (int i = 1; i < argc; i++) {
-		if (!strcmp(argv[i], "--no-open")) {
-			open = 0;
-		} else {
-			fprintf(stderr, "usage: seance list [--no-open]\n");
-			return 2;
-		}
+	printf("\nDirectShow %sfilters registered in %s:\n",
+	       all ? "" : "video ", *file ? file : "the registry (in memory)");
+	for (size_t i = 0; i < n; i++) {
+		if (!all && dshow_role(&r[i].f) == DSHOW_OTHER)
+			continue;
+		dshow_print_filter(&r[i].f, r[i].path ? r[i].path :
+				   "(no InprocServer32)", 0);
+		shown++;
 	}
-	if (runtime_enter()) {
-		fprintf(stderr, "seance: %s\n", vfw_error());
-		return 1;
-	}
+	if (!shown)
+		printf("  none%s. seance register <filter.ax> registers a "
+		       "filter server's filters.\n",
+		       all || !n ? "" : " that decode or encode video");
+	dshow_registered_free(r, n);
+}
 
+static void list_codecs(int open)
+{
 	printf("Codecs in %s:\n", vfw_ini_path());
 	const struct vfw_codec *c = vfw_enum(0, 0);
 	if (!c) {
 		printf("  none. Add a [drivers32] section with lines such as\n"
 		       "  vidc.XXXX=/path/to/codec.dll (or set VFW_INI).\n");
-		return 0;
+		return;
 	}
 	for (unsigned i = 0; (c = vfw_enum(0, i)); i++) {
 		char t[FOURCC_STR_SIZE], h[FOURCC_STR_SIZE];
@@ -64,5 +75,32 @@ int cmd_list(int argc, char **argv)
 		}
 		ic_close(hic);
 	}
+}
+
+int cmd_list(int argc, char **argv)
+{
+	int open = 1, all = 0;
+
+	for (int i = 1; i < argc; i++) {
+		if (!strcmp(argv[i], "--no-open")) {
+			open = 0;
+		} else if (!strcmp(argv[i], "--all")) {
+			all = 1;
+		} else {
+			fprintf(stderr, "usage: seance list [--no-open] [--all]\n"
+				"\n"
+				"  --no-open   don't open the codecs to ask their "
+				"names\n"
+				"  --all       list every DirectShow filter "
+				"registered, not just video ones\n");
+			return 2;
+		}
+	}
+	if (runtime_enter()) {
+		fprintf(stderr, "seance: %s\n", vfw_error());
+		return 1;
+	}
+	list_codecs(open);
+	list_filters(all);
 	return 0;
 }

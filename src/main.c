@@ -28,14 +28,18 @@ static const struct command commands[] = {
 	  "show an AVI file's headers, streams and index", cmd_avi },
 	{ "convert", "<in.avi> -o <out>",
 	  "write uncompressed video as Y4M, BMP or raw frames", cmd_convert },
-	{ "list", "[--no-open]",
-	  "list the codecs registered in vfw.ini", cmd_list },
+	{ "list", "[--no-open] [--all]",
+	  "list the codecs and DirectShow filters registered", cmd_list },
 	{ "probe", "<dll|fourcc> [in.avi]",
 	  "show codec info and the formats it accepts", cmd_probe },
 	{ "decode", "<dll|fourcc|auto> <in.avi> -o <out>",
 	  "decompress a video to Y4M, BMP or raw frames", cmd_decode },
 	{ "encode", "<dll|fourcc> <in.y4m|avi|bmp|raw> -o <out.avi>",
 	  "compress video to an AVI", cmd_encode },
+	{ "register", "[--dry-run] <filter.ax>",
+	  "register a DirectShow filter server's filters", cmd_register },
+	{ "unregister", "<filter.ax>",
+	  "unregister a DirectShow filter server's filters", cmd_register },
 };
 
 static void usage(FILE *out)
@@ -47,7 +51,7 @@ static void usage(FILE *out)
 		"commands:\n");
 	for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
 		const struct command *c = &commands[i];
-		fprintf(out, "  %-7s %-36s %s%s\n", c->name, c->args,
+		fprintf(out, "  %-10s %-36s %s%s\n", c->name, c->args,
 			c->summary, c->run ? "" : " (not implemented yet)");
 	}
 }

@@ -296,9 +296,36 @@ strmbase — same constraints as `testcodec.c`/`pe_com.c`), generic and small:
      description for the common ones (`quartz_errors.h`).
    - Tests: `test_quartz`, `test_winmm` (new), and stream, marshalling and
      sandbox cases in `test_ole32` and `test_advapi32`.
-2. **Discovery and registration.** `dshow/discover.c`, `register`/
+2. **Discovery and registration.** (Done.) `dshow/discover.c`, `register`/
    `unregister`, `info` and `list` output. Milestone: `testfilter.ax`'s two
    filters are discovered without touching the registry, and registered/listed.
+   - `dshow_discover` runs `DllRegisterServer` with `reg_sandbox_begin` and
+     quartz capturing, and keeps the filters whose class the DLL serves (no
+     InprocServer32, or one naming the file, by name or once links are
+     resolved). `dshow_register` does the same for real, or runs
+     `DllUnregisterServer`. Both CoInitialize around the call for servers
+     that don't.
+   - `dshow_registered_filters` reads every category's
+     `HKCR\CLSID\{category}\Instance` (the legacy and video compressor
+     categories plus those declared under ActiveMovieCategories) and the
+     legacy `HKCR\Filter` and `Pins` keys, user classes before machine
+     ones, with each filter's InprocServer32. `dshow_role` calls a filter a
+     video decoder (compressed video in, raw out), encoder (the reverse, or
+     in the video compressor category) or other.
+   - CLI: `seance register [--dry-run] <filter.ax>` and
+     `seance unregister <filter.ax>` print the filters with their pins;
+     `list` adds the registered video filters (`--all` for every one).
+     `info` stays a static look at the file, as it always was, so instead of
+     running the DLL it says when it is a COM server and points at
+     `register --dry-run`.
+   - `testfilter.ax` (`tests/fixtures/testfilter.c`) has its registration
+     side so far: a TST0 decoder through IFilterMapper2 and an encoder
+     through the legacy mapper, with InprocServer32 keys; its class
+     factories' CreateInstance returns E_NOTIMPL until Phase 3.
+   - Tests: `test_discover` (sandboxed discovery leaves no trace, discovery
+     through a renamed link, real registration read back and reached
+     through CoGetClassObject, unregistering, a legacy `.reg` import,
+     roles), and `smoke.sh` runs the new commands on a registry of its own.
 3. **Host and decode.** `mediatype.c`, `alloc.c`, `host.c`, `call.c`;
    `probe` and `decode` integration. Milestone: `tests/unit/test_dshow.c`
    connects, runs and tears down the decoder in every fixture mode with no

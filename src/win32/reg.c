@@ -262,6 +262,13 @@ static void load(void)
 	loading = 0;
 }
 
+const char *reg_file_path(void)
+{
+	reg_lock();
+	reg_unlock();
+	return file;
+}
+
 unsigned reg_generation(void)
 {
 	return generation;
