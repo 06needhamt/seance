@@ -1,9 +1,9 @@
 <!-- SPDX-License-Identifier: GPL-2.0-only -->
-# libseance: DirectShow filter support plan
+# seance: DirectShow filter support plan
 
 ## Context
 
-libseance loads 32-bit VfW/ICM codec DLLs natively on Linux and drives them
+seance loads 32-bit VfW/ICM codec DLLs natively on Linux and drives them
 through `DriverProc` (`probe`, `list`, `decode`, `encode`). Many codecs from
 the same era — and most later ones — ship as DirectShow filters (`.ax` DLLs):
 in-process COM servers exposing `DllGetClassObject`/`DllRegisterServer`,

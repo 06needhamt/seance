@@ -138,7 +138,7 @@ if(NOT DEFINED CACHE{VFW_I386_MODE})
 		endif()
 		string(CONCAT hint ${hint})
 		message(FATAL_ERROR "No C compiler here builds i386 programs, "
-			"which libseance must be (host: ${vfw_arch}). Install "
+			"which seance must be (host: ${vfw_arch}). Install "
 			"${hint}, or give one with -DCMAKE_C_COMPILER=... or a "
 			"toolchain file.")
 	endif()

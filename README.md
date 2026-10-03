@@ -1,9 +1,9 @@
 <!-- SPDX-License-Identifier: GPL-2.0-only -->
-# libseance
+# seance
 
-[![CI](https://github.com/06needhamt/libseance/actions/workflows/ci.yml/badge.svg)](https://github.com/06needhamt/libseance/actions/workflows/ci.yml)
+[![CI](https://github.com/06needhamt/seance/actions/workflows/ci.yml/badge.svg)](https://github.com/06needhamt/seance/actions/workflows/ci.yml)
 
-libseance is a harness for loading and running 32-bit Video for Windows
+seance is a harness for loading and running 32-bit Video for Windows
 (VfW / ICM) codec DLLs natively on Linux, without Wine. It maps the PE image
 itself, provides a small Win32 runtime, and drives the codec's `DriverProc`
 through a minimal reimplementation of the msvfw32 ICM API. The goal is to test

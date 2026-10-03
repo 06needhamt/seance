@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: GPL-2.0-only -->
-# libseance: audit and implementation plan
+# seance: audit and implementation plan
 
 ## Context
 

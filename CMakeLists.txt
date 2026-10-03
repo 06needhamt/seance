@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# libseance build.
+# seance build.
 #
 #   cmake -B build            configure (or: cmake --preset default)
 #   cmake --build build       build build/seance (i386) and, with
@@ -26,34 +26,16 @@ cmake_minimum_required(VERSION 3.20)
 # checks use it too.
 include(cmake/i386.cmake)
 
-project(libseance VERSION 0.1.0 LANGUAGES C)
+project(seance VERSION 0.1.0 LANGUAGES C)
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
-	message(FATAL_ERROR "libseance must be built as a 32-bit x86 "
+	message(FATAL_ERROR "seance must be built as a 32-bit x86 "
 		"program; the compiler gives ${CMAKE_SIZEOF_VOID_P}-byte pointers. "
 		"Install gcc-multilib or an i686 cross compiler, or give a "
 		"toolchain file for i386.")
 endif()
 
-# Running what was built: directly, or through an emulator on a cross
-# build (qemu-i386, unless the toolchain file names one). With neither an
-# emulator nor binfmt_misc to run i386 programs, nothing can be tested.
-set(vfw_can_run TRUE)
-if(CMAKE_CROSSCOMPILING AND NOT CMAKE_CROSSCOMPILING_EMULATOR)
-	find_program(VFW_QEMU_I386 NAMES qemu-i386-static qemu-i386)
-	if(VFW_QEMU_I386)
-		set(CMAKE_CROSSCOMPILING_EMULATOR ${VFW_QEMU_I386})
-	elseif(EXISTS /proc/sys/fs/binfmt_misc/qemu-i386)
-		message(STATUS "i386 programs run through binfmt_misc")
-	else()
-		set(vfw_can_run FALSE)
-		message(WARNING "Cross-compiling with no way to run i386 programs: "
-			"install qemu-user (qemu-i386) to build and run the tests.")
-	endif()
-endif()
-if(CMAKE_CROSSCOMPILING_EMULATOR)
-	message(STATUS "i386 programs run through ${CMAKE_CROSSCOMPILING_EMULATOR}")
-endif()
+include(cmake/emulator.cmake)
 # For the test scripts, which run the harness themselves.
 string(REPLACE ";" " " vfw_emulator "${CMAKE_CROSSCOMPILING_EMULATOR}")
 
@@ -131,6 +113,12 @@ endif()
 option(BUILD_TESTING "Build the tests" ${vfw_can_run})
 if(BUILD_TESTING)
 	enable_testing()
+	add_test(NAME emulator_detection
+		COMMAND ${CMAKE_COMMAND}
+			-P ${PROJECT_SOURCE_DIR}/tests/cmake/emulator.cmake)
+	add_test(NAME capture_arguments
+		COMMAND ${CMAKE_COMMAND}
+			-P ${PROJECT_SOURCE_DIR}/tests/cmake/capture.cmake)
 	set(test_dir ${CMAKE_BINARY_DIR}/tests)
 
 	# A test exits 77 when it needs something that isn't there (fixture
@@ -164,7 +152,7 @@ if(BUILD_TESTING)
 	set(abi_checks ${test_dir}/abi_checks.inc)
 	add_custom_command(OUTPUT ${abi_constants}
 		COMMAND ${CMAKE_COMMAND} -DOUTPUT=${abi_constants}
-			-P ${PROJECT_SOURCE_DIR}/cmake/capture.cmake
+			-P ${PROJECT_SOURCE_DIR}/cmake/capture.cmake --
 			sh ${PROJECT_SOURCE_DIR}/tests/abi/constants.sh ${win32_headers}
 		DEPENDS tests/abi/constants.sh tests/abi/constants_skip.txt
 			${win32_headers}
@@ -176,7 +164,7 @@ if(BUILD_TESTING)
 		RUNTIME_OUTPUT_DIRECTORY ${test_dir})
 	add_custom_command(OUTPUT ${abi_checks}
 		COMMAND ${CMAKE_COMMAND} -DOUTPUT=${abi_checks}
-			-P ${PROJECT_SOURCE_DIR}/cmake/capture.cmake
+			-P ${PROJECT_SOURCE_DIR}/cmake/capture.cmake --
 			${CMAKE_CROSSCOMPILING_EMULATOR} $<TARGET_FILE:gen_abi_checks>
 		DEPENDS gen_abi_checks
 		VERBATIM)
@@ -188,7 +176,7 @@ if(BUILD_TESTING)
 		set(abi_mingw_guids ${test_dir}/abi_mingw_guids.inc)
 		add_custom_command(OUTPUT ${abi_mingw_guids}
 			COMMAND ${CMAKE_COMMAND} -DOUTPUT=${abi_mingw_guids}
-				-P ${PROJECT_SOURCE_DIR}/cmake/capture.cmake
+				-P ${PROJECT_SOURCE_DIR}/cmake/capture.cmake --
 				sh ${PROJECT_SOURCE_DIR}/tests/abi/mingw_guids.sh
 				${VFW_MINGW_CC}
 			DEPENDS tests/abi/mingw_guids.sh

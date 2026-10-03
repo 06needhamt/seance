@@ -259,7 +259,7 @@ static int rle_decode(const BYTE *src, DWORD len, BYTE *dst, DWORD n, int xor)
 static LRESULT get_info(ICINFO *info, DWORD size)
 {
 	static const char name[] = "TST0";
-	static const char desc[] = "libseance test codec";
+	static const char desc[] = "seance test codec";
 	int i;
 
 	if (!info || size < sizeof(*info))

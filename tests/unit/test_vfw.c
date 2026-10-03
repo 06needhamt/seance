@@ -1112,7 +1112,7 @@ static void test_probe_cli(const char *codec)
 	args[2] = avi_path;
 	CHECK_EQ(run_captured(cmd_probe, 3, args, out, sizeof(out)), 0);
 	CHECK(strstr(out, "handler 'TST0'"));
-	CHECK(strstr(out, "description: libseance test codec"));
+	CHECK(strstr(out, "description: seance test codec"));
 	CHECK(strstr(out, "flags: 0x0034 TEMPORAL DRAW FASTTEMPORALC"));
 	CHECK(strstr(out, "state: 8 bytes"));
 	CHECK(strstr(out, "Decompression of"));
@@ -1129,7 +1129,7 @@ static void test_probe_cli(const char *codec)
 
 	args[0] = "list";
 	CHECK_EQ(run_captured(cmd_list, 1, args, out, sizeof(out)), 0);
-	CHECK(strstr(out, "TST0: libseance test codec"));
+	CHECK(strstr(out, "TST0: seance test codec"));
 	CHECK(strstr(out, "not a driver") == NULL);
 	CHECK(strstr(out, "vidc.NONE  nosuch.dll\n      can't open"));
 

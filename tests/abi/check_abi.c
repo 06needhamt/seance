@@ -8,7 +8,6 @@
 #include <windows.h>
 #include <mmsystem.h>
 #include <vfw.h>
-#include <aviriff.h>
 #include <shlobj.h>
 #include <aclapi.h>
 #include <oleauto.h>
@@ -17,6 +16,9 @@
 #include <commdlg.h>
 #include <shlwapi.h>
 #include <dshow.h>
+/* MinGW 12: aviriff.h sets TIMECODE_DEFINED without PTIMECODE_SAMPLE.
+ * Include DirectShow first so strmif.h supplies the complete definitions. */
+#include <aviriff.h>
 #include <dvdmedia.h>
 
 /*

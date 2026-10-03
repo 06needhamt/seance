@@ -142,7 +142,7 @@ static BYTE *builtin_block(const char *name, DWORD *size)
 	const WORD translation[2] = { 0x0409, 1200 };
 	char desc[128], internal[64];
 
-	snprintf(desc, sizeof(desc), "libseance built-in %s", name);
+	snprintf(desc, sizeof(desc), "seance built-in %s", name);
 	snprintf(internal, sizeof(internal), "%.*s",
 		 (int)strcspn(name, "."), name);
 
@@ -154,7 +154,7 @@ static BYTE *builtin_block(const char *name, DWORD *size)
 	string_node(&b, "FileVersion", BUILTIN_VERSION);
 	string_node(&b, "InternalName", internal);
 	string_node(&b, "OriginalFilename", name);
-	string_node(&b, "ProductName", "libseance");
+	string_node(&b, "ProductName", "seance");
 	string_node(&b, "ProductVersion", BUILTIN_VERSION);
 	end_node(&b, table);
 	end_node(&b, sfi);

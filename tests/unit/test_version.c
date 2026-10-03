@@ -114,12 +114,12 @@ static void test_file(void)
 	s = NULL;
 	CHECK(VerQueryValueA(block, "StringFileInfo\\\\040904B0\\FILEDESCRIPTION",
 			     (void **)&s, &len));
-	CHECK_STR(s, "libseance PE test fixture");
+	CHECK_STR(s, "seance PE test fixture");
 
 	WCHAR *w = NULL;
 	CHECK(VerQueryValueW(block, product_w, (void **)&w, &len));
-	CHECK(w && wide_is(w, "libseance"));
-	CHECK_EQ(len, 10);
+	CHECK(w && wide_is(w, "seance"));
+	CHECK_EQ(len, 7);
 	CHECK((BYTE *)w > block && (BYTE *)w < block + total);
 
 	len = 5;
@@ -209,8 +209,8 @@ static void test_loaded_module(void)
 	UINT len = 0;
 	CHECK(VerQueryValueA(raw, "\\StringFileInfo\\040904b0\\ProductName",
 			     (void **)&s, &len));
-	CHECK_STR(s, "libseance");
-	CHECK_EQ(len, 10);
+	CHECK_STR(s, "seance");
+	CHECK_EQ(len, 7);
 	CHECK((const BYTE *)s < m->base || (const BYTE *)s >= m->base + m->img->map_len);
 	CHECK(!memcmp(copy, m->base, m->img->map_len));
 	free(copy);
