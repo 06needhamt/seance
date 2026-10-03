@@ -565,7 +565,7 @@ SIZE_T global_size(HGLOBAL h)
 	return s == (SIZE_T)-1 ? 0 : s;
 }
 
-static HGLOBAL global_realloc(HGLOBAL h, SIZE_T size, UINT flags)
+HGLOBAL global_realloc(HGLOBAL h, SIZE_T size, UINT flags)
 {
 	struct moveable *m = moveable_of(h);
 	DWORD hflags = (flags & GMEM_ZEROINIT) ? HEAP_ZERO_MEMORY : 0;

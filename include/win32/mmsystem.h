@@ -42,6 +42,22 @@ typedef struct tagDRVCONFIGINFO {
 typedef LRESULT (CALLBACK *DRIVERPROC)(DWORD_PTR dwDriverId, HDRVR hdrvr,
 				       UINT msg, LPARAM lParam1, LPARAM lParam2);
 
+/* Multimedia timers (timeapi.h). */
+#define MMSYSERR_NOERROR    0
+#define MMSYSERR_INVALPARAM 11
+#define TIMERR_NOERROR      0
+#define TIMERR_NOCANDO      97
+
+#define TIME_ONESHOT              0x0000
+#define TIME_PERIODIC             0x0001
+#define TIME_CALLBACK_FUNCTION    0x0000
+#define TIME_CALLBACK_EVENT_SET   0x0010
+#define TIME_CALLBACK_EVENT_PULSE 0x0020
+#define TIME_KILL_SYNCHRONOUS     0x0100
+
+typedef void (CALLBACK *LPTIMECALLBACK)(UINT id, UINT msg, DWORD_PTR user,
+					DWORD_PTR dw1, DWORD_PTR dw2);
+
 typedef DWORD FOURCC;
 
 #define mmioFOURCC(c0, c1, c2, c3) \

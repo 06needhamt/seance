@@ -441,6 +441,62 @@ static void test_memory_only(void)
 	setenv("VFW_REGISTRY", file, 1);
 }
 
+/*
+ * A sandbox: a copy of the registry that changes like the real one but is
+ * never saved, then thrown away.
+ */
+static void test_sandbox(void)
+{
+	FN(LONG, RegCreateKeyA, HKEY, LPCSTR, HKEY *);
+	FN(LONG, RegOpenKeyA, HKEY, LPCSTR, HKEY *);
+	FN(LONG, RegCloseKey, HKEY);
+	FN(LONG, RegSetValueExA, HKEY, LPCSTR, DWORD, DWORD, const BYTE *,
+	   DWORD);
+	FN(LONG, RegQueryValueExA, HKEY, LPCSTR, LPDWORD, LPDWORD, LPBYTE,
+	   LPDWORD);
+	HKEY real, k;
+	DWORD v, size, type;
+
+	reg_reload();
+	CHECK_EQ(RegCreateKeyA(HKEY_CURRENT_USER, "Software\\Real", &real), 0);
+	v = 1;
+	CHECK_EQ(RegSetValueExA(real, "Value", 0, REG_DWORD, (BYTE *)&v,
+				sizeof(v)), 0);
+
+	CHECK_EQ(reg_sandbox_begin(), ERROR_SUCCESS);
+	v = 2;
+	CHECK_EQ(RegSetValueExA(real, "Value", 0, REG_DWORD, (BYTE *)&v,
+				sizeof(v)), 0);
+	CHECK_EQ(RegCreateKeyA(HKEY_CURRENT_USER, "Software\\Sandboxed", &k), 0);
+	RegCloseKey(k);
+	CHECK_EQ(RegOpenKeyA(HKEY_CURRENT_USER, "Software\\Sandboxed", &k), 0);
+	RegCloseKey(k);
+	size = sizeof(v);
+	CHECK_EQ(RegQueryValueExA(real, "Value", NULL, &type, (BYTE *)&v,
+				  &size), 0);
+	CHECK_EQ(v, 2);
+	char *text = read_text(file);
+	CHECK(text && strstr(text, "Real") && !strstr(text, "Sandboxed"));
+	free(text);
+	reg_sandbox_end();
+
+	/* Handles opened before keep working on the real tree. */
+	size = sizeof(v);
+	CHECK_EQ(RegQueryValueExA(real, "Value", NULL, &type, (BYTE *)&v,
+				  &size), 0);
+	CHECK_EQ(v, 1);
+	CHECK(RegOpenKeyA(HKEY_CURRENT_USER, "Software\\Sandboxed", &k) != 0);
+	v = 3;
+	CHECK_EQ(RegSetValueExA(real, "Value", 0, REG_DWORD, (BYTE *)&v,
+				sizeof(v)), 0);
+	text = read_text(file);
+	CHECK(text && strstr(text, "dword:00000003") &&
+	      !strstr(text, "Sandboxed"));
+	free(text);
+	RegCloseKey(real);
+	reg_sandbox_end();	/* outside one: nothing */
+}
+
 static void test_fixture(void)
 {
 	const char *d = getenv("VFW_FIXTURES");
@@ -847,6 +903,7 @@ int main(void)
 	test_notify();
 	test_key_security();
 	test_drivers32();
+	test_sandbox();
 	test_memory_only();
 	test_fixture();
 

@@ -5,8 +5,10 @@
  * strings, and in-process class objects: CoCreateInstance finds a class
  * registered with CoRegisterClassObject, or loads the DLL named by
  * HKCR\CLSID\{...}\InprocServer32 in the harness's registry and asks its
- * DllGetClassObject. There are no out-of-process servers, marshalling or
- * OLE documents.
+ * DllGetClassObject; Windows' own classes that the built-in DLLs serve
+ * (quartz's filter mapper, for one) need no registry entry. Streams on
+ * global memory and in-process marshalling are in ole_stream.c. There are
+ * no out-of-process servers, real marshalling or OLE documents.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -22,12 +24,12 @@
 #include "win32/codepage.h"
 #include "win32/internal.h"
 #include "win32/k32.h"
+#include "win32/ole.h"
 #include "win32/oleaut.h"
 #include "win32/path.h"
 #include "win32/reg.h"
 
-/* "{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}" and its NUL. */
-#define GUID_CHARS 39
+#define GUID_CHARS OLE_GUID_CHARS
 
 #define MEMCTX_TASK 1
 
@@ -198,7 +200,7 @@ WINFN(HRESULT) ole_CoGetMalloc(DWORD context, LPMALLOC *out)
 
 /* GUIDs and their strings. */
 
-static void guid_format(const GUID *g, char out[GUID_CHARS])
+void ole_guid_format(const GUID *g, char out[OLE_GUID_CHARS])
 {
 	snprintf(out, GUID_CHARS,
 		 "{%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
@@ -218,8 +220,7 @@ static int hex_digit(WCHAR c)
 	return -1;
 }
 
-/* Parses exactly "{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}". */
-static int guid_parse(const WCHAR *s, GUID *out)
+int ole_guid_parse(const WCHAR *s, GUID *out)
 {
 	static const char shape[] = "{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}";
 	BYTE b[16];
@@ -253,7 +254,7 @@ WINFN(INT) ole_StringFromGUID2(REFGUID g, LPOLESTR buf, INT cch)
 
 	if (!g || !buf || cch < GUID_CHARS)
 		return 0;
-	guid_format(g, s);
+	ole_guid_format(g, s);
 	for (int i = 0; i < GUID_CHARS; i++)
 		buf[i] = (BYTE)s[i];
 	return GUID_CHARS;
@@ -354,7 +355,7 @@ WINFN(HRESULT) ole_CLSIDFromProgID(LPCOLESTR progid, LPCLSID clsid)
 	char *value = classes_value(sub, "");
 	WCHAR *w = utf8_to_utf16_dup(value);
 	free(value);
-	int bad = !w || guid_parse(w, clsid);
+	int bad = !w || ole_guid_parse(w, clsid);
 	free(w);
 	if (bad) {
 		memset(clsid, 0, sizeof(*clsid));
@@ -371,7 +372,7 @@ WINFN(HRESULT) ole_CLSIDFromString(LPCOLESTR s, LPCLSID clsid)
 		memset(clsid, 0, sizeof(*clsid));
 		return S_OK;
 	}
-	if (!guid_parse(s, clsid))
+	if (!ole_guid_parse(s, clsid))
 		return S_OK;
 	if (*s != '{' && ole_CLSIDFromProgID(s, clsid) == S_OK)
 		return S_OK;
@@ -387,7 +388,7 @@ WINFN(HRESULT) ole_IIDFromString(LPCOLESTR s, LPIID iid)
 		memset(iid, 0, sizeof(*iid));
 		return S_OK;
 	}
-	if (guid_parse(s, iid)) {
+	if (ole_guid_parse(s, iid)) {
 		memset(iid, 0, sizeof(*iid));
 		return E_INVALIDARG;
 	}
@@ -403,7 +404,7 @@ WINFN(HRESULT) ole_ProgIDFromCLSID(REFCLSID clsid, LPOLESTR *out)
 	*out = NULL;
 	if (!clsid)
 		return E_INVALIDARG;
-	guid_format(clsid, g);
+	ole_guid_format(clsid, g);
 	snprintf(sub, sizeof(sub), "CLSID\\%s\\ProgID", g);
 	char *value = classes_value(sub, "");
 	if (!value)
@@ -562,17 +563,43 @@ static struct module *load_server(const char *name)
 	return m;
 }
 
+/*
+ * Classes Windows registers for its own DLLs, which the harness's registry
+ * needn't hold: they are served by the built-in DLL of that name unless
+ * the registry says otherwise. (On Windows the device enumerator is
+ * devenum.dll's; the built-in quartz serves it here.)
+ */
+static const struct {
+	const CLSID *clsid;
+	const char *dll;
+} system_classes[] = {
+	{ &CLSID_FilterMapper, "quartz.dll" },
+	{ &CLSID_FilterMapper2, "quartz.dll" },
+	{ &CLSID_SystemDeviceEnum, "quartz.dll" },
+};
+
+static char *system_class_dll(REFCLSID clsid)
+{
+	for (size_t i = 0; i < sizeof(system_classes) / sizeof(*system_classes);
+	     i++)
+		if (guid_eq(system_classes[i].clsid, clsid))
+			return strdup(system_classes[i].dll);
+	return NULL;
+}
+
 static HRESULT inproc_class_object(REFCLSID clsid, REFIID riid, void **ppv)
 {
 	char g[GUID_CHARS], sub[64];
 
-	guid_format(clsid, g);
+	ole_guid_format(clsid, g);
 	snprintf(sub, sizeof(sub), "CLSID\\%s\\InprocServer32", g);
 	char *dll = classes_value(sub, "");
 	if (!dll || !*dll) {
 		free(dll);
-		return REGDB_E_CLASSNOTREG;
+		dll = system_class_dll(clsid);
 	}
+	if (!dll)
+		return REGDB_E_CLASSNOTREG;
 
 	struct module *m = load_server(dll);
 	if (!m) {
@@ -671,7 +698,7 @@ static const struct builtin_export exports[] = {
 };
 
 static const struct builtin_export *const tables[] = {
-	exports, oa_errinfo_ole32_exports, NULL
+	exports, oa_errinfo_ole32_exports, ole_stream_exports, NULL
 };
 
 const struct builtin_dll builtin_ole32 = { "ole32.dll", NULL, tables, 0 };

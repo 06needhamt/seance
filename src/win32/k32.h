@@ -26,12 +26,16 @@ BOOL heap_free(HANDLE heap, DWORD flags, void *p);
 SIZE_T heap_size(HANDLE heap, DWORD flags, const void *p);
 void *heap_realloc(HANDLE heap, DWORD flags, void *p, SIZE_T size);
 
-/* GlobalAlloc, GlobalFree, GlobalLock, GlobalUnlock and GlobalSize. */
+/*
+ * GlobalAlloc, GlobalFree, GlobalLock, GlobalUnlock, GlobalSize and
+ * GlobalReAlloc.
+ */
 HGLOBAL global_alloc(UINT flags, SIZE_T size);
 HGLOBAL global_free(HGLOBAL h);
 LPVOID global_lock(HGLOBAL h);
 BOOL global_unlock(HGLOBAL h);
 SIZE_T global_size(HGLOBAL h);
+HGLOBAL global_realloc(HGLOBAL h, SIZE_T size, UINT flags);
 
 /* The Unix fd behind a file handle, or -1. */
 int file_handle_fd(HANDLE h);
@@ -47,6 +51,12 @@ DWORD copy_out_w(const char *s, LPWSTR buf, DWORD size);
 
 /* GetFullPathName's answer for a UTF-8 name (malloc()ed), or NULL. */
 char *k32_full_path(const char *name);
+
+/* CreateThread with the defaults, for threads the built-in DLLs run. */
+HANDLE thread_create(LPTHREAD_START_ROUTINE start, LPVOID param);
+
+/* SetEvent, or PulseEvent with pulse. */
+BOOL event_signal(HANDLE h, int pulse);
 
 /* Runs Fls callbacks and thread cleanup for the exiting thread. */
 void thread_exit_cleanup(void);

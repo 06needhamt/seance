@@ -223,6 +223,11 @@ WINFN(HANDLE) k32_CreateThread(LPSECURITY_ATTRIBUTES sa, SIZE_T stack,
 	return h;
 }
 
+HANDLE thread_create(LPTHREAD_START_ROUTINE start, LPVOID param)
+{
+	return k32_CreateThread(NULL, 0, start, param, 0, NULL);
+}
+
 void thread_exit(DWORD code)
 {
 	struct thread *t = self;

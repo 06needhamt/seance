@@ -256,11 +256,46 @@ strmbase — same constraints as `testcodec.c`/`pe_com.c`), generic and small:
      pieces, and `gen_abi_checks` asserts ours against them.
    - `constants.sh` now checks `VFW_E_`/`VFW_S_` names, which it used to skip
      as harness-only along with the rest of the `VFW_` prefix.
-1. **Runtime surface.** quartz built-in (filter mapper write + capture mode,
+1. **Runtime surface.** (Done.) quartz built-in (filter mapper write + capture mode,
    device enum, `AMGetErrorText`), ole32/winmm additions, registry overlay
    hook. Milestone: unit tests in `tests/unit/test_quartz.c` register and
    unregister a fake filter and read back `FilterData`; `test_ole32` covers
    the new stream functions.
+   - `src/win32/quartz.c` serves `CLSID_FilterMapper2`, `CLSID_FilterMapper`
+     (one object with both interfaces, as in Wine) and
+     `CLSID_SystemDeviceEnum`. ole32 now has a table of Windows' own classes
+     that built-in DLLs serve, so `CoCreateInstance` finds these with no
+     registry entry; a registry entry naming quartz.dll by any path also
+     reaches the built-in.
+   - `IFilterMapper2::RegisterFilter` writes `FriendlyName`, `CLSID` and a
+     version 2 `FilterData` under `HKCR\CLSID\{category}\Instance\{instance}`,
+     converting version 1 pins; `CreateCategory` and `UnregisterFilter` too.
+     The legacy mapper writes `HKCR\Filter\{clsid}`, `Merit` and
+     `Pins\name\Types\{major}\{sub}`. `EnumMatchingFilters` (both) is
+     E_NOTIMPL: with no graph manager nothing needs it. `RegisterFilter` gives
+     no moniker back (`*ppMoniker` is NULL).
+   - `src/win32/quartz.h` is the host's side: `struct qz_filter`/`qz_pin`,
+     `qz_filterdata_write`/`qz_filterdata_parse` (bounds-checked, fuzzed by
+     truncation in the test), and `quartz_capture_begin`/`_end`, which record
+     registrations from either mapper (legacy pins keep their names).
+   - The registry overlay is `reg_sandbox_begin`/`reg_sandbox_end` in `reg.c`:
+     a deep copy stands in for the tree and is never saved, then is thrown
+     away. Handles are paths, so ones opened before keep working.
+   - ole32: `CreateStreamOnHGlobal`/`GetHGlobalFromStream` (`ole_stream.c`,
+     after Wine; clones share the block), in-process marshalling
+     (`CoMarshalInterface`, `CoUnmarshalInterface`, `CoReleaseMarshalData`,
+     `CoMarshalInterThreadInterfaceInStream`, `CoGetInterfaceAndReleaseStream`:
+     the pointer itself, with a reference) and a free-threaded marshaler that
+     answers only IUnknown. `ole.h` shares the GUID string helpers.
+   - winmm: `timeSetEvent`/`timeKillEvent` on one timer thread made with
+     `CreateThread`, so callbacks run on a Win32 thread; event timers;
+     `TIME_KILL_SYNCHRONOUS` waits for a running callback unless the timer
+     thread itself kills. kernel32 gained `thread_create` and `event_signal`
+     for built-in DLLs.
+   - `AMGetErrorTextA/W` know every `VFW_E_`/`VFW_S_` code by name, with a
+     description for the common ones (`quartz_errors.h`).
+   - Tests: `test_quartz`, `test_winmm` (new), and stream, marshalling and
+     sandbox cases in `test_ole32` and `test_advapi32`.
 2. **Discovery and registration.** `dshow/discover.c`, `register`/
    `unregister`, `info` and `list` output. Milestone: `testfilter.ax`'s two
    filters are discovered without touching the registry, and registered/listed.
