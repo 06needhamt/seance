@@ -137,6 +137,13 @@ fixture(testcodec testcodec.c testcodec.def testcodec.rc
 	OPTIONS -mpreferred-stack-boundary=2 -fno-builtin
 		-fno-tree-loop-distribute-patterns)
 
+# A DirectShow filter server (.ax), registering itself through quartz's
+# filter mappers.
+fixture(testfilter testfilter.c testfilter.def LIBS ole32 advapi32 kernel32
+	OPTIONS -mpreferred-stack-boundary=2 -fno-builtin
+		-fno-tree-loop-distribute-patterns)
+set_target_properties(testfilter PROPERTIES SUFFIX ".ax")
+
 # The same image as pe_reloc.dll with its relocations stripped.
 add_custom_command(OUTPUT ${VFW_FIXTURE_DIR}/pe_noreloc.dll
 	COMMAND ${VFW_OBJCOPY} --remove-section .reloc
