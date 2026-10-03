@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include <sched.h>
 #include <setjmp.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/syscall.h>
@@ -494,6 +495,13 @@ WINFN(void) k32_ExitProcess(UINT code)
 	exit(code);
 }
 
+WINFN(void) k32_FatalAppExitA(UINT action, LPCSTR message)
+{
+	if (message)
+		fprintf(stderr, "FatalAppExit: %s\n", message);
+	k32_ExitProcess(0);
+}
+
 WINFN(BOOL) k32_TerminateProcess(HANDLE process, UINT code)
 {
 	if (process != PSEUDO_PROCESS) {
@@ -520,6 +528,7 @@ const struct builtin_export k32_thread_exports[] = {
 	E(CreateThread),
 	E(ExitProcess),
 	E(ExitThread),
+	E(FatalAppExitA),
 	E(FlsAlloc),
 	E(FlsFree),
 	E(FlsGetValue),

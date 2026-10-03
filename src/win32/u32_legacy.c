@@ -101,19 +101,6 @@ WINFN(BOOL) user_EnableMenuItem(HMENU menu, UINT id, UINT flags)
 	return (UINT)-1;
 }
 
-WINFN(BOOL) user_EnumResourceLanguagesA(HMODULE module, LPCSTR type,
-					 LPCSTR name, void *callback,
-					 LONG_PTR param)
-{
-	return FALSE;
-}
-
-WINFN(void) user_FatalAppExitA(UINT action, LPCSTR message)
-{
-	if (message)
-		TRACE("FatalAppExitA: %s", message);
-}
-
 WINFN(DWORD) user_GetClassLongA(HWND hwnd, int index)
 {
 	return 0;
@@ -286,8 +273,6 @@ const struct builtin_export u32_legacy_exports[] = {
 	E(DrawTextA),
 	E(DrawTextExA),
 	E(EnableMenuItem),
-	E(EnumResourceLanguagesA),
-	E(FatalAppExitA),
 	E(GetClassLongA),
 	E(GetCursor),
 	E(GetMenu),
