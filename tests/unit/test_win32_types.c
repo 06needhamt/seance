@@ -21,6 +21,14 @@ _Static_assert(sizeof(ICCOMPRESS) == 48, "ICCOMPRESS");
 _Static_assert(sizeof(ICDECOMPRESS) == 24, "ICDECOMPRESS");
 _Static_assert(sizeof(ICDECOMPRESSEX) == 52, "ICDECOMPRESSEX");
 _Static_assert(sizeof(ICCOMPRESSFRAMES) == 64, "ICCOMPRESSFRAMES");
+_Static_assert(sizeof(AM_MEDIA_TYPE) == 72, "AM_MEDIA_TYPE");
+_Static_assert(sizeof(VIDEOINFOHEADER) == 88, "VIDEOINFOHEADER");
+_Static_assert(offsetof(VIDEOINFOHEADER, AvgTimePerFrame) == 40,
+	       "VIDEOINFOHEADER.AvgTimePerFrame");
+_Static_assert(sizeof(VIDEOINFOHEADER2) == 112, "VIDEOINFOHEADER2");
+_Static_assert(sizeof(AM_SAMPLE2_PROPERTIES) == 48, "AM_SAMPLE2_PROPERTIES");
+_Static_assert(sizeof(PIN_INFO) == 264, "PIN_INFO");
+_Static_assert(sizeof(STATSTG) == 72, "STATSTG");
 
 /* 64-bit members are 8-byte aligned, as on Windows (not 4, as on Linux). */
 struct align_probe {
@@ -58,6 +66,14 @@ int main(void)
 	CHECK_EQ(HIWORD(0x12345678), 0x1234);
 	CHECK_EQ((DWORD)MAKELONG(0x5678, 0x1234), 0x12345678);
 	CHECK_EQ(MAKEWORD(0x34, 0x12), 0x1234);
+
+	/* FOURCC subtypes put the FOURCC in Data1 of the 'vids' shape. */
+	static const GUID yuy2 = FOURCC_SUBTYPE_INIT(mmioFOURCC('Y', 'U', 'Y', '2'));
+	CHECK(memcmp(&yuy2, &MEDIASUBTYPE_YUY2, sizeof(GUID)) == 0);
+	static const GUID vids = FOURCC_SUBTYPE_INIT(mmioFOURCC('v', 'i', 'd', 's'));
+	CHECK(memcmp(&vids, &MEDIATYPE_Video, sizeof(GUID)) == 0);
+	CHECK_EQ(IID_IPin.Data1, 0x56a86891);
+	CHECK_EQ(IID_IUnknown.Data4[0], 0xc0);
 
 	return test_summary("test_win32_types");
 }

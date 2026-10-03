@@ -16,5 +16,34 @@
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shlwapi.h>
+#include <dshow.h>
+#include <dvdmedia.h>
+
+/*
+ * mingw's GUIDs, each as eight typedefs of char arrays whose sizes are its
+ * 16-bit pieces plus one: they are constants, where the GUIDs themselves
+ * aren't, and a GUID defined twice gives the same typedefs again.
+ */
+#define ABI_GUID_PART(name, i, v) typedef char abi_guid_##name##_##i[1 + (v)];
+#define ABI_GUID(name, l, w1, w2, b1, b2, b3, b4, b5, b6, b7, b8) \
+	ABI_GUID_PART(name, 0, ((l) >> 16) & 0xffff) \
+	ABI_GUID_PART(name, 1, (l) & 0xffff) \
+	ABI_GUID_PART(name, 2, w1) ABI_GUID_PART(name, 3, w2) \
+	ABI_GUID_PART(name, 4, ((b1) << 8) | (b2)) \
+	ABI_GUID_PART(name, 5, ((b3) << 8) | (b4)) \
+	ABI_GUID_PART(name, 6, ((b5) << 8) | (b6)) \
+	ABI_GUID_PART(name, 7, ((b7) << 8) | (b8))
+#include "abi_mingw_guids.inc"
+
+/* Ours, as gen_abi_checks prints them. */
+#define ABI_GUID_IS(name, i, v) (sizeof(abi_guid_##name##_##i) == 1 + (v))
+#define ABI_GUID_CHECK(name, l, w1, w2, b1, b2, b3, b4, b5, b6, b7, b8) \
+	_Static_assert(ABI_GUID_IS(name, 0, ((l) >> 16) & 0xffff) && \
+		       ABI_GUID_IS(name, 1, (l) & 0xffff) && \
+		       ABI_GUID_IS(name, 2, w1) && ABI_GUID_IS(name, 3, w2) && \
+		       ABI_GUID_IS(name, 4, ((b1) << 8) | (b2)) && \
+		       ABI_GUID_IS(name, 5, ((b3) << 8) | (b4)) && \
+		       ABI_GUID_IS(name, 6, ((b5) << 8) | (b6)) && \
+		       ABI_GUID_IS(name, 7, ((b7) << 8) | (b8)), #name);
 
 #include "abi_checks.inc"

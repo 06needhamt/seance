@@ -238,8 +238,24 @@ strmbase — same constraints as `testcodec.c`/`pe_com.c`), generic and small:
 
 ## Phases
 
-0. **Headers and ABI.** `include/win32/dshow.h`, ABI list entries.
+0. **Headers and ABI.** (Done.) `include/win32/dshow.h`, ABI list entries.
    Milestone: `check_abi` passes.
+   - `IPersist`, `ISequentialStream`, `IStream`/`STATSTG`, `IPersistStream`
+     and `IEnumMoniker` (with `IMoniker` opaque) went into
+     `include/win32/objbase.h`, where objidl.h's interfaces belong; the rest
+     is in `dshow.h`. `ICodecAPI` is only named by its IID for now.
+   - GUIDs are kept as lists (`VFW_OBJBASE_GUIDS`, `VFW_DSHOW_GUIDS`, entries
+     `G(name, Data1, Data2, Data3, Data4...)`), declared `extern` through
+     `VFW_GUID_DECLARE` and defined once in `src/win32/guids.c`.
+     `FOURCC_SUBTYPE_INIT(fcc)` builds the subtype for any FOURCC.
+   - `check_abi` now compares GUIDs too. mingw's `DEFINE_GUID` can't be
+     redefined to capture values (guiddef.h redefines it on every include),
+     so `tests/abi/mingw_guids.sh` preprocesses the mingw headers with
+     `INITGUID` and reads the initialisers back as `ABI_GUID(...)` lines;
+     `check_abi.c` turns each into typedefs whose sizes are the GUID's 16-bit
+     pieces, and `gen_abi_checks` asserts ours against them.
+   - `constants.sh` now checks `VFW_E_`/`VFW_S_` names, which it used to skip
+     as harness-only along with the rest of the `VFW_` prefix.
 1. **Runtime surface.** quartz built-in (filter mapper write + capture mode,
    device enum, `AMGetErrorText`), ole32/winmm additions, registry overlay
    hook. Milestone: unit tests in `tests/unit/test_quartz.c` register and

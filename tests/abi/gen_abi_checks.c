@@ -3,7 +3,8 @@
  * Prints one _Static_assert per entry in abi_list.h, using the sizes,
  * offsets, alignments and values from our own include/win32 headers.
  * check_abi.c then compiles those assertions against the mingw-w64 Windows
- * headers, so any layout difference fails the build.
+ * headers, so any layout difference fails the build. GUIDs are compared
+ * with the values mingw_guids.sh reads from those headers.
  */
 #include <stdio.h>
 
@@ -25,6 +26,12 @@
 		       "\"alignment of %s\");\n", #t, offsetof(struct probe, v), \
 		       #t); \
 	}
+#define G(n, l, w1, w2, b1, b2, b3, b4, b5, b6, b7, b8) \
+	printf("ABI_GUID_CHECK(%s, 0x%08lx, 0x%04x, 0x%04x, 0x%02x, 0x%02x, " \
+	       "0x%02x, 0x%02x, 0x%02x, 0x%02x, 0x%02x, 0x%02x)\n", #n, \
+	       (unsigned long)(l), (unsigned)(w1), (unsigned)(w2), \
+	       (unsigned)(b1), (unsigned)(b2), (unsigned)(b3), (unsigned)(b4), \
+	       (unsigned)(b5), (unsigned)(b6), (unsigned)(b7), (unsigned)(b8));
 #define C(c) \
 	printf("_Static_assert((DWORD)(%s) == 0x%08xu, \"%s\");\n", \
 	       #c, (unsigned)(DWORD)(c), #c);
@@ -33,5 +40,6 @@ int main(void)
 {
 	VFW_ABI_LIST(S, O, C, A)
 	VFW_ABI_CONSTANTS(C)
+	VFW_ABI_GUIDS(G)
 	return 0;
 }
