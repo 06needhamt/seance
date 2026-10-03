@@ -183,6 +183,17 @@ if(BUILD_TESTING)
 	add_custom_target(abi_checks ALL DEPENDS ${abi_checks})
 
 	if(VFW_MINGW_CC)
+		# GUIDs aren't constants, so check_abi gets mingw's values
+		# from its preprocessor (see mingw_guids.sh).
+		set(abi_mingw_guids ${test_dir}/abi_mingw_guids.inc)
+		add_custom_command(OUTPUT ${abi_mingw_guids}
+			COMMAND ${CMAKE_COMMAND} -DOUTPUT=${abi_mingw_guids}
+				-P ${PROJECT_SOURCE_DIR}/cmake/capture.cmake
+				sh ${PROJECT_SOURCE_DIR}/tests/abi/mingw_guids.sh
+				${VFW_MINGW_CC}
+			DEPENDS tests/abi/mingw_guids.sh
+			VERBATIM)
+		add_custom_target(abi_mingw_guids ALL DEPENDS ${abi_mingw_guids})
 		add_test(NAME check_abi
 			COMMAND ${VFW_MINGW_CC} -std=c11 -fsyntax-only -I${test_dir}
 				${PROJECT_SOURCE_DIR}/tests/abi/check_abi.c)

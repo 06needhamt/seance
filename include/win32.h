@@ -21,5 +21,6 @@
 #include "win32/mmsystem.h"
 #include "win32/vfw.h"
 #include "win32/aviriff.h"
+#include "win32/dshow.h"
 
 #endif /* VFW_WIN32_H */

@@ -9,7 +9,8 @@
  *                    struct { char c; type v; }
  *
  * gen_abi_checks.c expands this list against our headers; check_abi.c
- * compiles the result against the mingw-w64 Windows headers.
+ * compiles the result against the mingw-w64 Windows headers. VFW_ABI_GUIDS
+ * (at the end) lists the GUIDs, which are compared the same way.
  */
 #define VFW_ABI_LIST(S, O, C, A) \
 	/* types.h */ \
@@ -655,6 +656,24 @@
 	S(IMalloc) S(IMallocVtbl) O(IMallocVtbl, Alloc) \
 	O(IMallocVtbl, Realloc) O(IMallocVtbl, Free) O(IMallocVtbl, GetSize) \
 	O(IMallocVtbl, DidAlloc) O(IMallocVtbl, HeapMinimize) \
+	S(IPersistVtbl) O(IPersistVtbl, GetClassID) \
+	S(STATSTG) A(STATSTG) O(STATSTG, pwcsName) O(STATSTG, type) \
+	O(STATSTG, cbSize) O(STATSTG, mtime) O(STATSTG, ctime) \
+	O(STATSTG, atime) O(STATSTG, grfMode) O(STATSTG, grfLocksSupported) \
+	O(STATSTG, clsid) O(STATSTG, grfStateBits) O(STATSTG, reserved) \
+	S(ISequentialStreamVtbl) O(ISequentialStreamVtbl, Read) \
+	O(ISequentialStreamVtbl, Write) \
+	S(IStreamVtbl) O(IStreamVtbl, Read) O(IStreamVtbl, Write) \
+	O(IStreamVtbl, Seek) O(IStreamVtbl, SetSize) O(IStreamVtbl, CopyTo) \
+	O(IStreamVtbl, Commit) O(IStreamVtbl, Revert) \
+	O(IStreamVtbl, LockRegion) O(IStreamVtbl, UnlockRegion) \
+	O(IStreamVtbl, Stat) O(IStreamVtbl, Clone) \
+	S(IPersistStreamVtbl) O(IPersistStreamVtbl, GetClassID) \
+	O(IPersistStreamVtbl, IsDirty) O(IPersistStreamVtbl, Load) \
+	O(IPersistStreamVtbl, Save) O(IPersistStreamVtbl, GetSizeMax) \
+	S(IEnumMonikerVtbl) O(IEnumMonikerVtbl, Next) \
+	O(IEnumMonikerVtbl, Skip) O(IEnumMonikerVtbl, Reset) \
+	O(IEnumMonikerVtbl, Clone) \
 	/* shellapi.h, shlobj.h */ \
 	S(HDROP) S(FILEOP_FLAGS) \
 	S(SHFILEOPSTRUCTA) O(SHFILEOPSTRUCTA, wFunc) O(SHFILEOPSTRUCTA, pFrom) \
@@ -678,4 +697,163 @@
 	S(SHITEMID) O(SHITEMID, abID) S(ITEMIDLIST) \
 	S(BROWSEINFOA) O(BROWSEINFOA, pszDisplayName) O(BROWSEINFOA, lpszTitle) \
 	O(BROWSEINFOA, ulFlags) O(BROWSEINFOA, iImage) S(BROWSEINFOW) \
-	O(BROWSEINFOW, lpszTitle) O(BROWSEINFOW, iImage)
+	O(BROWSEINFOW, lpszTitle) O(BROWSEINFOW, iImage) \
+	/* dshow.h: strmif.h, amvideo.h, dvdmedia.h, ocidl.h */ \
+	S(REFERENCE_TIME) A(REFERENCE_TIME) S(HEVENT) S(HSEMAPHORE) \
+	S(PIN_DIRECTION) S(FILTER_STATE) \
+	S(AM_MEDIA_TYPE) A(AM_MEDIA_TYPE) O(AM_MEDIA_TYPE, majortype) \
+	O(AM_MEDIA_TYPE, subtype) O(AM_MEDIA_TYPE, bFixedSizeSamples) \
+	O(AM_MEDIA_TYPE, bTemporalCompression) O(AM_MEDIA_TYPE, lSampleSize) \
+	O(AM_MEDIA_TYPE, formattype) O(AM_MEDIA_TYPE, pUnk) \
+	O(AM_MEDIA_TYPE, cbFormat) O(AM_MEDIA_TYPE, pbFormat) \
+	S(VIDEOINFOHEADER) A(VIDEOINFOHEADER) O(VIDEOINFOHEADER, rcSource) \
+	O(VIDEOINFOHEADER, rcTarget) O(VIDEOINFOHEADER, dwBitRate) \
+	O(VIDEOINFOHEADER, dwBitErrorRate) \
+	O(VIDEOINFOHEADER, AvgTimePerFrame) O(VIDEOINFOHEADER, bmiHeader) \
+	S(VIDEOINFOHEADER2) A(VIDEOINFOHEADER2) \
+	O(VIDEOINFOHEADER2, rcSource) O(VIDEOINFOHEADER2, rcTarget) \
+	O(VIDEOINFOHEADER2, dwBitRate) O(VIDEOINFOHEADER2, dwBitErrorRate) \
+	O(VIDEOINFOHEADER2, AvgTimePerFrame) \
+	O(VIDEOINFOHEADER2, dwInterlaceFlags) \
+	O(VIDEOINFOHEADER2, dwCopyProtectFlags) \
+	O(VIDEOINFOHEADER2, dwPictAspectRatioX) \
+	O(VIDEOINFOHEADER2, dwPictAspectRatioY) \
+	O(VIDEOINFOHEADER2, dwControlFlags) O(VIDEOINFOHEADER2, dwReserved1) \
+	O(VIDEOINFOHEADER2, dwReserved2) O(VIDEOINFOHEADER2, bmiHeader) \
+	S(MPEG1VIDEOINFO) A(MPEG1VIDEOINFO) O(MPEG1VIDEOINFO, hdr) \
+	O(MPEG1VIDEOINFO, dwStartTimeCode) \
+	O(MPEG1VIDEOINFO, cbSequenceHeader) \
+	O(MPEG1VIDEOINFO, bSequenceHeader) \
+	S(MPEG2VIDEOINFO) A(MPEG2VIDEOINFO) O(MPEG2VIDEOINFO, hdr) \
+	O(MPEG2VIDEOINFO, dwStartTimeCode) \
+	O(MPEG2VIDEOINFO, cbSequenceHeader) O(MPEG2VIDEOINFO, dwProfile) \
+	O(MPEG2VIDEOINFO, dwLevel) O(MPEG2VIDEOINFO, dwFlags) \
+	O(MPEG2VIDEOINFO, dwSequenceHeader) \
+	S(ALLOCATOR_PROPERTIES) O(ALLOCATOR_PROPERTIES, cBuffers) \
+	O(ALLOCATOR_PROPERTIES, cbBuffer) O(ALLOCATOR_PROPERTIES, cbAlign) \
+	O(ALLOCATOR_PROPERTIES, cbPrefix) \
+	S(AM_SAMPLE2_PROPERTIES) A(AM_SAMPLE2_PROPERTIES) \
+	O(AM_SAMPLE2_PROPERTIES, cbData) \
+	O(AM_SAMPLE2_PROPERTIES, dwTypeSpecificFlags) \
+	O(AM_SAMPLE2_PROPERTIES, dwSampleFlags) \
+	O(AM_SAMPLE2_PROPERTIES, lActual) O(AM_SAMPLE2_PROPERTIES, tStart) \
+	O(AM_SAMPLE2_PROPERTIES, tStop) O(AM_SAMPLE2_PROPERTIES, dwStreamId) \
+	O(AM_SAMPLE2_PROPERTIES, pMediaType) \
+	O(AM_SAMPLE2_PROPERTIES, pbBuffer) O(AM_SAMPLE2_PROPERTIES, cbBuffer) \
+	S(Quality) A(Quality) O(Quality, Type) O(Quality, Proportion) \
+	O(Quality, Late) O(Quality, TimeStamp) \
+	S(CAUUID) O(CAUUID, cElems) O(CAUUID, pElems) \
+	S(REGPINTYPES) O(REGPINTYPES, clsMajorType) \
+	O(REGPINTYPES, clsMinorType) \
+	S(REGFILTERPINS) O(REGFILTERPINS, strName) \
+	O(REGFILTERPINS, bRendered) O(REGFILTERPINS, bOutput) \
+	O(REGFILTERPINS, bZero) O(REGFILTERPINS, bMany) \
+	O(REGFILTERPINS, clsConnectsToFilter) \
+	O(REGFILTERPINS, strConnectsToPin) O(REGFILTERPINS, nMediaTypes) \
+	O(REGFILTERPINS, lpMediaType) \
+	S(REGPINMEDIUM) O(REGPINMEDIUM, clsMedium) O(REGPINMEDIUM, dw1) \
+	O(REGPINMEDIUM, dw2) \
+	S(REGFILTERPINS2) O(REGFILTERPINS2, dwFlags) \
+	O(REGFILTERPINS2, cInstances) O(REGFILTERPINS2, nMediaTypes) \
+	O(REGFILTERPINS2, lpMediaType) O(REGFILTERPINS2, nMediums) \
+	O(REGFILTERPINS2, lpMedium) O(REGFILTERPINS2, clsPinCategory) \
+	S(REGFILTER2) O(REGFILTER2, dwVersion) O(REGFILTER2, dwMerit) \
+	O(REGFILTER2, cPins) O(REGFILTER2, rgPins) O(REGFILTER2, cPins2) \
+	O(REGFILTER2, rgPins2) \
+	S(PIN_INFO) O(PIN_INFO, pFilter) O(PIN_INFO, dir) \
+	O(PIN_INFO, achName) \
+	S(FILTER_INFO) O(FILTER_INFO, achName) O(FILTER_INFO, pGraph) \
+	S(IReferenceClockVtbl) O(IReferenceClockVtbl, GetTime) \
+	O(IReferenceClockVtbl, AdviseTime) \
+	O(IReferenceClockVtbl, AdvisePeriodic) \
+	O(IReferenceClockVtbl, Unadvise) \
+	S(IMediaFilterVtbl) O(IMediaFilterVtbl, GetClassID) \
+	O(IMediaFilterVtbl, Stop) O(IMediaFilterVtbl, Pause) \
+	O(IMediaFilterVtbl, Run) O(IMediaFilterVtbl, GetState) \
+	O(IMediaFilterVtbl, SetSyncSource) O(IMediaFilterVtbl, GetSyncSource) \
+	S(IBaseFilterVtbl) O(IBaseFilterVtbl, GetClassID) \
+	O(IBaseFilterVtbl, Stop) O(IBaseFilterVtbl, Pause) \
+	O(IBaseFilterVtbl, Run) O(IBaseFilterVtbl, GetState) \
+	O(IBaseFilterVtbl, SetSyncSource) O(IBaseFilterVtbl, GetSyncSource) \
+	O(IBaseFilterVtbl, EnumPins) O(IBaseFilterVtbl, FindPin) \
+	O(IBaseFilterVtbl, QueryFilterInfo) \
+	O(IBaseFilterVtbl, JoinFilterGraph) \
+	O(IBaseFilterVtbl, QueryVendorInfo) \
+	S(IPinVtbl) O(IPinVtbl, Connect) O(IPinVtbl, ReceiveConnection) \
+	O(IPinVtbl, Disconnect) O(IPinVtbl, ConnectedTo) \
+	O(IPinVtbl, ConnectionMediaType) O(IPinVtbl, QueryPinInfo) \
+	O(IPinVtbl, QueryDirection) O(IPinVtbl, QueryId) \
+	O(IPinVtbl, QueryAccept) O(IPinVtbl, EnumMediaTypes) \
+	O(IPinVtbl, QueryInternalConnections) O(IPinVtbl, EndOfStream) \
+	O(IPinVtbl, BeginFlush) O(IPinVtbl, EndFlush) \
+	O(IPinVtbl, NewSegment) \
+	S(IEnumPinsVtbl) O(IEnumPinsVtbl, Next) O(IEnumPinsVtbl, Skip) \
+	O(IEnumPinsVtbl, Reset) O(IEnumPinsVtbl, Clone) \
+	S(IEnumMediaTypesVtbl) O(IEnumMediaTypesVtbl, Next) \
+	O(IEnumMediaTypesVtbl, Skip) O(IEnumMediaTypesVtbl, Reset) \
+	O(IEnumMediaTypesVtbl, Clone) \
+	S(IEnumFiltersVtbl) O(IEnumFiltersVtbl, Next) \
+	O(IEnumFiltersVtbl, Skip) O(IEnumFiltersVtbl, Reset) \
+	O(IEnumFiltersVtbl, Clone) \
+	S(IFilterGraphVtbl) O(IFilterGraphVtbl, AddFilter) \
+	O(IFilterGraphVtbl, RemoveFilter) O(IFilterGraphVtbl, EnumFilters) \
+	O(IFilterGraphVtbl, FindFilterByName) \
+	O(IFilterGraphVtbl, ConnectDirect) O(IFilterGraphVtbl, Reconnect) \
+	O(IFilterGraphVtbl, Disconnect) \
+	O(IFilterGraphVtbl, SetDefaultSyncSource) \
+	S(IMediaEventSinkVtbl) O(IMediaEventSinkVtbl, Notify) \
+	S(IMemAllocatorVtbl) O(IMemAllocatorVtbl, SetProperties) \
+	O(IMemAllocatorVtbl, GetProperties) O(IMemAllocatorVtbl, Commit) \
+	O(IMemAllocatorVtbl, Decommit) O(IMemAllocatorVtbl, GetBuffer) \
+	O(IMemAllocatorVtbl, ReleaseBuffer) \
+	S(IMediaSampleVtbl) O(IMediaSampleVtbl, GetPointer) \
+	O(IMediaSampleVtbl, GetSize) O(IMediaSampleVtbl, GetTime) \
+	O(IMediaSampleVtbl, SetTime) O(IMediaSampleVtbl, IsSyncPoint) \
+	O(IMediaSampleVtbl, SetSyncPoint) O(IMediaSampleVtbl, IsPreroll) \
+	O(IMediaSampleVtbl, SetPreroll) \
+	O(IMediaSampleVtbl, GetActualDataLength) \
+	O(IMediaSampleVtbl, SetActualDataLength) \
+	O(IMediaSampleVtbl, GetMediaType) O(IMediaSampleVtbl, SetMediaType) \
+	O(IMediaSampleVtbl, IsDiscontinuity) \
+	O(IMediaSampleVtbl, SetDiscontinuity) \
+	O(IMediaSampleVtbl, GetMediaTime) O(IMediaSampleVtbl, SetMediaTime) \
+	S(IMediaSample2Vtbl) O(IMediaSample2Vtbl, SetMediaTime) \
+	O(IMediaSample2Vtbl, GetProperties) \
+	O(IMediaSample2Vtbl, SetProperties) \
+	S(IMemInputPinVtbl) O(IMemInputPinVtbl, GetAllocator) \
+	O(IMemInputPinVtbl, NotifyAllocator) \
+	O(IMemInputPinVtbl, GetAllocatorRequirements) \
+	O(IMemInputPinVtbl, Receive) O(IMemInputPinVtbl, ReceiveMultiple) \
+	O(IMemInputPinVtbl, ReceiveCanBlock) \
+	S(IQualityControlVtbl) O(IQualityControlVtbl, Notify) \
+	O(IQualityControlVtbl, SetSink) \
+	S(IFilterMapperVtbl) O(IFilterMapperVtbl, RegisterFilter) \
+	O(IFilterMapperVtbl, RegisterFilterInstance) \
+	O(IFilterMapperVtbl, RegisterPin) O(IFilterMapperVtbl, RegisterPinType) \
+	O(IFilterMapperVtbl, UnregisterFilter) \
+	O(IFilterMapperVtbl, UnregisterFilterInstance) \
+	O(IFilterMapperVtbl, UnregisterPin) \
+	O(IFilterMapperVtbl, EnumMatchingFilters) \
+	S(IFilterMapper2Vtbl) O(IFilterMapper2Vtbl, CreateCategory) \
+	O(IFilterMapper2Vtbl, UnregisterFilter) \
+	O(IFilterMapper2Vtbl, RegisterFilter) \
+	O(IFilterMapper2Vtbl, EnumMatchingFilters) \
+	S(ICreateDevEnumVtbl) O(ICreateDevEnumVtbl, CreateClassEnumerator) \
+	S(IAMVideoCompressionVtbl) \
+	O(IAMVideoCompressionVtbl, put_KeyFrameRate) \
+	O(IAMVideoCompressionVtbl, get_KeyFrameRate) \
+	O(IAMVideoCompressionVtbl, put_PFramesPerKeyFrame) \
+	O(IAMVideoCompressionVtbl, get_PFramesPerKeyFrame) \
+	O(IAMVideoCompressionVtbl, put_Quality) \
+	O(IAMVideoCompressionVtbl, get_Quality) \
+	O(IAMVideoCompressionVtbl, put_WindowSize) \
+	O(IAMVideoCompressionVtbl, get_WindowSize) \
+	O(IAMVideoCompressionVtbl, GetInfo) \
+	O(IAMVideoCompressionVtbl, OverrideKeyFrame) \
+	O(IAMVideoCompressionVtbl, OverrideFrameSize) \
+	S(ISpecifyPropertyPagesVtbl) O(ISpecifyPropertyPagesVtbl, GetPages)
+
+/* Every GUID list in include/win32, compared with mingw's values. */
+#define VFW_ABI_GUIDS(G) \
+	VFW_OBJBASE_GUIDS(G) \
+	VFW_DSHOW_GUIDS(G)
