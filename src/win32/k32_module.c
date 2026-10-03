@@ -353,6 +353,79 @@ WINFN(HRSRC) k32_FindResourceExW(HMODULE h, LPCWSTR type, LPCWSTR name, WORD lan
 	return find_resource(h, type, name, lang, 1, 0);
 }
 
+typedef BOOL (CALLBACK *ENUMRESLANGPROCA)(HMODULE, LPCSTR, LPCSTR, WORD,
+					  LONG_PTR);
+
+struct enum_resource_languages {
+	HMODULE module;
+	LPCSTR type_arg, name_arg;
+	pe_resid type, name;
+	ENUMRESLANGPROCA callback;
+	LONG_PTR param;
+	int found, stopped;
+};
+
+static int resource_id_equal(const struct pe_resource *res, pe_resid id,
+			     int type)
+{
+	DWORD numeric = type ? res->type_id : res->name_id;
+	const char *named = type ? res->type_name : res->name_name;
+
+	if (id <= 0xffff)
+		return numeric == id;
+	return named && !strcasecmp(named, (const char *)id);
+}
+
+static int enum_resource_language(void *arg, const struct pe_resource *res)
+{
+	struct enum_resource_languages *ctx = arg;
+
+	if (!resource_id_equal(res, ctx->type, 1) ||
+	    !resource_id_equal(res, ctx->name, 0))
+		return 0;
+	ctx->found = 1;
+	if (!ctx->callback(ctx->module, ctx->type_arg, ctx->name_arg,
+			   res->lang, ctx->param)) {
+		ctx->stopped = 1;
+		return 1;
+	}
+	return 0;
+}
+
+WINFN(BOOL) k32_EnumResourceLanguagesA(HMODULE h, LPCSTR type, LPCSTR name,
+					ENUMRESLANGPROCA callback, LONG_PTR param)
+{
+	struct module *m = module_of(h);
+	char tbuf[256], nbuf[256];
+	struct enum_resource_languages ctx;
+
+	if (!m || !m->img || !type || !name || !callback) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	ctx = (struct enum_resource_languages){
+		.module = h ? h : (HMODULE)m->base,
+		.type_arg = type,
+		.name_arg = name,
+		.type = res_arg(type, 0, tbuf, sizeof(tbuf)),
+		.name = res_arg(name, 0, nbuf, sizeof(nbuf)),
+		.callback = callback,
+		.param = param,
+	};
+	if (!ctx.type || !ctx.name ||
+	    pe_foreach_resource(m->img, enum_resource_language, &ctx) < 0) {
+		if (ctx.stopped)
+			return FALSE;
+		win_set_error(ERROR_RESOURCE_NAME_NOT_FOUND);
+		return FALSE;
+	}
+	if (!ctx.found) {
+		win_set_error(ERROR_RESOURCE_NAME_NOT_FOUND);
+		return FALSE;
+	}
+	return TRUE;
+}
+
 /* The data entry behind hrsrc, if it lies inside module h's image. */
 static const IMAGE_RESOURCE_DATA_ENTRY *resource_entry(HMODULE h, HRSRC hrsrc,
 						       struct module **mod)
@@ -396,6 +469,7 @@ WINFN(DWORD) k32_SizeofResource(HMODULE h, HRSRC hrsrc)
 
 const struct builtin_export k32_module_exports[] = {
 	E(DisableThreadLibraryCalls),
+	E(EnumResourceLanguagesA),
 	E(FindResourceA),
 	E(FindResourceExA),
 	E(FindResourceExW),

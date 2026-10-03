@@ -52,6 +52,8 @@ struct gdi_dc_state {
 	int bkmode, stretch_mode, map_mode, rop2;
 	UINT text_align;
 	POINT pos;
+	POINT viewport_org;
+	SIZE viewport_ext, window_ext;
 };
 
 struct gdi_dc {

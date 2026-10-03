@@ -21,6 +21,7 @@ extern const struct builtin_export crt_helpers_exports[];
 extern const struct builtin_export crt_seh_exports[];
 extern const struct builtin_export crt_printf_exports[];
 extern const struct builtin_export crt_cxx_exports[];
+extern const struct builtin_export crt_legacy_exports[];
 
 static const struct builtin_export *const tables[] = {
 	crt_math_exports,
@@ -31,6 +32,7 @@ static const struct builtin_export *const tables[] = {
 	crt_seh_exports,
 	crt_printf_exports,
 	crt_cxx_exports,
+	crt_legacy_exports,
 	NULL
 };
 
