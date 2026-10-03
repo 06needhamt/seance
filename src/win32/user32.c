@@ -771,9 +771,10 @@ static const struct builtin_export exports[] = {
 
 extern const struct builtin_export u32_window_exports[];
 extern const struct builtin_export u32_string_exports[];
+extern const struct builtin_export u32_legacy_exports[];
 
 static const struct builtin_export *const tables[] = {
-	exports, u32_window_exports, u32_string_exports, NULL
+	exports, u32_window_exports, u32_string_exports, u32_legacy_exports, NULL
 };
 
 const struct builtin_dll builtin_user32 = { "user32.dll", NULL, tables, 0 };

@@ -1320,10 +1320,20 @@ WINFN(BOOL) adv_GetUserNameW(LPWSTR buf, LPDWORD size)
 
 #define E(name) { #name, 0, (void *)adv_##name }
 
+WINFN(LONG) adv_RegConnectRegistryA(LPCSTR machine, HKEY key, HKEY *out)
+{
+	/* The local machine (NULL or empty) needs no RPC connection. */
+	if (!out) return ERROR_INVALID_PARAMETER;
+	if (machine && *machine) { *out = NULL; return ERROR_BAD_PATHNAME; }
+	*out = key;
+	return ERROR_SUCCESS;
+}
+
 static const struct builtin_export exports[] = {
 	E(GetUserNameA),
 	E(GetUserNameW),
 	E(RegCloseKey),
+	E(RegConnectRegistryA),
 	E(RegCreateKeyA),
 	E(RegCreateKeyExA),
 	E(RegCreateKeyExW),

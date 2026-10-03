@@ -1136,6 +1136,47 @@ WINFN(BOOL) gdi_ExtTextOutW(HDC hdc, int x, int y, UINT opts, const RECT *rc,
 	return gdi_TextOutW(hdc, x, y, s, n);
 }
 
+static BOOL dc_point(HDC hdc, POINT *old, int x, int y, int which, int offset)
+{
+	gdi_lock();
+	struct gdi_obj *o = gdi_get(hdc, OBJ_DC);
+	if (!o) { gdi_unlock(); return FALSE; }
+	POINT *p = which ? &o->u.dc.s.viewport_org : (POINT *)&o->u.dc.s.viewport_ext;
+	if (old) *old = *p;
+	if (offset) { p->x += x; p->y += y; } else { p->x = x; p->y = y; }
+	gdi_unlock(); return TRUE;
+}
+WINFN(BOOL) gdi_OffsetViewportOrgEx(HDC h, int x, int y, LPPOINT old) { return dc_point(h, old, x, y, 1, 1); }
+WINFN(BOOL) gdi_SetViewportOrgEx(HDC h, int x, int y, LPPOINT old) { return dc_point(h, old, x, y, 1, 0); }
+WINFN(BOOL) gdi_SetViewportExtEx(HDC h, int x, int y, LPSIZE old) { return dc_point(h, (POINT *)old, x, y, 0, 0); }
+WINFN(BOOL) gdi_SetWindowExtEx(HDC h, int x, int y, LPSIZE old)
+{
+	gdi_lock(); struct gdi_obj *o = gdi_get(h, OBJ_DC);
+	if (!o) { gdi_unlock(); return FALSE; }
+	if (old) *old = o->u.dc.s.window_ext;
+	o->u.dc.s.window_ext = (SIZE){x, y}; gdi_unlock(); return TRUE;
+}
+static BOOL scale_ext(HDC h, int xn, int xd, int yn, int yd, LPSIZE old, int viewport)
+{
+	if (!xd || !yd) return FALSE;
+	gdi_lock(); struct gdi_obj *o = gdi_get(h, OBJ_DC);
+	if (!o) { gdi_unlock(); return FALSE; }
+	SIZE *s = viewport ? &o->u.dc.s.viewport_ext : &o->u.dc.s.window_ext;
+	if (old) *old = *s; s->cx = (LONG)((long long)s->cx*xn/xd); s->cy = (LONG)((long long)s->cy*yn/yd);
+	gdi_unlock(); return TRUE;
+}
+WINFN(BOOL) gdi_ScaleViewportExtEx(HDC h,int xn,int xd,int yn,int yd,LPSIZE o) { return scale_ext(h,xn,xd,yn,yd,o,1); }
+WINFN(BOOL) gdi_ScaleWindowExtEx(HDC h,int xn,int xd,int yn,int yd,LPSIZE o) { return scale_ext(h,xn,xd,yn,yd,o,0); }
+WINFN(int) gdi_GetClipBox(HDC h, LPRECT r)
+{
+	gdi_lock(); BOOL ok = gdi_get(h, OBJ_DC) != NULL; gdi_unlock();
+	if (!ok || !r) return 0; *r = (RECT){0,0,GDI_SCREEN_WIDTH,GDI_SCREEN_HEIGHT}; return 2;
+}
+WINFN(BOOL) gdi_PtVisible(HDC h, int x, int y) { RECT r; return gdi_GetClipBox(h,&r) && x>=r.left&&x<r.right&&y>=r.top&&y<r.bottom; }
+WINFN(BOOL) gdi_RectVisible(HDC h, const RECT *r) { RECT c; return r&&gdi_GetClipBox(h,&c)&&r->right>c.left&&r->left<c.right&&r->bottom>c.top&&r->top<c.bottom; }
+WINFN(BOOL) gdi_Rectangle(HDC h,int l,int t,int r,int b) { (void)l;(void)t;(void)r;(void)b; gdi_lock(); BOOL ok=gdi_get(h,OBJ_DC)!=NULL; gdi_unlock(); return ok; }
+WINFN(int) gdi_Escape(HDC h,int esc,int n,LPCSTR in,LPVOID out) { (void)esc;(void)n;(void)in;(void)out; gdi_lock(); BOOL ok=gdi_get(h,OBJ_DC)!=NULL; gdi_unlock(); return ok ? 0 : -1; }
+
 #define E(name) { #name, 0, (void *)gdi_##name }
 
 static const struct builtin_export exports[] = {
@@ -1158,9 +1199,11 @@ static const struct builtin_export exports[] = {
 	E(DeleteObject),
 	E(ExtTextOutA),
 	E(ExtTextOutW),
+	E(Escape),
 	E(GdiFlush),
 	E(GetBkColor),
 	E(GetBkMode),
+	E(GetClipBox),
 	E(GetCurrentObject),
 	E(GetDeviceCaps),
 	E(GetMapMode),
@@ -1184,6 +1227,10 @@ static const struct builtin_export exports[] = {
 	E(GetTextMetricsA),
 	E(GetTextMetricsW),
 	E(MoveToEx),
+	E(OffsetViewportOrgEx),
+	E(PtVisible),
+	E(RectVisible),
+	E(Rectangle),
 	E(RealizePalette),
 	E(RestoreDC),
 	E(SaveDC),
@@ -1197,6 +1244,11 @@ static const struct builtin_export exports[] = {
 	E(SetStretchBltMode),
 	E(SetTextAlign),
 	E(SetTextColor),
+	E(ScaleViewportExtEx),
+	E(ScaleWindowExtEx),
+	E(SetViewportExtEx),
+	E(SetViewportOrgEx),
+	E(SetWindowExtEx),
 	E(TextOutA),
 	E(TextOutW),
 	BUILTIN_END

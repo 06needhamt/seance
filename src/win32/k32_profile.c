@@ -571,6 +571,12 @@ WINFN(DWORD) k32_GetProfileStringA(LPCSTR section, LPCSTR key, LPCSTR def,
 	return k32_GetPrivateProfileStringA(section, key, def, out, size, "win.ini");
 }
 
+WINFN(DWORD) k32_GetPrivateProfileSectionNamesA(LPSTR out, DWORD size,
+						 LPCSTR file)
+{
+	return k32_GetPrivateProfileStringA(NULL, NULL, "", out, size, file);
+}
+
 WINFN(UINT) k32_GetProfileIntA(LPCSTR section, LPCSTR key, INT def)
 {
 	return k32_GetPrivateProfileIntA(section, key, def, "win.ini");
@@ -586,6 +592,7 @@ WINFN(BOOL) k32_WriteProfileStringA(LPCSTR section, LPCSTR key, LPCSTR value)
 const struct builtin_export k32_profile_exports[] = {
 	E(GetPrivateProfileIntA),
 	E(GetPrivateProfileIntW),
+	E(GetPrivateProfileSectionNamesA),
 	E(GetPrivateProfileStringA),
 	E(GetPrivateProfileStringW),
 	E(GetPrivateProfileStructA),
