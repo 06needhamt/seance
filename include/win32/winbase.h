@@ -44,6 +44,7 @@
 #define ERROR_DIR_NOT_EMPTY            145
 #define ERROR_BAD_ARGUMENTS            160
 #define ERROR_BAD_PATHNAME             161
+#define ERROR_BUSY                     170
 #define ERROR_ALREADY_EXISTS           183
 #define ERROR_BAD_EXE_FORMAT           193
 #define ERROR_ENVVAR_NOT_FOUND         203

@@ -72,7 +72,21 @@ LONG reg_save(void);
  */
 void reg_reload(void);
 
-/* Counts reloads of the tree (for views kept in step with it). */
+/*
+ * A sandbox: from reg_sandbox_begin() the registry is a copy of itself,
+ * which changes as usual but is never saved, until reg_sandbox_end()
+ * throws it away and puts the real one back. For running code (such as a
+ * DLL's DllRegisterServer) to see what it would write. It is the whole
+ * process's registry, not one thread's. Both take the lock themselves;
+ * begin fails with ERROR_BUSY inside a sandbox.
+ */
+LONG reg_sandbox_begin(void);
+void reg_sandbox_end(void);
+
+/*
+ * Counts reloads of the tree, and sandboxes starting and ending (for views
+ * kept in step with it).
+ */
 unsigned reg_generation(void);
 
 /* The full path of k, as reg_open() takes it; malloc()ed. */

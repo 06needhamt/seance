@@ -22,6 +22,9 @@ static int loaded;
 static int loading;		/* no change reports while reading the file */
 static unsigned generation;	/* counts reloads */
 static char file[4096];		/* "" to keep the registry in memory only */
+/* The real tree, put aside while a sandbox copy stands in for it. */
+static struct reg_key saved_root;
+static int sandboxed;
 
 void (*reg_change_hook)(const struct reg_key *k, DWORD what);
 
@@ -60,10 +63,13 @@ static FILETIME now(void)
 
 /* The tree. */
 
-static void free_key(struct reg_key *k)
+/* Frees what k holds, leaving k itself. */
+static void clear_key(struct reg_key *k)
 {
-	for (size_t i = 0; i < k->nsub; i++)
-		free_key(k->sub[i]);
+	for (size_t i = 0; i < k->nsub; i++) {
+		clear_key(k->sub[i]);
+		free(k->sub[i]);
+	}
 	for (size_t i = 0; i < k->nval; i++) {
 		free(k->val[i].name);
 		free(k->val[i].data);
@@ -71,6 +77,11 @@ static void free_key(struct reg_key *k)
 	free(k->sub);
 	free(k->val);
 	free(k->name);
+}
+
+static void free_key(struct reg_key *k)
+{
+	clear_key(k);
 	if (k != &root)
 		free(k);
 }
@@ -293,8 +304,94 @@ void reg_reload(void)
 	pthread_mutex_lock(&lock);
 	free_key(&root);
 	memset(&root, 0, sizeof(root));
+	if (sandboxed) {
+		clear_key(&saved_root);
+		memset(&saved_root, 0, sizeof(saved_root));
+		sandboxed = 0;
+	}
 	load();
 	pthread_mutex_unlock(&lock);
+}
+
+/* Copies k's values and subkeys (not its name) into the empty key c. */
+static int copy_key(const struct reg_key *k, struct reg_key *c)
+{
+	c->is_volatile = k->is_volatile;
+	c->modified = k->modified;
+	if (k->nval && !(c->val = calloc(k->nval, sizeof(*c->val))))
+		return -1;
+	for (size_t i = 0; i < k->nval; i++, c->nval++) {
+		const struct reg_value *v = &k->val[i];
+		struct reg_value *w = &c->val[i];
+		w->type = v->type;
+		w->size = v->size;
+		w->name = strdup(v->name);
+		w->data = malloc(v->size ? v->size : 1);
+		if (!w->name || !w->data) {
+			free(w->name);
+			free(w->data);
+			return -1;
+		}
+		memcpy(w->data, v->data, v->size);
+	}
+	if (k->nsub && !(c->sub = calloc(k->nsub, sizeof(*c->sub))))
+		return -1;
+	for (size_t i = 0; i < k->nsub; i++) {
+		struct reg_key *s = calloc(1, sizeof(*s));
+		if (!s)
+			return -1;
+		c->sub[c->nsub++] = s;
+		s->parent = c;
+		if (!(s->name = strdup(k->sub[i]->name)) ||
+		    copy_key(k->sub[i], s))
+			return -1;
+	}
+	return 0;
+}
+
+/* Points the hives back at root after it has been moved. */
+static void adopt(struct reg_key *r)
+{
+	for (size_t i = 0; i < r->nsub; i++)
+		r->sub[i]->parent = r;
+}
+
+LONG reg_sandbox_begin(void)
+{
+	struct reg_key copy = { 0 };
+
+	reg_lock();
+	if (sandboxed) {
+		reg_unlock();
+		return ERROR_BUSY;
+	}
+	if (copy_key(&root, &copy)) {
+		clear_key(&copy);
+		reg_unlock();
+		return ERROR_NOT_ENOUGH_MEMORY;
+	}
+	saved_root = root;
+	adopt(&saved_root);
+	root = copy;
+	adopt(&root);
+	sandboxed = 1;
+	generation++;
+	reg_unlock();
+	return ERROR_SUCCESS;
+}
+
+void reg_sandbox_end(void)
+{
+	reg_lock();
+	if (sandboxed) {
+		clear_key(&root);
+		root = saved_root;
+		adopt(&root);
+		memset(&saved_root, 0, sizeof(saved_root));
+		sandboxed = 0;
+		generation++;
+	}
+	reg_unlock();
 }
 
 static void put_escaped(FILE *f, const char *s)
@@ -401,7 +498,7 @@ LONG reg_save(void)
 	char tmp[sizeof(file) + 8], path[8192];
 	FILE *f;
 
-	if (!*file)
+	if (!*file || sandboxed)
 		return ERROR_SUCCESS;
 	if (!getenv("VFW_REGISTRY"))
 		path_drive_c();		/* creates $VFW_ROOT */

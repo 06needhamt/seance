@@ -10,6 +10,7 @@
 #include "win32/codepage.h"
 #include "win32/handle.h"
 #include "win32/internal.h"
+#include "win32/k32.h"
 
 static DWORD current_tid(void)
 {
@@ -367,6 +368,11 @@ static BOOL event_set(HANDLE h, int state, int pulse)
 	wait_unlock();
 	kobj_unref(&e->obj);
 	return TRUE;
+}
+
+BOOL event_signal(HANDLE h, int pulse)
+{
+	return event_set(h, 1, pulse);
 }
 
 WINFN(BOOL) k32_SetEvent(HANDLE h) { return event_set(h, 1, 0); }

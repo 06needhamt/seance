@@ -47,6 +47,9 @@ static const IID iid_unknown = { 0, 0, 0,
 static const IID iid_factory = { 1, 0, 0,
 	{ 0xc0, 0, 0, 0, 0, 0, 0, 0x46 } };
 
+/* Something that isn't a stream on global memory. */
+static const void *task_ole_dummy[1];
+
 static WCHAR *wide(const char *s)
 {
 	return utf8_to_utf16_dup(s);
@@ -413,6 +416,168 @@ static void test_registered(void)
 	CoUninitialize();
 }
 
+/* Streams on global memory, as filters keep their state in. */
+static void test_streams(void)
+{
+	FN(HRESULT, CreateStreamOnHGlobal, HGLOBAL, BOOL, LPSTREAM *);
+	FN(HRESULT, GetHGlobalFromStream, IStream *, HGLOBAL *);
+	K32(HGLOBAL, GlobalAlloc, UINT, SIZE_T);
+	K32(LPVOID, GlobalLock, HGLOBAL);
+	K32(BOOL, GlobalUnlock, HGLOBAL);
+	K32(SIZE_T, GlobalSize, HGLOBAL);
+	K32(HGLOBAL, GlobalFree, HGLOBAL);
+	IStream *s = NULL, *c = NULL;
+	ULONG n = 0;
+	ULARGE_INTEGER pos, size;
+	LARGE_INTEGER off;
+	char buf[64];
+
+	CHECK_EQ(CreateStreamOnHGlobal(NULL, TRUE, NULL), E_INVALIDARG);
+	CHECK_EQ(CreateStreamOnHGlobal(NULL, TRUE, &s), S_OK);
+	if (!s)
+		return;
+	void *q = NULL;
+	CHECK_EQ(s->lpVtbl->QueryInterface(s, &IID_ISequentialStream, &q), S_OK);
+	CHECK(q == s);
+	s->lpVtbl->Release(s);
+	CHECK_EQ(s->lpVtbl->QueryInterface(s, &iid_other, &q), E_NOINTERFACE);
+
+	CHECK_EQ(s->lpVtbl->Write(s, "hello, world", 12, &n), S_OK);
+	CHECK_EQ(n, 12);
+	off.QuadPart = 7;
+	CHECK_EQ(s->lpVtbl->Seek(s, off, STREAM_SEEK_SET, &pos), S_OK);
+	CHECK_EQ(pos.QuadPart, 7);
+	memset(buf, 0, sizeof(buf));
+	CHECK_EQ(s->lpVtbl->Read(s, buf, sizeof(buf), &n), S_OK);
+	CHECK_EQ(n, 5);
+	CHECK_STR(buf, "world");
+	CHECK_EQ(s->lpVtbl->Read(s, buf, sizeof(buf), &n), S_OK);
+	CHECK_EQ(n, 0);
+
+	off.QuadPart = -5;
+	CHECK_EQ(s->lpVtbl->Seek(s, off, STREAM_SEEK_END, &pos), S_OK);
+	CHECK_EQ(pos.QuadPart, 7);
+	off.QuadPart = -8;
+	CHECK_EQ(s->lpVtbl->Seek(s, off, STREAM_SEEK_CUR, NULL),
+		 STG_E_SEEKERROR);
+	CHECK_EQ(s->lpVtbl->Seek(s, off, 7, NULL), STG_E_SEEKERROR);
+
+	/* Writing past the end grows it, with a gap. */
+	off.QuadPart = 20;
+	s->lpVtbl->Seek(s, off, STREAM_SEEK_SET, NULL);
+	CHECK_EQ(s->lpVtbl->Write(s, "!", 1, NULL), S_OK);
+	STATSTG st;
+	CHECK_EQ(s->lpVtbl->Stat(s, &st, STATFLAG_NONAME), S_OK);
+	CHECK_EQ(st.type, STGTY_STREAM);
+	CHECK_EQ(st.cbSize.QuadPart, 21);
+	CHECK(st.pwcsName == NULL);
+	size.QuadPart = 5;
+	CHECK_EQ(s->lpVtbl->SetSize(s, size), S_OK);
+	s->lpVtbl->Stat(s, &st, STATFLAG_NONAME);
+	CHECK_EQ(st.cbSize.QuadPart, 5);
+
+	/* A clone shares the data and starts at the same place. */
+	off.QuadPart = 1;
+	s->lpVtbl->Seek(s, off, STREAM_SEEK_SET, NULL);
+	CHECK_EQ(s->lpVtbl->Clone(s, &c), S_OK);
+	if (c) {
+		memset(buf, 0, sizeof(buf));
+		c->lpVtbl->Read(c, buf, sizeof(buf), &n);
+		CHECK_STR(buf, "ello");
+		off.QuadPart = 0;
+		c->lpVtbl->Seek(c, off, STREAM_SEEK_SET, NULL);
+		c->lpVtbl->Write(c, "J", 1, NULL);
+	}
+	off.QuadPart = 0;
+	s->lpVtbl->Seek(s, off, STREAM_SEEK_SET, NULL);
+	memset(buf, 0, sizeof(buf));
+	s->lpVtbl->Read(s, buf, sizeof(buf), &n);
+	CHECK_STR(buf, "Jello");
+
+	/* CopyTo, into a stream on a block of our own. */
+	HGLOBAL mine = GlobalAlloc(GMEM_MOVEABLE, 3);
+	char *p = GlobalLock(mine);
+	memcpy(p, "abc", 3);
+	GlobalUnlock(mine);
+	IStream *d = NULL;
+	CHECK_EQ(CreateStreamOnHGlobal(mine, FALSE, &d), S_OK);
+	if (d) {
+		ULARGE_INTEGER cb = { .QuadPart = 3 }, r, w;
+		d->lpVtbl->Stat(d, &st, STATFLAG_NONAME);
+		CHECK_EQ(st.cbSize.QuadPart, 3);	/* the block's size */
+		off.QuadPart = 1;
+		s->lpVtbl->Seek(s, off, STREAM_SEEK_SET, NULL);
+		off.QuadPart = 0;
+		d->lpVtbl->Seek(d, off, STREAM_SEEK_END, NULL);
+		CHECK_EQ(s->lpVtbl->CopyTo(s, d, cb, &r, &w), S_OK);
+		CHECK(r.QuadPart == 3 && w.QuadPart == 3);
+		HGLOBAL h = NULL;
+		CHECK_EQ(GetHGlobalFromStream(d, &h), S_OK);
+		CHECK(h == mine);
+		CHECK_EQ(GlobalSize(mine), 6);
+		p = GlobalLock(mine);
+		CHECK(p && !memcmp(p, "abcell", 6));
+		GlobalUnlock(mine);
+		d->lpVtbl->Release(d);
+	}
+	/* Not deleted on release: still ours. */
+	CHECK_EQ(GlobalSize(mine), 6);
+	GlobalFree(mine);
+
+	HGLOBAL h = (HGLOBAL)1;
+	CHECK_EQ(GetHGlobalFromStream((IStream *)&task_ole_dummy, &h),
+		 E_INVALIDARG);
+	CHECK(h == NULL);
+	CHECK_EQ(s->lpVtbl->LockRegion(s, pos, pos, 0), STG_E_INVALIDFUNCTION);
+	if (c)
+		CHECK_EQ(c->lpVtbl->Release(c), 0);
+	CHECK_EQ(s->lpVtbl->Release(s), 0);
+}
+
+/* "Marshalling" within the process: the same pointer comes back. */
+static void test_marshal(void)
+{
+	FN(HRESULT, CoMarshalInterThreadInterfaceInStream, REFIID, LPUNKNOWN,
+	   LPSTREAM *);
+	FN(HRESULT, CoGetInterfaceAndReleaseStream, LPSTREAM, REFIID, LPVOID *);
+	FN(HRESULT, CoCreateFreeThreadedMarshaler, LPUNKNOWN, LPUNKNOWN *);
+	FN(HRESULT, CreateStreamOnHGlobal, HGLOBAL, BOOL, LPSTREAM *);
+	FN(HRESULT, CoMarshalInterface, IStream *, REFIID, IUnknown *, DWORD,
+	   void *, DWORD);
+	FN(HRESULT, CoReleaseMarshalData, IStream *);
+	IUnknown *ftm = NULL, *got = NULL;
+	IStream *s = NULL;
+
+	CHECK_EQ(CoCreateFreeThreadedMarshaler(NULL, &ftm), S_OK);
+	if (!ftm)
+		return;
+	void *q = NULL;
+	CHECK_EQ(ftm->lpVtbl->QueryInterface(ftm, &iid_other, &q),
+		 E_NOINTERFACE);
+
+	CHECK_EQ(CoMarshalInterThreadInterfaceInStream(&IID_IUnknown, ftm, &s),
+		 S_OK);
+	CHECK_EQ(ftm->lpVtbl->AddRef(ftm), 3);	/* the stream holds one */
+	ftm->lpVtbl->Release(ftm);
+	CHECK_EQ(CoGetInterfaceAndReleaseStream(s, &IID_IUnknown,
+						(void **)&got), S_OK);
+	CHECK(got == ftm);
+	if (got)
+		got->lpVtbl->Release(got);
+
+	/* Released without being unmarshalled. */
+	CHECK_EQ(CreateStreamOnHGlobal(NULL, TRUE, &s), S_OK);
+	CHECK_EQ(CoMarshalInterface(s, &IID_IUnknown, ftm, 0, NULL, 0), S_OK);
+	CHECK_EQ(CoMarshalInterface(s, &iid_other, ftm, 0, NULL, 0),
+		 E_NOINTERFACE);
+	LARGE_INTEGER zero = { .QuadPart = 0 };
+	s->lpVtbl->Seek(s, zero, STREAM_SEEK_SET, NULL);
+	CHECK_EQ(CoReleaseMarshalData(s), S_OK);
+	CHECK_EQ(CoReleaseMarshalData(s), STG_E_READFAULT);
+	s->lpVtbl->Release(s);
+	CHECK_EQ(ftm->lpVtbl->Release(ftm), 0);
+}
+
 /* pe_com.dll, found through HKCR\CLSID\{...}\InprocServer32. */
 static void test_inproc_server(void)
 {
@@ -479,6 +644,8 @@ int main(void)
 	test_apartments();
 	test_registered();
 	test_inproc_server();
+	test_streams();
+	test_marshal();
 
 	mod_free(k32);
 	mod_free(ole);
