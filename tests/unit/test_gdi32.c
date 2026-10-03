@@ -52,6 +52,16 @@ static void test_objects(void)
 {
 	FN(HGDIOBJ, GetStockObject, int);
 	FN(DWORD, GetObjectType, HGDIOBJ);
+	FN(BOOL, SetViewportOrgEx, HDC, int, int, LPPOINT);
+	FN(BOOL, OffsetViewportOrgEx, HDC, int, int, LPPOINT);
+	FN(BOOL, SetViewportExtEx, HDC, int, int, LPSIZE);
+	FN(BOOL, ScaleViewportExtEx, HDC, int, int, int, int, LPSIZE);
+	FN(BOOL, SetWindowExtEx, HDC, int, int, LPSIZE);
+	FN(BOOL, ScaleWindowExtEx, HDC, int, int, int, int, LPSIZE);
+	FN(int, GetClipBox, HDC, LPRECT);
+	FN(BOOL, PtVisible, HDC, int, int);
+	FN(BOOL, RectVisible, HDC, const RECT *);
+	FN(BOOL, Rectangle, HDC, int, int, int, int);
 	FN(int, GetObjectA, HGDIOBJ, int, LPVOID);
 	FN(int, GetObjectW, HGDIOBJ, int, LPVOID);
 	FN(BOOL, DeleteObject, HGDIOBJ);
@@ -169,6 +179,30 @@ static void test_dc_state(void)
 	CHECK_EQ(size.cx, 4 * tm.tmAveCharWidth);
 	CHECK_EQ(size.cy, 16);
 	CHECK(TextOutA(mem, 0, 0, "x", 1));
+
+	POINT point;
+	SIZE extent;
+	CHECK(SetViewportOrgEx(mem, 10, 20, &point));
+	CHECK(point.x == 0 && point.y == 0);
+	CHECK(OffsetViewportOrgEx(mem, 3, -2, &point));
+	CHECK(point.x == 10 && point.y == 20);
+	CHECK(SetViewportExtEx(mem, 100, 200, &extent));
+	CHECK(ScaleViewportExtEx(mem, 2, 1, 1, 2, &extent));
+	CHECK(extent.cx == 100 && extent.cy == 200);
+	CHECK(SetWindowExtEx(mem, 40, 60, &extent));
+	CHECK(ScaleWindowExtEx(mem, 3, 2, 2, 3, &extent));
+	CHECK(extent.cx == 40 && extent.cy == 60);
+	CHECK(!ScaleWindowExtEx(mem, 1, 0, 1, 1, NULL));
+
+	RECT clip, inside = { 1, 1, 10, 10 }, outside = { 1100, 1, 1200, 10 };
+	CHECK_EQ(GetClipBox(mem, &clip), 2);
+	CHECK(clip.left == 0 && clip.top == 0 && clip.right == 1024 &&
+	      clip.bottom == 768);
+	CHECK(PtVisible(mem, 0, 0));
+	CHECK(!PtVisible(mem, 1024, 768));
+	CHECK(RectVisible(mem, &inside));
+	CHECK(!RectVisible(mem, &outside));
+	CHECK(Rectangle(mem, 1, 1, 10, 10));
 
 	CHECK(DeleteDC(mem));
 	CHECK(!DeleteDC(mem));

@@ -19,7 +19,7 @@ WINFN(BOOL) k32_CreateProcessA(LPCSTR app, LPSTR cmd, void *pa, void *ta,
 
 WINFN(DWORD) k32_GetLogicalDriveStringsA(DWORD size, LPSTR buf)
 {
-	static const char drives[] = "C:\\\0\0";
+	static const char drives[] = "C:\\\0";
 	if (!buf || size < sizeof(drives)) return sizeof(drives);
 	memcpy(buf, drives, sizeof(drives));
 	return sizeof(drives) - 1;

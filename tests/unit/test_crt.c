@@ -288,7 +288,21 @@ static void test_msvcrt_semantics(void)
 	int (*controlfp_s)(unsigned *, unsigned, unsigned) = get("_controlfp_s");
 	void (*srand_)(unsigned) = get("srand");
 	int (*rand_)(void) = get("rand");
+	int (*sscanf_)(const char *, const char *, ...) = get("sscanf");
+	int (*access_)(const char *, int) = get("_access");
+	char *(*getenv_)(const char *) = get("getenv");
+	time_t (*time_)(time_t *) = get("time");
 	BYTE *iob = get("_iob");
+
+	int parsed = 0;
+	char word[8];
+	CHECK_EQ(sscanf_("42 codec", "%d %7s", &parsed, word), 2);
+	CHECK_EQ(parsed, 42);
+	CHECK_STR(word, "codec");
+	CHECK_EQ(access_("C:\\WINDOWS", 0), 0);
+	CHECK_STR(getenv_("VFW_ROOT"), getenv("VFW_ROOT"));
+	time_t now = 0;
+	CHECK(time_(&now) == now && now > 0);
 
 	/* _snprintf: -1 and no terminator when the output doesn't fit. */
 	char buf[16];

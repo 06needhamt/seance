@@ -10,13 +10,24 @@
 #include <unistd.h>
 
 #include "runtime/builtin.h"
+#include "win32/path.h"
 
 #define CRTFN(ret) static ret STUB_CDECL
 #define THISFN(ret) static ret __attribute__((thiscall, force_align_arg_pointer))
 
 typedef struct { char *_ptr; int _cnt; char *_base; int _flag, _file; } crt_FILE;
 
-CRTFN(int) crt__access(const char *p, int mode) { return access(p, mode); }
+CRTFN(int) crt__access(const char *path, int mode)
+{
+	char *unix_path = path_to_unix(path);
+	int result;
+
+	if (!unix_path)
+		return -1;
+	result = access(unix_path, mode);
+	free(unix_path);
+	return result;
+}
 CRTFN(int) crt__adjust_fdiv(void) { return 0; }
 CRTFN(clock_t) crt_clock(void) { return clock(); }
 CRTFN(void) crt_exit(int status) { exit(status); }

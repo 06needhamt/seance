@@ -491,6 +491,11 @@ static void test_misc(void)
 	FN(BOOL, SystemParametersInfoA, UINT, UINT, PVOID, UINT);
 	FN(HICON, LoadIconA, HINSTANCE, LPCSTR);
 	FN(int, LoadStringA, HINSTANCE, UINT, LPSTR, int);
+	FN(BOOL, AdjustWindowRectEx, LPRECT, DWORD, BOOL, DWORD);
+	FN(int, DrawTextA, HDC, LPCSTR, int, LPRECT, UINT);
+	FN(BOOL, GetUpdateRect, HWND, LPRECT, BOOL);
+	FN(BOOL, MapDialogRect, HWND, LPRECT);
+	FN(int, SetScrollPos, HWND, int, int, BOOL);
 	GDI(int, GetDeviceCaps, HDC, int);
 	GDI(DWORD, GetObjectType, HGDIOBJ);
 	GDI(int, GetObjectA, HGDIOBJ, int, LPVOID);
@@ -561,6 +566,22 @@ static void test_misc(void)
 	CHECK_EQ(r.bottom, 768);
 
 	CHECK(LoadIconA(NULL, (LPCSTR)32512) != NULL);	/* IDI_APPLICATION */
+
+	RECT legacy = { 0, 0, 40, 20 };
+	CHECK(AdjustWindowRectEx(&legacy, 0x00c00000, TRUE, 0));
+	CHECK(legacy.left == -4 && legacy.top == -23 &&
+	      legacy.right == 44 && legacy.bottom == 24);
+	legacy = (RECT){ 0 };
+	CHECK_EQ(DrawTextA(NULL, "one\ntwo", -1, &legacy, 0x400), 32);
+	CHECK(legacy.right == 24 && legacy.bottom == 32);
+	legacy = (RECT){ 1, 2, 3, 4 };
+	CHECK(!GetUpdateRect(NULL, &legacy, FALSE));
+	CHECK(legacy.left == 0 && legacy.bottom == 0);
+	legacy = (RECT){ 1, 2, 3, 4 };
+	CHECK(MapDialogRect(NULL, &legacy));
+	CHECK(legacy.left == 2 && legacy.top == 4 &&
+	      legacy.right == 6 && legacy.bottom == 8);
+	CHECK_EQ(SetScrollPos(NULL, 0, 37, FALSE), 37);
 
 	/* pe_basic's own strings, through LoadString. */
 	const char *d = getenv("VFW_FIXTURES");

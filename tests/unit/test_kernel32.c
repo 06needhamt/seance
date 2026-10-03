@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include "loader/modules.h"
 #include "runtime/runtime.h"
@@ -859,6 +861,7 @@ static void test_profile(void)
 	FN(UINT, GetPrivateProfileIntA, LPCSTR, LPCSTR, INT, LPCSTR);
 	FN(BOOL, WritePrivateProfileStructA, LPCSTR, LPCSTR, LPVOID, UINT, LPCSTR);
 	FN(BOOL, GetPrivateProfileStructA, LPCSTR, LPCSTR, LPVOID, UINT, LPCSTR);
+	FN(DWORD, GetPrivateProfileSectionNamesA, LPSTR, DWORD, LPCSTR);
 	char buf[256];
 
 	CHECK(WritePrivateProfileStringA("Codec", "Quality", "85", "vfwtest.ini"));
@@ -895,6 +898,8 @@ static void test_profile(void)
 	CHECK_EQ(GetPrivateProfileStringA(NULL, NULL, "", buf, sizeof(buf),
 					  "vfwtest.ini"), 12);
 	CHECK(!memcmp(buf, "Codec\0Other\0\0", 13));
+	CHECK_EQ(GetPrivateProfileSectionNamesA(buf, sizeof(buf), "vfwtest.ini"), 12);
+	CHECK(!memcmp(buf, "Codec\0Other\0\0", 13));
 	CHECK_EQ(GetPrivateProfileStringA("Codec", NULL, "", buf, sizeof(buf),
 					  "vfwtest.ini"), 13);
 	CHECK(!memcmp(buf, "Quality\0Mode\0\0", 14));
@@ -914,6 +919,88 @@ static void test_profile(void)
 				       "vfwtest.ini"));
 	CHECK(out.a == in.a && out.b == in.b);
 	CHECK(!GetPrivateProfileStructA("Codec", "State", &out, 4, "vfwtest.ini"));
+}
+
+static void test_legacy(void)
+{
+	FN(DWORD, GetLogicalDriveStringsA, DWORD, LPSTR);
+	FN(int, MulDiv, int, int, int);
+	FN(ATOM, GlobalAddAtomA, LPCSTR);
+	FN(ATOM, GlobalFindAtomA, LPCSTR);
+	FN(ATOM, GlobalDeleteAtom, ATOM);
+	FN(UINT, GlobalGetAtomNameA, ATOM, LPSTR, int);
+	FN(void, FatalAppExitA, UINT, LPCSTR);
+	char buf[32];
+
+	CHECK_EQ(GetLogicalDriveStringsA(0, NULL), 5);
+	CHECK_EQ(GetLogicalDriveStringsA(sizeof(buf), buf), 4);
+	CHECK(!memcmp(buf, "C:\\\0\0", 5));
+	CHECK_EQ(MulDiv(10, 3, 4), 8);
+	CHECK_EQ(MulDiv(-10, 3, 4), -8);
+	CHECK_EQ(MulDiv(1, 1, 0), -1);
+
+	ATOM atom = GlobalAddAtomA("SeanceAtom");
+	CHECK(atom >= 0xc000);
+	CHECK_EQ(GlobalAddAtomA("seanceatom"), atom);
+	CHECK_EQ(GlobalFindAtomA("SEANCEATOM"), atom);
+	CHECK_EQ(GlobalGetAtomNameA(atom, buf, sizeof(buf)), 10);
+	CHECK_STR(buf, "SeanceAtom");
+	CHECK_EQ(GlobalDeleteAtom(atom), 0);
+	CHECK_EQ(GlobalFindAtomA("SeanceAtom"), atom);
+	CHECK_EQ(GlobalDeleteAtom(atom), 0);
+	CHECK_EQ(GlobalFindAtomA("SeanceAtom"), 0);
+
+	pid_t child = fork();
+	CHECK(child >= 0);
+	if (!child)
+		FatalAppExitA(0, NULL);
+	if (child > 0) {
+		int status = -1;
+		CHECK_EQ(waitpid(child, &status, 0), child);
+		CHECK(WIFEXITED(status));
+		CHECK_EQ(WEXITSTATUS(status), 0);
+	}
+}
+
+static BOOL CALLBACK count_resource_language(HMODULE module, LPCSTR type,
+					      LPCSTR name, WORD language,
+					      LONG_PTR param)
+{
+	int *count = (int *)param;
+
+	CHECK(module != NULL);
+	CHECK((ULONG_PTR)type == RT_STRING);
+	CHECK((ULONG_PTR)name == 1);
+	CHECK(language != 0);
+	(*count)++;
+	return TRUE;
+}
+
+static void test_resource_languages(void)
+{
+	typedef BOOL (CALLBACK *callback)(HMODULE, LPCSTR, LPCSTR, WORD,
+					    LONG_PTR);
+	FN(BOOL, EnumResourceLanguagesA, HMODULE, LPCSTR, LPCSTR, callback,
+	   LONG_PTR);
+	const char *dir = getenv("VFW_FIXTURES");
+	char path[512];
+
+	if (!dir)
+		return;
+	snprintf(path, sizeof(path), "%s/pe_basic.dll", dir);
+	struct module *m = mod_load(path, NULL);
+	CHECK(m != NULL);
+	if (!m)
+		return;
+	int count = 0;
+	CHECK(EnumResourceLanguagesA((HMODULE)m->base, (LPCSTR)RT_STRING,
+				     (LPCSTR)1, count_resource_language,
+				     (LONG_PTR)&count));
+	CHECK_EQ(count, 1);
+	CHECK(!EnumResourceLanguagesA((HMODULE)m->base, (LPCSTR)RT_STRING,
+				      (LPCSTR)999, count_resource_language,
+				      (LONG_PTR)&count));
+	mod_free(m);
 }
 
 static void test_modules(void)
@@ -1182,6 +1269,8 @@ int main(void)
 	test_system();
 	test_files();
 	test_profile();
+	test_legacy();
+	test_resource_languages();
 	test_modules();
 
 	test_fixture();
