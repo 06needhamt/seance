@@ -19,6 +19,8 @@ struct pin {
 };
 struct filter {
 	IBaseFilter iface;
+	IAMVideoCompression compression;
+	IPersistStream persist;
 	LONG refs;
 	BOOL encoder;
 	FILTER_STATE state;
@@ -28,6 +30,13 @@ struct filter {
 	BYTE *picture;
 	DWORD picture_size, frame;
 	BOOL valid;
+	LONG key_interval, pframes;
+	double quality;
+	DWORDLONG window;
+	BOOL async, no_eos, require_segment, segment;
+	LONG workers;
+	HRESULT async_error;
+	CRITICAL_SECTION transform_lock;
 };
 struct enum_pins { IEnumPins iface; LONG refs; struct filter *filter; ULONG pos; };
 
@@ -37,6 +46,8 @@ static const GUID iid_filter={0x56a86895,0x0ad4,0x11ce,{0xb0,0x3a,0,0x20,0xaf,0x
 static const GUID iid_pin={0x56a86891,0x0ad4,0x11ce,{0xb0,0x3a,0,0x20,0xaf,0x0b,0xa7,0x70}};
 static const GUID iid_enum_pins={0x56a86892,0x0ad4,0x11ce,{0xb0,0x3a,0,0x20,0xaf,0x0b,0xa7,0x70}};
 static const GUID iid_mem_input={0x56a8689d,0x0ad4,0x11ce,{0xb0,0x3a,0,0x20,0xaf,0x0b,0xa7,0x70}};
+static const GUID iid_compression={0xc6e13343,0x30ac,0x11d0,{0xa1,0x8c,0,0xa0,0xc9,0x11,0x89,0x56}};
+static const GUID iid_persist_stream={0x00000109,0x0000,0x0000,{0xc0,0,0,0,0,0,0,0x46}};
 
 static int eq(const GUID*a,const GUID*b){const BYTE*x=(const BYTE*)a,*y=(const BYTE*)b;for(int i=0;i<16;i++)if(x[i]!=y[i])return 0;return 1;}
 static void *alloc(DWORD n){return HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,n);}
@@ -76,9 +87,9 @@ static int rle_decode(const BYTE*s,DWORD len,BYTE*d,DWORD n,BOOL delta)
 	return 0;
 }
 
-static HRESULT WINAPI filter_qi(IBaseFilter*p,REFIID iid,void**out){if(!out)return E_POINTER;if(eq(iid,&iid_unknown)||eq(iid,&iid_filter))*out=p;else{*out=NULL;return E_NOINTERFACE;}p->lpVtbl->AddRef(p);return S_OK;}
+static HRESULT WINAPI filter_qi(IBaseFilter*p,REFIID iid,void**out){if(!out)return E_POINTER;struct filter*f=(void*)p;if(eq(iid,&iid_unknown)||eq(iid,&iid_filter))*out=p;else if(f->encoder&&eq(iid,&iid_compression))*out=&f->compression;else if(f->encoder&&eq(iid,&iid_persist_stream))*out=&f->persist;else{*out=NULL;return E_NOINTERFACE;}p->lpVtbl->AddRef(p);return S_OK;}
 static ULONG WINAPI filter_addref(IBaseFilter*p){return InterlockedIncrement(&((struct filter*)p)->refs);}
-static ULONG WINAPI filter_release(IBaseFilter*p){struct filter*f=(void*)p;LONG n=InterlockedDecrement(&f->refs);if(!n){release(f->picture);if(f->clock)f->clock->lpVtbl->Release(f->clock);if(f->graph)f->graph->lpVtbl->Release(f->graph);release(f);InterlockedDecrement(&objects);}return n;}
+static ULONG WINAPI filter_release(IBaseFilter*p){struct filter*f=(void*)p;LONG n=InterlockedDecrement(&f->refs);if(!n){release(f->picture);if(f->clock)f->clock->lpVtbl->Release(f->clock);if(f->graph)f->graph->lpVtbl->Release(f->graph);DeleteCriticalSection(&f->transform_lock);release(f);InterlockedDecrement(&objects);}return n;}
 static HRESULT WINAPI filter_class(IBaseFilter*p,CLSID*c){if(!c)return E_POINTER;for(int i=0;i<16;i++)((BYTE*)c)[i]=0;return S_OK;}
 static HRESULT WINAPI filter_stop(IBaseFilter*p){((struct filter*)p)->state=State_Stopped;return S_OK;}
 static HRESULT WINAPI filter_pause(IBaseFilter*p){((struct filter*)p)->state=State_Paused;return S_OK;}
@@ -86,6 +97,35 @@ static HRESULT WINAPI filter_run(IBaseFilter*p,REFERENCE_TIME t){((struct filter
 static HRESULT WINAPI filter_state(IBaseFilter*p,DWORD timeout,FILTER_STATE*s){if(!s)return E_POINTER;*s=((struct filter*)p)->state;return S_OK;}
 static HRESULT WINAPI filter_set_clock(IBaseFilter*p,IReferenceClock*c){struct filter*f=(void*)p;if(c)c->lpVtbl->AddRef(c);if(f->clock)f->clock->lpVtbl->Release(f->clock);f->clock=c;return S_OK;}
 static HRESULT WINAPI filter_get_clock(IBaseFilter*p,IReferenceClock**c){if(!c)return E_POINTER;*c=((struct filter*)p)->clock;if(*c)(*c)->lpVtbl->AddRef(*c);return *c?S_OK:VFW_E_NO_CLOCK;}
+
+static struct filter *filter_from_compression(IAMVideoCompression*p){return(void*)((BYTE*)p-FIELD_OFFSET(struct filter,compression));}
+static HRESULT WINAPI compression_qi(IAMVideoCompression*p,REFIID i,void**o){return filter_qi(&filter_from_compression(p)->iface,i,o);}
+static ULONG WINAPI compression_addref(IAMVideoCompression*p){return filter_addref(&filter_from_compression(p)->iface);}
+static ULONG WINAPI compression_release(IAMVideoCompression*p){return filter_release(&filter_from_compression(p)->iface);}
+static HRESULT WINAPI compression_put_key(IAMVideoCompression*p,LONG n){filter_from_compression(p)->key_interval=n;return S_OK;}
+static HRESULT WINAPI compression_get_key(IAMVideoCompression*p,LONG*n){if(!n)return E_POINTER;*n=filter_from_compression(p)->key_interval;return S_OK;}
+static HRESULT WINAPI compression_put_p(IAMVideoCompression*p,LONG n){filter_from_compression(p)->pframes=n;return S_OK;}
+static HRESULT WINAPI compression_get_p(IAMVideoCompression*p,LONG*n){if(!n)return E_POINTER;*n=filter_from_compression(p)->pframes;return S_OK;}
+static HRESULT WINAPI compression_put_quality(IAMVideoCompression*p,double n){filter_from_compression(p)->quality=n;return S_OK;}
+static HRESULT WINAPI compression_get_quality(IAMVideoCompression*p,double*n){if(!n)return E_POINTER;*n=filter_from_compression(p)->quality;return S_OK;}
+static HRESULT WINAPI compression_put_window(IAMVideoCompression*p,DWORDLONG n){filter_from_compression(p)->window=n;return S_OK;}
+static HRESULT WINAPI compression_get_window(IAMVideoCompression*p,DWORDLONG*n){if(!n)return E_POINTER;*n=filter_from_compression(p)->window;return S_OK;}
+static HRESULT WINAPI compression_info(IAMVideoCompression*p,LPWSTR a,int*b,LPWSTR c,int*d,LONG*e,LONG*f,double*g,LONG*h){return E_NOTIMPL;}
+static HRESULT WINAPI compression_override_key(IAMVideoCompression*p,LONG n){return E_NOTIMPL;}
+static HRESULT WINAPI compression_override_size(IAMVideoCompression*p,LONG n,LONG s){return E_NOTIMPL;}
+static IAMVideoCompressionVtbl compression_vtbl={compression_qi,compression_addref,compression_release,compression_put_key,compression_get_key,compression_put_p,compression_get_p,compression_put_quality,compression_get_quality,compression_put_window,compression_get_window,compression_info,compression_override_key,compression_override_size};
+
+struct saved_state { DWORD magic; LONG key,pframes; double quality; DWORDLONG window; };
+static struct filter *filter_from_persist(IPersistStream*p){return(void*)((BYTE*)p-FIELD_OFFSET(struct filter,persist));}
+static HRESULT WINAPI persist_qi(IPersistStream*p,REFIID i,void**o){return filter_qi(&filter_from_persist(p)->iface,i,o);}
+static ULONG WINAPI persist_addref(IPersistStream*p){return filter_addref(&filter_from_persist(p)->iface);}
+static ULONG WINAPI persist_release(IPersistStream*p){return filter_release(&filter_from_persist(p)->iface);}
+static HRESULT WINAPI persist_class(IPersistStream*p,CLSID*c){if(!c)return E_POINTER;for(int i=0;i<16;i++)((BYTE*)c)[i]=0;return S_OK;}
+static HRESULT WINAPI persist_dirty(IPersistStream*p){return S_FALSE;}
+static HRESULT WINAPI persist_load(IPersistStream*p,IStream*s){if(!s)return E_POINTER;struct saved_state x;ULONG got=0;HRESULT hr=s->lpVtbl->Read(s,&x,sizeof(x),&got);if(FAILED(hr))return hr;if(got!=sizeof(x)||x.magic!=mmioFOURCC('T','S','T','0'))return E_FAIL;struct filter*f=filter_from_persist(p);f->key_interval=x.key;f->pframes=x.pframes;f->quality=x.quality;f->window=x.window;return S_OK;}
+static HRESULT WINAPI persist_save(IPersistStream*p,IStream*s,BOOL clear){if(!s)return E_POINTER;struct filter*f=filter_from_persist(p);struct saved_state x={mmioFOURCC('T','S','T','0'),f->key_interval,f->pframes,f->quality,f->window};ULONG wrote=0;HRESULT hr=s->lpVtbl->Write(s,&x,sizeof(x),&wrote);return SUCCEEDED(hr)&&wrote!=sizeof(x)?E_FAIL:hr;}
+static HRESULT WINAPI persist_size(IPersistStream*p,ULARGE_INTEGER*n){if(!n)return E_POINTER;n->QuadPart=sizeof(struct saved_state);return S_OK;}
+static IPersistStreamVtbl persist_vtbl={persist_qi,persist_addref,persist_release,persist_class,persist_dirty,persist_load,persist_save,persist_size};
 
 static HRESULT WINAPI enum_qi(IEnumPins*p,REFIID iid,void**out){if(!out)return E_POINTER;if(eq(iid,&iid_unknown)||eq(iid,&iid_enum_pins))*out=p;else{*out=NULL;return E_NOINTERFACE;}p->lpVtbl->AddRef(p);return S_OK;}
 static ULONG WINAPI enum_addref(IEnumPins*p){return InterlockedIncrement(&((struct enum_pins*)p)->refs);}
@@ -113,10 +153,10 @@ static HRESULT WINAPI pin_id(IPin*p,LPWSTR*out){return E_NOTIMPL;}
 static HRESULT WINAPI pin_accept(IPin*p,const AM_MEDIA_TYPE*mt){return mt?S_OK:E_POINTER;}
 static HRESULT WINAPI pin_enum_types(IPin*p,IEnumMediaTypes**out){return E_NOTIMPL;}
 static HRESULT WINAPI pin_internal(IPin*p,IPin**out,ULONG*n){return E_NOTIMPL;}
-static HRESULT WINAPI pin_eos(IPin*p){struct pin*x=(void*)p;return x->filter->output.connected?x->filter->output.peer->lpVtbl->EndOfStream(x->filter->output.peer):S_OK;}
-static HRESULT WINAPI pin_begin_flush(IPin*p){struct pin*x=(void*)p;x->flushing=TRUE;x->filter->valid=FALSE;return x->filter->output.connected?x->filter->output.peer->lpVtbl->BeginFlush(x->filter->output.peer):S_OK;}
+static HRESULT WINAPI pin_eos(IPin*p){struct pin*x=(void*)p;while(x->filter->workers)Sleep(1);if(FAILED(x->filter->async_error))return x->filter->async_error;if(x->filter->no_eos)return S_OK;return x->filter->output.connected?x->filter->output.peer->lpVtbl->EndOfStream(x->filter->output.peer):S_OK;}
+static HRESULT WINAPI pin_begin_flush(IPin*p){struct pin*x=(void*)p;x->flushing=TRUE;x->filter->valid=FALSE;x->filter->segment=FALSE;x->filter->async_error=S_OK;return x->filter->output.connected?x->filter->output.peer->lpVtbl->BeginFlush(x->filter->output.peer):S_OK;}
 static HRESULT WINAPI pin_end_flush(IPin*p){struct pin*x=(void*)p;x->flushing=FALSE;return x->filter->output.connected?x->filter->output.peer->lpVtbl->EndFlush(x->filter->output.peer):S_OK;}
-static HRESULT WINAPI pin_segment(IPin*p,REFERENCE_TIME a,REFERENCE_TIME b,double r){struct pin*x=(void*)p;return x->filter->output.connected?x->filter->output.peer->lpVtbl->NewSegment(x->filter->output.peer,a,b,r):S_OK;}
+static HRESULT WINAPI pin_segment(IPin*p,REFERENCE_TIME a,REFERENCE_TIME b,double r){struct pin*x=(void*)p;x->filter->segment=TRUE;return x->filter->output.connected?x->filter->output.peer->lpVtbl->NewSegment(x->filter->output.peer,a,b,r):S_OK;}
 static IPinVtbl pin_vtbl={pin_qi,pin_addref,pin_release,pin_connect,pin_receive_connection,pin_disconnect,pin_connected,pin_type,pin_info,pin_direction,pin_id,pin_accept,pin_enum_types,pin_internal,pin_eos,pin_begin_flush,pin_end_flush,pin_segment};
 
 static HRESULT WINAPI mem_qi(IMemInputPin*p,REFIID i,void**o){return pin_qi(&pin_from_mem(p)->iface,i,o);}
@@ -142,7 +182,7 @@ static HRESULT transform(struct filter*f,IMediaSample*input)
 	if(FAILED(hr))return hr;
 	BYTE*dst=NULL;hr=sample->lpVtbl->GetPointer(sample,&dst);
 	if(SUCCEEDED(hr)&&f->encoder){
-		BOOL key=input->lpVtbl->IsSyncPoint(input)==S_OK||!f->valid;
+		BOOL key=input->lpVtbl->IsSyncPoint(input)==S_OK||!f->valid||(f->key_interval>0&&f->frame%(DWORD)f->key_interval==0);
 		LONG cap=sample->lpVtbl->GetSize(sample);if(cap<4)hr=VFW_E_BUFFER_OVERFLOW;
 		else{dst[0]=key?'K':'D';dst[1]=(BYTE)ib->biBitCount;dst[2]=dst[3]=0;if(key){DWORD n=rle_encode(src,raw,dst+4);if(n+4>(DWORD)cap)hr=VFW_E_BUFFER_OVERFLOW;else sample->lpVtbl->SetActualDataLength(sample,n+4);}else{for(DWORD i=0;i<raw;i++)f->picture[i]^=src[i];DWORD n=rle_encode(f->picture,raw,dst+4);if(n+4>(DWORD)cap)hr=VFW_E_BUFFER_OVERFLOW;else sample->lpVtbl->SetActualDataLength(sample,n+4);}if(SUCCEEDED(hr)){for(DWORD i=0;i<raw;i++)f->picture[i]=src[i];f->valid=TRUE;sample->lpVtbl->SetSyncPoint(sample,key);}}
 	}else if(SUCCEEDED(hr)){
@@ -155,9 +195,11 @@ static HRESULT transform(struct filter*f,IMediaSample*input)
 	if(SUCCEEDED(hr)){sample->lpVtbl->SetPreroll(sample,input->lpVtbl->IsPreroll(input)==S_OK);sample->lpVtbl->SetDiscontinuity(sample,input->lpVtbl->IsDiscontinuity(input)==S_OK);hr=out->peer_mem->lpVtbl->Receive(out->peer_mem,sample);}
 	sample->lpVtbl->Release(sample);f->frame++;return hr;
 }
-static HRESULT WINAPI mem_receive(IMemInputPin*p,IMediaSample*s){struct pin*x=pin_from_mem(p);if(!s)return E_POINTER;if(x->flushing)return S_FALSE;return transform(x->filter,s);}
+struct async_sample { struct filter *filter; IMediaSample *sample; HRESULT result; };
+static DWORD WINAPI transform_thread(void *opaque){struct async_sample*w=opaque;EnterCriticalSection(&w->filter->transform_lock);w->result=transform(w->filter,w->sample);if(FAILED(w->result)&&SUCCEEDED(w->filter->async_error))w->filter->async_error=w->result;LeaveCriticalSection(&w->filter->transform_lock);w->sample->lpVtbl->Release(w->sample);InterlockedDecrement(&w->filter->workers);w->filter->iface.lpVtbl->Release(&w->filter->iface);return 0;}
+static HRESULT WINAPI mem_receive(IMemInputPin*p,IMediaSample*s){struct pin*x=pin_from_mem(p);if(!s)return E_POINTER;if(x->flushing)return S_FALSE;if(x->filter->require_segment&&!x->filter->segment)return VFW_E_WRONG_STATE;if(!x->filter->async)return transform(x->filter,s);struct async_sample*w=alloc(sizeof(*w));if(!w)return E_OUTOFMEMORY;w->filter=x->filter;w->sample=s;s->lpVtbl->AddRef(s);x->filter->iface.lpVtbl->AddRef(&x->filter->iface);InterlockedIncrement(&x->filter->workers);HANDLE thread=CreateThread(NULL,0,transform_thread,w,0,NULL);if(!thread){InterlockedDecrement(&x->filter->workers);x->filter->iface.lpVtbl->Release(&x->filter->iface);s->lpVtbl->Release(s);release(w);return E_FAIL;}WaitForSingleObject(thread,INFINITE);CloseHandle(thread);HRESULT hr=w->result;release(w);return hr;}
 static HRESULT WINAPI mem_multiple(IMemInputPin*p,IMediaSample**s,LONG n,LONG*done){if(!s||!done)return E_POINTER;*done=0;for(;*done<n;(*done)++){HRESULT hr=mem_receive(p,s[*done]);if(FAILED(hr))return hr;}return S_OK;}
-static HRESULT WINAPI mem_can_block(IMemInputPin*p){return S_FALSE;}
+static HRESULT WINAPI mem_can_block(IMemInputPin*p){return pin_from_mem(p)->filter->async?S_OK:S_FALSE;}
 static IMemInputPinVtbl mem_vtbl={mem_qi,mem_addref,mem_release,mem_get_allocator,mem_notify,mem_require,mem_receive,mem_multiple,mem_can_block};
 
 static HRESULT WINAPI filter_find(IBaseFilter*p,LPCWSTR id,IPin**out){return E_NOTIMPL;}
@@ -166,5 +208,6 @@ static HRESULT WINAPI filter_join(IBaseFilter*p,IFilterGraph*g,LPCWSTR name){str
 static HRESULT WINAPI filter_vendor(IBaseFilter*p,LPWSTR*out){return E_NOTIMPL;}
 static IBaseFilterVtbl filter_vtbl={filter_qi,filter_addref,filter_release,filter_class,filter_stop,filter_pause,filter_run,filter_state,filter_set_clock,filter_get_clock,filter_enum,filter_find,filter_info,filter_join,filter_vendor};
 
-HRESULT testfilter_create(BOOL encoder,REFIID iid,void**out){if(!out)return E_POINTER;*out=NULL;struct filter*f=alloc(sizeof(*f));if(!f)return E_OUTOFMEMORY;f->iface.lpVtbl=&filter_vtbl;f->refs=1;f->encoder=encoder;f->input=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_INPUT};f->output=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_OUTPUT};InterlockedIncrement(&objects);HRESULT hr=filter_qi(&f->iface,iid,out);filter_release(&f->iface);return hr;}
+static BOOL env_on(const char*name){char value[2];return GetEnvironmentVariableA(name,value,sizeof(value))==1&&value[0]=='1';}
+HRESULT testfilter_create(BOOL encoder,REFIID iid,void**out){if(!out)return E_POINTER;*out=NULL;struct filter*f=alloc(sizeof(*f));if(!f)return E_OUTOFMEMORY;f->iface.lpVtbl=&filter_vtbl;f->compression.lpVtbl=&compression_vtbl;f->persist.lpVtbl=&persist_vtbl;f->refs=1;f->encoder=encoder;f->quality=0.75;f->async=env_on("TESTFILTER_ASYNC");f->no_eos=env_on("TESTFILTER_NO_EOS");f->require_segment=env_on("TESTFILTER_REQUIRE_SEGMENT");InitializeCriticalSection(&f->transform_lock);f->input=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_INPUT};f->output=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_OUTPUT};InterlockedIncrement(&objects);HRESULT hr=filter_qi(&f->iface,iid,out);filter_release(&f->iface);return hr;}
 LONG testfilter_objects(void){return objects;}

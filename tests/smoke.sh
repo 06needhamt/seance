@@ -104,6 +104,59 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 			echo "smoke: strict round trip differs" >&2
 			exit 1
 		}
+		# The DirectShow decoder must negotiate from the AVI's media type and
+		# produce exactly the same frames as the VfW decoder.
+		$emu "$harness" probe "$fixtures/testfilter.ax" "$work/t.avi" |
+			grep -q "outputs accepted.*I420"
+		$emu "$harness" decode "$fixtures/testfilter.ax" "$work/t.avi" \
+			-o "$work/dshow.y4m" 2>/dev/null
+		cmp -s "$work/in.y4m" "$work/dshow.y4m" || {
+			echo "smoke: DirectShow decode differs" >&2
+			exit 1
+		}
+		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/t.avi" \
+			-o "$work/start.ref.y4m" --start 1 2>/dev/null
+		VFW_ENV_TESTFILTER_ASYNC=1 VFW_ENV_TESTFILTER_REQUIRE_SEGMENT=1 \
+			$emu "$harness" decode "$fixtures/testfilter.ax" "$work/t.avi" \
+			-o "$work/start.y4m" --start 1 2>/dev/null
+		cmp -s "$work/start.ref.y4m" "$work/start.y4m" || {
+			echo "smoke: asynchronous seek decode differs" >&2
+			exit 1
+		}
+		if env VFW_ENV_TESTFILTER_NO_EOS=1 VFW_TIMEOUT=1 $emu \
+			"$harness" decode "$fixtures/testfilter.ax" "$work/t.avi" \
+			-o "$work/timeout.y4m" 2>"$work/timeout.err"; then
+			echo "smoke: DirectShow missing-EOS mode should time out" >&2
+			exit 1
+		fi
+		grep -q VFW_E_TIMEOUT "$work/timeout.err"
+		# And the reverse direction: DirectShow encode must produce a TST0
+		# stream which the VfW decoder reads byte-for-byte. Exercise the
+		# encoder controls and persisted state while doing so.
+		$emu "$harness" encode "$fixtures/testfilter.ax" "$work/in.y4m" \
+			-o "$work/dshow.avi" --keyint 2 --quality 7000 \
+			--bitrate 100 --save-state "$work/dshow.state" 2>/dev/null
+		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/dshow.avi" \
+			-o "$work/dshow-vfw.y4m" 2>/dev/null
+		cmp -s "$work/in.y4m" "$work/dshow-vfw.y4m" || {
+			echo "smoke: DirectShow encode differs" >&2
+			exit 1
+		}
+		$emu "$harness" encode "$fixtures/testfilter.ax" "$work/in.y4m" \
+			-o "$work/dshow-state.avi" --state "$work/dshow.state" --clsid \
+			'{5E6C9B32-3A7D-4F0E-9C11-0D2B7A6E4F80}' \
+			2>/dev/null
+		reg="$work/registry"
+		export VFW_REGISTRY="$reg"
+		$emu "$harness" register "$fixtures/testfilter.ax" >/dev/null
+		VFW_INI=/nonexistent $emu "$harness" decode auto "$work/t.avi" \
+			-o "$work/dshow-auto.y4m" 2>/dev/null
+		cmp -s "$work/in.y4m" "$work/dshow-auto.y4m" || {
+			echo "smoke: registered DirectShow auto decode differs" >&2
+			exit 1
+		}
+		$emu "$harness" unregister "$fixtures/testfilter.ax" >/dev/null
+		unset VFW_REGISTRY
 		# The check itself works: without the reservation it trips.
 		# Not under an emulator, where the guest's memory is all below
 		# 2 GB anyway (qemu-user maps it low).

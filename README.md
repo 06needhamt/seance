@@ -31,8 +31,8 @@ and their ABI check, a built-in quartz.dll (filter mappers, device
 enumerator, `AMGetErrorText`), and finding and registering filters
 (`register`, `list`). Media-type conversion, sample allocation, traced COM
 calls, encoder controls and persisted filter state are implemented and unit
-tested. The minimal source/sink graph and command-line decode/encode paths are
-still in progress.
+tested. The minimal source/sink graph and command-line decode and encode paths
+are complete.
 
 ## Prerequisites
 
@@ -384,6 +384,7 @@ each run.
 ```sh
 build/seance register --dry-run filter.ax  # what it would register
 build/seance probe filter.ax               # filters, roles, pins and types
+build/seance probe filter.ax clip.avi      # dynamically accepted outputs
 build/seance register filter.ax
 build/seance list                          # ... then DirectShow filters
 build/seance unregister filter.ax
@@ -400,8 +401,9 @@ afterwards, so nothing changes.
 
 `probe` also discovers filters in a server without registering it and prints
 the same CLSID, role, merit, pin and media-type metadata. Servers containing
-several classes can be narrowed with `--clsid {GUID}`. Connecting those pins
-and probing formats dynamically will be added with the DirectShow graph host.
+several classes can be narrowed with `--clsid {GUID}`. With an AVI argument,
+`probe` also builds the minimal graph and reports the standard output formats
+to which each decoder actually connects.
 
 `list` shows the video decoders and encoders registered, from the
 filter categories and the older `HKCR\Filter` keys, with the DLL that
@@ -413,10 +415,12 @@ filters' DLLs are then found through the drive mapping.
 
 ```sh
 build/seance decode codec.dll clip.avi -o clip.y4m
+build/seance decode filter.ax clip.avi -o clip.y4m --clsid '{GUID}'
 build/seance decode auto clip.avi -o 'frame%05d.bmp' --start 250 --frames 10
 build/seance decode XVID clip.avi -o clip.yuv --output-format YV12
 
 build/seance encode codec.dll in.y4m -o out.avi --keyint 30 --quality 8000
+build/seance encode filter.ax in.y4m -o out.avi --clsid '{GUID}'
 build/seance encode TST0 'shot%04d.bmp' -o out.avi --rate 30000/1001
 build/seance encode codec.dll in.yuv -o out.avi --input-format I420 --size 720x576
 ffmpeg -i any.mkv -f yuv4mpegpipe - | build/seance encode codec.dll - -o out.avi
@@ -435,7 +439,14 @@ before that frame, feeding the frames in between with
 `ICDECOMPRESS_PREROLL`; frames that aren't keyframes get
 `ICDECOMPRESS_NOTKEYFRAME`. A frame the codec rejects stops the decode,
 or with `--keep-going` repeats the previous picture. `.raw` output keeps
-the codec's output exactly, in whatever format it is.
+the codec's output exactly, in whatever format it is. A DirectShow `.ax`
+server is loaded without registration, its decoder is connected between the
+built-in source and sink pins, and compressed AVI chunks are delivered as
+timestamped media samples. `--clsid` selects a class when necessary.
+For `--start`, the DirectShow graph is flushed and given a new segment before
+frames are preroll-fed from the preceding keyframe. Output and EOS may arrive
+from a filter worker thread; EOS waits are bounded by `VFW_TIMEOUT` (five
+seconds by default).
 
 `encode` compresses video into an AVI through the msvfw32 sequence API
 (`ICSeqCompressFrameStart`, `ICSeqCompressFrame`, `ICSeqCompressFrameEnd`),
@@ -458,6 +469,13 @@ The keyframe flags in the AVI index are the codec's. `--state` sets a
 codec state saved earlier with `--save-state` (`ICM_SETSTATE` /
 `ICM_GETSTATE`), and `--odml` writes OpenDML indexes even for small
 files; files over 1 GB always get them.
+
+For a DirectShow `.ax` server, `encode` selects its video encoder (or the
+class named by `--clsid`), negotiates the source or a converted standard raw
+format on the input pin, and writes each compressed output sample to AVI. Its
+sync-point flag becomes the AVI keyframe flag. Quality, keyframe interval and
+bitrate use `IAMVideoCompression`; `--state` and `--save-state` use
+`IPersistStream`.
 
 Both commands print the frame count, the formats on each side and the time
 spent in the codec per frame. With `testcodec.dll`, encoding a clip and

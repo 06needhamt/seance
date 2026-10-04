@@ -428,18 +428,14 @@ HRESULT dshow_host_seek(struct dshow_host *h, REFERENCE_TIME start,
                         REFERENCE_TIME stop) {
   if (!h)
     return E_POINTER;
-  HRESULT hr = dshow_call_pin_begin_flush(h->input);
-  if (SUCCEEDED(hr))
-    hr = dshow_call_pin_begin_flush(h->output);
-  if (SUCCEEDED(hr))
-    hr = dshow_call_pin_end_flush(h->input);
-  if (SUCCEEDED(hr))
-    hr = dshow_call_pin_end_flush(h->output);
-  if (SUCCEEDED(hr))
-    hr = dshow_call_pin_new_segment(h->input, start, stop, 1.0);
   pthread_mutex_lock(&h->mutex);
   h->eos = h->have_event = 0;
   pthread_mutex_unlock(&h->mutex);
+  HRESULT hr = dshow_call_pin_begin_flush(h->input);
+  if (SUCCEEDED(hr))
+    hr = dshow_call_pin_end_flush(h->input);
+  if (SUCCEEDED(hr))
+    hr = dshow_call_pin_new_segment(h->input, start, stop, 1.0);
   return hr;
 }
 
@@ -449,6 +445,16 @@ HRESULT dshow_host_end(struct dshow_host *h, DWORD timeout) {
   HRESULT hr = dshow_call_pin_end_of_stream(h->input);
   if (FAILED(hr))
     return hr;
+  if (!timeout) {
+    timeout = 5000;
+    const char *setting = getenv("VFW_TIMEOUT");
+    if (setting && *setting) {
+      char *end;
+      unsigned long seconds = strtoul(setting, &end, 10);
+      if (!*end && seconds && seconds <= UINT32_MAX / 1000)
+        timeout = (DWORD)seconds * 1000;
+    }
+  }
   struct timespec ts;
   clock_gettime(CLOCK_REALTIME, &ts);
   ts.tv_sec += timeout / 1000;

@@ -70,9 +70,9 @@ static HRESULT WINAPI sample_pointer(IMediaSample2 *p, BYTE **out)
 { if (!out) return E_POINTER; *out = sample_from(p)->data; return S_OK; }
 static LONG WINAPI sample_size(IMediaSample2 *p) { return sample_from(p)->size; }
 static HRESULT WINAPI sample_get_time(IMediaSample2 *p, REFERENCE_TIME *a, REFERENCE_TIME *b)
-{ struct sample *s=sample_from(p); if (!s->have_time) return VFW_E_SAMPLE_TIME_NOT_SET; if (a)*a=s->start; if(b)*b=s->stop; return S_OK; }
+{ struct sample *s=sample_from(p); if (!s->have_time) return VFW_E_SAMPLE_TIME_NOT_SET; if(a)memcpy(a,&s->start,sizeof(*a));if(b)memcpy(b,&s->stop,sizeof(*b));return S_OK; }
 static HRESULT WINAPI sample_set_time(IMediaSample2 *p, REFERENCE_TIME *a, REFERENCE_TIME *b)
-{ struct sample*s=sample_from(p); s->have_time=a!=NULL; if(a)s->start=*a; if(b)s->stop=*b; else s->stop=s->start; return S_OK; }
+{ struct sample*s=sample_from(p);s->have_time=a!=NULL;if(a)memcpy(&s->start,a,sizeof(*a));if(b)memcpy(&s->stop,b,sizeof(*b));else s->stop=s->start;return S_OK; }
 static HRESULT flag_get(struct sample*s,DWORD f){return s->flags&f?S_OK:S_FALSE;}
 static HRESULT flag_set(struct sample*s,DWORD f,BOOL v){if(v)s->flags|=f;else s->flags&=~f;return S_OK;}
 static HRESULT WINAPI sample_sync(IMediaSample2*p){return flag_get(sample_from(p),AM_SAMPLE_SPLICEPOINT);}
@@ -93,8 +93,8 @@ static HRESULT WINAPI sample_set_mt(IMediaSample2*p,AM_MEDIA_TYPE *mt)
 {struct sample*s=sample_from(p);dshow_free_media_type(&s->mt);s->have_mt=0;if(!mt)return S_OK;HRESULT hr=dshow_copy_media_type(&s->mt,mt);s->have_mt=SUCCEEDED(hr);return hr;}
 static HRESULT WINAPI sample_disc(IMediaSample2*p){return flag_get(sample_from(p),AM_SAMPLE_DATADISCONTINUITY);}
 static HRESULT WINAPI sample_set_disc(IMediaSample2*p,BOOL v){return flag_set(sample_from(p),AM_SAMPLE_DATADISCONTINUITY,v);}
-static HRESULT WINAPI sample_get_media(IMediaSample2*p,LONGLONG*a,LONGLONG*b){struct sample*s=sample_from(p);if(!s->have_media_time)return VFW_E_MEDIA_TIME_NOT_SET;if(a)*a=s->media_start;if(b)*b=s->media_stop;return S_OK;}
-static HRESULT WINAPI sample_set_media(IMediaSample2*p,LONGLONG*a,LONGLONG*b){struct sample*s=sample_from(p);s->have_media_time=a!=NULL;if(a)s->media_start=*a;if(b)s->media_stop=*b;return S_OK;}
+static HRESULT WINAPI sample_get_media(IMediaSample2*p,LONGLONG*a,LONGLONG*b){struct sample*s=sample_from(p);if(!s->have_media_time)return VFW_E_MEDIA_TIME_NOT_SET;if(a)memcpy(a,&s->media_start,sizeof(*a));if(b)memcpy(b,&s->media_stop,sizeof(*b));return S_OK;}
+static HRESULT WINAPI sample_set_media(IMediaSample2*p,LONGLONG*a,LONGLONG*b){struct sample*s=sample_from(p);s->have_media_time=a!=NULL;if(a)memcpy(&s->media_start,a,sizeof(*a));if(b)memcpy(&s->media_stop,b,sizeof(*b));return S_OK;}
 static HRESULT WINAPI sample_get_props(IMediaSample2*p,DWORD n,BYTE*out)
 {
 	if (!out || n < sizeof(AM_SAMPLE2_PROPERTIES))
