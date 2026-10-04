@@ -190,10 +190,12 @@ static void test_register(const char *filter)
 	CHECK_EQ(CoGetClassObject(&clsid_encoder, CLSCTX_INPROC_SERVER, NULL,
 				  &IID_IClassFactory, (void **)&cf), S_OK);
 	if (cf) {
-		IUnknown *u = (IUnknown *)cf;
+		IUnknown *u = NULL;
 		CHECK_EQ(cf->lpVtbl->CreateInstance(cf, NULL, &IID_IUnknown,
-						    (void **)&u), E_NOTIMPL);
-		CHECK(u == NULL);
+					    (void **)&u), S_OK);
+		CHECK(u != NULL);
+		if (u)
+			u->lpVtbl->Release(u);
 		cf->lpVtbl->Release(cf);
 	}
 	CoUninitialize();

@@ -6,9 +6,7 @@
  * HKCR\CLSID\{...}\InprocServer32 key, as DllRegisterServer writes them
  * for real filters; DllUnregisterServer takes it all away again.
  *
- * The filters themselves (their pins and the TST0 bitstream) are not here
- * yet: DllGetClassObject hands out class factories whose CreateInstance
- * says E_NOTIMPL.
+ * The filter objects and their TST0 transform live in testfilter_filter.c.
  */
 #include "fixture.h"
 #include <strmif.h>
@@ -49,6 +47,8 @@ static const WCHAR decoder_name[] = L"seance test decoder";
 static const WCHAR encoder_name[] = L"seance test encoder";
 
 static HINSTANCE self;
+HRESULT testfilter_create(BOOL encoder, REFIID riid, void **out);
+LONG testfilter_objects(void);
 
 static int guid_eq(const GUID *a, const GUID *b)
 {
@@ -226,7 +226,10 @@ HRESULT WINAPI DllUnregisterServer(void)
 	return S_OK;
 }
 
-/* Class factories: one per filter; the filters themselves come later. */
+struct factory { IClassFactory iface; BOOL encoder; };
+static struct factory *factory_from(IClassFactory *cf) { return (void *)cf; }
+
+/* Class factories: one per transform filter. */
 static HRESULT WINAPI cf_qi(IClassFactory *cf, REFIID riid, void **ppv)
 {
 	if (guid_eq(riid, &iid_unknown) || guid_eq(riid, &iid_factory)) {
@@ -244,7 +247,8 @@ static HRESULT WINAPI cf_create(IClassFactory *cf, IUnknown *outer,
 				REFIID riid, void **ppv)
 {
 	*ppv = NULL;
-	return outer ? CLASS_E_NOAGGREGATION : E_NOTIMPL;
+	return outer ? CLASS_E_NOAGGREGATION :
+		testfilter_create(factory_from(cf)->encoder, riid, ppv);
 }
 
 static HRESULT WINAPI cf_lock(IClassFactory *cf, BOOL lock) { return S_OK; }
@@ -252,22 +256,26 @@ static HRESULT WINAPI cf_lock(IClassFactory *cf, BOOL lock) { return S_OK; }
 static const IClassFactoryVtbl cf_vtbl = {
 	cf_qi, cf_addref, cf_release, cf_create, cf_lock
 };
-static IClassFactory decoder_factory = { (IClassFactoryVtbl *)&cf_vtbl };
-static IClassFactory encoder_factory = { (IClassFactoryVtbl *)&cf_vtbl };
+static struct factory decoder_factory = {
+	{ (IClassFactoryVtbl *)&cf_vtbl }, FALSE
+};
+static struct factory encoder_factory = {
+	{ (IClassFactoryVtbl *)&cf_vtbl }, TRUE
+};
 
 HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void **ppv)
 {
 	if (guid_eq(clsid, &clsid_decoder))
-		return cf_qi(&decoder_factory, riid, ppv);
+		return cf_qi(&decoder_factory.iface, riid, ppv);
 	if (guid_eq(clsid, &clsid_encoder))
-		return cf_qi(&encoder_factory, riid, ppv);
+		return cf_qi(&encoder_factory.iface, riid, ppv);
 	*ppv = NULL;
 	return CLASS_E_CLASSNOTAVAILABLE;
 }
 
 HRESULT WINAPI DllCanUnloadNow(void)
 {
-	return S_OK;
+	return testfilter_objects() ? S_FALSE : S_OK;
 }
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)

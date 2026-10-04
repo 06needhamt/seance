@@ -52,6 +52,25 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	export VFW_REGISTRY="$reg"
 	$emu "$harness" register --dry-run "$fixtures/testfilter.ax" |
 		grep -q "seance test decoder"
+	# Probe performs the same sandboxed discovery through the normal CLI,
+	# reports both filter roles and can select one class from a multi-class
+	# server without registering it.
+	probe=$($emu "$harness" probe "$fixtures/testfilter.ax")
+	printf '%s\n' "$probe" | grep -q "DirectShow server:"
+	printf '%s\n' "$probe" | grep -q "seance test decoder"
+	printf '%s\n' "$probe" | grep -q "video decoder"
+	printf '%s\n' "$probe" | grep -q "seance test encoder"
+	printf '%s\n' "$probe" | grep -q "video encoder"
+	selected=$($emu "$harness" probe "$fixtures/testfilter.ax" --clsid \
+		'{5E6C9B32-3A7D-4F0E-9C11-0D2B7A6E4F80}')
+	printf '%s\n' "$selected" | grep -q "seance test encoder"
+	if printf '%s\n' "$selected" | grep -q "seance test decoder"; then
+		echo "smoke: --clsid did not select one DirectShow filter" >&2
+		exit 1
+	fi
+	fails $emu "$harness" probe "$fixtures/testfilter.ax" --clsid bad
+	fails $emu "$harness" probe "$fixtures/testfilter.ax" --fourcc TST0
+	[ ! -e "$reg" ] || { echo "smoke: probe wrote $reg" >&2; exit 1; }
 	[ ! -e "$reg" ] || { echo "smoke: --dry-run wrote $reg" >&2; exit 1; }
 	$emu "$harness" register "$fixtures/testfilter.ax" >/dev/null
 	VFW_INI=/nonexistent $emu "$harness" list |
