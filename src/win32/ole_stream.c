@@ -295,13 +295,7 @@ HRESULT ole_stream_on_hglobal(HGLOBAL h, BOOL delete_on_release,
 	return hr;
 }
 
-WINFN(HRESULT) ole_CreateStreamOnHGlobal(HGLOBAL h, BOOL delete_on_release,
-					 LPSTREAM *out)
-{
-	return ole_stream_on_hglobal(h, delete_on_release, out);
-}
-
-WINFN(HRESULT) ole_GetHGlobalFromStream(IStream *stream, HGLOBAL *out)
+HRESULT ole_hglobal_from_stream(IStream *stream, HGLOBAL *out)
 {
 	if (!out)
 		return E_INVALIDARG;
@@ -310,6 +304,17 @@ WINFN(HRESULT) ole_GetHGlobalFromStream(IStream *stream, HGLOBAL *out)
 		return E_INVALIDARG;
 	*out = impl(stream)->data->h;
 	return S_OK;
+}
+
+WINFN(HRESULT) ole_CreateStreamOnHGlobal(HGLOBAL h, BOOL delete_on_release,
+					 LPSTREAM *out)
+{
+	return ole_stream_on_hglobal(h, delete_on_release, out);
+}
+
+WINFN(HRESULT) ole_GetHGlobalFromStream(IStream *stream, HGLOBAL *out)
+{
+	return ole_hglobal_from_stream(stream, out);
 }
 
 /*
