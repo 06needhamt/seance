@@ -1,11 +1,15 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /* Small, ABI-compatible pieces of the old MSVCRT/MSVCP surface. */
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <locale.h>
+#include <stdint.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -50,6 +54,72 @@ CRTFN(int) crt_fscanf(crt_FILE *f, const char *fmt, ...)
 	va_list ap; va_start(ap, fmt); int r = vfscanf(host, fmt, ap); va_end(ap);
 	fclose(host); return r;
 }
+CRTFN(int *) crt__errno(void) { return &errno; }
+CRTFN(int) crt__read(int fd, void *buf, unsigned count)
+{
+	ssize_t n = read(fd, buf, count); return n < 0 ? -1 : (int)n;
+}
+CRTFN(int) crt__write(int fd, const void *buf, unsigned count)
+{
+	ssize_t n = write(fd, buf, count); return n < 0 ? -1 : (int)n;
+}
+CRTFN(long) crt__lseek(int fd, long off, int origin)
+{
+	off_t n = lseek(fd, off, origin); return n < 0 ? -1 : (long)n;
+}
+CRTFN(long long) crt__filelengthi64(int fd)
+{
+	struct stat st; return fstat(fd, &st) ? -1 : (long long)st.st_size;
+}
+CRTFN(int) crt__fstat(int fd, void *out)
+{
+	/* The beginning of MSVCRT's _stat structure is compatible for the
+	 * fields callers normally inspect: device, inode, mode and links. */
+	struct stat st;
+	if (!out || fstat(fd, &st)) return -1;
+	struct win_stat { uint32_t dev, ino; uint16_t mode, nlink, uid, gid;
+		uint32_t rdev; int32_t size, atime, mtime, ctime; } *w = out;
+	*w = (struct win_stat){ st.st_dev, st.st_ino, st.st_mode, st.st_nlink,
+		st.st_uid, st.st_gid, st.st_rdev, st.st_size,
+		st.st_atime, st.st_mtime, st.st_ctime };
+	return 0;
+}
+CRTFN(int) crt__isctype(int c, int mask)
+{
+	if (c < 0 || c > 255) return 0;
+	unsigned f = 0;
+	if (isupper(c)) f |= 0x101;
+	if (islower(c)) f |= 0x102;
+	if (isdigit(c)) f |= 0x004;
+	if (isspace(c)) f |= 0x008;
+	if (ispunct(c)) f |= 0x010;
+	if (iscntrl(c)) f |= 0x020;
+	if (c == ' ') f |= 0x040;
+	if (isxdigit(c)) f |= 0x080;
+	return f & mask;
+}
+CRTFN(char *) crt_setlocale(int category, const char *locale)
+{
+	/* The emulation intentionally remains in the deterministic C locale. */
+	(void)category;
+	if (!locale || !*locale || !strcmp(locale, "C") || !strcmp(locale, ".C"))
+		return "C";
+	errno = EINVAL; return NULL;
+}
+CRTFN(struct lconv *) crt_localeconv(void) { return localeconv(); }
+CRTFN(void) crt__assert(const char *expr, const char *file, unsigned line)
+{
+	fprintf(stderr, "Assertion failed: %s, file %s, line %u\n",
+		expr ? expr : "", file ? file : "", line);
+	abort();
+}
+
+__attribute__((naked)) static void STUB_CDECL crt__EH_prolog(void)
+{
+	__asm__ volatile("pushl $-1; pushl %eax; pushl %fs:0; movl %esp,%fs:0; "
+		"movl 12(%esp),%eax; movl %ebp,12(%esp); leal 12(%esp),%ebp; "
+		"pushl %eax; ret");
+}
 
 /* VC6 iostream initialisers and locks are process-wide bookkeeping only. */
 THISFN(void *) crt_ios_init_ctor(void *self) { return self; }
@@ -75,7 +145,9 @@ CRTFN(void *) crt_ostream_endl(void *self)
 #define E(n) { #n, 0, (void *)crt_##n }
 #define M(n, f) { n, 0, (void *)(f) }
 const struct builtin_export crt_legacy_exports[] = {
-	E(_access), E(_adjust_fdiv), E(clock), E(exit), E(fscanf), E(getenv),
+	E(_EH_prolog), E(_access), E(_adjust_fdiv), E(_assert), E(_errno), E(_filelengthi64),
+	E(_fstat), E(_isctype), E(_lseek), E(_read), E(_write),
+	E(clock), E(exit), E(fscanf), E(getenv), E(localeconv), E(setlocale),
 	E(localtime), E(sscanf), E(strftime), E(time),
 	M("??0Init@ios_base@std@@QAE@XZ", crt_ios_init_ctor),
 	M("??1Init@ios_base@std@@QAE@XZ", crt_ios_init_dtor),

@@ -52,16 +52,6 @@ static void test_objects(void)
 {
 	FN(HGDIOBJ, GetStockObject, int);
 	FN(DWORD, GetObjectType, HGDIOBJ);
-	FN(BOOL, SetViewportOrgEx, HDC, int, int, LPPOINT);
-	FN(BOOL, OffsetViewportOrgEx, HDC, int, int, LPPOINT);
-	FN(BOOL, SetViewportExtEx, HDC, int, int, LPSIZE);
-	FN(BOOL, ScaleViewportExtEx, HDC, int, int, int, int, LPSIZE);
-	FN(BOOL, SetWindowExtEx, HDC, int, int, LPSIZE);
-	FN(BOOL, ScaleWindowExtEx, HDC, int, int, int, int, LPSIZE);
-	FN(int, GetClipBox, HDC, LPRECT);
-	FN(BOOL, PtVisible, HDC, int, int);
-	FN(BOOL, RectVisible, HDC, const RECT *);
-	FN(BOOL, Rectangle, HDC, int, int, int, int);
 	FN(int, GetObjectA, HGDIOBJ, int, LPVOID);
 	FN(int, GetObjectW, HGDIOBJ, int, LPVOID);
 	FN(BOOL, DeleteObject, HGDIOBJ);
@@ -135,6 +125,16 @@ static void test_dc_state(void)
 	FN(BOOL, GetTextExtentPoint32A, HDC, LPCSTR, int, LPSIZE);
 	FN(BOOL, TextOutA, HDC, int, int, LPCSTR, int);
 	FN(DWORD, GetObjectType, HGDIOBJ);
+	FN(BOOL, SetViewportOrgEx, HDC, int, int, LPPOINT);
+	FN(BOOL, OffsetViewportOrgEx, HDC, int, int, LPPOINT);
+	FN(BOOL, SetViewportExtEx, HDC, int, int, LPSIZE);
+	FN(BOOL, ScaleViewportExtEx, HDC, int, int, int, int, LPSIZE);
+	FN(BOOL, SetWindowExtEx, HDC, int, int, LPSIZE);
+	FN(BOOL, ScaleWindowExtEx, HDC, int, int, int, int, LPSIZE);
+	FN(int, GetClipBox, HDC, LPRECT);
+	FN(BOOL, PtVisible, HDC, int, int);
+	FN(BOOL, RectVisible, HDC, const RECT *);
+	FN(BOOL, Rectangle, HDC, int, int, int, int);
 
 	HDC disp = CreateDCA("DISPLAY", NULL, NULL, NULL);
 	CHECK(disp != NULL);

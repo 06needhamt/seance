@@ -210,6 +210,10 @@ typedef struct tagTEXTMETRICW {
 #define OBJ_ENHMETADC   12
 #define OBJ_ENHMETAFILE 13
 
+#ifndef BS_PATTERN
+#define BS_PATTERN 3
+#endif
+
 /* GetStockObject. */
 #define WHITE_BRUSH         0
 #define LTGRAY_BRUSH        1

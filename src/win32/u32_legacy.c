@@ -146,6 +146,25 @@ WINFN(int) user_GetScrollPos(HWND hwnd, int bar)
 	return 0;
 }
 
+WINFN(BOOL) user_GetScrollRange(HWND hwnd, int bar, int *min, int *max)
+{
+	(void)bar;
+	if (!user_is_window(hwnd)) return FALSE;
+	if (min) *min = 0;
+	if (max) *max = 100;
+	return TRUE;
+}
+
+WINFN(WORD) user_GetWindowWord(HWND hwnd, int index)
+{
+	if (!user_is_window(hwnd)) return 0;
+	/* Positive offsets are application-owned extra bytes, which this
+	 * headless window model does not allocate.  Negative indices are the
+	 * low word of their GetWindowLong counterparts. */
+	(void)index;
+	return 0;
+}
+
 WINFN(HMENU) user_GetSubMenu(HMENU menu, int position)
 {
 	return NULL;
@@ -282,10 +301,12 @@ const struct builtin_export u32_legacy_exports[] = {
 	E(GetMenuState),
 	E(GetNextDlgTabItem),
 	E(GetScrollPos),
+	E(GetScrollRange),
 	E(GetSubMenu),
 	E(GetTopWindow),
 	E(GetUpdateRect),
 	E(GetWindow),
+	E(GetWindowWord),
 	E(GetWindowPlacement),
 	E(GrayStringA),
 	E(IsDialogMessageA),

@@ -45,6 +45,8 @@ typedef LRESULT (CALLBACK *DRIVERPROC)(DWORD_PTR dwDriverId, HDRVR hdrvr,
 /* Multimedia timers (timeapi.h). */
 #define MMSYSERR_NOERROR    0
 #define MMSYSERR_INVALPARAM 11
+#define MMSYSERR_INVALHANDLE 5
+#define MMSYSERR_ALLOCATED   4
 #define TIMERR_NOERROR      0
 #define TIMERR_NOCANDO      97
 
@@ -59,6 +61,30 @@ typedef void (CALLBACK *LPTIMECALLBACK)(UINT id, UINT msg, DWORD_PTR user,
 					DWORD_PTR dw1, DWORD_PTR dw2);
 
 typedef DWORD FOURCC;
+
+#define WAVE_MAPPER ((UINT)-1)
+#define WAVE_FORMAT_PCM 1
+#define CALLBACK_NULL 0
+#define WHDR_DONE     0x00000001
+#define WHDR_PREPARED 0x00000002
+#define WHDR_INQUEUE  0x00000010
+
+#pragma pack(push, 1)
+typedef struct waveformat_tag {
+	WORD wFormatTag, nChannels;
+	DWORD nSamplesPerSec, nAvgBytesPerSec;
+	WORD nBlockAlign, wBitsPerSample;
+} WAVEFORMATEX, *LPWAVEFORMATEX;
+
+typedef struct wavehdr_tag {
+	LPSTR lpData;
+	DWORD dwBufferLength, dwBytesRecorded;
+	DWORD_PTR dwUser;
+	DWORD dwFlags, dwLoops;
+	struct wavehdr_tag *lpNext;
+	DWORD_PTR reserved;
+} WAVEHDR, *LPWAVEHDR;
+#pragma pack(pop)
 
 #define mmioFOURCC(c0, c1, c2, c3) \
 	((DWORD)(BYTE)(c0) | ((DWORD)(BYTE)(c1) << 8) | \

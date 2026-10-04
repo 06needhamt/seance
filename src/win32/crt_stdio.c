@@ -16,7 +16,9 @@
  * accessor) needs the layout to still be right at that address.
  */
 #include <ctype.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <stdint.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,6 +75,12 @@ static crt_FILE *file_new(int fd, int writing)
 	f->_file = fd;
 	f->_flag = writing ? _IOWRT : _IOREAD;
 	return f;
+}
+
+CRTFN(crt_FILE *) crt__fdopen(int fd, const char *mode)
+{
+	if (fd < 0 || !mode) { errno = EINVAL; return NULL; }
+	return file_new(fd, strpbrk(mode, "wa+") != NULL);
 }
 
 CRTFN(crt_FILE *) crt_fopen(const char *path, const char *mode)
@@ -164,6 +172,14 @@ CRTFN(int) crt_fgetc(crt_FILE *f)
 	unsigned char ch;
 	return crt_fread(&ch, 1, 1, f) == 1 ? ch : EOF;
 }
+CRTFN(int) crt__filbuf(crt_FILE *f) { return crt_fgetc(f); }
+CRTFN(int) crt__flsbuf(int c, crt_FILE *f) { return crt_fputc(c, f); }
+CRTFN(int) crt_ungetc(int c, crt_FILE *f)
+{
+	if (!f || c == EOF || lseek(f->_file, -1, SEEK_CUR) < 0) return EOF;
+	f->_flag &= ~_IOEOF;
+	return (unsigned char)c;
+}
 
 CRTFN(int) crt_fputs(const char *s, crt_FILE *f)
 {
@@ -197,6 +213,21 @@ CRTFN(long) crt_ftell(crt_FILE *f) { return (long)lseek(f->_file, 0, SEEK_CUR); 
 CRTFN(int) crt_fseek(crt_FILE *f, long off, int whence)
 {
 	if (lseek(f->_file, off, whence) < 0)
+		return -1;
+	f->_flag &= ~_IOEOF;
+	return 0;
+}
+CRTFN(int) crt_fgetpos(crt_FILE *f, int64_t *pos)
+{
+	off_t n = lseek(f->_file, 0, SEEK_CUR);
+	if (n < 0)
+		return -1;
+	*pos = n;
+	return 0;
+}
+CRTFN(int) crt_fsetpos(crt_FILE *f, const int64_t *pos)
+{
+	if (!pos || lseek(f->_file, *pos, SEEK_SET) < 0)
 		return -1;
 	f->_flag &= ~_IOEOF;
 	return 0;
@@ -318,6 +349,7 @@ CRTFN(int) crt__fileno(crt_FILE *f) { return f->_file; }
 
 static unsigned short ctype_table[257];	/* [0] is EOF's entry */
 static const unsigned short *pctype_ptr = ctype_table + 1;
+static int mb_cur_max = 1;
 
 static void ctype_init(void) __attribute__((constructor));
 static void ctype_init(void)
@@ -365,13 +397,19 @@ CRTFN(int) crt_isgraph(int c)
 }
 CRTFN(int) crt_toupper(int c) { return crt_islower(c) ? c - 'a' + 'A' : c; }
 CRTFN(int) crt_tolower(int c) { return crt_isupper(c) ? c - 'A' + 'a' : c; }
+CRTFN(int) crt__ctype(int c)
+{
+	return c >= -1 && c <= 255 ? ctype_table[c + 1] : 0;
+}
 
 #define E(name) { #name, 0, (void *)crt_##name }
 
 const struct builtin_export crt_stdio_exports[] = {
 	{ "_iob", 0, crt_iob },
 	{ "_pctype", 0, (void *)&pctype_ptr },
+	{ "__mb_cur_max", 0, &mb_cur_max },
 	E(fopen), E(fclose), E(fread), E(fwrite), E(fputc), E(fgetc),
+	E(_fdopen), E(_filbuf), E(_flsbuf), E(ungetc), E(fgetpos), E(fsetpos),
 	E(fputs), E(fgets), E(fflush), E(feof), E(ferror), E(clearerr),
 	E(ftell), E(fseek), E(rewind), E(setvbuf), E(remove),
 	E(fprintf), E(vfprintf), E(printf), E(vprintf), E(puts),
@@ -380,5 +418,6 @@ const struct builtin_export crt_stdio_exports[] = {
 	E(isalpha), E(isupper), E(islower), E(isdigit), E(isxdigit),
 	E(isspace), E(ispunct), E(iscntrl), E(isalnum), E(isprint),
 	E(isgraph), E(toupper), E(tolower),
+	E(_ctype),
 	BUILTIN_END
 };
