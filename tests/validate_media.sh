@@ -199,6 +199,21 @@ if [ -f "$codec" ]; then
 		-show_entries stream=codec_tag_string -of csv=p=0 $e/t.avi)" TST0
 	$emu "$harness" decode $codec $e/t.avi -o $e/out.y4m 2>/dev/null || fail "decode"
 	at_least "Y4M -> TST0 -> Y4M" "$(psnr $e/out.y4m $e/in.y4m)" inf
+	filter=$build/fixtures/testfilter.ax
+	if [ -f "$filter" ]; then
+		$emu "$harness" decode "$filter" $e/t.avi -o $e/dshow-out.y4m \
+			2>/dev/null || fail "DirectShow decode"
+		at_least "VfW encode -> DirectShow decode" \
+			"$(psnr $e/dshow-out.y4m $e/in.y4m)" inf
+		$emu "$harness" encode "$filter" $e/in.y4m -o $e/dshow.avi \
+			--keyint 5 2>/dev/null || fail "DirectShow encode"
+		expect "DirectShow encoded AVI: packets and keyframes" \
+			"$(packets $e/dshow.avi | cut -d' ' -f1-2)" "10 2"
+		$emu "$harness" decode $codec $e/dshow.avi \
+			-o $e/dshow-vfw-out.y4m 2>/dev/null || fail "VfW decode"
+		at_least "DirectShow encode -> VfW decode" \
+			"$(psnr $e/dshow-vfw-out.y4m $e/in.y4m)" inf
+	fi
 	$emu "$harness" encode $codec - -o $e/stdin.avi <$e/in.y4m 2>/dev/null
 	expect "Y4M from stdin" "$(packets $e/stdin.avi | cut -d' ' -f1)" 10
 	$emu "$harness" encode $codec $e/in.y4m -o $e/odml.avi --odml 2>/dev/null

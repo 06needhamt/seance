@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * seance encode <codec> <input> -o <out.avi>: compress video with a
- * VfW codec into an AVI, through the ICSeqCompressFrame* sequence API.
+ * VfW codec or DirectShow transform into an AVI.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -15,9 +15,16 @@
 #include "commands.h"
 #include "common/error.h"
 #include "common/fourcc.h"
+#include "common/unicode.h"
+#include "dshow/discover.h"
+#include "dshow/dshow.h"
 #include "in/source.h"
+#include "loader/pe.h"
 #include "out/image.h"
+#include "runtime/runtime.h"
 #include "vfw/icm.h"
+#include "win32/codepage.h"
+#include "win32/ole.h"
 
 static int usage(void)
 {
@@ -30,6 +37,7 @@ static int usage(void)
 		"                       files (frame%%04d.bmp), or raw frames with\n"
 		"                       --input-format and --size\n"
 		"  --fourcc <XXXX>      the handler to open a DLL as\n"
+		"  --clsid <{GUID}>     DirectShow class when a server has several\n"
 		"  --quality <q>        0 to 10000 (default: the codec's)\n"
 		"  --keyint <n>         a keyframe every n frames; 0 for only the\n"
 		"                       first (default: the codec's)\n"
@@ -49,6 +57,14 @@ static int usage(void)
 		"  --save-state <file>  write the codec's state afterwards\n"
 		"  --odml               write OpenDML (AVI 2.0) indexes\n");
 	return 2;
+}
+
+static int parse_clsid(const char *s, CLSID *clsid)
+{
+	WCHAR *w = utf8_to_utf16_dup(s);
+	int bad = !w || ole_guid_parse(w, clsid);
+	free(w);
+	return bad;
 }
 
 static void *read_file(const char *path, size_t *len)
@@ -194,10 +210,352 @@ static double now(void)
 	return t.tv_sec + t.tv_nsec / 1e9;
 }
 
+struct dshow_encode_output {
+	struct avi_writer *writer;
+	uint64_t bytes;
+	unsigned long written, keys;
+};
+
+static HRESULT dshow_write_encoded(void *opaque, IMediaSample *sample,
+				   const AM_MEDIA_TYPE *dynamic)
+{
+	struct dshow_encode_output *out = opaque;
+	BYTE *data = NULL;
+	LONG size = sample->lpVtbl->GetActualDataLength(sample);
+	if (!out->writer)
+		return VFW_E_WRONG_STATE;
+	if (dynamic || size < 0 || FAILED(sample->lpVtbl->GetPointer(sample, &data)))
+		return VFW_E_INVALIDMEDIATYPE;
+	int key = sample->lpVtbl->IsSyncPoint(sample) == S_OK;
+	if (avi_writer_add(out->writer, data, (DWORD)size, key))
+		return E_FAIL;
+	out->written++;
+	out->keys += key;
+	out->bytes += (DWORD)size;
+	return S_OK;
+}
+
+static int write_file(const char *path, const void *data, size_t size)
+{
+	FILE *f = fopen(path, "wb");
+	if (!f) {
+		vfw_set_error("%s: can't write it", path);
+		return -1;
+	}
+	int failed = fwrite(data, 1, size, f) != size;
+	if (fclose(f))
+		failed = 1;
+	if (failed)
+		vfw_set_error("%s: can't write it", path);
+	return failed ? -1 : 0;
+}
+
+static int encoder_class(const char *path, const CLSID *selected, CLSID *clsid,
+			 FOURCC *compression)
+{
+	struct qz_filter *filters = NULL;
+	size_t count = 0;
+	HRESULT registration;
+	if (dshow_discover(path, &filters, &count, &registration))
+		return -1;
+	int matches = 0;
+	for (size_t i = 0; i < count; i++) {
+		if (dshow_role(&filters[i]) != DSHOW_ENCODER ||
+		    (selected && memcmp(selected, &filters[i].clsid, sizeof(*selected))))
+			continue;
+		FOURCC subtype = 0;
+		for (size_t p = 0; p < filters[i].npins && !subtype; p++) {
+			if (!(filters[i].pins[p].flags & REG_PINFLAG_B_OUTPUT))
+				continue;
+			for (size_t t = 0; t < filters[i].pins[p].ntypes; t++) {
+				const GUID *g = &filters[i].pins[p].types[t].minor;
+				static const BYTE tail[8] = {0x80, 0, 0, 0xaa,
+							     0, 0x38, 0x9b, 0x71};
+				if (g->Data2 == 0 && g->Data3 == 0x10 &&
+				    !memcmp(g->Data4, tail, sizeof(tail))) {
+					subtype = g->Data1;
+					break;
+				}
+			}
+		}
+		if (subtype) {
+			*clsid = filters[i].clsid;
+			*compression = subtype;
+			matches++;
+		}
+	}
+	qz_filters_free(filters, count);
+	return matches == 1 ? 0 : -1;
+}
+
+static int dshow_try_input(IBaseFilter *filter, const BITMAPINFOHEADER *input,
+			   size_t input_size, FOURCC compression, DWORD rate,
+			   DWORD scale, struct dshow_encode_output *sink,
+			   struct dshow_host **host, BITMAPINFOHEADER **output,
+			   size_t *output_size)
+{
+	AM_MEDIA_TYPE in_mt = {0}, out_mt = {0};
+	BITMAPINFOHEADER encoded = *input;
+	encoded.biSize = sizeof(encoded);
+	encoded.biCompression = compression;
+	DWORD raw = input->biSizeImage;
+	if (!raw)
+		raw = (DWORD)((uint64_t)input->biWidth *
+			(input->biHeight < 0 ? -input->biHeight : input->biHeight) *
+			input->biBitCount / 8);
+	encoded.biSizeImage = raw > (UINT32_MAX - 4096) / 2 ? UINT32_MAX :
+			      raw * 2 + 4096;
+	HRESULT hr = dshow_bih_to_mt(input, input_size, rate, scale, 0, &in_mt);
+	if (SUCCEEDED(hr))
+		hr = dshow_bih_to_mt(&encoded, sizeof(encoded), rate, scale, 0,
+				     &out_mt);
+	if (SUCCEEDED(hr))
+		hr = dshow_host_create(filter, &in_mt, &out_mt, dshow_write_encoded,
+				       sink, host);
+	if (SUCCEEDED(hr)) {
+		*output = malloc(sizeof(encoded));
+		if (!*output)
+			hr = E_OUTOFMEMORY;
+		else {
+			**output = encoded;
+			*output_size = sizeof(encoded);
+		}
+	}
+	if (FAILED(hr) && *host) {
+		dshow_host_destroy(*host);
+		*host = NULL;
+	}
+	dshow_free_media_type(&out_mt);
+	dshow_free_media_type(&in_mt);
+	return SUCCEEDED(hr) ? 0 : -1;
+}
+
+static int encode_dshow(const char *target, const CLSID *selected,
+			struct source *src, const char *out_path, const char *forced,
+			const char *state_path, const char *save_path,
+			unsigned long start, unsigned long count,
+			unsigned long quality, unsigned long keyint,
+			unsigned long bitrate, DWORD rate, DWORD scale,
+			const struct avi_writer_options *writer_options)
+{
+	struct dshow_filter *server = NULL;
+	IBaseFilter *filter = NULL;
+	struct dshow_host *host = NULL;
+	struct feed feed = {0};
+	BITMAPINFOHEADER *output_format = NULL;
+	size_t output_size = 0;
+	struct dshow_encode_output sink = {0};
+	void *state = NULL, *saved = NULL;
+	size_t saved_size = 0;
+	int status = 1;
+	char error[24], fcc[FOURCC_STR_SIZE], desc[160];
+	CLSID clsid;
+	FOURCC compression;
+
+	if (encoder_class(target, selected, &clsid, &compression)) {
+		fprintf(stderr, "seance: %s: no unique DirectShow video encoder\n",
+			target);
+		goto done;
+	}
+	HRESULT hr = dshow_filter_open(target, &clsid, 1, &server, &filter, NULL);
+	if (FAILED(hr)) {
+		fprintf(stderr, "seance: cannot open encoder in %s (%s)\n", target,
+			dshow_hr_name(hr, error));
+		goto done;
+	}
+	if (!rate)
+		source_rate(src, &rate, &scale);
+	if (!rate || !scale) {
+		rate = 25;
+		scale = 1;
+	}
+
+	if (state_path) {
+		size_t n;
+		if (!(state = read_file(state_path, &n))) {
+			fprintf(stderr, "seance: %s\n", vfw_error());
+			goto done;
+		}
+		hr = dshow_filter_load_state(filter, state, n);
+		if (FAILED(hr)) {
+			fprintf(stderr, "seance: %s: filter refused this state (%s)\n",
+				state_path, dshow_hr_name(hr, error));
+			goto done;
+		}
+	}
+	struct dshow_encoder_options options = {
+		.key_interval = keyint == (unsigned long)-1 ? -1 :
+				keyint > INT32_MAX ? INT32_MAX : (LONG)keyint,
+		.quality = quality == (unsigned long)-1 ? -1.0 : quality / 10000.0,
+		.bitrate = bitrate ? (LONGLONG)bitrate * 1000 : -1,
+	};
+	if (options.key_interval >= 0 || options.quality >= 0.0 ||
+	    options.bitrate >= 0) {
+		hr = dshow_encoder_configure(filter, &options);
+		if (FAILED(hr)) {
+			fprintf(stderr, "seance: encoder options were refused (%s)\n",
+				dshow_hr_name(hr, error));
+			goto done;
+		}
+	}
+
+	size_t native_size;
+	const BITMAPINFOHEADER *native = source_format(src, &native_size);
+	LONG width = native->biWidth;
+	LONG height = native->biHeight < 0 ? -native->biHeight : native->biHeight;
+	if (!forced && !dshow_try_input(filter, native, native_size, compression,
+			rate, scale, &sink, &host, &output_format, &output_size)) {
+		memcpy(&feed.fmt, native, native_size);
+		feed.fmt_size = native_size;
+		feed.name = source_format_name(src);
+	} else {
+		struct vfw_format candidate;
+		const char *name;
+		for (unsigned i = 0; !host &&
+		     (name = vfw_std_format(i, width, height, &candidate)); i++) {
+			if (candidate.bih.biBitCount == 8 ||
+			    (forced && strcasecmp(forced, name)))
+				continue;
+			if (dshow_try_input(filter, &candidate.bih,
+					vfw_format_size(&candidate.bih), compression,
+					rate, scale, &sink, &host, &output_format,
+					&output_size))
+				continue;
+			feed.fmt = candidate;
+			feed.fmt_size = vfw_format_size(&candidate.bih);
+			feed.name = name;
+			feed.from = image_conv_new(native, native_size);
+			feed.to = image_conv_new(&candidate.bih, feed.fmt_size);
+			if (!feed.from || !feed.to)
+				goto conversion_error;
+			size_t mid = image_pack_wants_i420(feed.to) ?
+				image_i420_size(width, height) :
+				image_bgr24_size(width, height);
+			feed.tmp = malloc(mid);
+			feed.packed = calloc(1, image_frame_size(feed.to));
+			if (!feed.tmp || !feed.packed) {
+				vfw_set_error("out of memory");
+				goto conversion_error;
+			}
+		}
+	}
+	if (!host) {
+		fprintf(stderr, "seance: encoder takes neither %s nor %s standard "
+			"input format\n", source_format_name(src),
+			forced ? "the requested" : "any");
+		goto done;
+	}
+
+	sink.writer = avi_writer_open(out_path, output_format, (DWORD)output_size,
+		compression, rate, scale, writer_options);
+	if (!sink.writer) {
+		fprintf(stderr, "seance: %s\n", vfw_error());
+		goto done;
+	}
+	cli_format_desc(output_format, desc, sizeof(desc));
+	unsigned long read = 0, pushed = 0;
+	double busy = 0;
+	for (;;) {
+		if (count != (unsigned long)-1 && pushed >= count)
+			break;
+		const BYTE *frame;
+		size_t len;
+		int got = source_read(src, &frame, &len);
+		if (got < 0) {
+			fprintf(stderr, "seance: %s\n", vfw_error());
+			goto done;
+		}
+		if (!got)
+			break;
+		if (read++ < start) {
+			if (feed.from && image_is_delta(feed.from))
+				image_feed(feed.from, frame, len);
+			continue;
+		}
+		void *bits = convert(&feed, frame, len);
+		if (!bits) {
+			fprintf(stderr, "seance: frame %lu: %s\n", read - 1,
+				vfw_error());
+			goto done;
+		}
+		size_t input_bytes = feed.from ? image_frame_size(feed.to) : len;
+		REFERENCE_TIME a = (REFERENCE_TIME)pushed * scale * 10000000 / rate;
+		REFERENCE_TIME b = (REFERENCE_TIME)(pushed + 1) * scale * 10000000 / rate;
+		int key = !pushed || (keyint && keyint != (unsigned long)-1 &&
+				      pushed % keyint == 0);
+		DWORD flags = key ? AM_SAMPLE_SPLICEPOINT : 0;
+		if (!pushed)
+			flags |= AM_SAMPLE_DATADISCONTINUITY;
+		double then = now();
+		hr = dshow_host_push(host, bits, input_bytes, a, b, flags);
+		busy += now() - then;
+		if (FAILED(hr)) {
+			fprintf(stderr, "seance: frame %lu: %s\n", read - 1,
+				dshow_hr_name(hr, error));
+			goto done;
+		}
+		pushed++;
+	}
+	hr = dshow_host_end(host, 0);
+	if (FAILED(hr)) {
+		fprintf(stderr, "seance: end of stream: %s\n",
+			dshow_hr_name(hr, error));
+		goto done;
+	}
+	dshow_host_destroy(host);
+	host = NULL;
+	if (save_path) {
+		hr = dshow_filter_save_state(filter, &saved, &saved_size);
+		if (FAILED(hr) || write_file(save_path, saved, saved_size)) {
+			if (FAILED(hr))
+				vfw_set_error("filter has no state to save (%s)",
+					dshow_hr_name(hr, error));
+			fprintf(stderr, "seance: %s\n", vfw_error());
+			goto done;
+		}
+	}
+	if (avi_writer_close(sink.writer)) {
+		sink.writer = NULL;
+		fprintf(stderr, "seance: %s\n", vfw_error());
+		goto done;
+	}
+	sink.writer = NULL;
+	fprintf(stderr, "%s: %lu frame%s (%lu key), %s -> '%s' (%s)",
+		out_path, sink.written, sink.written == 1 ? "" : "s", sink.keys,
+		feed.name, fourcc_str(compression, fcc), desc);
+	if (sink.written) {
+		double seconds = (double)sink.written * scale / rate;
+		fprintf(stderr, ", %llu bytes, %.1f kbit/s, %.3f ms/frame",
+			(unsigned long long)sink.bytes,
+			sink.bytes * 8 / seconds / 1000, busy * 1000 / sink.written);
+	}
+	fprintf(stderr, "\n");
+	status = 0;
+	goto done;
+
+conversion_error:
+	fprintf(stderr, "seance: cannot convert input to the encoder format: %s\n",
+		vfw_error());
+done:
+	if (sink.writer)
+		avi_writer_close(sink.writer);
+	dshow_host_destroy(host);
+	dshow_filter_close(server, filter);
+	image_conv_free(feed.from);
+	image_conv_free(feed.to);
+	free(feed.tmp);
+	free(feed.packed);
+	free(output_format);
+	free(saved);
+	free(state);
+	return status;
+}
+
 int cmd_encode(int argc, char **argv)
 {
 	static const UINT modes[] = { ICMODE_COMPRESS };
 	const char *target = NULL, *path = NULL, *out_path = NULL, *fourcc = NULL;
+	const char *clsid_arg = NULL;
 	const char *forced = NULL, *state_path = NULL, *save_path = NULL;
 	unsigned long start = 0, count = (unsigned long)-1, quality = (unsigned long)-1;
 	unsigned long keyint = (unsigned long)-1, bitrate = 0, stream = (unsigned long)-1;
@@ -213,6 +571,8 @@ int cmd_encode(int argc, char **argv)
 			out_path = argv[++i];
 		else if (!strcmp(a, "--fourcc") && v)
 			fourcc = argv[++i];
+		else if (!strcmp(a, "--clsid") && v)
+			clsid_arg = argv[++i];
 		else if (!strcmp(a, "--codec-input") && v)
 			forced = argv[++i];
 		else if (!strcmp(a, "--input-format") && v)
@@ -274,6 +634,36 @@ int cmd_encode(int argc, char **argv)
 	if (!src) {
 		fprintf(stderr, "seance: %s\n", vfw_error());
 		return 1;
+	}
+	struct pe_image *image = pe_open(target);
+	int directshow = image && dshow_is_server(image);
+	pe_free(image);
+	if (directshow || clsid_arg) {
+		CLSID clsid, *selected = NULL;
+		if (!directshow) {
+			fprintf(stderr, "seance: --clsid requires a DirectShow server\n");
+			source_close(src);
+			return 2;
+		}
+		if (fourcc) {
+			fprintf(stderr, "seance: --fourcc is for VfW codecs\n");
+			source_close(src);
+			return 2;
+		}
+		if (clsid_arg) {
+			if (parse_clsid(clsid_arg, &clsid)) {
+				fprintf(stderr, "seance: --clsid wants a GUID, not '%s'\n",
+					clsid_arg);
+				source_close(src);
+				return 2;
+			}
+			selected = &clsid;
+		}
+		int status = encode_dshow(target, selected, src, out_path, forced,
+			state_path, save_path, start, count, quality, keyint, bitrate,
+			rate, scale, &wo);
+		source_close(src);
+		return status;
 	}
 
 	int status = 1, started = 0;
