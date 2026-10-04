@@ -13,8 +13,10 @@ extern const struct builtin_dll builtin_ntdll;
 extern const struct builtin_dll builtin_winmm;
 extern const struct builtin_dll builtin_msvfw32;
 extern const struct builtin_dll builtin_user32, builtin_gdi32, builtin_advapi32,
-	builtin_version, builtin_ole32, builtin_oleaut32, builtin_shell32,
-	builtin_comctl32, builtin_comdlg32, builtin_quartz, builtin_msvcrt;
+	builtin_version, builtin_ole32, builtin_oleaut32, builtin_oleacc,
+	builtin_shell32,
+	builtin_comctl32, builtin_comdlg32, builtin_winspool, builtin_setupapi,
+	builtin_avifil32, builtin_quartz, builtin_msvcrt;
 extern const struct builtin_dll builtin_shlwapi;
 
 const struct builtin_dll *const builtin_dlls[] = {
@@ -28,10 +30,14 @@ const struct builtin_dll *const builtin_dlls[] = {
 	&builtin_version,
 	&builtin_ole32,
 	&builtin_oleaut32,
+	&builtin_oleacc,
 	&builtin_shell32,
 	&builtin_shlwapi,
 	&builtin_comctl32,
 	&builtin_comdlg32,
+	&builtin_winspool,
+	&builtin_setupapi,
+	&builtin_avifil32,
 	&builtin_quartz,
 	&builtin_msvcrt,
 	NULL

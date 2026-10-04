@@ -38,6 +38,9 @@ DECLARE_HANDLE(HIC);
 #define ICERR_BADIMAGESIZE  (-201)
 #define ICERR_CUSTOM        (-400)
 
+/* AVIFile library errors (SCODE severity error, FACILITY_ITF). */
+#define AVIERR_UNSUPPORTED ((HRESULT)0x80044065L)
+
 /* ICOPEN.dwFlags / ICOpen() modes. */
 #define ICMODE_COMPRESS       1
 #define ICMODE_DECOMPRESS     2

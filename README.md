@@ -299,10 +299,65 @@ comdlg32 are built in too, headless:
   answer OK with what they start with, there are no printers
   (`PrintDlg` fails with `PDERR_NODEFAULTPRN`), and the find and replace
   dialogs fail, as `CreateDialog` does. Each says so on stderr.
+- **winspool.drv:** there are no printers. `OpenPrinter` fails with
+  `ERROR_INVALID_PRINTER_NAME`; `DocumentProperties` and `ClosePrinter` fail
+  with `ERROR_INVALID_HANDLE`. This lets codecs that import the spooler for a
+  configuration page load and continue to use their non-printing paths.
+- **setupapi:** device-information sets are empty: codecs can enumerate for
+  capture hardware, find none, and continue with file-based operation.
+- **oleacc:** Microsoft Active Accessibility has no visible controls to expose;
+  creating or marshalling an `IAccessible` proxy reports `E_NOTIMPL`.
+- **avifil32:** the legacy COM-based AVIFile library is present so codecs with
+  optional AVI utilities can load. Those utilities report
+  `AVIERR_UNSUPPORTED`; seance commands use the native AVI reader instead.
 
 A function a built-in DLL doesn't implement still lets a codec load:
 `info` shows which of its imports those are, and calling one stops the
 harness with a message naming it.
+
+#### Codec dependency DLLs
+
+Not every DLL imported by a codec is part of Windows. Codec distributions
+often contain private companion DLLs, and seance does not reimplement those.
+For example, an error such as
+
+```
+MultiCodec.dll: SImageLib.dll: not found (searched the importer's directory, $VFW_PATH and the current directory)
+```
+
+means that `MultiCodec.dll` has a normal PE import for `SImageLib.dll`, but no
+file by that name was found. Obtain the **32-bit** companion DLL from the same
+codec installation or distribution, then either place it beside
+`MultiCodec.dll` or add its directory to the colon-separated `VFW_PATH`:
+
+```sh
+VFW_PATH=/path/to/codec-dependencies build/seance probe /path/to/MultiCodec.dll
+```
+
+Use the companion from the exact product and version that supplied the codec.
+Do not substitute a same-named file from a generic DLL-download site: private
+DLL names do not identify a stable public ABI, so a different build may have
+incompatible exports or behaviour. If the original installer is unavailable,
+record the codec's version information and checksum before looking for an
+archived copy.
+
+Name matching is case-insensitive, as it is on Windows. The codec's own
+directory is searched first, followed by each directory in `VFW_PATH`, then
+the current directory. A missing private library is therefore a packaging or
+search-path issue, not a Win32 API stub that should be added to seance. By
+contrast, if the missing name is a Windows system DLL, it may indicate that
+seance needs another built-in DLL; `info` can be used to inspect the import
+without loading the codec.
+
+Some dependencies fall between those two cases: they are vendor runtimes,
+not Windows API DLLs and not private parts of the codec. `MFC42.DLL`, for
+example, is the 32-bit Microsoft Foundation Classes runtime used by programs
+built with older Visual C++ toolsets. It should not be reimplemented as a
+seance built-in. Supply the matching retail runtime DLL from a licensed
+Visual C++ redistributable, the codec's original installer, or a 32-bit
+Windows installation, and put it beside the codec or on `VFW_PATH`. Do not
+use `mfc42d.dll`, which is the non-redistributable debug build. A current
+Visual C++ redistributable does not replace this versioned legacy runtime.
 
 ### The registry
 
