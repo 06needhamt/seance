@@ -42,7 +42,59 @@ static int parse_clsid(const char *s, CLSID *clsid)
 }
 
 /* Probe registration metadata without changing the persistent registry. */
-static int probe_dshow(const char *path, const char *selected)
+static void probe_dshow_connections(const char *path, const CLSID *clsid,
+				    const char *avi_path)
+{
+	struct avi_file *avi = avi_open(avi_path);
+	if (!avi) {
+		printf("    connection check: cannot open %s (%s)\n", avi_path,
+		       vfw_error());
+		return;
+	}
+	int sn = avi_video_stream(avi);
+	const struct avi_stream *s = sn >= 0 ? &avi->streams[sn] : NULL;
+	const BITMAPINFOHEADER *bih = s ? avi_stream_bih(s) : NULL;
+	if (!bih) {
+		printf("    connection check: no video stream in %s\n", avi_path);
+		avi_close(avi);
+		return;
+	}
+	DWORD rate = s->header.dwRate ? s->header.dwRate : 25;
+	DWORD scale = s->header.dwScale ? s->header.dwScale : 1;
+	AM_MEDIA_TYPE input = {0};
+	HRESULT hr = dshow_bih_to_mt(bih, s->format_size, rate, scale, 0, &input);
+	printf("    outputs accepted for %s:", avi_path);
+	int any = 0;
+	if (SUCCEEDED(hr)) {
+		LONG h = bih->biHeight < 0 ? -bih->biHeight : bih->biHeight;
+		struct vfw_format f;
+		const char *name;
+		for (unsigned i = 0; (name = vfw_std_format(i, bih->biWidth, h, &f)); i++) {
+			struct dshow_filter *server = NULL;
+			IBaseFilter *filter = NULL;
+			struct dshow_host *host = NULL;
+			AM_MEDIA_TYPE output = {0};
+			hr = dshow_filter_open(path, clsid, 0, &server, &filter, NULL);
+			if (SUCCEEDED(hr) && SUCCEEDED(dshow_bih_to_mt(&f.bih, sizeof(f),
+					rate, scale, 0, &output)))
+				hr = dshow_host_create(filter, &input, &output, NULL, NULL,
+						       &host);
+			if (SUCCEEDED(hr)) {
+				printf(" %s", name);
+				any = 1;
+			}
+			dshow_host_destroy(host);
+			dshow_filter_close(server, filter);
+			dshow_free_media_type(&output);
+		}
+	}
+	printf("%s\n", any ? "" : " none of the standard ones");
+	dshow_free_media_type(&input);
+	avi_close(avi);
+}
+
+static int probe_dshow(const char *path, const char *selected,
+		       const char *avi_path)
 {
 	CLSID wanted;
 	if (selected && parse_clsid(selected, &wanted)) {
@@ -70,6 +122,8 @@ static int probe_dshow(const char *path, const char *selected)
 		if (selected && memcmp(&filters[i].clsid, &wanted, sizeof(wanted)))
 			continue;
 		dshow_print_filter(&filters[i], NULL, 1);
+		if (avi_path && dshow_role(&filters[i]) == DSHOW_DECODER)
+			probe_dshow_connections(path, &filters[i].clsid, avi_path);
 		shown++;
 	}
 	qz_filters_free(filters, count);
@@ -230,10 +284,7 @@ int cmd_probe(int argc, char **argv)
 					"use --clsid for DirectShow filters\n");
 				return 2;
 			}
-			if (avi_path)
-				fprintf(stderr, "seance: note: media-type connection "
-					"checks are not implemented yet\n");
-			return probe_dshow(target, clsid);
+			return probe_dshow(target, clsid, avi_path);
 		}
 	}
 	if (clsid) {

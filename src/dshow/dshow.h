@@ -70,6 +70,7 @@ HRESULT dshow_call_mem_receive_can_block(IMemInputPin *pin);
 
 /* Clockless one-filter graph used by both decoding and encoding. */
 struct dshow_host;
+struct dshow_filter;
 typedef HRESULT (*dshow_output_fn)(void *opaque, IMediaSample *sample,
 				   const AM_MEDIA_TYPE *dynamic_type);
 
@@ -84,5 +85,11 @@ HRESULT dshow_host_end(struct dshow_host *host, DWORD timeout_ms);
 HRESULT dshow_host_event(struct dshow_host *host, LONG *code,
 			 LONG_PTR *param1, LONG_PTR *param2);
 void dshow_host_destroy(struct dshow_host *host);
+
+/* Load one transform class directly from a DirectShow server. */
+HRESULT dshow_filter_open(const char *path, const CLSID *selected,
+			  int encoder, struct dshow_filter **server,
+			  IBaseFilter **filter, CLSID *clsid);
+void dshow_filter_close(struct dshow_filter *server, IBaseFilter *filter);
 
 #endif

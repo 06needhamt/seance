@@ -168,10 +168,10 @@ commands; the `validate_media` test checks them against FFmpeg.
 ## Phases and milestones
 
 DirectShow has a separate phased plan in `docs/DIRECT_SHOW_PLAN.md`. Its
-headers, runtime support, discovery and registration are complete. Media-type
-conversion, sample allocation, crash-framed COM calls, encoder controls and
-persisted state are implemented; the minimal graph, fixture transforms and
-decode/encode CLI integration remain in progress.
+headers, runtime support, discovery, registration, the minimal transform graph,
+fixture decoder and encoder, and DirectShow decode and encode CLI paths are
+complete. Media-type conversion, sample allocation, crash-framed COM calls,
+encoder controls and persisted state are implemented.
 
 All milestones are checked against **test fixtures built in the repo**, never against the uploaded DLL.
 

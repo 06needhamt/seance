@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <pthread.h>
 #include <unistd.h>
 
 #include "dshow/dshow.h"
@@ -397,6 +398,7 @@ struct received_sample {
 	BYTE data[32];
 	size_t size;
 	int calls;
+	pthread_t thread;
 };
 
 static HRESULT receive_sample(void *opaque, IMediaSample *sample,
@@ -411,6 +413,7 @@ static HRESULT receive_sample(void *opaque, IMediaSample *sample,
 	memcpy(r->data, data, size);
 	r->size = size;
 	r->calls++;
+	r->thread = pthread_self();
 	return S_OK;
 }
 
@@ -431,6 +434,8 @@ static void fixture_host(void)
 		{ 0x9c, 0x11, 0x0d, 0x2b, 0x7a, 0x6e, 0x4f, 0x80 } };
 	IClassFactory *factory = NULL;
 	IBaseFilter *filter = NULL;
+	setenv("VFW_ENV_TESTFILTER_ASYNC", "1", 1);
+	setenv("VFW_ENV_TESTFILTER_REQUIRE_SEGMENT", "1", 1);
 	CHECK(get != NULL);
 	CHECK(get && get(&decoder, &IID_IClassFactory, (void **)&factory) == S_OK);
 	CHECK(factory && factory->lpVtbl->CreateInstance(factory, NULL,
@@ -447,18 +452,26 @@ static void fixture_host(void)
 	CHECK(dshow_bih_to_mt(&input,sizeof(input),25,1,0,&in_mt)==S_OK);
 	CHECK(dshow_bih_to_mt(&output,sizeof(output),25,1,0,&out_mt)==S_OK);
 	struct received_sample received = {0};
+	pthread_t caller = pthread_self();
 	struct dshow_host *host = NULL;
 	CHECK(filter && dshow_host_create(filter,&in_mt,&out_mt,receive_sample,
 		&received,&host)==S_OK);
 	static const BYTE compressed[]={'K',12,0,0,5,1,2,3,4,5,6};
 	CHECK(host && dshow_host_push(host,compressed,sizeof(compressed),0,400000,
+		AM_SAMPLE_SPLICEPOINT)==VFW_E_WRONG_STATE);
+	CHECK(host && dshow_host_seek(host,0,400000)==S_OK);
+	CHECK(host && dshow_host_push(host,compressed,sizeof(compressed),0,400000,
 		AM_SAMPLE_SPLICEPOINT)==S_OK);
+	CHECK(host && dshow_host_end(host,1000)==S_OK);
 	CHECK(received.calls==1 && received.size==6);
 	CHECK(!memcmp(received.data,compressed+5,6));
-	CHECK(host && dshow_host_end(host,1000)==S_OK);
+	CHECK(!pthread_equal(caller,received.thread));
 	dshow_host_destroy(host);
-	dshow_free_media_type(&in_mt); dshow_free_media_type(&out_mt);
+	unsetenv("VFW_ENV_TESTFILTER_ASYNC");
+	unsetenv("VFW_ENV_TESTFILTER_REQUIRE_SEGMENT");
 	if(filter)filter->lpVtbl->Release(filter);
+
+	dshow_free_media_type(&in_mt); dshow_free_media_type(&out_mt);
 	typedef HRESULT (WINAPI *unload_fn)(void);
 	unload_fn unload=(unload_fn)mod_get_proc(m,"DllCanUnloadNow");
 	CHECK(unload && unload()==S_OK);

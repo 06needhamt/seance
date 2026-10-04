@@ -326,7 +326,7 @@ strmbase — same constraints as `testcodec.c`/`pe_com.c`), generic and small:
      through a renamed link, real registration read back and reached
      through CoGetClassObject, unregistering, a legacy `.reg` import,
      roles), and `smoke.sh` runs the new commands on a registry of its own.
-3. **Host and decode. (In progress.)** `mediatype.c`, `alloc.c`, `host.c`,
+3. **Host and decode. (Done.)** `mediatype.c`, `alloc.c`, `host.c`,
    `call.c`; `probe` and `decode` integration. Milestone:
    `tests/unit/test_dshow.c`
    connects, runs and tears down the decoder in every fixture mode with no
@@ -337,17 +337,27 @@ strmbase — same constraints as `testcodec.c`/`pe_com.c`), generic and small:
      crash-framed wrappers for state, connection and sample-delivery calls.
    - Done: `probe filter.ax` performs sandboxed discovery, prints filter roles,
      pins and registered media types, and supports `--clsid` selection.
-   - Remaining: the source/sink/stub-graph objects in `host.c`, a working
-     decoder object in `testfilter.ax`, dynamic connection checks in `probe`,
-     and `decode` CLI integration.
-4. **Encode. (In progress.)** Encoder path, `IAMVideoCompression`,
+   - The source/sink pins and stub graph negotiate allocators, run the filter,
+     deliver samples to the output callback, propagate EOS/events and tear the
+     graph down without retaining fixture objects.
+   - `testfilter.ax` has a working synchronous TST0 decoder. `probe` performs
+     connection checks against an AVI's media type, and `decode` loads a filter
+     class directly, negotiates standard output formats and preserves timing,
+     keyframe and preroll sample properties. The smoke test compares its Y4M
+     output byte-for-byte with the VfW fixture decoder's output.
+4. **Encode. (Done.)** Encoder path, `IAMVideoCompression`,
    `IPersistStream` state.
    Milestone: Y4M → `encode testfilter.ax` → `decode testcodec.dll` is
    byte-exact, and vice versa.
    - Done: reusable `IAMVideoCompression` option application and
      `IPersistStream` load/save over an HGLOBAL stream, with unit tests.
-   - Remaining: the fixture encoder and the encoded-sample/AVI CLI path.
-5. **Hardening and docs. (In progress.)** Seeks (`--start`) via flush/new
+   - `testfilter.ax` implements the TST0 encoder, `IAMVideoCompression` and
+     `IPersistStream`. The CLI negotiates a raw input type, converts source
+     frames when necessary, sends timed samples through the host and writes
+     compressed output samples and their sync-point flags to AVI.
+   - The smoke test exercises both interoperability directions byte-for-byte,
+     along with encoder options and filter state save/load.
+5. **Hardening and docs. (Done.)** Seeks (`--start`) via flush/new
    segment, worker thread delivery, timeouts, crash reports naming COM
    methods, fuzzed media types in `test_dshow`, `tests/samples.sh` also
    running over `*.ax`,
@@ -356,8 +366,13 @@ strmbase — same constraints as `testcodec.c`/`pe_com.c`), generic and small:
    - Done: host-to-filter call frames name the COM method, media-type tests
      exercise every truncated VideoInfo2 format block, `samples.sh` includes
      `.ax` files, and the documentation reports the implementation status.
-   - Remaining: seek/flush behavior, asynchronous fixture delivery, timeout
-     integration, and end-to-end DirectShow smoke/media cases.
+   - `--start` sends flush and new-segment notifications before prerolling from
+     the preceding keyframe. The fixture can require this sequence and can
+     deliver samples on a Win32 worker thread.
+   - EOS waits use `VFW_TIMEOUT` (five seconds by default), with a fixture mode
+     that deliberately withholds EOS. `test_dshow`, `smoke.sh` and
+     `validate_media.sh` cover worker delivery, seeks, timeout reporting and
+     both VfW/DirectShow interoperability directions.
 
 ## Critical files
 
