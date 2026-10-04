@@ -326,19 +326,35 @@ strmbase — same constraints as `testcodec.c`/`pe_com.c`), generic and small:
      through a renamed link, real registration read back and reached
      through CoGetClassObject, unregistering, a legacy `.reg` import,
      roles), and `smoke.sh` runs the new commands on a registry of its own.
-3. **Host and decode.** `mediatype.c`, `alloc.c`, `host.c`, `call.c`;
-   `probe` and `decode` integration. Milestone: `tests/unit/test_dshow.c`
+3. **Host and decode. (In progress.)** `mediatype.c`, `alloc.c`, `host.c`,
+   `call.c`; `probe` and `decode` integration. Milestone:
+   `tests/unit/test_dshow.c`
    connects, runs and tears down the decoder in every fixture mode with no
    leaked references (`DllCanUnloadNow == S_OK`); decoding a testcodec-made
    AVI via `testfilter.ax` matches decoding it via `testcodec.dll`.
-4. **Encode.** Encoder path, `IAMVideoCompression`, `IPersistStream` state.
+   - Done: VideoInfo/VideoInfo2/MPEG media-type conversion and ownership,
+     the harness `IMemAllocator`/`IMediaSample2`, HRESULT diagnostics, and
+     crash-framed wrappers for state, connection and sample-delivery calls.
+   - Remaining: the source/sink/stub-graph objects in `host.c`, a working
+     decoder object in `testfilter.ax`, and `probe`/`decode` CLI integration.
+4. **Encode. (In progress.)** Encoder path, `IAMVideoCompression`,
+   `IPersistStream` state.
    Milestone: Y4M → `encode testfilter.ax` → `decode testcodec.dll` is
    byte-exact, and vice versa.
-5. **Hardening and docs.** Seeks (`--start`) via flush/new segment, worker
-   thread delivery, timeouts, crash reports naming COM methods, fuzzed media
-   types in `test_dshow`, `tests/samples.sh` also running over `*.ax`,
+   - Done: reusable `IAMVideoCompression` option application and
+     `IPersistStream` load/save over an HGLOBAL stream, with unit tests.
+   - Remaining: the fixture encoder and the encoded-sample/AVI CLI path.
+5. **Hardening and docs. (In progress.)** Seeks (`--start`) via flush/new
+   segment, worker thread delivery, timeouts, crash reports naming COM
+   methods, fuzzed media types in `test_dshow`, `tests/samples.sh` also
+   running over `*.ax`,
    `smoke.sh`/`validate_media.sh` cases, README section and a status row
    in `docs/IMPLEMENTATION_PLAN.md`. CI needs no new packages.
+   - Done: host-to-filter call frames name the COM method, media-type tests
+     exercise every truncated VideoInfo2 format block, `samples.sh` includes
+     `.ax` files, and the documentation reports the implementation status.
+   - Remaining: seek/flush behavior, asynchronous fixture delivery, timeout
+     integration, and end-to-end DirectShow smoke/media cases.
 
 ## Critical files
 

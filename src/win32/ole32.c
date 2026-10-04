@@ -132,6 +132,16 @@ WINFN(void) ole_CoTaskMemFree(LPVOID p)
 	heap_free(heap_process(), 0, p);
 }
 
+void *ole_taskmem_alloc(SIZE_T size)
+{
+	return heap_alloc(heap_process(), 0, size);
+}
+
+void ole_taskmem_free(void *p)
+{
+	heap_free(heap_process(), 0, p);
+}
+
 WINFN(HRESULT) malloc_QueryInterface(IMalloc *self, REFIID riid, void **ppv)
 {
 	if (!ppv)

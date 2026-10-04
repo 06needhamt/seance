@@ -24,6 +24,11 @@ int ole_guid_parse(const WCHAR *s, GUID *out);
  */
 HRESULT ole_stream_on_hglobal(HGLOBAL h, BOOL delete_on_release,
 			      IStream **out);
+HRESULT ole_hglobal_from_stream(IStream *stream, HGLOBAL *out);
+
+/* Host-side users that must return memory compatible with CoTaskMemFree. */
+void *ole_taskmem_alloc(SIZE_T size);
+void ole_taskmem_free(void *p);
 
 /* The streams and in-process marshalling (ole_stream.c). */
 extern const struct builtin_export ole_stream_exports[];

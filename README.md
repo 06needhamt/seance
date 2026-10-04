@@ -29,7 +29,10 @@ DirectShow filters (`.ax`) are being added in phases of their own; see
 [docs/DIRECT_SHOW_PLAN.md](docs/DIRECT_SHOW_PLAN.md). So far: the headers
 and their ABI check, a built-in quartz.dll (filter mappers, device
 enumerator, `AMGetErrorText`), and finding and registering filters
-(`register`, `list`). Decoding and encoding through them are next.
+(`register`, `list`). Media-type conversion, sample allocation, traced COM
+calls, encoder controls and persisted filter state are implemented and unit
+tested. The minimal source/sink graph and command-line decode/encode paths are
+still in progress.
 
 ## Prerequisites
 
