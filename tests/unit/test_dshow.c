@@ -2,8 +2,11 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "dshow/dshow.h"
+#include "loader/modules.h"
+#include "runtime/runtime.h"
 #include "test.h"
 
 struct fake_filter {
@@ -353,11 +356,123 @@ static void encoder_controls(void)
 	free(saved);
 }
 
+static void call_wrapper_arguments(void)
+{
+	FILTER_STATE state;
+	ALLOCATOR_PROPERTIES props;
+	IMemAllocator *allocator = (void *)1;
+	LONG processed;
+
+	CHECK(dshow_call_filter_get_state(NULL, 0, &state) == E_POINTER);
+	CHECK(dshow_call_filter_set_sync_source(NULL, NULL) == E_POINTER);
+	CHECK(dshow_call_filter_join_graph(NULL, NULL, NULL) == E_POINTER);
+	CHECK(dshow_call_pin_begin_flush(NULL) == E_POINTER);
+	CHECK(dshow_call_pin_end_flush(NULL) == E_POINTER);
+	CHECK(dshow_call_pin_new_segment(NULL, 0, 1, 1.0) == E_POINTER);
+	CHECK(dshow_call_pin_query_accept(NULL, NULL) == E_POINTER);
+	CHECK(dshow_call_mem_get_allocator(NULL, &allocator) == E_POINTER);
+	CHECK(allocator == (void *)1); /* A NULL pin cannot touch the result. */
+	CHECK(dshow_call_mem_notify_allocator(NULL, NULL, FALSE) == E_POINTER);
+	CHECK(dshow_call_mem_allocator_requirements(NULL, &props) == E_POINTER);
+	CHECK(dshow_call_mem_receive_multiple(NULL, NULL, 0, &processed) ==
+	      E_POINTER);
+	CHECK(dshow_call_mem_receive_can_block(NULL) == E_POINTER);
+}
+
+static void host_arguments(void)
+{
+	struct dshow_host *host = (void *)1;
+	LONG code;
+	LONG_PTR param1, param2;
+
+	CHECK(dshow_host_create(NULL, NULL, NULL, NULL, NULL, &host) == E_POINTER);
+	CHECK(dshow_host_push(NULL, NULL, 0, 0, 0, 0) == E_POINTER);
+	CHECK(dshow_host_seek(NULL, 0, 0) == E_POINTER);
+	CHECK(dshow_host_end(NULL, 1) == E_POINTER);
+	CHECK(dshow_host_event(NULL, &code, &param1, &param2) == E_POINTER);
+	dshow_host_destroy(NULL);
+}
+
+struct received_sample {
+	BYTE data[32];
+	size_t size;
+	int calls;
+};
+
+static HRESULT receive_sample(void *opaque, IMediaSample *sample,
+			      const AM_MEDIA_TYPE *dynamic_type)
+{
+	struct received_sample *r = opaque;
+	BYTE *data = NULL;
+	LONG size = sample->lpVtbl->GetActualDataLength(sample);
+	if (size < 0 || size > (LONG)sizeof(r->data) ||
+	    FAILED(sample->lpVtbl->GetPointer(sample, &data)))
+		return E_FAIL;
+	memcpy(r->data, data, size);
+	r->size = size;
+	r->calls++;
+	return S_OK;
+}
+
+static void fixture_host(void)
+{
+	const char *dir = getenv("VFW_FIXTURES");
+	char path[4096];
+	if (!dir) return;
+	snprintf(path, sizeof(path), "%s/testfilter.ax", dir);
+	if (access(path, R_OK)) return;
+	CHECK(runtime_enter() == 0);
+	struct module *m = mod_load(path, NULL);
+	CHECK(m != NULL);
+	if (!m) return;
+	LPFNGETCLASSOBJECT get = (LPFNGETCLASSOBJECT)mod_get_proc(m,
+		"DllGetClassObject");
+	static const CLSID decoder = { 0x5e6c9b31, 0x3a7d, 0x4f0e,
+		{ 0x9c, 0x11, 0x0d, 0x2b, 0x7a, 0x6e, 0x4f, 0x80 } };
+	IClassFactory *factory = NULL;
+	IBaseFilter *filter = NULL;
+	CHECK(get != NULL);
+	CHECK(get && get(&decoder, &IID_IClassFactory, (void **)&factory) == S_OK);
+	CHECK(factory && factory->lpVtbl->CreateInstance(factory, NULL,
+		&IID_IBaseFilter, (void **)&filter) == S_OK);
+	if (factory) factory->lpVtbl->Release(factory);
+
+	BITMAPINFOHEADER input = { .biSize=sizeof(input), .biWidth=2,
+		.biHeight=2, .biPlanes=1, .biBitCount=12,
+		.biCompression=mmioFOURCC('T','S','T','0'), .biSizeImage=16 };
+	BITMAPINFOHEADER output = input;
+	output.biCompression = mmioFOURCC('I','4','2','0');
+	output.biSizeImage = 6;
+	AM_MEDIA_TYPE in_mt, out_mt;
+	CHECK(dshow_bih_to_mt(&input,sizeof(input),25,1,0,&in_mt)==S_OK);
+	CHECK(dshow_bih_to_mt(&output,sizeof(output),25,1,0,&out_mt)==S_OK);
+	struct received_sample received = {0};
+	struct dshow_host *host = NULL;
+	CHECK(filter && dshow_host_create(filter,&in_mt,&out_mt,receive_sample,
+		&received,&host)==S_OK);
+	static const BYTE compressed[]={'K',12,0,0,5,1,2,3,4,5,6};
+	CHECK(host && dshow_host_push(host,compressed,sizeof(compressed),0,400000,
+		AM_SAMPLE_SPLICEPOINT)==S_OK);
+	CHECK(received.calls==1 && received.size==6);
+	CHECK(!memcmp(received.data,compressed+5,6));
+	CHECK(host && dshow_host_end(host,1000)==S_OK);
+	dshow_host_destroy(host);
+	dshow_free_media_type(&in_mt); dshow_free_media_type(&out_mt);
+	if(filter)filter->lpVtbl->Release(filter);
+	typedef HRESULT (WINAPI *unload_fn)(void);
+	unload_fn unload=(unload_fn)mod_get_proc(m,"DllCanUnloadNow");
+	CHECK(unload && unload()==S_OK);
+	mod_free(m);
+}
+
 int main(void)
 {
 	media_types();
 	malformed_media_types();
 	allocator();
 	encoder_controls();
+	call_wrapper_arguments();
+	host_arguments();
+	fixture_host();
 	return test_summary("test_dshow");
 }

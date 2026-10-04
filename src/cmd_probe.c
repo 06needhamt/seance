@@ -13,7 +13,12 @@
 #include "common/error.h"
 #include "common/fourcc.h"
 #include "common/unicode.h"
+#include "dshow/discover.h"
+#include "dshow/dshow.h"
+#include "loader/pe.h"
 #include "vfw/icm.h"
+#include "win32/codepage.h"
+#include "win32/ole.h"
 
 static int usage(void)
 {
@@ -22,9 +27,59 @@ static int usage(void)
 		"\n"
 		"  --fourcc <XXXX>    the handler to open a DLL as (default: from\n"
 		"                     vfw.ini, else 0, then what the codec reports)\n"
+		"  --clsid <{GUID}>   DirectShow class when a server has several\n"
 		"  --size <WxH>       frame size for the format checks (default\n"
 		"                     320x240, or the AVI's)\n");
 	return 2;
+}
+
+static int parse_clsid(const char *s, CLSID *clsid)
+{
+	WCHAR *w = utf8_to_utf16_dup(s);
+	int bad = !w || ole_guid_parse(w, clsid);
+	free(w);
+	return bad;
+}
+
+/* Probe registration metadata without changing the persistent registry. */
+static int probe_dshow(const char *path, const char *selected)
+{
+	CLSID wanted;
+	if (selected && parse_clsid(selected, &wanted)) {
+		fprintf(stderr, "seance: --clsid wants a GUID, not '%s'\n", selected);
+		return 2;
+	}
+
+	struct qz_filter *filters = NULL;
+	size_t count = 0;
+	HRESULT hr;
+	if (dshow_discover(path, &filters, &count, &hr)) {
+		fprintf(stderr, "seance: %s\n", vfw_error());
+		return 1;
+	}
+	if (FAILED(hr) && !count) {
+		char name[24];
+		fprintf(stderr, "seance: %s: DllRegisterServer failed (%s)\n",
+			path, dshow_hr_name(hr, name));
+		return 1;
+	}
+
+	size_t shown = 0;
+	printf("DirectShow server: %s\n", path);
+	for (size_t i = 0; i < count; i++) {
+		if (selected && memcmp(&filters[i].clsid, &wanted, sizeof(wanted)))
+			continue;
+		dshow_print_filter(&filters[i], NULL, 1);
+		shown++;
+	}
+	qz_filters_free(filters, count);
+	if (!shown) {
+		fprintf(stderr, "seance: %s: %s\n", path,
+			selected ? "that CLSID is not registered by this server" :
+			"no DirectShow filters discovered");
+		return 1;
+	}
+	return 0;
 }
 
 /* A bounded UTF-16 field (ICINFO strings) as UTF-8. */
@@ -140,6 +195,7 @@ int cmd_probe(int argc, char **argv)
 	static const UINT modes[] = { ICMODE_QUERY, ICMODE_DECOMPRESS,
 				      ICMODE_COMPRESS };
 	const char *target = NULL, *avi_path = NULL, *fourcc = NULL;
+	const char *clsid = NULL;
 	LONG w = 320, h = 240;
 	int have_size = 0;
 
@@ -147,6 +203,8 @@ int cmd_probe(int argc, char **argv)
 		const char *a = argv[i];
 		if (!strcmp(a, "--fourcc") && i + 1 < argc) {
 			fourcc = argv[++i];
+		} else if (!strcmp(a, "--clsid") && i + 1 < argc) {
+			clsid = argv[++i];
 		} else if (!strcmp(a, "--size") && i + 1 < argc) {
 			if (cli_parse_size(a, argv[++i], &w, &h))
 				return 2;
@@ -161,6 +219,27 @@ int cmd_probe(int argc, char **argv)
 	}
 	if (!target)
 		return usage();
+
+	struct pe_image *image = pe_open(target);
+	if (image) {
+		int directshow = dshow_is_server(image);
+		pe_free(image);
+		if (directshow) {
+			if (fourcc) {
+				fprintf(stderr, "seance: --fourcc is for VfW codecs; "
+					"use --clsid for DirectShow filters\n");
+				return 2;
+			}
+			if (avi_path)
+				fprintf(stderr, "seance: note: media-type connection "
+					"checks are not implemented yet\n");
+			return probe_dshow(target, clsid);
+		}
+	}
+	if (clsid) {
+		fprintf(stderr, "seance: --clsid requires a DirectShow server\n");
+		return 2;
+	}
 
 	struct avi_file *avi = NULL;
 	const BITMAPINFOHEADER *in = NULL;

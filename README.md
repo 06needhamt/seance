@@ -328,6 +328,7 @@ each run.
 
 ```sh
 build/seance register --dry-run filter.ax  # what it would register
+build/seance probe filter.ax               # filters, roles, pins and types
 build/seance register filter.ax
 build/seance list                          # ... then DirectShow filters
 build/seance unregister filter.ax
@@ -341,6 +342,11 @@ filters registered: CLSID, name, whether it looks like a video decoder or
 encoder (from its pins' media types), merit, category and pins. With
 `--dry-run` it runs in a copy of the registry that is thrown away
 afterwards, so nothing changes.
+
+`probe` also discovers filters in a server without registering it and prints
+the same CLSID, role, merit, pin and media-type metadata. Servers containing
+several classes can be narrowed with `--clsid {GUID}`. Connecting those pins
+and probing formats dynamically will be added with the DirectShow graph host.
 
 `list` shows the video decoders and encoders registered, from the
 filter categories and the older `HKCR\Filter` keys, with the DLL that

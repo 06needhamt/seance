@@ -139,7 +139,8 @@ fixture(testcodec testcodec.c testcodec.def testcodec.rc
 
 # A DirectShow filter server (.ax), registering itself through quartz's
 # filter mappers.
-fixture(testfilter testfilter.c testfilter.def LIBS ole32 advapi32 kernel32
+fixture(testfilter testfilter.c testfilter_filter.c testfilter.def
+	LIBS ole32 advapi32 kernel32
 	OPTIONS -mpreferred-stack-boundary=2 -fno-builtin
 		-fno-tree-loop-distribute-patterns)
 set_target_properties(testfilter PROPERTIES SUFFIX ".ax")

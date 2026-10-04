@@ -335,8 +335,11 @@ strmbase — same constraints as `testcodec.c`/`pe_com.c`), generic and small:
    - Done: VideoInfo/VideoInfo2/MPEG media-type conversion and ownership,
      the harness `IMemAllocator`/`IMediaSample2`, HRESULT diagnostics, and
      crash-framed wrappers for state, connection and sample-delivery calls.
+   - Done: `probe filter.ax` performs sandboxed discovery, prints filter roles,
+     pins and registered media types, and supports `--clsid` selection.
    - Remaining: the source/sink/stub-graph objects in `host.c`, a working
-     decoder object in `testfilter.ax`, and `probe`/`decode` CLI integration.
+     decoder object in `testfilter.ax`, dynamic connection checks in `probe`,
+     and `decode` CLI integration.
 4. **Encode. (In progress.)** Encoder path, `IAMVideoCompression`,
    `IPersistStream` state.
    Milestone: Y4M → `encode testfilter.ax` → `decode testcodec.dll` is
