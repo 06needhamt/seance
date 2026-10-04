@@ -90,6 +90,9 @@ void gdi_free(struct gdi_obj *o)
 	case OBJ_PAL:
 		free(o->u.pal.entries);
 		break;
+	case OBJ_ENHMETAFILE:
+		free(o->u.emf.bits);
+		break;
 	case OBJ_DC:
 	case OBJ_MEMDC:
 		free(o->u.dc.saved);
@@ -146,6 +149,48 @@ static HGDIOBJ new_brush(UINT style, COLORREF color, int is_stock)
 	o->u.brush.lbColor = color;
 	o->stock = is_stock;
 	return o->handle;
+}
+
+WINFN(HBRUSH) gdi_CreatePatternBrush(HBITMAP bitmap)
+{
+	gdi_lock();
+	if (!gdi_get((HGDIOBJ)bitmap, OBJ_BITMAP)) { gdi_unlock(); return NULL; }
+	HBRUSH brush = (HBRUSH)new_brush(BS_PATTERN, (COLORREF)(ULONG_PTR)bitmap, 0);
+	gdi_unlock();
+	return brush;
+}
+
+WINFN(HGDIOBJ) gdi_SetEnhMetaFileBits(UINT size, const BYTE *bits)
+{
+	if (!size || !bits) return NULL;
+	gdi_lock();
+	struct gdi_obj *o = gdi_new(OBJ_ENHMETAFILE);
+	if (o) {
+		o->u.emf.bits = malloc(size);
+		if (!o->u.emf.bits) { gdi_free(o); o = NULL; }
+		else { memcpy(o->u.emf.bits, bits, size); o->u.emf.size = size; }
+	}
+	HGDIOBJ h = o ? o->handle : NULL;
+	gdi_unlock();
+	return h;
+}
+
+WINFN(BOOL) gdi_DeleteEnhMetaFile(HGDIOBJ emf)
+{
+	gdi_lock();
+	struct gdi_obj *o = gdi_get(emf, OBJ_ENHMETAFILE);
+	if (o)
+		gdi_free(o);
+	gdi_unlock();
+	return o != NULL;
+}
+
+WINFN(BOOL) gdi_PlayEnhMetaFile(HDC dc, HGDIOBJ emf, const RECT *bounds)
+{
+	(void)bounds;
+	gdi_lock();
+	BOOL ok = gdi_get((HGDIOBJ)dc, OBJ_DC) && gdi_get(emf, OBJ_ENHMETAFILE);
+	gdi_unlock(); return ok;
 }
 
 static HGDIOBJ new_pen(UINT style, int width, COLORREF color, int is_stock)
@@ -1158,19 +1203,41 @@ WINFN(BOOL) gdi_SetWindowExtEx(HDC h, int x, int y, LPSIZE old)
 }
 static BOOL scale_ext(HDC h, int xn, int xd, int yn, int yd, LPSIZE old, int viewport)
 {
-	if (!xd || !yd) return FALSE;
-	gdi_lock(); struct gdi_obj *o = gdi_get(h, OBJ_DC);
-	if (!o) { gdi_unlock(); return FALSE; }
+	if (!xd || !yd)
+		return FALSE;
+	gdi_lock();
+	struct gdi_obj *o = gdi_get(h, OBJ_DC);
+	if (!o) {
+		gdi_unlock();
+		return FALSE;
+	}
 	SIZE *s = viewport ? &o->u.dc.s.viewport_ext : &o->u.dc.s.window_ext;
-	if (old) *old = *s; s->cx = (LONG)((long long)s->cx*xn/xd); s->cy = (LONG)((long long)s->cy*yn/yd);
-	gdi_unlock(); return TRUE;
+	if (old)
+		*old = *s;
+	s->cx = (LONG)((long long)s->cx * xn / xd);
+	s->cy = (LONG)((long long)s->cy * yn / yd);
+	gdi_unlock();
+	return TRUE;
 }
-WINFN(BOOL) gdi_ScaleViewportExtEx(HDC h,int xn,int xd,int yn,int yd,LPSIZE o) { return scale_ext(h,xn,xd,yn,yd,o,1); }
-WINFN(BOOL) gdi_ScaleWindowExtEx(HDC h,int xn,int xd,int yn,int yd,LPSIZE o) { return scale_ext(h,xn,xd,yn,yd,o,0); }
+WINFN(BOOL) gdi_ScaleViewportExtEx(HDC h, int xn, int xd, int yn, int yd,
+	LPSIZE old)
+{
+	return scale_ext(h, xn, xd, yn, yd, old, 1);
+}
+WINFN(BOOL) gdi_ScaleWindowExtEx(HDC h, int xn, int xd, int yn, int yd,
+	LPSIZE old)
+{
+	return scale_ext(h, xn, xd, yn, yd, old, 0);
+}
 WINFN(int) gdi_GetClipBox(HDC h, LPRECT r)
 {
-	gdi_lock(); BOOL ok = gdi_get(h, OBJ_DC) != NULL; gdi_unlock();
-	if (!ok || !r) return 0; *r = (RECT){0,0,GDI_SCREEN_WIDTH,GDI_SCREEN_HEIGHT}; return 2;
+	gdi_lock();
+	BOOL ok = gdi_get(h, OBJ_DC) != NULL;
+	gdi_unlock();
+	if (!ok || !r)
+		return 0;
+	*r = (RECT){ 0, 0, GDI_SCREEN_WIDTH, GDI_SCREEN_HEIGHT };
+	return 2;
 }
 WINFN(BOOL) gdi_PtVisible(HDC h, int x, int y) { RECT r; return gdi_GetClipBox(h,&r) && x>=r.left&&x<r.right&&y>=r.top&&y<r.bottom; }
 WINFN(BOOL) gdi_RectVisible(HDC h, const RECT *r) { RECT c; return r&&gdi_GetClipBox(h,&c)&&r->right>c.left&&r->left<c.right&&r->bottom>c.top&&r->top<c.bottom; }
@@ -1192,10 +1259,12 @@ static const struct builtin_export exports[] = {
 	{ "CreateICA", 0, (void *)gdi_CreateDCA },
 	{ "CreateICW", 0, (void *)gdi_CreateDCW },
 	E(CreatePalette),
+	E(CreatePatternBrush),
 	E(CreatePen),
 	E(CreatePenIndirect),
 	E(CreateSolidBrush),
 	E(DeleteDC),
+	E(DeleteEnhMetaFile),
 	E(DeleteObject),
 	E(ExtTextOutA),
 	E(ExtTextOutW),
@@ -1229,6 +1298,7 @@ static const struct builtin_export exports[] = {
 	E(MoveToEx),
 	E(OffsetViewportOrgEx),
 	E(PtVisible),
+	E(PlayEnhMetaFile),
 	E(RectVisible),
 	E(Rectangle),
 	E(RealizePalette),
@@ -1237,6 +1307,7 @@ static const struct builtin_export exports[] = {
 	E(SelectObject),
 	E(SelectPalette),
 	E(SetBkColor),
+	E(SetEnhMetaFileBits),
 	E(SetBkMode),
 	E(SetMapMode),
 	E(SetPaletteEntries),

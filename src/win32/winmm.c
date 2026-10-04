@@ -22,6 +22,55 @@
 
 /* The longest timer delay and period, as timeGetDevCaps reports. */
 #define TIMER_MAX 1000000
+#define WAVE_MAGIC 0x57415645u
+
+struct wave_out { DWORD magic; int paused; };
+
+static struct wave_out *wave(HWAVEOUT h)
+{
+	struct wave_out *w = (struct wave_out *)h;
+	return w && w->magic == WAVE_MAGIC ? w : NULL;
+}
+
+WINFN(UINT) mm_waveOutOpen(HWAVEOUT *out, UINT device, const WAVEFORMATEX *fmt,
+	DWORD_PTR callback, DWORD_PTR instance, DWORD flags)
+{
+	(void)callback; (void)instance; (void)flags;
+	if (!out || !fmt || (device != WAVE_MAPPER && device != 0) ||
+	    fmt->wFormatTag != WAVE_FORMAT_PCM) return MMSYSERR_INVALPARAM;
+	struct wave_out *w = calloc(1, sizeof(*w));
+	if (!w) return MMSYSERR_ALLOCATED;
+	w->magic = WAVE_MAGIC; *out = (HWAVEOUT)w; return MMSYSERR_NOERROR;
+}
+WINFN(UINT) mm_waveOutClose(HWAVEOUT h)
+{
+	struct wave_out *w = wave(h); if (!w) return MMSYSERR_INVALHANDLE;
+	w->magic = 0; free(w); return MMSYSERR_NOERROR;
+}
+WINFN(UINT) mm_waveOutPrepareHeader(HWAVEOUT h, WAVEHDR *hdr, UINT size)
+{
+	if (!wave(h)) return MMSYSERR_INVALHANDLE;
+	if (!hdr || size < sizeof(*hdr)) return MMSYSERR_INVALPARAM;
+	hdr->dwFlags |= WHDR_PREPARED; return MMSYSERR_NOERROR;
+}
+WINFN(UINT) mm_waveOutUnprepareHeader(HWAVEOUT h, WAVEHDR *hdr, UINT size)
+{
+	if (!wave(h)) return MMSYSERR_INVALHANDLE;
+	if (!hdr || size < sizeof(*hdr) || (hdr->dwFlags & WHDR_INQUEUE)) return MMSYSERR_INVALPARAM;
+	hdr->dwFlags &= ~WHDR_PREPARED; return MMSYSERR_NOERROR;
+}
+WINFN(UINT) mm_waveOutWrite(HWAVEOUT h, WAVEHDR *hdr, UINT size)
+{
+	if (!wave(h)) return MMSYSERR_INVALHANDLE;
+	if (!hdr || size < sizeof(*hdr) || !(hdr->dwFlags & WHDR_PREPARED)) return MMSYSERR_INVALPARAM;
+	/* Audio is deliberately discarded, but completion is synchronous and
+	 * observable exactly like an already played buffer. */
+	hdr->dwFlags = (hdr->dwFlags & ~WHDR_INQUEUE) | WHDR_DONE;
+	return MMSYSERR_NOERROR;
+}
+WINFN(UINT) mm_waveOutPause(HWAVEOUT h) { struct wave_out *w=wave(h); if(!w)return MMSYSERR_INVALHANDLE; w->paused=1; return 0; }
+WINFN(UINT) mm_waveOutRestart(HWAVEOUT h) { struct wave_out *w=wave(h); if(!w)return MMSYSERR_INVALHANDLE; w->paused=0; return 0; }
+WINFN(UINT) mm_waveOutReset(HWAVEOUT h) { return wave(h) ? MMSYSERR_NOERROR : MMSYSERR_INVALHANDLE; }
 
 /* Wine's DefDriverProc: what a driver gets for messages it doesn't handle. */
 WINFN(LRESULT) mm_DefDriverProc(DWORD_PTR id, HDRVR h, UINT msg, LPARAM l1,
@@ -344,6 +393,14 @@ static const struct builtin_export exports[] = {
 	E(timeGetTime),
 	E(timeKillEvent),
 	E(timeSetEvent),
+	E(waveOutClose),
+	E(waveOutOpen),
+	E(waveOutPause),
+	E(waveOutPrepareHeader),
+	E(waveOutReset),
+	E(waveOutRestart),
+	E(waveOutUnprepareHeader),
+	E(waveOutWrite),
 	BUILTIN_END
 };
 

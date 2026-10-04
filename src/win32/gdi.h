@@ -74,6 +74,7 @@ struct gdi_obj {
 		LOGBRUSH brush;
 		LOGPEN pen;
 		LOGFONTW font;
+		struct { UINT size; BYTE *bits; } emf;
 		struct gdi_dc dc;
 	} u;
 };
