@@ -92,6 +92,13 @@ CRTFN(int) crt_wcscmp(const WCHAR *a, const WCHAR *b)
 		a++, b++;
 	return (int)*a - (int)*b;
 }
+CRTFN(int) crt_wcsncmp(const WCHAR *a, const WCHAR *b, size_t n)
+{
+	while (n-- && *a && *a == *b) a++, b++;
+	return n == (size_t)-1 ? 0 : (int)*a - (int)*b;
+}
+CRTFN(int) crt_strcoll(const char *a, const char *b) { return strcoll(a, b); }
+CRTFN(size_t) crt_strxfrm(char *d, const char *s, size_t n) { return strxfrm(d, s, n); }
 
 /* Number/string conversions. atoi/atol/atof and strtol/strtoul/strtod are
  * shared with the host's exactly; MSVC's own itoa/ltoa/ultoa family has no
@@ -215,7 +222,8 @@ const struct builtin_export crt_string_exports[] = {
 	E(strcmp), E(strncmp), E(strchr), E(strrchr), E(strstr),
 	E(strpbrk), E(strspn), E(strcspn), E(strtok), E(strerror),
 	E(_stricmp), E(_strnicmp), E(_strdup), E(_strrev), E(_strlwr), E(_strupr),
-	E(wcslen), E(wcscpy), E(wcscat), E(wcscmp),
+	E(wcslen), E(wcscpy), E(wcscat), E(wcscmp), E(wcsncmp),
+	E(strcoll), E(strxfrm),
 	E(atoi), E(atol), E(atof), E(strtol), E(strtoul), E(strtod),
 	E(_itoa), E(_ltoa), E(_ultoa),
 	E(srand), E(rand), E(qsort), E(bsearch), E(abs), E(labs),

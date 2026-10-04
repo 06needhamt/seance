@@ -90,6 +90,9 @@ void gdi_free(struct gdi_obj *o)
 	case OBJ_PAL:
 		free(o->u.pal.entries);
 		break;
+	case OBJ_ENHMETAFILE:
+		free(o->u.emf.bits);
+		break;
 	case OBJ_DC:
 	case OBJ_MEMDC:
 		free(o->u.dc.saved);
@@ -146,6 +149,44 @@ static HGDIOBJ new_brush(UINT style, COLORREF color, int is_stock)
 	o->u.brush.lbColor = color;
 	o->stock = is_stock;
 	return o->handle;
+}
+
+WINFN(HBRUSH) gdi_CreatePatternBrush(HBITMAP bitmap)
+{
+	gdi_lock();
+	if (!gdi_get((HGDIOBJ)bitmap, OBJ_BITMAP)) { gdi_unlock(); return NULL; }
+	HBRUSH brush = (HBRUSH)new_brush(BS_PATTERN, (COLORREF)(ULONG_PTR)bitmap, 0);
+	gdi_unlock();
+	return brush;
+}
+
+WINFN(HGDIOBJ) gdi_SetEnhMetaFileBits(UINT size, const BYTE *bits)
+{
+	if (!size || !bits) return NULL;
+	gdi_lock();
+	struct gdi_obj *o = gdi_new(OBJ_ENHMETAFILE);
+	if (o) {
+		o->u.emf.bits = malloc(size);
+		if (!o->u.emf.bits) { gdi_free(o); o = NULL; }
+		else { memcpy(o->u.emf.bits, bits, size); o->u.emf.size = size; }
+	}
+	HGDIOBJ h = o ? o->handle : NULL;
+	gdi_unlock();
+	return h;
+}
+
+WINFN(BOOL) gdi_DeleteEnhMetaFile(HGDIOBJ emf)
+{
+	gdi_lock(); struct gdi_obj *o = gdi_get(emf, OBJ_ENHMETAFILE);
+	if (o) gdi_free(o); gdi_unlock(); return o != NULL;
+}
+
+WINFN(BOOL) gdi_PlayEnhMetaFile(HDC dc, HGDIOBJ emf, const RECT *bounds)
+{
+	(void)bounds;
+	gdi_lock();
+	BOOL ok = gdi_get((HGDIOBJ)dc, OBJ_DC) && gdi_get(emf, OBJ_ENHMETAFILE);
+	gdi_unlock(); return ok;
 }
 
 static HGDIOBJ new_pen(UINT style, int width, COLORREF color, int is_stock)
@@ -1192,10 +1233,12 @@ static const struct builtin_export exports[] = {
 	{ "CreateICA", 0, (void *)gdi_CreateDCA },
 	{ "CreateICW", 0, (void *)gdi_CreateDCW },
 	E(CreatePalette),
+	E(CreatePatternBrush),
 	E(CreatePen),
 	E(CreatePenIndirect),
 	E(CreateSolidBrush),
 	E(DeleteDC),
+	E(DeleteEnhMetaFile),
 	E(DeleteObject),
 	E(ExtTextOutA),
 	E(ExtTextOutW),
@@ -1229,6 +1272,7 @@ static const struct builtin_export exports[] = {
 	E(MoveToEx),
 	E(OffsetViewportOrgEx),
 	E(PtVisible),
+	E(PlayEnhMetaFile),
 	E(RectVisible),
 	E(Rectangle),
 	E(RealizePalette),
@@ -1237,6 +1281,7 @@ static const struct builtin_export exports[] = {
 	E(SelectObject),
 	E(SelectPalette),
 	E(SetBkColor),
+	E(SetEnhMetaFileBits),
 	E(SetBkMode),
 	E(SetMapMode),
 	E(SetPaletteEntries),
