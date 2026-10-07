@@ -115,8 +115,9 @@ from the thread it was meant for, which deadlocks FFmpeg's thread pool when it
 wakes a worker and then waits for the answer on the same variable (it is now a
 first-in first-out wait queue); and LAV's Quick Sync mode destroyed a member its
 constructor never set when set-up failed, which only works if fresh memory is
-zero, so memory from `malloc`, `operator new` and `HeapAlloc` is now always
-zeroed (as a fresh Windows heap usually gives). `struct _stat` also had the
+zero, so memory from `malloc`, `operator new` and `HeapAlloc` is now zeroed by
+default (as a fresh Windows heap usually gives; `VFW_ZERO_MEMORY=0` turns it
+off). `struct _stat` also had the
 wrong layout in `_fstat` and is now MSVCRT's.
 
 ### Still not supported

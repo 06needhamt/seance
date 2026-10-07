@@ -208,11 +208,17 @@ void *heap_alloc(HANDLE handle, DWORD flags, SIZE_T size)
 		return NULL;
 	}
 	/*
-	 * Always zeroed, which HEAP_ZERO_MEMORY only promises: memory fresh from a
-	 * Windows heap usually is, and code that was never run on anything else
-	 * can depend on it.
+	 * Zeroed by default, which HEAP_ZERO_MEMORY only promises: memory fresh
+	 * from a Windows heap usually is, and code that was never run on anything
+	 * else can depend on it (VFW_ZERO_MEMORY=0 turns this off). Honour the
+	 * flag even then.
 	 */
-	b = calloc(1, sizeof(*b) + size);
+	b = win_alloc(1, sizeof(*b) + size);
+	if (b && !win_zero_memory()) {
+		memset(b, 0, sizeof(*b));
+		if (flags & HEAP_ZERO_MEMORY)
+			memset(b + 1, 0, size);
+	}
 	if (!b) {
 		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
 		return NULL;
@@ -232,6 +238,22 @@ void *heap_alloc(HANDLE handle, DWORD flags, SIZE_T size)
 	h->blocks = b;
 	pthread_mutex_unlock(&h->lock);
 	return b + 1;
+}
+
+int win_zero_memory(void)
+{
+	static int zero = -1;
+
+	if (zero < 0) {
+		const char *env = getenv("VFW_ZERO_MEMORY");
+		zero = !(env && !strcmp(env, "0"));
+	}
+	return zero;
+}
+
+void *win_alloc(size_t n, size_t size)
+{
+	return win_zero_memory() ? calloc(n, size) : malloc(n * size);
 }
 
 static void unlink_block(struct heap *h, struct block *b)

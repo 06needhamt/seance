@@ -20,19 +20,26 @@ Work is split into phases; see [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION
 |---|---|---|
 | 0 | Build skeleton, Win32 headers, ABI cross-check, CLI skeleton | done |
 | 1 | PE loader and `info` | done |
-| 2 | Win32 runtime (TEB, SEH, threads, stub DLLs) | in progress: TEB, built-in DLLs, kernel32, ntdll, SEH dispatch, delay-load binding, the msvcrt-family CRT (math/string/stdio/startup/64-bit arithmetic helpers), msvcrt's `__try`/`__except` handlers, setjmp/longjmp, C++ exceptions and RTTI, its printf dialect and `_CI*` intrinsics, headless user32, gdi32 and advapi32 (registry, security), version, ole32, oleaut32, shell32, comctl32 and comdlg32 done |
+| 2 | Win32 runtime (TEB, SEH, threads, stub DLLs) | done: TEB, built-in DLLs, kernel32 (including SRW locks, condition variables, `InitOnce`, interlocked lists and thread-pool timers, waits and work), ntdll, SEH dispatch, delay-load binding, the msvcrt-family CRT (math, string, stdio, low-level I/O, `_findfirst`, `_stat`, startup, 64-bit helpers, `__try`/`__except`, setjmp/longjmp, C++ exceptions and RTTI, printf dialect), headless user32, gdi32 and advapi32 (registry, security), version, ole32, oleaut32, shell32, comctl32, comdlg32, and offline ws2_32, bcrypt, ncrypt, crypt32, d3d9, dxva2, d3d11 and dxgi |
 | 3 | VfW layer and `probe` | done: driver lifecycle, ICM API (including ICSeqCompressFrame*, ICImageCompress/ICImageDecompress and DrawDib*), winmm/msvfw32 built-ins, `probe`, `list` |
 | 4 | AVI / Y4M I/O, `decode` and `encode` | done: AVI reader and writer, Y4M/BMP/raw input and output, `avi`, `convert`, `decode`, `encode` |
 | 5 | Hardening and CI | done: DLL memory below 2 GB, crash and hang reports, SSE/FPU fixture, fuzzing, samples run, CI |
 
-DirectShow filters (`.ax`) are being added in phases of their own; see
-[docs/DIRECT_SHOW_PLAN.md](docs/DIRECT_SHOW_PLAN.md). So far: the headers
-and their ABI check, a built-in quartz.dll (filter mappers, device
-enumerator, `AMGetErrorText`), and finding and registering filters
-(`register`, `list`). Media-type conversion, sample allocation, traced COM
-calls, encoder controls and persisted filter state are implemented and unit
-tested. The minimal source/sink graph and command-line decode and encode paths
-are complete.
+DirectShow video decoders and encoders (`.ax`) have phases of their own; see
+[docs/DIRECT_SHOW_PLAN.md](docs/DIRECT_SHOW_PLAN.md). They are done: the headers
+and their ABI check, a built-in quartz.dll (filter mappers, device enumerator,
+`AMGetErrorText`), finding and registering filters (`register`, `list`), the
+minimal source/sink graph, and `probe`, `decode` and `encode` for filters,
+including dynamic format changes, `ICodecAPI` and `IAMVideoCompression`
+encoder controls, persisted filter state and MPEG-1/MPEG-2 media types.
+
+The real-world check is the LAV Filters 0.83 package (32-bit): LAV Video
+loads, registers, connects and decodes 18 codecs identically to FFmpeg, and
+the whole package loads with no unimplemented imports. The results, and what
+is not supported or not yet exercised, are in
+[MISSING_FEATURES.md](MISSING_FEATURES.md). Out of scope: audio, splitter and
+renderer filters, DMOs, capture devices, a real Filter Graph Manager, network
+access and hardware decoding.
 
 ## Prerequisites
 
@@ -327,9 +334,11 @@ comdlg32 are built in too, headless:
   `InitOnce` and interlocked lists work (built on one process-wide lock, so
   they are correct but not fast). Thread-pool timers, waits and work items
   run on a thread each.
-- **Memory:** `malloc`, `operator new` and `HeapAlloc` return zeroed memory, as
-  a fresh Windows heap usually does, since code that was only ever run there
-  can depend on it. (This also makes a codec's output repeatable.)
+- **Memory:** `malloc`, `operator new` and `HeapAlloc` return zeroed memory by
+  default, as a fresh Windows heap usually does, since code that was only ever
+  run there can depend on it. (This also makes a codec's output repeatable.)
+  `VFW_ZERO_MEMORY=0` turns it off, to find reads of uninitialised memory
+  (`HEAP_ZERO_MEMORY` is still honoured).
 - **CryptoAPI:** the random numbers work; hashes and keys can't be created.
 
 A function a built-in DLL doesn't implement still lets a codec load:
@@ -555,6 +564,7 @@ hangs on one.
 | `VFW_TIMEOUT=<s>` | Report and stop (exit 124) when one call into a DLL takes longer |
 | `VFW_COMPRESSOR` | What `ICCompressorChoose` answers: a FOURCC (`TST0`), `uncompressed` or `cancel` |
 | `VFW_OPEN_FILE`, `VFW_SAVE_FILE` | What `GetOpenFileName` and `GetSaveFileName` answer: a file, or `cancel` (the default) |
+| `VFW_ZERO_MEMORY=0` | Don't zero memory from `malloc`, `operator new` and `HeapAlloc` (zeroed by default) |
 | `VFW_LOW_MEMORY=0` | Don't keep DLL-visible memory below 2 GB |
 | `VFW_ENV_<NAME>=<value>` | Put `NAME=value` in the Windows environment codecs see |
 
