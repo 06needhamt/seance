@@ -15,7 +15,11 @@ struct fake_filter {
 	IBaseFilter filter;
 	IAMVideoCompression compression;
 	IPersistStream persist;
+	ICodecAPI api;
 	ULONG refs;
+	int api_on, no_compression, api_no_rate, no_persist;
+	int api_no_mode, api_mode_locked;
+	ULONG api_gop, api_quality, api_rate, api_mode;
 	LONG key_rate, pframes;
 	double quality;
 	DWORDLONG window;
@@ -51,9 +55,11 @@ static HRESULT WINAPI fake_qi(IBaseFilter *p, REFIID iid, void **out)
 		return E_POINTER;
 	if (guid_eq(iid, &IID_IUnknown) || guid_eq(iid, &IID_IBaseFilter))
 		*out = &f->filter;
-	else if (guid_eq(iid, &IID_IAMVideoCompression))
+	else if (guid_eq(iid, &IID_IAMVideoCompression) && !f->no_compression)
 		*out = &f->compression;
-	else if (guid_eq(iid, &IID_IPersistStream))
+	else if (guid_eq(iid, &IID_ICodecAPI) && f->api_on)
+		*out = &f->api;
+	else if (guid_eq(iid, &IID_IPersistStream) && !f->no_persist)
 		*out = &f->persist;
 	else {
 		*out = NULL;
@@ -72,6 +78,84 @@ static ULONG WINAPI fake_release(IBaseFilter *p)
 {
 	return --from_filter(p)->refs;
 }
+
+static struct fake_filter *from_api(ICodecAPI *p)
+{
+	return (void *)((char *)p - offsetof(struct fake_filter, api));
+}
+
+static HRESULT WINAPI api_qi(ICodecAPI *p, REFIID iid, void **out)
+{
+	return fake_qi(&from_api(p)->filter, iid, out);
+}
+
+static ULONG WINAPI api_addref(ICodecAPI *p)
+{
+	return ++from_api(p)->refs;
+}
+
+static ULONG WINAPI api_release(ICodecAPI *p)
+{
+	return --from_api(p)->refs;
+}
+
+/* The GOP size, quality and mean bit rate; the last one withdrawn on request. */
+static HRESULT WINAPI api_supported(ICodecAPI *p, const GUID *api)
+{
+	if (guid_eq(api, &CODECAPI_AVEncCommonMeanBitRate))
+		return from_api(p)->api_no_rate ? S_FALSE : S_OK;
+	if (guid_eq(api, &CODECAPI_AVEncCommonRateControlMode))
+		return from_api(p)->api_no_mode ? S_FALSE : S_OK;
+	return guid_eq(api, &CODECAPI_AVEncMPVGOPSize) ||
+	       guid_eq(api, &CODECAPI_AVEncCommonQuality) ? S_OK : S_FALSE;
+}
+
+static HRESULT WINAPI api_modifiable(ICodecAPI *p, const GUID *api)
+{
+	if (guid_eq(api, &CODECAPI_AVEncCommonRateControlMode) &&
+	    from_api(p)->api_mode_locked)
+		return S_FALSE;
+	return api_supported(p, api);
+}
+
+static HRESULT WINAPI api_get(ICodecAPI *p, const GUID *api, VARIANT *v)
+{
+	if (!guid_eq(api, &CODECAPI_AVEncCommonRateControlMode))
+		return E_NOTIMPL;
+	v->vt = VT_UI4;
+	v->ulVal = from_api(p)->api_mode;
+	return S_OK;
+}
+
+static HRESULT WINAPI api_set(ICodecAPI *p, const GUID *api, VARIANT *v)
+{
+	struct fake_filter *f = from_api(p);
+
+	if (v->vt != VT_UI4)
+		return E_INVALIDARG;
+	if (guid_eq(api, &CODECAPI_AVEncMPVGOPSize))
+		f->api_gop = v->ulVal;
+	else if (guid_eq(api, &CODECAPI_AVEncCommonQuality))
+		f->api_quality = v->ulVal;
+	else if (guid_eq(api, &CODECAPI_AVEncCommonMeanBitRate))
+		f->api_rate = v->ulVal;
+	else if (guid_eq(api, &CODECAPI_AVEncCommonRateControlMode))
+		f->api_mode = v->ulVal;
+	else
+		return E_NOTIMPL;
+	return S_OK;
+}
+
+static const ICodecAPIVtbl api_vtbl = {
+	.QueryInterface = api_qi,
+	.AddRef = api_addref,
+	.Release = api_release,
+	.IsSupported = api_supported,
+	.IsModifiable = api_modifiable,
+	.GetValue = api_get,
+	.SetValue = api_set,
+};
+
 
 static HRESULT WINAPI notimpl_filter(IBaseFilter *p)
 {
@@ -393,6 +477,85 @@ static void encoder_controls(void)
 	free(saved);
 }
 
+static void encoder_codec_api(void)
+{
+	struct fake_filter f = {
+		.filter.lpVtbl = &filter_vtbl,
+		.compression.lpVtbl = &compression_vtbl,
+		.api.lpVtbl = &api_vtbl,
+		.refs = 1,
+		.api_on = 1,
+		.no_compression = 1,
+		.no_persist = 1,
+	};
+	struct dshow_encoder_options options = {
+		.key_interval = 12, .quality = 0.75, .bitrate = 800000,
+	};
+	char names[160];
+
+	/* ICodecAPI alone is enough: the quality becomes a percentage. */
+	CHECK(dshow_filter_interfaces(&f.filter, names, sizeof(names)) == 1);
+	CHECK(!strcmp(names, "ICodecAPI"));
+	CHECK(dshow_encoder_configure(&f.filter, &options) == S_OK);
+	CHECK(f.api_gop == 12 && f.api_quality == 75 && f.api_rate == 800000);
+	CHECK(f.key_rate == 0 && f.window == 0);	/* the other one wasn't used */
+	CHECK(f.refs == 1);
+
+	/* A filter with both gets both. */
+	f.no_compression = 0;
+	f.api_gop = f.api_quality = f.api_rate = 0;
+	CHECK(dshow_filter_interfaces(&f.filter, names, sizeof(names)) == 2);
+	CHECK(!strcmp(names, "IAMVideoCompression, ICodecAPI"));
+	CHECK(dshow_encoder_configure(&f.filter, &options) == S_OK);
+	CHECK(f.api_gop == 12 && f.key_rate == 12 && f.api_rate == 800000);
+	CHECK(f.refs == 1);
+
+	/* An option no interface takes is an error; the others still apply. */
+	f.no_compression = 1;
+	f.api_no_rate = 1;
+	f.api_gop = 0;
+	CHECK(dshow_encoder_configure(&f.filter, &options) == E_NOTIMPL);
+	CHECK(f.api_gop == 12);
+	options.bitrate = -1;
+	CHECK(dshow_encoder_configure(&f.filter, &options) == S_OK);
+
+	/*
+	 * The mean bit rate only counts in the bit rate modes: an encoder in
+	 * quality mode is switched to CBR, one already in a bit rate mode (or with
+	 * no mode at all) is left alone, and one stuck in quality mode fails.
+	 */
+	options.bitrate = 800000;
+	f.api_no_rate = 0;
+	f.api_mode = eAVEncCommonRateControlMode_Quality;
+	f.api_rate = 0;
+	CHECK(dshow_encoder_configure(&f.filter, &options) == S_OK);
+	CHECK(f.api_mode == eAVEncCommonRateControlMode_CBR && f.api_rate == 800000);
+	f.api_mode = eAVEncCommonRateControlMode_UnconstrainedVBR;
+	f.api_rate = 0;
+	CHECK(dshow_encoder_configure(&f.filter, &options) == S_OK);
+	CHECK(f.api_mode == eAVEncCommonRateControlMode_UnconstrainedVBR);
+	CHECK(f.api_rate == 800000);
+	f.api_no_mode = 1;
+	f.api_mode = eAVEncCommonRateControlMode_Quality;
+	f.api_rate = 0;
+	CHECK(dshow_encoder_configure(&f.filter, &options) == S_OK);
+	CHECK(f.api_mode == eAVEncCommonRateControlMode_Quality && f.api_rate == 800000);
+	f.api_no_mode = 0;
+	f.api_mode_locked = 1;
+	f.api_rate = 0;
+	CHECK(dshow_encoder_configure(&f.filter, &options) == E_NOTIMPL);
+	CHECK(f.api_rate == 0);
+	f.api_mode_locked = 0;
+	options.bitrate = -1;
+
+	/* Neither interface at all. */
+	f.api_on = 0;
+	CHECK(dshow_encoder_configure(&f.filter, &options) == E_NOINTERFACE);
+	CHECK(dshow_filter_interfaces(&f.filter, names, sizeof(names)) == 0);
+	CHECK(names[0] == '\0');
+	CHECK(f.refs == 1);
+}
+
 static void call_wrapper_arguments(void)
 {
 	FILTER_STATE state;
@@ -523,6 +686,7 @@ int main(void)
 	malformed_media_types();
 	allocator();
 	encoder_controls();
+	encoder_codec_api();
 	call_wrapper_arguments();
 	host_arguments();
 	fixture_host();

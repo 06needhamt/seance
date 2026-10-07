@@ -93,6 +93,23 @@ static void probe_dshow_connections(const char *path, const CLSID *clsid,
 	avi_close(avi);
 }
 
+/* The optional interfaces a decoder or encoder has, as the codec's own probe says what it can do. */
+static void probe_dshow_interfaces(const char *path, const struct qz_filter *f)
+{
+	enum dshow_role role = dshow_role(f);
+	struct dshow_filter *server = NULL;
+	IBaseFilter *filter = NULL;
+	char names[160];
+
+	if (role == DSHOW_OTHER ||
+	    FAILED(dshow_filter_open(path, &f->clsid, role == DSHOW_ENCODER,
+				     &server, &filter, NULL)))
+		return;
+	if (dshow_filter_interfaces(filter, names, sizeof(names)))
+		printf("      interfaces: %s\n", names);
+	dshow_filter_close(server, filter);
+}
+
 static int probe_dshow(const char *path, const char *selected,
 		       const char *avi_path)
 {
@@ -122,6 +139,7 @@ static int probe_dshow(const char *path, const char *selected,
 		if (selected && memcmp(&filters[i].clsid, &wanted, sizeof(wanted)))
 			continue;
 		dshow_print_filter(&filters[i], NULL, 1);
+		probe_dshow_interfaces(path, &filters[i]);
 		if (avi_path && dshow_role(&filters[i]) == DSHOW_DECODER)
 			probe_dshow_connections(path, &filters[i].clsid, avi_path);
 		shown++;

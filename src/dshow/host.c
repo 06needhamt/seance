@@ -49,6 +49,7 @@ struct dshow_host {
   LONG event_code;
   LONG_PTR event_param1, event_param2;
   int have_event, eos, flushing, running;
+  HRESULT error;	/* a fatal error a filter reported by event, until a seek */
 };
 
 static int guid_eq(REFIID a, REFIID b) { return !memcmp(a, b, sizeof(*a)); }
@@ -503,6 +504,13 @@ static HRESULT WINAPI event_notify(IMediaEventSink *p, LONG code, LONG_PTR a,
   h->have_event = 1;
   if (code == EC_COMPLETE)
     h->eos = 1;
+  /*
+   * A filter that fails a sample may report it here and still return S_OK
+   * from Receive. These end the stream: the HRESULT is the first parameter.
+   */
+  if ((code == EC_ERRORABORT || code == EC_ERRORABORTEX ||
+       code == EC_STREAM_ERROR_STOPPED) && !h->error)
+    h->error = FAILED((HRESULT)a) ? (HRESULT)a : E_FAIL;
   pthread_cond_broadcast(&h->changed);
   pthread_mutex_unlock(&h->mutex);
   return S_OK;
@@ -601,6 +609,14 @@ HRESULT dshow_host_create(IBaseFilter *f, const AM_MEDIA_TYPE *in,
   return S_OK;
 }
 
+/* The fatal error a filter has reported by event, or S_OK. */
+static HRESULT host_error(struct dshow_host *h) {
+  pthread_mutex_lock(&h->mutex);
+  HRESULT hr = h->error;
+  pthread_mutex_unlock(&h->mutex);
+  return hr;
+}
+
 HRESULT dshow_host_push(struct dshow_host *h, const void *data, size_t size,
                         REFERENCE_TIME start, REFERENCE_TIME stop,
                         DWORD flags) {
@@ -609,8 +625,10 @@ HRESULT dshow_host_push(struct dshow_host *h, const void *data, size_t size,
   if (size > INT32_MAX)
     return E_INVALIDARG;
   IMediaSample *s = NULL;
-  HRESULT hr =
-      h->allocator->lpVtbl->GetBuffer(h->allocator, &s, &start, &stop, 0);
+  HRESULT hr = host_error(h);
+  if (FAILED(hr))
+    return hr;
+  hr = h->allocator->lpVtbl->GetBuffer(h->allocator, &s, &start, &stop, 0);
   if (FAILED(hr))
     return hr;
   BYTE *p = NULL;
@@ -625,6 +643,9 @@ HRESULT dshow_host_push(struct dshow_host *h, const void *data, size_t size,
     hr = dshow_call_mem_receive(h->mem, s);
   }
   s->lpVtbl->Release(s);
+  /* An error the filter reported by event, alongside a Receive that succeeded. */
+  if (SUCCEEDED(hr))
+    hr = host_error(h);
   return hr;
 }
 
@@ -634,6 +655,7 @@ HRESULT dshow_host_seek(struct dshow_host *h, REFERENCE_TIME start,
     return E_POINTER;
   pthread_mutex_lock(&h->mutex);
   h->eos = h->have_event = 0;
+  h->error = S_OK;
   pthread_mutex_unlock(&h->mutex);
   HRESULT hr = dshow_call_pin_begin_flush(h->input);
   if (SUCCEEDED(hr))
@@ -675,8 +697,8 @@ HRESULT dshow_host_end(struct dshow_host *h, DWORD timeout) {
       break;
     }
   }
-  if (h->have_event && h->event_code == EC_ERRORABORT)
-    hr = h->event_param1 ? (HRESULT)h->event_param1 : E_FAIL;
+  if (h->error)
+    hr = h->error;
   pthread_mutex_unlock(&h->mutex);
   return hr;
 }
