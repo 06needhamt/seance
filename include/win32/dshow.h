@@ -89,6 +89,7 @@ typedef int FILTER_STATE;
 #define EC_STREAM_ERROR_STOPPED      0x06
 #define EC_STREAM_ERROR_STILLPLAYING 0x07
 #define EC_ERROR_STILLPLAYING        0x08
+#define EC_ERRORABORTEX              0x45
 #define EC_PALETTE_CHANGED           0x09
 #define EC_VIDEO_SIZE_CHANGED        0x0A
 #define EC_QUALITY_CHANGE            0x0B

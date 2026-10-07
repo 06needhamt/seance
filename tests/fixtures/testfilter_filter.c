@@ -34,7 +34,7 @@ struct filter {
 	LONG key_interval, pframes;
 	double quality;
 	DWORDLONG window;
-	BOOL async, no_eos, require_segment, segment, peer_info, dynamic, dynamic_extra, no_preroll, codec_api_only;
+	BOOL async, no_eos, require_segment, segment, peer_info, dynamic, dynamic_extra, no_preroll, codec_api_only, notify_error;
 	LONG workers;
 	HRESULT async_error;
 	CRITICAL_SECTION transform_lock;
@@ -47,6 +47,7 @@ static const GUID iid_filter={0x56a86895,0x0ad4,0x11ce,{0xb0,0x3a,0,0x20,0xaf,0x
 static const GUID iid_pin={0x56a86891,0x0ad4,0x11ce,{0xb0,0x3a,0,0x20,0xaf,0x0b,0xa7,0x70}};
 static const GUID iid_enum_pins={0x56a86892,0x0ad4,0x11ce,{0xb0,0x3a,0,0x20,0xaf,0x0b,0xa7,0x70}};
 static const GUID iid_mem_input={0x56a8689d,0x0ad4,0x11ce,{0xb0,0x3a,0,0x20,0xaf,0x0b,0xa7,0x70}};
+static const GUID iid_event_sink={0x56a868a2,0x0ad4,0x11ce,{0xb0,0x3a,0,0x20,0xaf,0x0b,0xa7,0x70}};
 static const GUID iid_codec_api={0x901db4c7,0x31ce,0x41a2,{0x85,0xdc,0x8f,0xa0,0xbf,0x41,0xb8,0xda}};
 static const GUID api_gop_size={0x95f31b26,0x95a4,0x41aa,{0x93,0x03,0x24,0x6a,0x7f,0xc6,0xee,0xf1}};
 static const GUID api_quality={0xfcbf57a3,0x7ea5,0x4b0c,{0x96,0x44,0x69,0xb4,0x0c,0x39,0xc3,0x91}};
@@ -268,11 +269,25 @@ static HRESULT transform(struct filter*f,IMediaSample*input)
 		else{for(DWORD i=0;i<raw;i++)dst[i]=f->picture[i];f->valid=TRUE;sample->lpVtbl->SetActualDataLength(sample,raw);sample->lpVtbl->SetSyncPoint(sample,input->lpVtbl->IsSyncPoint(input)==S_OK);}
 	}
 	/*
+	 * TESTFILTER_NOTIFY_ERROR: a frame that can't be decoded is reported to the
+	 * graph as an event (EC_ERRORABORT, the HRESULT as the first parameter) and
+	 * Receive returns S_OK, as filters that report errors asynchronously do.
+	 */
+	BOOL reported=FALSE;
+	if(FAILED(hr)&&f->notify_error&&f->graph){
+		IMediaEventSink*ev=NULL;
+		if(SUCCEEDED(f->graph->lpVtbl->QueryInterface(f->graph,&iid_event_sink,(void**)&ev))&&ev){
+			ev->lpVtbl->Notify(ev,3/*EC_ERRORABORT*/,(LONG_PTR)hr,0);
+			ev->lpVtbl->Release(ev);
+			hr=S_OK;reported=TRUE;
+		}
+	}
+	/*
 	 * TESTFILTER_DYNAMIC: from the second frame on, the decoder switches its
 	 * output to YV12 (the chroma planes swapped), announcing it with the type
 	 * on the first sample that has it, after the receiver accepts it.
 	 */
-	if(SUCCEEDED(hr)&&f->dynamic&&!f->encoder&&f->frame>=1&&ob->biCompression==mmioFOURCC('I','4','2','0')){
+	if(SUCCEEDED(hr)&&!reported&&f->dynamic&&!f->encoder&&f->frame>=1&&ob->biCompression==mmioFOURCC('I','4','2','0')){
 		DWORD luma=(DWORD)ob->biWidth*(DWORD)(ob->biHeight<0?-ob->biHeight:ob->biHeight),chroma=luma/4;
 		for(DWORD i=0;i<chroma;i++){BYTE t=dst[luma+i];dst[luma+i]=dst[luma+chroma+i];dst[luma+chroma+i]=t;}
 		if(f->frame==1){
@@ -305,7 +320,7 @@ static HRESULT transform(struct filter*f,IMediaSample*input)
 			free_type(&mt);
 		}
 	}
-	if(SUCCEEDED(hr)){sample->lpVtbl->SetPreroll(sample,!f->no_preroll&&input->lpVtbl->IsPreroll(input)==S_OK);sample->lpVtbl->SetDiscontinuity(sample,input->lpVtbl->IsDiscontinuity(input)==S_OK);hr=out->peer_mem->lpVtbl->Receive(out->peer_mem,sample);}
+	if(SUCCEEDED(hr)&&!reported){sample->lpVtbl->SetPreroll(sample,!f->no_preroll&&input->lpVtbl->IsPreroll(input)==S_OK);sample->lpVtbl->SetDiscontinuity(sample,input->lpVtbl->IsDiscontinuity(input)==S_OK);hr=out->peer_mem->lpVtbl->Receive(out->peer_mem,sample);}
 	sample->lpVtbl->Release(sample);f->frame++;return hr;
 }
 struct async_sample { struct filter *filter; IMediaSample *sample; HRESULT result; };
@@ -322,5 +337,5 @@ static HRESULT WINAPI filter_vendor(IBaseFilter*p,LPWSTR*out){return E_NOTIMPL;}
 static IBaseFilterVtbl filter_vtbl={filter_qi,filter_addref,filter_release,filter_class,filter_stop,filter_pause,filter_run,filter_state,filter_set_clock,filter_get_clock,filter_enum,filter_find,filter_info,filter_join,filter_vendor};
 
 static BOOL env_on(const char*name){char value[2];return GetEnvironmentVariableA(name,value,sizeof(value))==1&&value[0]=='1';}
-HRESULT testfilter_create(BOOL encoder,REFIID iid,void**out){if(!out)return E_POINTER;*out=NULL;struct filter*f=alloc(sizeof(*f));if(!f)return E_OUTOFMEMORY;f->iface.lpVtbl=&filter_vtbl;f->compression.lpVtbl=&compression_vtbl;f->codec_api.lpVtbl=&codec_api_vtbl;f->codec_api_only=env_on("TESTFILTER_CODECAPI");f->persist.lpVtbl=&persist_vtbl;f->refs=1;f->encoder=encoder;f->quality=0.75;f->async=env_on("TESTFILTER_ASYNC");f->no_eos=env_on("TESTFILTER_NO_EOS");f->require_segment=env_on("TESTFILTER_REQUIRE_SEGMENT");f->peer_info=env_on("TESTFILTER_PEER_INFO");f->dynamic=env_on("TESTFILTER_DYNAMIC");f->dynamic_extra=env_on("TESTFILTER_DYNAMIC_EXTRA");f->no_preroll=env_on("TESTFILTER_NO_PREROLL");InitializeCriticalSection(&f->transform_lock);f->input=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_INPUT};f->output=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_OUTPUT};InterlockedIncrement(&objects);HRESULT hr=filter_qi(&f->iface,iid,out);filter_release(&f->iface);return hr;}
+HRESULT testfilter_create(BOOL encoder,REFIID iid,void**out){if(!out)return E_POINTER;*out=NULL;struct filter*f=alloc(sizeof(*f));if(!f)return E_OUTOFMEMORY;f->iface.lpVtbl=&filter_vtbl;f->compression.lpVtbl=&compression_vtbl;f->codec_api.lpVtbl=&codec_api_vtbl;f->codec_api_only=env_on("TESTFILTER_CODECAPI");f->persist.lpVtbl=&persist_vtbl;f->refs=1;f->encoder=encoder;f->quality=0.75;f->async=env_on("TESTFILTER_ASYNC");f->no_eos=env_on("TESTFILTER_NO_EOS");f->require_segment=env_on("TESTFILTER_REQUIRE_SEGMENT");f->peer_info=env_on("TESTFILTER_PEER_INFO");f->dynamic=env_on("TESTFILTER_DYNAMIC");f->dynamic_extra=env_on("TESTFILTER_DYNAMIC_EXTRA");f->no_preroll=env_on("TESTFILTER_NO_PREROLL");f->notify_error=env_on("TESTFILTER_NOTIFY_ERROR");InitializeCriticalSection(&f->transform_lock);f->input=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_INPUT};f->output=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_OUTPUT};InterlockedIncrement(&objects);HRESULT hr=filter_qi(&f->iface,iid,out);filter_release(&f->iface);return hr;}
 LONG testfilter_objects(void){return objects;}
