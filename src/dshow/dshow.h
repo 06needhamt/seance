@@ -26,6 +26,12 @@ struct dshow_encoder_options {
 
 HRESULT dshow_encoder_configure(IBaseFilter *filter,
 				const struct dshow_encoder_options *options);
+/*
+ * Which of the optional interfaces an encoder or decoder has
+ * (IAMVideoCompression, ICodecAPI, IPersistStream, ISpecifyPropertyPages),
+ * names separated by commas in buf. Returns how many.
+ */
+int dshow_filter_interfaces(IBaseFilter *filter, char *buf, size_t size);
 HRESULT dshow_filter_load_state(IBaseFilter *filter, const void *data,
 				size_t size);
 HRESULT dshow_filter_save_state(IBaseFilter *filter, void **data,

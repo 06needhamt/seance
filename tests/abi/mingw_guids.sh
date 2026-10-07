@@ -24,3 +24,8 @@ for set in "dshow.h dvdmedia.h" "icodecapi.h"; do
 		tr '\n' ' ' | tr ';' '\n' |
 		sed -n 's/^.*[ )]GUID *\(__attribute__((selectany))\)\{0,1\} *\([A-Za-z_][A-Za-z0-9_]*\) *= *{\([^{}]*\), *{\([^{}]*\)} *} *$/ABI_GUID(\2, \3, \4)/p'
 done
+
+# codecapi.h defines its GUIDs as uuid-tagged structs, which INITGUID doesn't
+# turn into values, but each also has a STATIC_ macro holding them.
+printf '#include <windows.h>\n#include <codecapi.h>\n' | "$cc" -std=c11 -E -dD -x c - |
+	sed -n 's/^#define STATIC_\(CODECAPI_[A-Za-z0-9_]*\) *\(0x[0-9a-fA-F]*, *0x[0-9a-fA-F]*, *0x[0-9a-fA-F]*\), *\(0x.*\)$/ABI_GUID(\1, \2, \3)/p'

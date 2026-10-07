@@ -177,6 +177,16 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 			echo "smoke: DirectShow encode with a type change differs" >&2
 			exit 1
 		}
+		# An encoder that has ICodecAPI instead of IAMVideoCompression gets the
+		# same options: every second of the four frames is a keyframe.
+		VFW_ENV_TESTFILTER_CODECAPI=1 $emu "$harness" probe \
+			"$fixtures/testfilter.ax" | grep -q "interfaces: ICodecAPI"
+		VFW_ENV_TESTFILTER_CODECAPI=1 $emu "$harness" encode \
+			"$fixtures/testfilter.ax" "$work/in.y4m" -o "$work/dshow-api.avi" \
+			--keyint 2 2>&1 | grep -q "(2 key)" || {
+			echo "smoke: ICodecAPI key interval was not applied" >&2
+			exit 1
+		}
 		# A type that adds format data the file's stream header lacks can't be
 		# followed, and says so rather than writing a misleading file.
 		if env VFW_ENV_TESTFILTER_DYNAMIC_EXTRA=1 $emu "$harness" encode \

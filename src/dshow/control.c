@@ -4,6 +4,7 @@
  * cmd_encode, means command-line policy never leaks into the COM host.
  */
 #include <limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -20,47 +21,167 @@ static HRESULT persist_stream(IBaseFilter *filter, IPersistStream **out)
 					      (void **)out);
 }
 
+int dshow_filter_interfaces(IBaseFilter *filter, char *buf, size_t size)
+{
+	static const struct {
+		const IID *iid;
+		const char *name;
+	} known[] = {
+		{ &IID_IAMVideoCompression, "IAMVideoCompression" },
+		{ &IID_ICodecAPI, "ICodecAPI" },
+		{ &IID_IPersistStream, "IPersistStream" },
+		{ &IID_ISpecifyPropertyPages, "ISpecifyPropertyPages" },
+	};
+	int found = 0;
+	size_t used = 0;
+
+	if (size)
+		buf[0] = '\0';
+	if (!filter)
+		return 0;
+	for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
+		IUnknown *unknown = NULL;
+
+		if (FAILED(filter->lpVtbl->QueryInterface(filter, known[i].iid,
+							  (void **)&unknown)) || !unknown)
+			continue;
+		unknown->lpVtbl->Release(unknown);
+		if (size > used) {
+			int n = snprintf(buf + used, size - used, "%s%s",
+					 found ? ", " : "", known[i].name);
+			if (n > 0)
+				used += (size_t)n < size - used ? (size_t)n : size - used - 1;
+		}
+		found++;
+	}
+	return found;
+}
+
+/*
+ * One ICodecAPI setting, an unsigned 32-bit value. S_FALSE if the filter
+ * doesn't have the setting (IsSupported says so) or won't let it be changed.
+ */
+static HRESULT codec_api_set(ICodecAPI *api, const GUID *setting, ULONG value)
+{
+	VARIANT v;
+	HRESULT hr = api->lpVtbl->IsSupported(api, setting);
+
+	if (hr != S_OK)
+		return FAILED(hr) ? hr : S_FALSE;
+	if (api->lpVtbl->IsModifiable(api, setting) != S_OK)
+		return S_FALSE;
+	memset(&v, 0, sizeof(v));
+	v.vt = VT_UI4;
+	v.ulVal = value;
+	return api->lpVtbl->SetValue(api, setting, &v);
+}
+
+/*
+ * Applies the options through the interfaces the filter has: IAMVideoCompression
+ * (the DirectShow one) and ICodecAPI (the Media Foundation one carried over).
+ * An option that either takes is applied; one that none takes is an error, as
+ * is a filter with neither.
+ */
 HRESULT dshow_encoder_configure(IBaseFilter *filter,
 				const struct dshow_encoder_options *options)
 {
 	IAMVideoCompression *compression = NULL;
-	HRESULT first = S_OK;
+	ICodecAPI *api = NULL;
+	HRESULT first = S_OK, hr;
+	int have_key = 0, have_quality = 0, have_rate = 0;
 
 	if (!filter || !options)
 		return E_POINTER;
-	HRESULT hr = filter->lpVtbl->QueryInterface(filter,
-						    &IID_IAMVideoCompression,
-						    (void **)&compression);
+	hr = filter->lpVtbl->QueryInterface(filter, &IID_IAMVideoCompression,
+					    (void **)&compression);
 	if (FAILED(hr))
-		return hr;
+		compression = NULL;
+	hr = filter->lpVtbl->QueryInterface(filter, &IID_ICodecAPI, (void **)&api);
+	if (FAILED(hr))
+		api = NULL;
+	if (!compression && !api)
+		return E_NOINTERFACE;
+
+	/* The first failure of an option, kept if nothing else takes it. */
+	HRESULT key_error = S_OK, quality_error = S_OK, rate_error = S_OK;
 
 	if (options->key_interval >= 0) {
 		LONG interval = options->key_interval;
-		hr = compression->lpVtbl->put_KeyFrameRate(compression, interval);
-		if (FAILED(hr) && SUCCEEDED(first))
-			first = hr;
-		/* Most filters expose one of these two equivalent controls. */
-		hr = compression->lpVtbl->put_PFramesPerKeyFrame(compression,
-							 interval ? interval - 1 : 0);
-		if (FAILED(hr) && SUCCEEDED(first))
-			first = hr;
+
+		if (compression) {
+			/* Most filters expose one of these two equivalent controls. */
+			hr = compression->lpVtbl->put_KeyFrameRate(compression, interval);
+			if (SUCCEEDED(hr))
+				have_key = 1;
+			else
+				key_error = hr;
+			hr = compression->lpVtbl->put_PFramesPerKeyFrame(compression,
+						interval ? interval - 1 : 0);
+			if (SUCCEEDED(hr))
+				have_key = 1;
+			else if (SUCCEEDED(key_error))
+				key_error = hr;
+		}
+		if (api) {
+			hr = codec_api_set(api, &CODECAPI_AVEncMPVGOPSize, interval);
+			if (hr == S_OK)
+				have_key = 1;
+			else if (FAILED(hr) && SUCCEEDED(key_error))
+				key_error = hr;
+		}
 	}
 	if (options->quality >= 0.0) {
-		double quality = options->quality;
-		if (quality > 1.0)
-			quality = 1.0;
-		hr = compression->lpVtbl->put_Quality(compression, quality);
-		if (FAILED(hr) && SUCCEEDED(first))
-			first = hr;
+		double quality = options->quality > 1.0 ? 1.0 : options->quality;
+
+		if (compression) {
+			hr = compression->lpVtbl->put_Quality(compression, quality);
+			if (SUCCEEDED(hr))
+				have_quality = 1;
+			else
+				quality_error = hr;
+		}
+		if (api) {
+			/* ICodecAPI's quality is a percentage. */
+			hr = codec_api_set(api, &CODECAPI_AVEncCommonQuality,
+					   (ULONG)(quality * 100.0 + 0.5));
+			if (hr == S_OK)
+				have_quality = 1;
+			else if (FAILED(hr) && SUCCEEDED(quality_error))
+				quality_error = hr;
+		}
 	}
 	if (options->bitrate >= 0) {
-		/* WindowSize is the only standard 64-bit rate/size control here. */
-		hr = compression->lpVtbl->put_WindowSize(compression,
-							(DWORDLONG)options->bitrate);
-		if (FAILED(hr) && SUCCEEDED(first))
-			first = hr;
+		if (compression) {
+			/* WindowSize is the only standard 64-bit rate/size control here. */
+			hr = compression->lpVtbl->put_WindowSize(compression,
+						(DWORDLONG)options->bitrate);
+			if (SUCCEEDED(hr))
+				have_rate = 1;
+			else
+				rate_error = hr;
+		}
+		if (api) {
+			hr = codec_api_set(api, &CODECAPI_AVEncCommonMeanBitRate,
+					   options->bitrate > ULONG_MAX ? ULONG_MAX :
+					   (ULONG)options->bitrate);
+			if (hr == S_OK)
+				have_rate = 1;
+			else if (FAILED(hr) && SUCCEEDED(rate_error))
+				rate_error = hr;
+		}
 	}
-	compression->lpVtbl->Release(compression);
+
+	/* An option nobody took fails with the first reason given, else E_NOTIMPL. */
+	if (options->key_interval >= 0 && !have_key)
+		first = FAILED(key_error) ? key_error : E_NOTIMPL;
+	if (SUCCEEDED(first) && options->quality >= 0.0 && !have_quality)
+		first = FAILED(quality_error) ? quality_error : E_NOTIMPL;
+	if (SUCCEEDED(first) && options->bitrate >= 0 && !have_rate)
+		first = FAILED(rate_error) ? rate_error : E_NOTIMPL;
+	if (compression)
+		compression->lpVtbl->Release(compression);
+	if (api)
+		api->lpVtbl->Release(api);
 	return first;
 }
 

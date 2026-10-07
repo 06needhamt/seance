@@ -11,6 +11,7 @@
 #define VFW_WIN32_DSHOW_H
 
 #include "objbase.h"
+#include "oleauto.h"
 #include "types.h"
 #include "wingdi.h"
 
@@ -846,6 +847,48 @@ struct ICreateDevEnum {
 	const ICreateDevEnumVtbl *lpVtbl;
 };
 
+/*
+ * ICodecAPI (icodecapi.h): an encoder's settings by GUID, the modern
+ * equivalent of IAMVideoCompression. Values travel as VARIANTs.
+ */
+typedef struct ICodecAPI ICodecAPI;
+typedef struct ICodecAPIVtbl {
+	HRESULT (WINAPI *QueryInterface)(ICodecAPI *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(ICodecAPI *This);
+	ULONG (WINAPI *Release)(ICodecAPI *This);
+	HRESULT (WINAPI *IsSupported)(ICodecAPI *This, const GUID *api);
+	HRESULT (WINAPI *IsModifiable)(ICodecAPI *This, const GUID *api);
+	HRESULT (WINAPI *GetParameterRange)(ICodecAPI *This, const GUID *api,
+					    VARIANT *min, VARIANT *max,
+					    VARIANT *step);
+	HRESULT (WINAPI *GetParameterValues)(ICodecAPI *This, const GUID *api,
+					     VARIANT **values, ULONG *count);
+	HRESULT (WINAPI *GetDefaultValue)(ICodecAPI *This, const GUID *api,
+					  VARIANT *value);
+	HRESULT (WINAPI *GetValue)(ICodecAPI *This, const GUID *api,
+				   VARIANT *value);
+	HRESULT (WINAPI *SetValue)(ICodecAPI *This, const GUID *api,
+				   VARIANT *value);
+	HRESULT (WINAPI *RegisterForEvent)(ICodecAPI *This, const GUID *api,
+					   LONG_PTR user_data);
+	HRESULT (WINAPI *UnregisterForEvent)(ICodecAPI *This, const GUID *api);
+	HRESULT (WINAPI *SetAllDefaults)(ICodecAPI *This);
+	HRESULT (WINAPI *SetValueWithNotify)(ICodecAPI *This, const GUID *api,
+					     VARIANT *value, GUID **changed,
+					     ULONG *count);
+	HRESULT (WINAPI *SetAllDefaultsWithNotify)(ICodecAPI *This,
+						   GUID **changed, ULONG *count);
+	HRESULT (WINAPI *GetAllSettings)(ICodecAPI *This, IStream *stream);
+	HRESULT (WINAPI *SetAllSettings)(ICodecAPI *This, IStream *stream);
+	HRESULT (WINAPI *SetAllSettingsWithNotify)(ICodecAPI *This,
+						   IStream *stream,
+						   GUID **changed, ULONG *count);
+} ICodecAPIVtbl;
+struct ICodecAPI {
+	const ICodecAPIVtbl *lpVtbl;
+};
+
 /* IAMVideoCompression: an encoder's keyframe and quality settings. */
 typedef struct IAMVideoCompression IAMVideoCompression;
 typedef struct IAMVideoCompressionVtbl {
@@ -951,6 +994,15 @@ struct ISpecifyPropertyPages {
 	  0xb6, 0x9c, 0x00, 0xaa, 0x00, 0x34, 0x1d, 0x07) \
 	G(IID_ICodecAPI, 0x901db4c7, 0x31ce, 0x41a2, \
 	  0x85, 0xdc, 0x8f, 0xa0, 0xbf, 0x41, 0xb8, 0xda) \
+	/* The ICodecAPI settings seance sets (codecapi.h) */ \
+	G(CODECAPI_AVEncCommonRateControlMode, 0x1c0608e9, 0x370c, 0x4710, \
+	  0x8a, 0x58, 0xcb, 0x61, 0x81, 0xc4, 0x24, 0x23) \
+	G(CODECAPI_AVEncCommonQuality, 0xfcbf57a3, 0x7ea5, 0x4b0c, \
+	  0x96, 0x44, 0x69, 0xb4, 0x0c, 0x39, 0xc3, 0x91) \
+	G(CODECAPI_AVEncCommonMeanBitRate, 0xf7222374, 0x2144, 0x4815, \
+	  0xb5, 0x50, 0xa3, 0x7f, 0x8e, 0x12, 0xee, 0x52) \
+	G(CODECAPI_AVEncMPVGOPSize, 0x95f31b26, 0x95a4, 0x41aa, \
+	  0x93, 0x03, 0x24, 0x6a, 0x7f, 0xc6, 0xee, 0xf1) \
 	/* Classes and categories */ \
 	G(CLSID_FilterMapper, 0xe436ebb2, 0x524f, 0x11ce, \
 	  0x9f, 0x53, 0x00, 0x20, 0xaf, 0x0b, 0xa7, 0x70) \

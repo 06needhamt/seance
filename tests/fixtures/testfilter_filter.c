@@ -20,6 +20,7 @@ struct pin {
 struct filter {
 	IBaseFilter iface;
 	IAMVideoCompression compression;
+	ICodecAPI codec_api;
 	IPersistStream persist;
 	LONG refs;
 	BOOL encoder;
@@ -33,7 +34,7 @@ struct filter {
 	LONG key_interval, pframes;
 	double quality;
 	DWORDLONG window;
-	BOOL async, no_eos, require_segment, segment, peer_info, dynamic, dynamic_extra, no_preroll;
+	BOOL async, no_eos, require_segment, segment, peer_info, dynamic, dynamic_extra, no_preroll, codec_api_only;
 	LONG workers;
 	HRESULT async_error;
 	CRITICAL_SECTION transform_lock;
@@ -46,6 +47,10 @@ static const GUID iid_filter={0x56a86895,0x0ad4,0x11ce,{0xb0,0x3a,0,0x20,0xaf,0x
 static const GUID iid_pin={0x56a86891,0x0ad4,0x11ce,{0xb0,0x3a,0,0x20,0xaf,0x0b,0xa7,0x70}};
 static const GUID iid_enum_pins={0x56a86892,0x0ad4,0x11ce,{0xb0,0x3a,0,0x20,0xaf,0x0b,0xa7,0x70}};
 static const GUID iid_mem_input={0x56a8689d,0x0ad4,0x11ce,{0xb0,0x3a,0,0x20,0xaf,0x0b,0xa7,0x70}};
+static const GUID iid_codec_api={0x901db4c7,0x31ce,0x41a2,{0x85,0xdc,0x8f,0xa0,0xbf,0x41,0xb8,0xda}};
+static const GUID api_gop_size={0x95f31b26,0x95a4,0x41aa,{0x93,0x03,0x24,0x6a,0x7f,0xc6,0xee,0xf1}};
+static const GUID api_quality={0xfcbf57a3,0x7ea5,0x4b0c,{0x96,0x44,0x69,0xb4,0x0c,0x39,0xc3,0x91}};
+static const GUID api_mean_bitrate={0xf7222374,0x2144,0x4815,{0xb5,0x50,0xa3,0x7f,0x8e,0x12,0xee,0x52}};
 static const GUID iid_compression={0xc6e13343,0x30ac,0x11d0,{0xa1,0x8c,0,0xa0,0xc9,0x11,0x89,0x56}};
 static const GUID iid_persist_stream={0x00000109,0x0000,0x0000,{0xc0,0,0,0,0,0,0,0x46}};
 
@@ -87,7 +92,7 @@ static int rle_decode(const BYTE*s,DWORD len,BYTE*d,DWORD n,BOOL delta)
 	return 0;
 }
 
-static HRESULT WINAPI filter_qi(IBaseFilter*p,REFIID iid,void**out){if(!out)return E_POINTER;struct filter*f=(void*)p;if(eq(iid,&iid_unknown)||eq(iid,&iid_filter))*out=p;else if(f->encoder&&eq(iid,&iid_compression))*out=&f->compression;else if(f->encoder&&eq(iid,&iid_persist_stream))*out=&f->persist;else{*out=NULL;return E_NOINTERFACE;}p->lpVtbl->AddRef(p);return S_OK;}
+static HRESULT WINAPI filter_qi(IBaseFilter*p,REFIID iid,void**out){if(!out)return E_POINTER;struct filter*f=(void*)p;if(eq(iid,&iid_unknown)||eq(iid,&iid_filter))*out=p;else if(f->encoder&&!f->codec_api_only&&eq(iid,&iid_compression))*out=&f->compression;else if(f->encoder&&f->codec_api_only&&eq(iid,&iid_codec_api))*out=&f->codec_api;else if(f->encoder&&eq(iid,&iid_persist_stream))*out=&f->persist;else{*out=NULL;return E_NOINTERFACE;}p->lpVtbl->AddRef(p);return S_OK;}
 static ULONG WINAPI filter_addref(IBaseFilter*p){return InterlockedIncrement(&((struct filter*)p)->refs);}
 static ULONG WINAPI filter_release(IBaseFilter*p){struct filter*f=(void*)p;LONG n=InterlockedDecrement(&f->refs);if(!n){release(f->picture);if(f->clock)f->clock->lpVtbl->Release(f->clock);if(f->graph)f->graph->lpVtbl->Release(f->graph);DeleteCriticalSection(&f->transform_lock);release(f);InterlockedDecrement(&objects);}return n;}
 static HRESULT WINAPI filter_class(IBaseFilter*p,CLSID*c){if(!c)return E_POINTER;for(int i=0;i<16;i++)((BYTE*)c)[i]=0;return S_OK;}
@@ -114,6 +119,49 @@ static HRESULT WINAPI compression_info(IAMVideoCompression*p,LPWSTR a,int*b,LPWS
 static HRESULT WINAPI compression_override_key(IAMVideoCompression*p,LONG n){return E_NOTIMPL;}
 static HRESULT WINAPI compression_override_size(IAMVideoCompression*p,LONG n,LONG s){return E_NOTIMPL;}
 static IAMVideoCompressionVtbl compression_vtbl={compression_qi,compression_addref,compression_release,compression_put_key,compression_get_key,compression_put_p,compression_get_p,compression_put_quality,compression_get_quality,compression_put_window,compression_get_window,compression_info,compression_override_key,compression_override_size};
+
+/*
+ * ICodecAPI (TESTFILTER_CODECAPI=1 gives the encoder this in place of
+ * IAMVideoCompression): the GOP size, quality (a percentage) and mean bit
+ * rate, as unsigned 32-bit values.
+ */
+static struct filter *filter_from_api(ICodecAPI*p){return(void*)((BYTE*)p-FIELD_OFFSET(struct filter,codec_api));}
+static HRESULT WINAPI api_qi(ICodecAPI*p,REFIID i,void**o){return filter_qi(&filter_from_api(p)->iface,i,o);}
+static ULONG WINAPI api_addref(ICodecAPI*p){return filter_addref(&filter_from_api(p)->iface);}
+static ULONG WINAPI api_release(ICodecAPI*p){return filter_release(&filter_from_api(p)->iface);}
+static BOOL api_known(const GUID*a){return eq(a,&api_gop_size)||eq(a,&api_quality)||eq(a,&api_mean_bitrate);}
+static HRESULT WINAPI api_supported(ICodecAPI*p,const GUID*a){return a&&api_known(a)?S_OK:S_FALSE;}
+static HRESULT WINAPI api_modifiable(ICodecAPI*p,const GUID*a){return a&&api_known(a)?S_OK:S_FALSE;}
+static HRESULT WINAPI api_get(ICodecAPI*p,const GUID*a,VARIANT*v){
+	struct filter*f=filter_from_api(p);
+	if(!a||!v)return E_POINTER;
+	v->vt=VT_UI4;
+	if(eq(a,&api_gop_size))v->ulVal=(ULONG)f->key_interval;
+	else if(eq(a,&api_quality))v->ulVal=(ULONG)(f->quality*100.0+0.5);
+	else if(eq(a,&api_mean_bitrate))v->ulVal=(ULONG)f->window;
+	else return E_NOTIMPL;
+	return S_OK;
+}
+static HRESULT WINAPI api_set(ICodecAPI*p,const GUID*a,VARIANT*v){
+	struct filter*f=filter_from_api(p);
+	if(!a||!v)return E_POINTER;
+	if(v->vt!=VT_UI4)return E_INVALIDARG;
+	if(eq(a,&api_gop_size))f->key_interval=(LONG)v->ulVal;
+	else if(eq(a,&api_quality)){if(v->ulVal>100)return E_INVALIDARG;f->quality=v->ulVal/100.0;}
+	else if(eq(a,&api_mean_bitrate))f->window=v->ulVal;
+	else return E_NOTIMPL;
+	return S_OK;
+}
+static HRESULT WINAPI api_range(ICodecAPI*p,const GUID*a,VARIANT*x,VARIANT*y,VARIANT*z){return E_NOTIMPL;}
+static HRESULT WINAPI api_values(ICodecAPI*p,const GUID*a,VARIANT**v,ULONG*n){return E_NOTIMPL;}
+static HRESULT WINAPI api_event(ICodecAPI*p,const GUID*a,LONG_PTR d){return E_NOTIMPL;}
+static HRESULT WINAPI api_unevent(ICodecAPI*p,const GUID*a){return E_NOTIMPL;}
+static HRESULT WINAPI api_defaults(ICodecAPI*p){return E_NOTIMPL;}
+static HRESULT WINAPI api_set_notify(ICodecAPI*p,const GUID*a,VARIANT*v,GUID**c,ULONG*n){return E_NOTIMPL;}
+static HRESULT WINAPI api_defaults_notify(ICodecAPI*p,GUID**c,ULONG*n){return E_NOTIMPL;}
+static HRESULT WINAPI api_all(ICodecAPI*p,IStream*s){return E_NOTIMPL;}
+static HRESULT WINAPI api_all_notify(ICodecAPI*p,IStream*s,GUID**c,ULONG*n){return E_NOTIMPL;}
+static ICodecAPIVtbl codec_api_vtbl={api_qi,api_addref,api_release,api_supported,api_modifiable,api_range,api_values,api_get,api_get,api_set,api_event,api_unevent,api_defaults,api_set_notify,api_defaults_notify,api_all,api_all,api_all_notify};
 
 struct saved_state { DWORD magic; LONG key,pframes; double quality; DWORDLONG window; };
 static struct filter *filter_from_persist(IPersistStream*p){return(void*)((BYTE*)p-FIELD_OFFSET(struct filter,persist));}
@@ -274,5 +322,5 @@ static HRESULT WINAPI filter_vendor(IBaseFilter*p,LPWSTR*out){return E_NOTIMPL;}
 static IBaseFilterVtbl filter_vtbl={filter_qi,filter_addref,filter_release,filter_class,filter_stop,filter_pause,filter_run,filter_state,filter_set_clock,filter_get_clock,filter_enum,filter_find,filter_info,filter_join,filter_vendor};
 
 static BOOL env_on(const char*name){char value[2];return GetEnvironmentVariableA(name,value,sizeof(value))==1&&value[0]=='1';}
-HRESULT testfilter_create(BOOL encoder,REFIID iid,void**out){if(!out)return E_POINTER;*out=NULL;struct filter*f=alloc(sizeof(*f));if(!f)return E_OUTOFMEMORY;f->iface.lpVtbl=&filter_vtbl;f->compression.lpVtbl=&compression_vtbl;f->persist.lpVtbl=&persist_vtbl;f->refs=1;f->encoder=encoder;f->quality=0.75;f->async=env_on("TESTFILTER_ASYNC");f->no_eos=env_on("TESTFILTER_NO_EOS");f->require_segment=env_on("TESTFILTER_REQUIRE_SEGMENT");f->peer_info=env_on("TESTFILTER_PEER_INFO");f->dynamic=env_on("TESTFILTER_DYNAMIC");f->dynamic_extra=env_on("TESTFILTER_DYNAMIC_EXTRA");f->no_preroll=env_on("TESTFILTER_NO_PREROLL");InitializeCriticalSection(&f->transform_lock);f->input=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_INPUT};f->output=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_OUTPUT};InterlockedIncrement(&objects);HRESULT hr=filter_qi(&f->iface,iid,out);filter_release(&f->iface);return hr;}
+HRESULT testfilter_create(BOOL encoder,REFIID iid,void**out){if(!out)return E_POINTER;*out=NULL;struct filter*f=alloc(sizeof(*f));if(!f)return E_OUTOFMEMORY;f->iface.lpVtbl=&filter_vtbl;f->compression.lpVtbl=&compression_vtbl;f->codec_api.lpVtbl=&codec_api_vtbl;f->codec_api_only=env_on("TESTFILTER_CODECAPI");f->persist.lpVtbl=&persist_vtbl;f->refs=1;f->encoder=encoder;f->quality=0.75;f->async=env_on("TESTFILTER_ASYNC");f->no_eos=env_on("TESTFILTER_NO_EOS");f->require_segment=env_on("TESTFILTER_REQUIRE_SEGMENT");f->peer_info=env_on("TESTFILTER_PEER_INFO");f->dynamic=env_on("TESTFILTER_DYNAMIC");f->dynamic_extra=env_on("TESTFILTER_DYNAMIC_EXTRA");f->no_preroll=env_on("TESTFILTER_NO_PREROLL");InitializeCriticalSection(&f->transform_lock);f->input=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_INPUT};f->output=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_OUTPUT};InterlockedIncrement(&objects);HRESULT hr=filter_qi(&f->iface,iid,out);filter_release(&f->iface);return hr;}
 LONG testfilter_objects(void){return objects;}
