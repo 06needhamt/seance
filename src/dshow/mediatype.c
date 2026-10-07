@@ -92,6 +92,74 @@ HRESULT dshow_bih_to_mt(const BITMAPINFOHEADER *b, size_t size,
 	return S_OK;
 }
 
+/* The FOURCCs of MPEG-1 and MPEG-2 video elementary streams. */
+static int fourcc_is(DWORD c, const char *const *list)
+{
+	for (; *list; list++)
+		if (c == (DWORD)((*list)[0] | (*list)[1] << 8 | (*list)[2] << 16 |
+				 (DWORD)(*list)[3] << 24))
+			return 1;
+	return 0;
+}
+
+static const char *const mpeg1_codes[] = { "MPEG", "mpeg", "MPG1", "mpg1", "MP1V", "mp1v", NULL };
+static const char *const mpeg2_codes[] = { "MPG2", "mpg2", "MP2V", "mp2v", "M2V1", "m2v1", NULL };
+
+HRESULT dshow_input_variant(const BITMAPINFOHEADER *b, size_t size, DWORD rate,
+			    DWORD scale, unsigned variant, AM_MEDIA_TYPE *mt)
+{
+	if (variant < 2)
+		return dshow_bih_to_mt(b, size, rate, scale, variant, mt);
+	if (variant > 2 || !b || size < sizeof(*b))
+		return S_FALSE;
+	int mpeg1 = fourcc_is(b->biCompression, mpeg1_codes);
+	int mpeg2 = fourcc_is(b->biCompression, mpeg2_codes);
+	if (!mpeg1 && !mpeg2)
+		return S_FALSE;
+	/*
+	 * Decoders take MPEG video as its own subtype with an MPEG1VIDEOINFO or
+	 * MPEG2VIDEOINFO, where a splitter would put the sequence header; the
+	 * stream's own headers are left to the decoder to find.
+	 */
+	REFERENCE_TIME avg = rate ? (REFERENCE_TIME)10000000 * scale / rate : 0;
+	BITMAPINFOHEADER bih = *b;
+	/* The format is the struct up to its trailing sequence header, which is empty. */
+	size_t cb = mpeg2 ? offsetof(MPEG2VIDEOINFO, dwSequenceHeader) :
+			    offsetof(MPEG1VIDEOINFO, bSequenceHeader);
+	size_t room = mpeg2 ? sizeof(MPEG2VIDEOINFO) : sizeof(MPEG1VIDEOINFO);
+	BYTE *pb = ole_taskmem_alloc(room);
+
+	if (!pb)
+		return E_OUTOFMEMORY;
+	memset(pb, 0, room);
+	bih.biSize = sizeof(bih);
+	bih.biSizeImage = 0;
+	memset(mt, 0, sizeof(*mt));
+	mt->majortype = MEDIATYPE_Video;
+	mt->bTemporalCompression = TRUE;
+	mt->lSampleSize = b->biSizeImage;
+	mt->pbFormat = pb;
+	mt->cbFormat = (ULONG)cb;
+	if (mpeg2) {
+		MPEG2VIDEOINFO *v = (void *)pb;
+
+		v->hdr.AvgTimePerFrame = avg;
+		v->hdr.dwPictAspectRatioX = b->biWidth;
+		v->hdr.dwPictAspectRatioY = b->biHeight < 0 ? -b->biHeight : b->biHeight;
+		v->hdr.bmiHeader = bih;
+		mt->subtype = MEDIASUBTYPE_MPEG2_VIDEO;
+		mt->formattype = FORMAT_MPEG2Video;
+	} else {
+		MPEG1VIDEOINFO *v = (void *)pb;
+
+		v->hdr.AvgTimePerFrame = avg;
+		v->hdr.bmiHeader = bih;
+		mt->subtype = MEDIASUBTYPE_MPEG1Video;
+		mt->formattype = FORMAT_MPEGVideo;
+	}
+	return S_OK;
+}
+
 HRESULT dshow_mt_to_bih(const AM_MEDIA_TYPE *mt, BITMAPINFOHEADER **out,
 			 size_t *out_size)
 {

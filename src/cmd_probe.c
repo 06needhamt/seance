@@ -62,11 +62,18 @@ static void probe_dshow_connections(const char *path, const CLSID *clsid,
 	DWORD rate = s->header.dwRate ? s->header.dwRate : 25;
 	DWORD scale = s->header.dwScale ? s->header.dwScale : 1;
 	AM_MEDIA_TYPE input = {0};
-	HRESULT hr = dshow_bih_to_mt(bih, s->format_size, rate, scale, 0, &input);
+	HRESULT hr = S_OK;
 	printf("    outputs accepted for %s:", avi_path);
 	int any = 0;
-	if (SUCCEEDED(hr)) {
-		LONG h = bih->biHeight < 0 ? -bih->biHeight : bih->biHeight;
+	LONG h = bih->biHeight < 0 ? -bih->biHeight : bih->biHeight;
+	/* The first way of naming the input format that the filter takes. */
+	for (unsigned variant = 0; !any; variant++) {
+		dshow_free_media_type(&input);
+		hr = dshow_input_variant(bih, s->format_size, rate, scale, variant, &input);
+		if (hr == S_FALSE)
+			break;
+		if (FAILED(hr))
+			continue;
 		struct vfw_format f;
 		const char *name;
 		for (unsigned i = 0; (name = vfw_std_format(i, bih->biWidth, h, &f)); i++) {
