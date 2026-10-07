@@ -2333,6 +2333,70 @@ WINFN(BOOLEAN) adv_SystemFunction036(PVOID buf, ULONG len)
 	return (!len || buf) && !fill_random(buf, len);
 }
 
+/*
+ * The rest of the CryptoAPI (hashes, keys, provider parameters) is not here:
+ * a hash can't be created ("no such algorithm"), so no hash or key handle
+ * ever exists for the functions that take one, and a provider has no
+ * parameters to read or set. Code that needs them, such as a TLS client
+ * signing with a certificate, finds out on the first call.
+ */
+WINFN(BOOL) adv_CryptCreateHash(HCRYPTPROV prov, UINT alg, ULONG_PTR key,
+				DWORD flags, ULONG_PTR *hash)
+{
+	if (hash)
+		*hash = 0;
+	win_set_error((DWORD)NTE_BAD_ALGID);
+	return FALSE;
+}
+
+WINFN(BOOL) adv_CryptDestroyHash(ULONG_PTR hash)
+{
+	win_set_error(ERROR_INVALID_PARAMETER);
+	return FALSE;
+}
+
+WINFN(BOOL) adv_CryptGetHashParam(ULONG_PTR hash, DWORD param, BYTE *data,
+				  DWORD *len, DWORD flags)
+{
+	win_set_error(ERROR_INVALID_PARAMETER);
+	return FALSE;
+}
+
+WINFN(BOOL) adv_CryptSetHashParam(ULONG_PTR hash, DWORD param, const BYTE *data,
+				  DWORD flags)
+{
+	win_set_error(ERROR_INVALID_PARAMETER);
+	return FALSE;
+}
+
+WINFN(BOOL) adv_CryptSignHashA(ULONG_PTR hash, DWORD key_spec, LPCSTR desc,
+			       DWORD flags, BYTE *sig, DWORD *len)
+{
+	win_set_error(ERROR_INVALID_PARAMETER);
+	return FALSE;
+}
+
+WINFN(BOOL) adv_CryptDecrypt(ULONG_PTR key, ULONG_PTR hash, BOOL final,
+			     DWORD flags, BYTE *data, DWORD *len)
+{
+	win_set_error(ERROR_INVALID_PARAMETER);
+	return FALSE;
+}
+
+WINFN(BOOL) adv_CryptGetProvParam(HCRYPTPROV h, DWORD param, BYTE *data,
+				  DWORD *len, DWORD flags)
+{
+	win_set_error(ERROR_INVALID_PARAMETER);
+	return FALSE;
+}
+
+WINFN(BOOL) adv_CryptSetProvParam(HCRYPTPROV h, DWORD param, const BYTE *data,
+				  DWORD flags)
+{
+	win_set_error(ERROR_INVALID_PARAMETER);
+	return FALSE;
+}
+
 #define E(name) { #name, 0, (void *)adv_##name }
 
 const struct builtin_export adv_security_exports[] = {
@@ -2353,8 +2417,16 @@ const struct builtin_export adv_security_exports[] = {
 	E(CryptAcquireContextA),
 	E(CryptAcquireContextW),
 	E(CryptContextAddRef),
+	E(CryptCreateHash),
+	E(CryptDecrypt),
+	E(CryptDestroyHash),
 	E(CryptGenRandom),
+	E(CryptGetHashParam),
+	E(CryptGetProvParam),
 	E(CryptReleaseContext),
+	E(CryptSetHashParam),
+	E(CryptSetProvParam),
+	E(CryptSignHashA),
 	E(DeleteAce),
 	E(DuplicateToken),
 	E(DuplicateTokenEx),

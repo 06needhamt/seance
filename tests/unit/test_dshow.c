@@ -347,6 +347,64 @@ static void media_types(void)
 	      E_INVALIDARG);
 }
 
+/* The ways a stream's format is offered as an input type. */
+static void input_variants(void)
+{
+	BITMAPINFOHEADER h264 = { .biSize = sizeof(h264), .biWidth = 64, .biHeight = 48,
+		.biPlanes = 1, .biBitCount = 24,
+		.biCompression = mmioFOURCC('H', '2', '6', '4'), .biSizeImage = 5000 };
+	BITMAPINFOHEADER mpg2 = h264, mpg1 = h264;
+	AM_MEDIA_TYPE mt;
+	BITMAPINFOHEADER *back = NULL;
+	size_t size = 0;
+
+	mpg2.biCompression = mmioFOURCC('m', 'p', 'g', '2');
+	mpg1.biCompression = mmioFOURCC('M', 'P', 'G', '1');
+
+	/* VideoInfo, then VideoInfo2; a FOURCC with no MPEG form has no third. */
+	CHECK(dshow_input_variant(&h264, sizeof(h264), 25, 1, 0, &mt) == S_OK);
+	CHECK(!memcmp(&mt.formattype, &FORMAT_VideoInfo, sizeof(GUID)));
+	CHECK(mt.subtype.Data1 == h264.biCompression);
+	dshow_free_media_type(&mt);
+	CHECK(dshow_input_variant(&h264, sizeof(h264), 25, 1, 1, &mt) == S_OK);
+	CHECK(!memcmp(&mt.formattype, &FORMAT_VideoInfo2, sizeof(GUID)));
+	dshow_free_media_type(&mt);
+	CHECK(dshow_input_variant(&h264, sizeof(h264), 25, 1, 2, &mt) == S_FALSE);
+	CHECK(dshow_input_variant(&mpg2, sizeof(mpg2), 25, 1, 3, &mt) == S_FALSE);
+
+	/* MPEG-2 video: its own subtype and an MPEG2VIDEOINFO, no sequence header. */
+	CHECK(dshow_input_variant(&mpg2, sizeof(mpg2), 25, 1, 2, &mt) == S_OK);
+	CHECK(!memcmp(&mt.subtype, &MEDIASUBTYPE_MPEG2_VIDEO, sizeof(GUID)));
+	CHECK(!memcmp(&mt.formattype, &FORMAT_MPEG2Video, sizeof(GUID)));
+	CHECK(mt.cbFormat == offsetof(MPEG2VIDEOINFO, dwSequenceHeader));
+	CHECK(mt.lSampleSize == 5000);
+	CHECK(mt.bTemporalCompression);
+	MPEG2VIDEOINFO *v2 = (void *)mt.pbFormat;
+	CHECK(v2->hdr.AvgTimePerFrame == 400000);
+	CHECK(v2->cbSequenceHeader == 0);
+	CHECK(v2->hdr.bmiHeader.biWidth == 64 && v2->hdr.bmiHeader.biHeight == 48);
+	/* And it reads back as the picture it describes. */
+	CHECK(dshow_mt_to_bih(&mt, &back, &size) == S_OK);
+	CHECK(back->biWidth == 64 && back->biCompression == mpg2.biCompression);
+	free(back);
+	dshow_free_media_type(&mt);
+
+	/* MPEG-1: the same with an MPEG1VIDEOINFO. */
+	CHECK(dshow_input_variant(&mpg1, sizeof(mpg1), 25, 1, 2, &mt) == S_OK);
+	CHECK(!memcmp(&mt.subtype, &MEDIASUBTYPE_MPEG1Video, sizeof(GUID)));
+	CHECK(!memcmp(&mt.formattype, &FORMAT_MPEGVideo, sizeof(GUID)));
+	CHECK(mt.cbFormat == offsetof(MPEG1VIDEOINFO, bSequenceHeader));
+	CHECK(((MPEG1VIDEOINFO *)mt.pbFormat)->hdr.AvgTimePerFrame == 400000);
+	back = NULL;
+	CHECK(dshow_mt_to_bih(&mt, &back, &size) == S_OK);
+	CHECK(back->biHeight == 48);
+	free(back);
+	dshow_free_media_type(&mt);
+
+	CHECK(dshow_input_variant(&mpg2, sizeof(mpg2) - 1, 25, 1, 2, &mt) == S_FALSE ||
+	      dshow_input_variant(&mpg2, sizeof(mpg2) - 1, 25, 1, 2, &mt) == E_INVALIDARG);
+}
+
 static void malformed_media_types(void)
 {
 	BITMAPINFOHEADER b = { .biSize = sizeof(b), .biWidth = 16,
@@ -683,6 +741,7 @@ static void fixture_host(void)
 int main(void)
 {
 	media_types();
+	input_variants();
 	malformed_media_types();
 	allocator();
 	encoder_controls();

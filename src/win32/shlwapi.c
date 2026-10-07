@@ -148,6 +148,166 @@ WINFN(BOOL) sl_PathRemoveFileSpecW(LPWSTR p)
 	return ok;
 }
 
+/*
+ * UrlGetPart: one piece of scheme://user:password@host:port/path?query.
+ * S_FALSE if the URL has none, E_POINTER (with the size needed, counting the
+ * NUL) if the buffer is too small, URL_E_INVALID_SYNTAX if it isn't a URL.
+ */
+#define URL_PART_SCHEME     1
+#define URL_PART_HOSTNAME   2
+#define URL_PART_USERNAME   3
+#define URL_PART_PASSWORD   4
+#define URL_PART_PORT       5
+#define URL_PART_QUERY      6
+#define URL_PARTFLAG_KEEPSCHEME 1
+#define URL_E_INVALID_SYNTAX ((HRESULT)0x80041001)
+
+static HRESULT url_part(const char *url, DWORD part, DWORD flags, char **out)
+{
+	const char *p = url, *rest, *auth_end, *auth, *at, *colon;
+	const char *start = NULL;
+	size_t len = 0, scheme_len;
+
+	*out = NULL;
+	while (*p && *p != ':' && (isalnum((BYTE)*p) || *p == '+' || *p == '-' || *p == '.'))
+		p++;
+	if (*p != ':' || p == url || !isalpha((BYTE)*url))
+		return URL_E_INVALID_SYNTAX;
+	scheme_len = (size_t)(p - url);
+	rest = p + 1;
+	if (part == URL_PART_SCHEME) {
+		start = url;
+		len = scheme_len;
+	} else if (part == URL_PART_QUERY) {
+		const char *q = strchr(rest, '?');
+		const char *hash;
+
+		if (q) {
+			start = q + 1;
+			hash = strchr(start, '#');
+			len = hash ? (size_t)(hash - start) : strlen(start);
+		}
+	} else if (part >= URL_PART_HOSTNAME && part <= URL_PART_PORT) {
+		if (rest[0] == '/' && rest[1] == '/') {
+			auth = rest + 2;
+			auth_end = auth + strcspn(auth, "/?#");
+			at = memchr(auth, '@', (size_t)(auth_end - auth));
+			const char *host = at ? at + 1 : auth;
+
+			if (part == URL_PART_USERNAME || part == URL_PART_PASSWORD) {
+				if (at) {
+					colon = memchr(auth, ':', (size_t)(at - auth));
+					if (part == URL_PART_USERNAME) {
+						start = auth;
+						len = (size_t)((colon ? colon : at) - auth);
+					} else if (colon) {
+						start = colon + 1;
+						len = (size_t)(at - colon - 1);
+					}
+				}
+			} else {
+				const char *host_end = auth_end;
+
+				if (*host == '[') {		/* an IPv6 address */
+					const char *close = memchr(host, ']', (size_t)(auth_end - host));
+
+					host_end = close ? close + 1 : auth_end;
+					colon = host_end < auth_end && *host_end == ':' ? host_end : NULL;
+				} else {
+					colon = memchr(host, ':', (size_t)(auth_end - host));
+					if (colon)
+						host_end = colon;
+				}
+				if (part == URL_PART_HOSTNAME) {
+					start = host;
+					len = (size_t)(host_end - host);
+				} else if (colon) {
+					start = colon + 1;
+					len = (size_t)(auth_end - colon - 1);
+				}
+			}
+		}
+	} else
+		return E_INVALIDARG;
+	if (!len)
+		return S_FALSE;
+	/* With the scheme kept, the scheme and a colon go first. */
+	if ((flags & URL_PARTFLAG_KEEPSCHEME) && part != URL_PART_SCHEME &&
+	    part != URL_PART_QUERY) {
+		*out = malloc(scheme_len + 1 + len + 1);
+		if (!*out)
+			return E_OUTOFMEMORY;
+		memcpy(*out, url, scheme_len + 1);
+		memcpy(*out + scheme_len + 1, start, len);
+		(*out)[scheme_len + 1 + len] = '\0';
+	} else {
+		*out = malloc(len + 1);
+		if (!*out)
+			return E_OUTOFMEMORY;
+		memcpy(*out, start, len);
+		(*out)[len] = '\0';
+	}
+	return S_OK;
+}
+
+WINFN(HRESULT) sl_UrlGetPartA(LPCSTR url, LPSTR buf, LPDWORD size, DWORD part,
+			      DWORD flags)
+{
+	char *piece;
+	HRESULT hr;
+
+	if (!url || !buf || !size || !*size)
+		return E_INVALIDARG;
+	hr = url_part(url, part, flags, &piece);
+	if (hr == S_OK) {
+		DWORD n = (DWORD)strlen(piece);
+
+		if (n >= *size) {
+			*size = n + 1;
+			hr = E_POINTER;
+		} else {
+			memcpy(buf, piece, n + 1);
+			*size = n;
+		}
+	} else if (hr == S_FALSE) {
+		buf[0] = '\0';
+		*size = 0;
+	}
+	free(piece);
+	return hr;
+}
+
+WINFN(HRESULT) sl_UrlGetPartW(LPCWSTR url, LPWSTR buf, LPDWORD size, DWORD part,
+			      DWORD flags)
+{
+	char *u = url ? utf16_to_utf8_dup(url) : NULL;
+	char *piece = NULL;
+	HRESULT hr;
+
+	if (!u || !buf || !size || !*size) {
+		free(u);
+		return E_INVALIDARG;
+	}
+	hr = url_part(u, part, flags, &piece);
+	if (hr == S_OK) {
+		int need = cp_to_utf16(CP_UTF8, piece, -1, NULL, 0, 0);
+
+		if (need > 0 && (DWORD)need > *size) {
+			*size = (DWORD)need;
+			hr = E_POINTER;
+		} else {
+			cp_to_utf16(CP_UTF8, piece, -1, buf, (int)*size, 0);
+			*size = (DWORD)need - 1;
+		}
+	} else if (hr == S_FALSE) {
+		buf[0] = 0;
+		*size = 0;
+	}
+	free(piece);
+	free(u);
+	return hr;
+}
+
 WINFN(HRESULT) sl_DllGetVersion(DLLVERSIONINFO *v)
 { if(!v || v->cbSize<sizeof(*v)) return E_INVALIDARG; v->dwMajorVersion=6; v->dwMinorVersion=0; v->dwBuildNumber=2900; v->dwPlatformID=2; return S_OK; }
 
@@ -166,7 +326,7 @@ static const struct builtin_export exports[] = {
 	E(StrCatBuffW), E(StrChrA), E(StrChrIA), E(StrChrIW), E(StrChrW), E(StrCmpNA),
 	E(StrCmpNIA), E(StrCmpNIW), E(StrCmpNW), E(StrCpyNA), E(StrCpyNW), E(StrStrA),
 	E(StrStrIA), E(StrStrIW), E(StrStrW), E(StrToIntA), E(StrToIntExA),
-	E(StrToIntExW), E(StrToIntW), BUILTIN_END
+	E(StrToIntExW), E(StrToIntW), E(UrlGetPartA), E(UrlGetPartW), BUILTIN_END
 };
 static const struct builtin_export *const tables[] = { exports, NULL };
 const struct builtin_dll builtin_shlwapi = { "shlwapi.dll", NULL, tables, 0 };

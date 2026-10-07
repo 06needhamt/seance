@@ -29,4 +29,12 @@ size_t wstrlen(const WCHAR *s);
 struct module;
 struct module *win_caller_module(const void *return_address);
 
+/*
+ * Memory for the guest's malloc, operator new and HeapAlloc. Zeroed unless
+ * VFW_ZERO_MEMORY=0: memory fresh from a Windows heap usually is, and code
+ * only ever run on one can depend on it. The setting is read once.
+ */
+int win_zero_memory(void);
+void *win_alloc(size_t n, size_t size);
+
 #endif /* VFW_WIN32_INTERNAL_H */

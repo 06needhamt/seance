@@ -52,6 +52,32 @@ WINFN(HWND) user_ChildWindowFromPoint(HWND parent, POINT point)
 	return user_is_window(parent) ? parent : NULL;
 }
 
+/*
+ * Menus are only names: nothing is shown, so a new one is a handle that
+ * items can be inserted into and that can be destroyed.
+ */
+static ULONG_PTR next_menu = 0x00100001;
+
+WINFN(HMENU) user_CreateMenu(void)
+{
+	return (HMENU)(next_menu += 4);
+}
+
+WINFN(HMENU) user_CreatePopupMenu(void)
+{
+	return user_CreateMenu();
+}
+
+WINFN(BOOL) user_InsertMenuItemW(HMENU menu, UINT item, BOOL by_position,
+				 const void *info)
+{
+	if (!menu || !info) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	return TRUE;
+}
+
 WINFN(BOOL) user_DestroyMenu(HMENU menu)
 {
 	return menu != NULL;
@@ -301,6 +327,8 @@ const struct builtin_export u32_legacy_exports[] = {
 	E(CheckMenuItem),
 	E(CheckRadioButton),
 	E(ChildWindowFromPoint),
+	E(CreateMenu),
+	E(CreatePopupMenu),
 	E(DestroyMenu),
 	E(DrawTextA),
 	E(DrawTextExA),
@@ -323,6 +351,7 @@ const struct builtin_export u32_legacy_exports[] = {
 	E(GetWindowPlacement),
 	E(GetWindowWord),
 	E(GrayStringA),
+	E(InsertMenuItemW),
 	E(IsDialogMessageA),
 	E(MapDialogRect),
 	E(MapWindowPoints),

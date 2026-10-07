@@ -10,16 +10,22 @@
  * nothing from CR-LF conversion. There is no table tying a descriptor to
  * a Win32 handle, so _get_osfhandle fails.
  */
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <fnmatch.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include "runtime/builtin.h"
 #include "win32/codepage.h"
+#include "win32/handle.h"
 #include "win32/internal.h"
 #include "win32/k32.h"
 #include "win32/path.h"
@@ -221,6 +227,262 @@ CRTFN(int) crt__waccess(const WCHAR *name, int mode)
 	return r;
 }
 
+/* The C runtime's find and path functions follow. */
+
+/* _findfirst and friends: the directory is read lazily, name by name. */
+
+struct crt_find {
+	DIR *dir;
+	char *dirpath;
+	char *mask;
+};
+
+/* The layout of _finddata_t and _wfinddata_t: a common head, then the name. */
+struct finddata_head {
+	unsigned attrib;
+	int32_t time_create, time_access, time_write;
+	uint32_t size;
+};
+
+struct finddata32 {
+	struct finddata_head h;
+	char name[260];
+};
+
+struct wfinddata32 {
+	struct finddata_head h;
+	WCHAR name[260];
+};
+
+#define CRT_A_RDONLY 0x01
+#define CRT_A_SUBDIR 0x10
+#define CRT_A_ARCH   0x20
+
+/* Windows wildcards: "*.*" matches everything, even names without a dot. */
+static int find_match(const char *mask, const char *name)
+{
+	if (!strcmp(mask, "*.*") || !strcmp(mask, "*"))
+		return 1;
+	return !fnmatch(mask, name, FNM_CASEFOLD | FNM_PERIOD);
+}
+
+/* The next entry matching, as its name and attributes; 0, or -1 at the end. */
+static int find_step(struct crt_find *f, char *name, size_t size,
+		     struct finddata_head *h)
+{
+	struct dirent *e;
+
+	while ((e = readdir(f->dir))) {
+		char full[PATH_MAX];
+		struct stat st;
+
+		if (!find_match(f->mask, e->d_name))
+			continue;
+		snprintf(full, sizeof(full), "%s/%s", f->dirpath, e->d_name);
+		snprintf(name, size, "%s", e->d_name);
+		h->attrib = CRT_A_ARCH;
+		h->time_create = h->time_access = h->time_write = -1;
+		h->size = 0;
+		if (!stat(full, &st)) {
+			h->attrib = S_ISDIR(st.st_mode) ? CRT_A_SUBDIR : CRT_A_ARCH;
+			if (!(st.st_mode & 0222))
+				h->attrib |= CRT_A_RDONLY;
+			h->time_create = (int32_t)st.st_ctime;
+			h->time_access = (int32_t)st.st_atime;
+			h->time_write = (int32_t)st.st_mtime;
+			h->size = S_ISDIR(st.st_mode) ? 0 : (uint32_t)st.st_size;
+		}
+		return 0;
+	}
+	return -1;
+}
+
+/* Opens the directory part of a pattern (UTF-8); NULL with errno set. */
+static struct crt_find *find_open(const char *pattern)
+{
+	struct crt_find *f = calloc(1, sizeof(*f));
+	char *copy = pattern ? strdup(pattern) : NULL;
+
+	if (!f || !copy) {
+		free(f);
+		free(copy);
+		errno = pattern ? ENOMEM : EINVAL;
+		return NULL;
+	}
+	char *sep = strrchr(copy, '\\');
+	char *slash = strrchr(copy, '/');
+	if (slash > sep)
+		sep = slash;
+	const char *mask = sep ? sep + 1 : copy;
+	if (sep)
+		*sep = '\0';
+	f->mask = strdup(*mask ? mask : "*");
+	f->dirpath = path_to_unix(sep ? (*copy ? copy : "\\") : ".");
+	free(copy);
+	if (!f->mask || !f->dirpath || !(f->dir = opendir(f->dirpath))) {
+		if (!errno)
+			errno = ENOENT;
+		if (f->dir)
+			closedir(f->dir);
+		free(f->mask);
+		free(f->dirpath);
+		free(f);
+		return NULL;
+	}
+	return f;
+}
+
+static void find_free(struct crt_find *f)
+{
+	closedir(f->dir);
+	free(f->mask);
+	free(f->dirpath);
+	free(f);
+}
+
+CRTFN(intptr_t) crt__findfirst(const char *pattern, struct finddata32 *d)
+{
+	struct crt_find *f = find_open(pattern);
+
+	if (!f)
+		return -1;
+	if (find_step(f, d->name, sizeof(d->name), &d->h)) {
+		find_free(f);
+		errno = ENOENT;
+		return -1;
+	}
+	return (intptr_t)f;
+}
+
+CRTFN(int) crt__findnext(intptr_t handle, struct finddata32 *d)
+{
+	struct crt_find *f = (struct crt_find *)handle;
+
+	if (!f || find_step(f, d->name, sizeof(d->name), &d->h)) {
+		errno = ENOENT;
+		return -1;
+	}
+	return 0;
+}
+
+CRTFN(intptr_t) crt__wfindfirst(const WCHAR *pattern, struct wfinddata32 *d)
+{
+	char *u = pattern ? utf16_to_utf8_dup(pattern) : NULL;
+	struct crt_find *f = find_open(u);
+	char name[1024];
+
+	free(u);
+	if (!f)
+		return -1;
+	if (find_step(f, name, sizeof(name), &d->h)) {
+		find_free(f);
+		errno = ENOENT;
+		return -1;
+	}
+	cp_to_utf16(CP_UTF8, name, -1, d->name, 260, 0);
+	d->name[259] = 0;
+	return (intptr_t)f;
+}
+
+CRTFN(int) crt__wfindnext(intptr_t handle, struct wfinddata32 *d)
+{
+	struct crt_find *f = (struct crt_find *)handle;
+	char name[1024];
+
+	if (!f || find_step(f, name, sizeof(name), &d->h)) {
+		errno = ENOENT;
+		return -1;
+	}
+	cp_to_utf16(CP_UTF8, name, -1, d->name, 260, 0);
+	d->name[259] = 0;
+	return 0;
+}
+
+CRTFN(int) crt__findclose(intptr_t handle)
+{
+	if (!handle || handle == -1) {
+		errno = EINVAL;
+		return -1;
+	}
+	find_free((struct crt_find *)handle);
+	return 0;
+}
+
+/* The current directory, as a Windows path. */
+CRTFN(char *) crt__getcwd(char *buf, int size)
+{
+	char *cwd = path_getcwd();
+	size_t len;
+
+	if (!cwd) {
+		errno = ENOMEM;
+		return NULL;
+	}
+	len = strlen(cwd);
+	if (!buf) {
+		size_t room = size > 0 ? (size_t)size : len + 1;
+
+		if (room < len + 1) {
+			free(cwd);
+			errno = ERANGE;
+			return NULL;
+		}
+		buf = malloc(room);
+		if (!buf) {
+			free(cwd);
+			errno = ENOMEM;
+			return NULL;
+		}
+		size = (int)room;
+	} else if (size <= 0 || (size_t)size < len + 1) {
+		free(cwd);
+		errno = size <= 0 ? EINVAL : ERANGE;
+		return NULL;
+	}
+	memcpy(buf, cwd, len + 1);
+	free(cwd);
+	return buf;
+}
+
+/*
+ * A descriptor for a Win32 file handle. The descriptor takes the handle over,
+ * as the real call does: it is a new descriptor onto the same file, and the
+ * handle itself is closed, so closing the descriptor releases the file and
+ * the handle is no longer usable. (The standard handles are not closed: they
+ * belong to the process, not to the caller.)
+ */
+CRTFN(int) crt__open_osfhandle(intptr_t handle, int flags)
+{
+	int fd = file_handle_fd((HANDLE)handle);
+	int nfd;
+
+	if (fd < 0) {
+		errno = EBADF;
+		return -1;
+	}
+	nfd = dup(fd);
+	if (nfd >= 0 && fd > 2)
+		handle_close((HANDLE)handle);
+	return nfd;
+}
+
+/* The stdio file limit is only a number here. */
+static int max_stdio = 512;
+
+CRTFN(int) crt__getmaxstdio(void)
+{
+	return max_stdio;
+}
+
+CRTFN(int) crt__setmaxstdio(int n)
+{
+	if (n < 32 || n > 2048) {
+		errno = EINVAL;
+		return -1;
+	}
+	return max_stdio = n;
+}
+
 /*
  * Threads. The C runtime's own entry points differ from CreateThread in
  * the type of the start routine's result, which is the same register, and
@@ -251,5 +513,7 @@ const struct builtin_export crt_lowio_exports[] = {
 	E(_isatty), E(_lseeki64), E(_setmode), E(_get_osfhandle),
 	E(_unlink), E(_wunlink), E(_mkdir), E(_wmkdir), E(_rmdir), E(_wrmdir),
 	E(_waccess), E(_beginthreadex), E(_endthreadex),
+	E(_findfirst), E(_findnext), E(_findclose), E(_wfindfirst), E(_wfindnext),
+	E(_getcwd), E(_open_osfhandle), E(_getmaxstdio), E(_setmaxstdio),
 	BUILTIN_END
 };

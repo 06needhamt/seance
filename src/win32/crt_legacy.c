@@ -14,6 +14,8 @@
 #include <unistd.h>
 
 #include "runtime/builtin.h"
+#include "win32/codepage.h"
+#include "win32/k32.h"
 #include "win32/path.h"
 
 #define CRTFN(ret) static ret STUB_CDECL
@@ -103,18 +105,72 @@ CRTFN(long long) crt__filelengthi64(int fd)
 {
 	struct stat st; return fstat(fd, &st) ? -1 : (long long)st.st_size;
 }
-CRTFN(int) crt__fstat(int fd, void *out)
+/*
+ * MSVCRT's struct _stat (the 32-bit one, which _stat, _wstat and _fstat fill):
+ * the device, a 16-bit inode, mode and link count and owner ids, then the
+ * size and the times as 32-bit values. The mode's type bits are the Unix
+ * ones; the permission bits are the owner's, copied to group and others.
+ */
+struct crt_stat32 {
+	uint32_t dev;
+	uint16_t ino, mode;
+	int16_t nlink, uid, gid;
+	uint32_t rdev;
+	int32_t size, atime, mtime, ctime;
+};
+
+static void stat_fill(const struct stat *st, struct crt_stat32 *w)
 {
-	/* The beginning of MSVCRT's _stat structure is compatible for the
-	 * fields callers normally inspect: device, inode, mode and links. */
+	unsigned owner = st->st_mode & 0700;
+
+	memset(w, 0, sizeof(*w));
+	w->dev = (uint32_t)st->st_dev;
+	w->ino = (uint16_t)st->st_ino;
+	w->mode = (uint16_t)((st->st_mode & 0170000) | owner | owner >> 3 | owner >> 6);
+	w->nlink = (int16_t)st->st_nlink;
+	w->rdev = (uint32_t)st->st_rdev;
+	w->size = (int32_t)st->st_size;
+	w->atime = (int32_t)st->st_atime;
+	w->mtime = (int32_t)st->st_mtime;
+	w->ctime = (int32_t)st->st_ctime;
+}
+
+CRTFN(int) crt__fstat(int fd, struct crt_stat32 *out)
+{
 	struct stat st;
-	if (!out || fstat(fd, &st)) return -1;
-	struct win_stat { uint32_t dev, ino; uint16_t mode, nlink, uid, gid;
-		uint32_t rdev; int32_t size, atime, mtime, ctime; } *w = out;
-	*w = (struct win_stat){ st.st_dev, st.st_ino, st.st_mode, st.st_nlink,
-		st.st_uid, st.st_gid, st.st_rdev, st.st_size,
-		st.st_atime, st.st_mtime, st.st_ctime };
+
+	if (!out || fstat(fd, &st)) {
+		if (!out)
+			errno = EINVAL;
+		return -1;
+	}
+	stat_fill(&st, out);
 	return 0;
+}
+
+CRTFN(int) crt__stat(const char *name, struct crt_stat32 *out)
+{
+	char *path = name ? path_to_unix(name) : NULL;
+	struct stat st;
+	int r = -1;
+
+	if (!out || !path)
+		errno = !out ? EINVAL : ENOENT;
+	else if (!stat(path, &st)) {
+		stat_fill(&st, out);
+		r = 0;
+	}
+	free(path);
+	return r;
+}
+
+CRTFN(int) crt__wstat(const WCHAR *name, struct crt_stat32 *out)
+{
+	char *u = name ? utf16_to_utf8_dup(name) : NULL;
+	int r = crt__stat(u, out);
+
+	free(u);
+	return r;
 }
 CRTFN(int) crt__isctype(int c, int mask)
 {
@@ -174,11 +230,174 @@ CRTFN(void *) crt_ostream_endl(void *self)
 	fputc('\n', stdout); fflush(stdout); return self;
 }
 
+/* The wide forms of a few path and environment calls, over the UTF-8 ones. */
+
+CRTFN(WCHAR *) crt__wfullpath(WCHAR *abs, const WCHAR *rel, size_t max)
+{
+	char *u = rel ? utf16_to_utf8_dup(rel) : strdup(".");
+	char *full = u ? k32_full_path(u) : NULL;
+	int need;
+
+	free(u);
+	if (!full) {
+		errno = ENOMEM;
+		return NULL;
+	}
+	need = cp_to_utf16(CP_UTF8, full, -1, NULL, 0, 0);
+	if (!abs) {
+		if (!max || max < (size_t)need)
+			max = (size_t)need;
+		abs = malloc(max * sizeof(WCHAR));
+		if (!abs) {
+			free(full);
+			errno = ENOMEM;
+			return NULL;
+		}
+	} else if (max < (size_t)need) {
+		free(full);
+		errno = ERANGE;
+		return NULL;
+	}
+	cp_to_utf16(CP_UTF8, full, -1, abs, (int)max, 0);
+	free(full);
+	return abs;
+}
+
+/* The value, as UTF-16 in a buffer that the next call replaces. */
+CRTFN(WCHAR *) crt__wgetenv(const WCHAR *name)
+{
+	static WCHAR value[1024];
+	char *u = name ? utf16_to_utf8_dup(name) : NULL;
+	const char *v = u ? getenv(u) : NULL;
+
+	free(u);
+	if (!v)
+		return NULL;
+	cp_to_utf16(CP_UTF8, v, -1, value, sizeof(value) / sizeof(value[0]), 0);
+	value[sizeof(value) / sizeof(value[0]) - 1] = 0;
+	return value;
+}
+
+static size_t wcslen16(const WCHAR *s)
+{
+	size_t n = 0;
+
+	while (s[n])
+		n++;
+	return n;
+}
+
+/* To the ANSI code page. With no destination, the length needed. */
+CRTFN(size_t) crt_wcstombs(char *dst, const WCHAR *src, size_t n)
+{
+	int len;
+
+	if (!src) {
+		errno = EINVAL;
+		return (size_t)-1;
+	}
+	if (!dst) {
+		len = cp_from_utf16(CP_ACP, src, -1, NULL, 0, '?', NULL);
+		return len > 0 ? (size_t)len - 1 : (size_t)-1;
+	}
+	if (!n)
+		return 0;
+	len = cp_from_utf16(CP_ACP, src, -1, dst, (int)n, '?', NULL);
+	if (len <= 0) {
+		/* Too small for all of it: what fits, with no terminator. */
+		len = cp_from_utf16(CP_ACP, src, (int)wcslen16(src), dst, (int)n, '?', NULL);
+		return len > 0 ? (size_t)len : n;
+	}
+	return (size_t)len - 1;
+}
+
+CRTFN(size_t) crt_mbstowcs(WCHAR *dst, const char *src, size_t n)
+{
+	int len;
+
+	if (!src) {
+		errno = EINVAL;
+		return (size_t)-1;
+	}
+	if (!dst) {
+		len = cp_to_utf16(CP_ACP, src, -1, NULL, 0, 0);
+		return len > 0 ? (size_t)len - 1 : (size_t)-1;
+	}
+	if (!n)
+		return 0;
+	len = cp_to_utf16(CP_ACP, src, -1, dst, (int)n, 0);
+	if (len <= 0) {
+		len = cp_to_utf16(CP_ACP, src, (int)strlen(src), dst, (int)n, 0);
+		return len > 0 ? (size_t)len : n;
+	}
+	return (size_t)len - 1;
+}
+
+/*
+ * signal and raise, in software: the process takes no real signals, but
+ * code that raises one (an abort, a failed assertion) gets the handler it
+ * installed, or MSVCRT's default of ending the process with status 3.
+ */
+
+typedef void (*crt_sighandler)(int);
+
+#define CRT_SIG_DFL ((crt_sighandler)0)
+#define CRT_SIG_IGN ((crt_sighandler)1)
+#define CRT_SIG_ERR ((crt_sighandler)-1)
+
+/* SIGINT, SIGILL, SIGFPE, SIGSEGV, SIGTERM, SIGBREAK, SIGABRT. */
+static const int crt_signals[] = { 2, 4, 8, 11, 15, 21, 22 };
+static crt_sighandler crt_handlers[sizeof(crt_signals) / sizeof(crt_signals[0])];
+
+static int signal_index(int sig)
+{
+	for (size_t i = 0; i < sizeof(crt_signals) / sizeof(crt_signals[0]); i++)
+		if (crt_signals[i] == sig)
+			return (int)i;
+	return -1;
+}
+
+CRTFN(crt_sighandler) crt_signal(int sig, crt_sighandler handler)
+{
+	int i = signal_index(sig);
+	crt_sighandler old;
+
+	if (i < 0 || handler == CRT_SIG_ERR) {
+		errno = EINVAL;
+		return CRT_SIG_ERR;
+	}
+	old = crt_handlers[i];
+	crt_handlers[i] = handler;
+	return old;
+}
+
+CRTFN(int) crt_raise(int sig)
+{
+	int i = signal_index(sig);
+	crt_sighandler handler;
+
+	if (i < 0) {
+		errno = EINVAL;
+		return -1;
+	}
+	handler = crt_handlers[i];
+	if (handler == CRT_SIG_IGN)
+		return 0;
+	if (handler == CRT_SIG_DFL) {
+		fflush(NULL);
+		_exit(3);
+	}
+	crt_handlers[i] = CRT_SIG_DFL;	/* a handler is used once */
+	handler(sig);
+	return 0;
+}
+
 #define E(n) { #n, 0, (void *)crt_##n }
 #define M(n, f) { n, 0, (void *)(f) }
 const struct builtin_export crt_legacy_exports[] = {
 	E(_EH_prolog), E(_access), E(_adjust_fdiv), E(_assert), E(_errno), E(_filelengthi64),
-	E(_fstat), E(_isctype), E(_lseek), E(_read), E(_write),
+	E(_fstat), E(_stat), E(_wstat), E(_isctype), E(_lseek), E(_read), E(_write),
+	E(_wfullpath), E(_wgetenv), E(wcstombs), E(mbstowcs), E(signal), E(raise),
 	E(_tzset), E(__p__daylight), E(__p__dstbias), E(__p__timezone), E(gmtime),
 	E(clock), E(exit), E(fscanf), E(getenv), E(localeconv), E(setlocale),
 	E(localtime), E(sscanf), E(strftime), E(time),

@@ -88,13 +88,52 @@ WINFN(BOOLEAN) k32_TryAcquireSRWLockExclusive(PSRWLOCK l) { return srw_try(l, 1)
 WINFN(BOOLEAN) k32_TryAcquireSRWLockShared(PSRWLOCK l) { return srw_try(l, 0); }
 
 /*
- * Condition variables: the low half of the word counts the threads
- * waiting, the high half the wake-ups handed out and not yet taken, so a
- * wake-up reaches only a thread that was already waiting.
+ * Condition variables: the word holds the first of a circular list of the
+ * threads waiting, each on its own stack, in the order they arrived. A wake
+ * takes threads off the front, so it reaches only those already waiting: a
+ * thread that starts waiting after a wake-up can't take it from the thread
+ * it was for, which matters to code that signals a worker and then waits
+ * on the same variable itself.
  */
 
-#define CV_WAITING(w) ((w) & 0xffffu)
-#define CV_SIGNALS(w) ((w) >> 16)
+struct cv_waiter {
+	struct cv_waiter *next, *prev;
+	int signaled;
+};
+
+static struct cv_waiter *cv_first(uint32_t *w)
+{
+	return (struct cv_waiter *)(uintptr_t)*w;
+}
+
+/* With the wait lock held. */
+static void cv_enqueue(uint32_t *w, struct cv_waiter *n)
+{
+	struct cv_waiter *first = cv_first(w);
+
+	if (!first) {
+		n->next = n->prev = n;
+		*w = (uint32_t)(uintptr_t)n;
+		return;
+	}
+	n->prev = first->prev;
+	n->next = first;
+	first->prev->next = n;
+	first->prev = n;
+}
+
+static void cv_remove(uint32_t *w, struct cv_waiter *n)
+{
+	if (n->next == n) {
+		*w = 0;
+	} else {
+		n->prev->next = n->next;
+		n->next->prev = n->prev;
+		if (cv_first(w) == n)
+			*w = (uint32_t)(uintptr_t)n->next;
+	}
+	n->next = n->prev = NULL;
+}
 
 WINFN(void) k32_InitializeConditionVariable(PCONDITION_VARIABLE cv)
 {
@@ -114,27 +153,21 @@ struct cv_lock {
 static BOOL cv_sleep(PCONDITION_VARIABLE cv, DWORD ms, const struct cv_lock *l)
 {
 	uint32_t *w = word(&cv->Ptr);
+	struct cv_waiter me = { NULL, NULL, 0 };
 	struct timespec deadline;
-	int expired = 0;
 	BOOL woken = TRUE;
 
 	if (ms != INFINITE)
 		wait_deadline(ms, &deadline);
 	wait_lock();
-	*w += 1;
+	cv_enqueue(w, &me);
 	l->release(l->ctx);
-	for (;;) {
-		if (CV_SIGNALS(*w)) {
-			*w -= 0x10000u + 1;
-			break;
-		}
-		if (expired) {
-			*w -= 1;
+	while (!me.signaled) {
+		if (wait_block(ms == INFINITE ? NULL : &deadline) && !me.signaled) {
+			cv_remove(w, &me);
 			woken = FALSE;
 			break;
 		}
-		if (wait_block(ms == INFINITE ? NULL : &deadline))
-			expired = 1;
 	}
 	wait_unlock();
 	l->acquire(l->ctx);
@@ -190,10 +223,12 @@ WINFN(BOOL) k32_SleepConditionVariableCS(PCONDITION_VARIABLE cv,
 WINFN(void) k32_WakeConditionVariable(PCONDITION_VARIABLE cv)
 {
 	uint32_t *w = word(&cv->Ptr);
+	struct cv_waiter *first;
 
 	wait_lock();
-	if (CV_SIGNALS(*w) < CV_WAITING(*w)) {
-		*w += 0x10000u;
+	if ((first = cv_first(w))) {
+		cv_remove(w, first);
+		first->signaled = 1;
 		wait_broadcast();
 	}
 	wait_unlock();
@@ -202,12 +237,14 @@ WINFN(void) k32_WakeConditionVariable(PCONDITION_VARIABLE cv)
 WINFN(void) k32_WakeAllConditionVariable(PCONDITION_VARIABLE cv)
 {
 	uint32_t *w = word(&cv->Ptr);
+	struct cv_waiter *first;
 
 	wait_lock();
-	if (CV_SIGNALS(*w) < CV_WAITING(*w)) {
-		*w = (CV_WAITING(*w) << 16) | CV_WAITING(*w);
-		wait_broadcast();
+	while ((first = cv_first(w))) {
+		cv_remove(w, first);
+		first->signaled = 1;
 	}
+	wait_broadcast();
 	wait_unlock();
 }
 

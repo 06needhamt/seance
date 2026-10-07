@@ -108,6 +108,21 @@ CRTFN(crt_FILE *) crt_fopen(const char *path, const char *mode)
 	return file_new(fd, writing);
 }
 
+CRTFN(crt_FILE *) crt__wfopen(const WCHAR *path, const WCHAR *mode)
+{
+	char *p = path ? utf16_to_utf8_dup(path) : NULL;
+	char *m = mode ? utf16_to_utf8_dup(mode) : NULL;
+	crt_FILE *f = NULL;
+
+	if (p && m)
+		f = crt_fopen(p, m);
+	else
+		errno = EINVAL;
+	free(p);
+	free(m);
+	return f;
+}
+
 CRTFN(int) crt_fclose(crt_FILE *f)
 {
 	if (!f || f == &crt_iob[0] || f == &crt_iob[1] || f == &crt_iob[2])
@@ -415,7 +430,7 @@ const struct builtin_export crt_stdio_exports[] = {
 	{ "_pctype", 0, (void *)&pctype_ptr },
 	{ "__mb_cur_max", 0, &mb_cur_max },
 	{ "__lc_codepage", 0, &lc_codepage },
-	E(fopen), E(fclose), E(fread), E(fwrite), E(fputc), E(fgetc),
+	E(fopen), E(_wfopen), E(fclose), E(fread), E(fwrite), E(fputc), E(fgetc),
 	E(_fdopen), E(_filbuf), E(_flsbuf), E(ungetc), E(fgetpos), E(fsetpos),
 	E(fputs), E(fgets), E(fflush), E(feof), E(ferror), E(clearerr),
 	E(ftell), E(fseek), E(rewind), E(setvbuf), E(remove),

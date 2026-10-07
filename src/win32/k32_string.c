@@ -547,13 +547,45 @@ WINFN(BOOL) k32_EnumSystemLocalesA(LOCALE_ENUMPROCA fn, DWORD flags)
 	return TRUE;
 }
 
+/* The locale-name forms: the one locale there is, whichever name is given. */
+
+WINFN(int) k32_CompareStringEx(LPCWSTR locale, DWORD flags, LPCWSTR a, int na,
+			       LPCWSTR b, int nb, LPVOID version, LPVOID reserved,
+			       LPARAM param)
+{
+	return k32_CompareStringW(LCID_EN_US, flags, a, na, b, nb);
+}
+
+WINFN(int) k32_LCMapStringEx(LPCWSTR locale, DWORD flags, LPCWSTR src, int n,
+			     LPWSTR dst, int size, LPVOID version, LPVOID reserved,
+			     LPARAM param)
+{
+	return k32_LCMapStringW(LCID_EN_US, flags, src, n, dst, size);
+}
+
+typedef BOOL (WINAPI *LOCALE_ENUMPROCW)(LPWSTR name);
+
+WINFN(BOOL) k32_EnumSystemLocalesW(LOCALE_ENUMPROCW fn, DWORD flags)
+{
+	static WCHAR name[] = { '0', '0', '0', '0', '0', '4', '0', '9', 0 };
+
+	if (!fn) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	fn(name);
+	return TRUE;
+}
+
 #define E(name) { #name, 0, (void *)k32_##name }
 
 const struct builtin_export k32_string_exports[] = {
 	E(CompareStringA),
+	E(CompareStringEx),
 	E(CompareStringW),
 	E(ConvertDefaultLocale),
 	E(EnumSystemLocalesA),
+	E(EnumSystemLocalesW),
 	E(GetACP),
 	E(GetCPInfo),
 	E(GetLocaleInfoA),
@@ -575,6 +607,7 @@ const struct builtin_export k32_string_exports[] = {
 	E(IsValidCodePage),
 	E(IsValidLocale),
 	E(LCMapStringA),
+	E(LCMapStringEx),
 	E(LCMapStringW),
 	E(MultiByteToWideChar),
 	E(SetThreadLocale),

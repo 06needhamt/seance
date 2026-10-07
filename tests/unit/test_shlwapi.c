@@ -64,6 +64,54 @@ static void test_paths(void)
 	CHECK(PathRemoveFileSpecA(b));
 	CHECK_STR(b, "C:\\Program Files");
 
+	/* UrlGetPart: one piece of a URL. */
+	FN(HRESULT, UrlGetPartA, LPCSTR, LPSTR, LPDWORD, DWORD, DWORD);
+	FN(HRESULT, UrlGetPartW, LPCWSTR, LPWSTR, LPDWORD, DWORD, DWORD);
+	{
+		const char *url = "http://user:pw@example.com:8080/path/x.avi?a=1&b=2#frag";
+		char part[64];
+		DWORD n = sizeof(part);
+
+		CHECK_EQ(UrlGetPartA(url, part, &n, 1, 0), S_OK);	/* scheme */
+		CHECK_STR(part, "http");
+		CHECK_EQ(n, 4);
+		n = sizeof(part);
+		CHECK_EQ(UrlGetPartA(url, part, &n, 2, 0), S_OK);	/* host */
+		CHECK_STR(part, "example.com");
+		n = sizeof(part);
+		CHECK_EQ(UrlGetPartA(url, part, &n, 3, 0), S_OK);	/* user */
+		CHECK_STR(part, "user");
+		n = sizeof(part);
+		CHECK_EQ(UrlGetPartA(url, part, &n, 4, 0), S_OK);	/* password */
+		CHECK_STR(part, "pw");
+		n = sizeof(part);
+		CHECK_EQ(UrlGetPartA(url, part, &n, 5, 0), S_OK);	/* port */
+		CHECK_STR(part, "8080");
+		n = sizeof(part);
+		CHECK_EQ(UrlGetPartA(url, part, &n, 6, 0), S_OK);	/* query */
+		CHECK_STR(part, "a=1&b=2");
+		n = sizeof(part);
+		CHECK_EQ(UrlGetPartA(url, part, &n, 2, 1), S_OK);	/* keeping the scheme */
+		CHECK_STR(part, "http:example.com");
+		/* Pieces a URL doesn't have; a bad one; a buffer too small. */
+		n = sizeof(part);
+		CHECK_EQ(UrlGetPartA("http://example.com/", part, &n, 5, 0), S_FALSE);
+		CHECK_EQ(n, 0);
+		n = sizeof(part);
+		CHECK_EQ(UrlGetPartA("http://[::1]:99/", part, &n, 2, 0), S_OK);
+		CHECK_STR(part, "[::1]");
+		n = sizeof(part);
+		CHECK_EQ(UrlGetPartA("not a url", part, &n, 1, 0), (HRESULT)0x80041001);
+		n = 4;
+		CHECK_EQ(UrlGetPartA(url, part, &n, 2, 0), E_POINTER);
+		CHECK_EQ(n, 12);			/* "example.com" and its NUL */
+		static const WCHAR wurl[] = { 'f', 't', 'p', ':', '/', '/', 'h', '.', 'x', '/', 0 };
+		WCHAR wpart[16];
+		n = 16;
+		CHECK_EQ(UrlGetPartW(wurl, wpart, &n, 2, 0), S_OK);
+		CHECK(n == 3 && wpart[0] == 'h' && wpart[1] == '.' && wpart[2] == 'x' && wpart[3] == 0);
+	}
+
 	/* A file spec is a name with no directory or drive. */
 	FN(BOOL, PathIsFileSpecA, LPCSTR);
 	FN(BOOL, PathIsFileSpecW, LPCWSTR);

@@ -312,40 +312,51 @@ static int decode_dshow(const char *target, const CLSID *selected,
 			goto done;
 		}
 	}
-	if (FAILED(hr = dshow_bih_to_mt(in, in_size, rate, scale, 0, &in_mt)))
-		goto media_error;
-
 	LONG height = in->biHeight < 0 ? -in->biHeight : in->biHeight;
 	struct vfw_format fmt;
 	const char *format_name;
 	int passes = forced || kind == OUT_RAW ? 1 : 2;
-	for (int pass = 0; pass < passes && !host; pass++) {
-		for (unsigned i = 0; (format_name = vfw_std_format(i, in->biWidth,
-							     height, &fmt)); i++) {
-			if (forced && strcasecmp(forced, format_name))
-				continue;
-			int preferred =
-				((kind == OUT_Y4M || kind == OUT_YUV) &&
-				 (!strcasecmp(format_name, "I420") ||
-				  !strcasecmp(format_name, "YV12"))) ||
-				((kind == OUT_BMP || kind == OUT_BGR) &&
-				 !strcasecmp(format_name, "BGR24"));
-			if (!forced && kind != OUT_RAW && preferred != !pass)
-				continue;
-			if (FAILED(dshow_bih_to_mt(&fmt.bih, sizeof(fmt), rate, scale,
-						       0, &out_mt)))
-				continue;
-			hr = dshow_host_create(filter, &in_mt, &out_mt,
-					       dshow_write_sample, &sink, &host);
-			if (SUCCEEDED(hr)) {
-				out = malloc(sizeof(fmt));
-				if (out)
-					memcpy(out, &fmt, sizeof(fmt));
-				break;
+	HRESULT connect_hr = E_FAIL;
+	/* The input type a filter takes depends on how it names its formats. */
+	for (unsigned variant = 0; !host; variant++) {
+		dshow_free_media_type(&in_mt);
+		hr = dshow_input_variant(in, in_size, rate, scale, variant, &in_mt);
+		if (hr == S_FALSE)
+			break;
+		if (FAILED(hr)) {
+			if (!variant)
+				goto media_error;
+			continue;
+		}
+		for (int pass = 0; pass < passes && !host; pass++) {
+			for (unsigned i = 0; (format_name = vfw_std_format(i, in->biWidth,
+								     height, &fmt)); i++) {
+				if (forced && strcasecmp(forced, format_name))
+					continue;
+				int preferred =
+					((kind == OUT_Y4M || kind == OUT_YUV) &&
+					 (!strcasecmp(format_name, "I420") ||
+					  !strcasecmp(format_name, "YV12"))) ||
+					((kind == OUT_BMP || kind == OUT_BGR) &&
+					 !strcasecmp(format_name, "BGR24"));
+				if (!forced && kind != OUT_RAW && preferred != !pass)
+					continue;
+				if (FAILED(dshow_bih_to_mt(&fmt.bih, sizeof(fmt), rate,
+							   scale, 0, &out_mt)))
+					continue;
+				connect_hr = dshow_host_create(filter, &in_mt, &out_mt,
+							       dshow_write_sample, &sink, &host);
+				if (SUCCEEDED(connect_hr)) {
+					out = malloc(sizeof(fmt));
+					if (out)
+						memcpy(out, &fmt, sizeof(fmt));
+					break;
+				}
+				dshow_free_media_type(&out_mt);
 			}
-			dshow_free_media_type(&out_mt);
 		}
 	}
+	hr = connect_hr;
 	if (!host || !out) {
 		if (forced)
 			fprintf(stderr, "seance: filter won't connect to output format %s\n",

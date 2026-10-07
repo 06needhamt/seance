@@ -216,6 +216,25 @@ static void test_condition_variables(void)
 	join(a);
 	CHECK_EQ(woken, 2);
 
+	/*
+	 * A wake-up goes to a thread that was already waiting, not to the one that
+	 * signals and then waits itself: code that wakes a worker and then waits
+	 * for its answer on the same variable would otherwise take its own wake-up
+	 * and leave both asleep for ever.
+	 */
+	ready = woken = 0;
+	a = start_thread(srw_waiter, NULL);
+	wait_ready(1);
+	AcquireSRWLockExclusive(&lock);
+	WakeConditionVariable(&cv);	/* meant for the thread above */
+	CHECK(!SleepConditionVariableSRW(&cv, &lock, 100, 0));	/* so not for us */
+	CHECK_EQ(GetLastError(), ERROR_TIMEOUT);
+	woken = 1;			/* let it finish: it was woken, and sees this */
+	ReleaseSRWLockExclusive(&lock);
+	WakeAllConditionVariable(&cv);
+	join(a);
+	CHECK_EQ(woken, 2);
+
 	/* Waking with nobody waiting does nothing, and isn't remembered. */
 	WakeConditionVariable(&cv);
 	WakeAllConditionVariable(&cv);
@@ -424,8 +443,6 @@ static void test_misc(void)
 	FN(void, GetCurrentProcessorNumberEx, PPROCESSOR_NUMBER);
 	FN(BOOL, GetNumaHighestNodeNumber, ULONG *);
 	FN(BOOL, GetLogicalProcessorInformationEx, DWORD, PVOID, PDWORD);
-	FN(PVOID, CreateThreadpoolTimer, PVOID, PVOID, PVOID);
-	FN(void, CloseThreadpoolTimer, PVOID);
 	FN(void, FlushProcessWriteBuffers, void);
 	FN(DWORD, GetLastError, void);
 
@@ -506,11 +523,233 @@ static void test_misc(void)
 	DWORD len = 0;
 	CHECK(!GetLogicalProcessorInformationEx(0, NULL, &len));
 
-	/* Thread-pool timers can't be created; closing the NULL is harmless. */
-	PVOID timer = CreateThreadpoolTimer(NULL, NULL, NULL);
-	CHECK(timer == NULL);
-	CloseThreadpoolTimer(timer);
 	FlushProcessWriteBuffers();
+}
+
+/* Thread-pool timers, waits and work. */
+
+static volatile LONG pool_count;
+static volatile ULONG pool_result;
+static HANDLE pool_event;
+static CRITICAL_SECTION pool_cs;
+
+static void WINAPI count_timer(PVOID inst, PVOID ctx, PVOID timer)
+{
+	__atomic_add_fetch(&pool_count, 1, __ATOMIC_SEQ_CST);
+}
+
+static void WINAPI count_wait(PVOID inst, PVOID ctx, PVOID wait, ULONG result)
+{
+	__atomic_store_n(&pool_result, result, __ATOMIC_SEQ_CST);
+	__atomic_add_fetch(&pool_count, 1, __ATOMIC_SEQ_CST);
+}
+
+static void WINAPI slow_work(PVOID inst, PVOID ctx, PVOID work)
+{
+	FN(void, Sleep, DWORD);
+
+	Sleep(40);
+	__atomic_add_fetch(&pool_count, 1, __ATOMIC_SEQ_CST);
+}
+
+static void WINAPI simple_callback(PVOID inst, PVOID ctx)
+{
+	FN(void, SetEventWhenCallbackReturns, PVOID, HANDLE);
+	FN(void, EnterCriticalSection, LPCRITICAL_SECTION);
+	FN(void, LeaveCriticalSectionWhenCallbackReturns, PVOID, LPCRITICAL_SECTION);
+
+	EnterCriticalSection(&pool_cs);
+	LeaveCriticalSectionWhenCallbackReturns(inst, &pool_cs);
+	SetEventWhenCallbackReturns(inst, pool_event);
+	__atomic_add_fetch(&pool_count, 1, __ATOMIC_SEQ_CST);
+}
+
+static LONG pool_get(void) { return __atomic_load_n(&pool_count, __ATOMIC_SEQ_CST); }
+
+static void test_thread_pool(void)
+{
+	FN(PVOID, CreateThreadpoolTimer, PVOID, PVOID, PVOID);
+	FN(void, SetThreadpoolTimer, PVOID, PFILETIME, DWORD, DWORD);
+	FN(BOOL, IsThreadpoolTimerSet, PVOID);
+	FN(void, WaitForThreadpoolTimerCallbacks, PVOID, BOOL);
+	FN(void, CloseThreadpoolTimer, PVOID);
+	FN(PVOID, CreateThreadpoolWait, PVOID, PVOID, PVOID);
+	FN(void, SetThreadpoolWait, PVOID, HANDLE, PFILETIME);
+	FN(void, WaitForThreadpoolWaitCallbacks, PVOID, BOOL);
+	FN(void, CloseThreadpoolWait, PVOID);
+	FN(PVOID, CreateThreadpoolWork, PVOID, PVOID, PVOID);
+	FN(void, SubmitThreadpoolWork, PVOID);
+	FN(void, WaitForThreadpoolWorkCallbacks, PVOID, BOOL);
+	FN(void, CloseThreadpoolWork, PVOID);
+	FN(BOOL, TrySubmitThreadpoolCallback, PVOID, PVOID, PVOID);
+	FN(HANDLE, CreateEventA, LPSECURITY_ATTRIBUTES, BOOL, BOOL, LPCSTR);
+	FN(BOOL, SetEvent, HANDLE);
+	FN(DWORD, WaitForSingleObject, HANDLE, DWORD);
+	FN(BOOL, CloseHandle, HANDLE);
+	FN(void, Sleep, DWORD);
+	FN(void, InitializeCriticalSection, LPCRITICAL_SECTION);
+	FN(BOOL, TryEnterCriticalSection, LPCRITICAL_SECTION);
+	FN(void, LeaveCriticalSection, LPCRITICAL_SECTION);
+
+	/* A timer set 30 ms ahead (negative: relative) fires once. */
+	PVOID t = CreateThreadpoolTimer(count_timer, NULL, NULL);
+	CHECK(t != NULL);
+	CHECK(!IsThreadpoolTimerSet(t));
+	LONGLONG rel = -30 * 10000LL;
+	FILETIME due = { (DWORD)rel, (DWORD)((ULONGLONG)rel >> 32) };
+	pool_count = 0;
+	SetThreadpoolTimer(t, &due, 0, 0);
+	CHECK(IsThreadpoolTimerSet(t));
+	Sleep(10);
+	CHECK_EQ(pool_get(), 0);
+	for (int i = 0; i < 200 && !pool_get(); i++)
+		Sleep(5);
+	CHECK_EQ(pool_get(), 1);
+	Sleep(60);
+	CHECK_EQ(pool_get(), 1);
+	CHECK(!IsThreadpoolTimerSet(t));
+
+	/* A repeating one keeps firing until it is cancelled with a NULL time. */
+	pool_count = 0;
+	rel = -10 * 10000LL;
+	due.dwLowDateTime = (DWORD)rel;
+	due.dwHighDateTime = (DWORD)((ULONGLONG)rel >> 32);
+	SetThreadpoolTimer(t, &due, 10, 0);
+	for (int i = 0; i < 400 && pool_get() < 4; i++)
+		Sleep(5);
+	CHECK(pool_get() >= 4);
+	SetThreadpoolTimer(t, NULL, 0, 0);
+	WaitForThreadpoolTimerCallbacks(t, TRUE);
+	LONG stopped = pool_get();
+	Sleep(60);
+	CHECK_EQ(pool_get(), stopped);
+
+	/* Re-arming replaces: a far-off timer re-set to soon fires once, soon. */
+	pool_count = 0;
+	rel = -60000 * 10000LL;
+	due.dwLowDateTime = (DWORD)rel;
+	due.dwHighDateTime = (DWORD)((ULONGLONG)rel >> 32);
+	SetThreadpoolTimer(t, &due, 0, 0);
+	rel = -10 * 10000LL;
+	due.dwLowDateTime = (DWORD)rel;
+	due.dwHighDateTime = (DWORD)((ULONGLONG)rel >> 32);
+	SetThreadpoolTimer(t, &due, 0, 0);
+	for (int i = 0; i < 200 && !pool_get(); i++)
+		Sleep(5);
+	CHECK_EQ(pool_get(), 1);
+	CloseThreadpoolTimer(t);
+
+	/* Closing an armed timer cancels it. */
+	t = CreateThreadpoolTimer(count_timer, NULL, NULL);
+	pool_count = 0;
+	rel = -30 * 10000LL;
+	due.dwLowDateTime = (DWORD)rel;
+	due.dwHighDateTime = (DWORD)((ULONGLONG)rel >> 32);
+	SetThreadpoolTimer(t, &due, 0, 0);
+	CloseThreadpoolTimer(t);
+	Sleep(80);
+	CHECK_EQ(pool_get(), 0);
+
+	/* A wait calls back when its handle is signalled, once... */
+	HANDLE ev = CreateEventA(NULL, FALSE, FALSE, NULL);
+	PVOID w = CreateThreadpoolWait(count_wait, NULL, NULL);
+	CHECK(w != NULL);
+	pool_count = 0;
+	SetThreadpoolWait(w, ev, NULL);
+	Sleep(30);
+	CHECK_EQ(pool_get(), 0);
+	SetEvent(ev);
+	for (int i = 0; i < 200 && !pool_get(); i++)
+		Sleep(5);
+	CHECK_EQ(pool_get(), 1);
+	CHECK_EQ(pool_result, WAIT_OBJECT_0);
+	/* ...taking the auto-reset event with it, and not again unless re-set. */
+	CHECK_EQ(WaitForSingleObject(ev, 0), WAIT_TIMEOUT);
+	SetEvent(ev);
+	Sleep(40);
+	CHECK_EQ(pool_get(), 1);
+	/* The event is still set; re-arming sees it at once. */
+	SetThreadpoolWait(w, ev, NULL);
+	for (int i = 0; i < 200 && pool_get() < 2; i++)
+		Sleep(5);
+	CHECK_EQ(pool_get(), 2);
+
+	/* A timeout reports WAIT_TIMEOUT. */
+	rel = -30 * 10000LL;
+	due.dwLowDateTime = (DWORD)rel;
+	due.dwHighDateTime = (DWORD)((ULONGLONG)rel >> 32);
+	pool_count = 0;
+	SetThreadpoolWait(w, ev, &due);
+	for (int i = 0; i < 200 && !pool_get(); i++)
+		Sleep(5);
+	CHECK_EQ(pool_get(), 1);
+	CHECK_EQ(pool_result, WAIT_TIMEOUT);
+
+	/* A NULL handle cancels a wait. */
+	pool_count = 0;
+	SetThreadpoolWait(w, ev, NULL);
+	SetThreadpoolWait(w, NULL, NULL);
+	WaitForThreadpoolWaitCallbacks(w, TRUE);
+	SetEvent(ev);
+	Sleep(60);
+	CHECK_EQ(pool_get(), 0);
+	CloseThreadpoolWait(w);
+	CloseHandle(ev);
+
+	/* Work items run on their own threads; waiting covers all submitted. */
+	PVOID work = CreateThreadpoolWork(slow_work, NULL, NULL);
+	CHECK(work != NULL);
+	pool_count = 0;
+	for (int i = 0; i < 3; i++)
+		SubmitThreadpoolWork(work);
+	WaitForThreadpoolWorkCallbacks(work, FALSE);
+	CHECK_EQ(pool_get(), 3);
+	CloseThreadpoolWork(work);
+
+	/* A one-off callback may ask for an event and a section to be released. */
+	pool_event = CreateEventA(NULL, TRUE, FALSE, NULL);
+	InitializeCriticalSection(&pool_cs);
+	pool_count = 0;
+	CHECK(TrySubmitThreadpoolCallback(simple_callback, NULL, NULL));
+	CHECK_EQ(WaitForSingleObject(pool_event, 10000), WAIT_OBJECT_0);
+	CHECK_EQ(pool_get(), 1);
+	CHECK(TryEnterCriticalSection(&pool_cs));	/* the callback left it */
+	LeaveCriticalSection(&pool_cs);
+	CloseHandle(pool_event);
+}
+
+/* The locale-name forms of the string functions. */
+
+static BOOL WINAPI count_locale(LPWSTR name)
+{
+	pool_count++;
+	return name[0] == '0';
+}
+
+static void test_locale_names(void)
+{
+	FN(int, CompareStringEx, LPCWSTR, DWORD, LPCWSTR, int, LPCWSTR, int, LPVOID,
+	   LPVOID, LPARAM);
+	FN(int, LCMapStringEx, LPCWSTR, DWORD, LPCWSTR, int, LPWSTR, int, LPVOID,
+	   LPVOID, LPARAM);
+	FN(BOOL, EnumSystemLocalesW, BOOL (WINAPI *)(LPWSTR), DWORD);
+	static const WCHAR en[] = { 'e', 'n', '-', 'U', 'S', 0 };
+	static const WCHAR lower[] = { 'a', 'b', 'c', 0 };
+	static const WCHAR upper[] = { 'A', 'B', 'C', 0 };
+	static const WCHAR later[] = { 'a', 'b', 'd', 0 };
+	WCHAR out[8];
+
+	CHECK_EQ(CompareStringEx(en, 0, lower, -1, lower, -1, NULL, NULL, 0), 2);	/* CSTR_EQUAL */
+	CHECK_EQ(CompareStringEx(en, 0, lower, -1, later, -1, NULL, NULL, 0), 1);	/* CSTR_LESS_THAN */
+	CHECK_EQ(CompareStringEx(en, 1 /* NORM_IGNORECASE */, lower, -1, upper, -1,
+				 NULL, NULL, 0), 2);
+	CHECK_EQ(LCMapStringEx(en, 0x200 /* LCMAP_UPPERCASE */, lower, -1, out, 8,
+			       NULL, NULL, 0), 4);
+	CHECK(out[0] == 'A' && out[2] == 'C' && out[3] == 0);
+	pool_count = 0;
+	CHECK(EnumSystemLocalesW(count_locale, 0));
+	CHECK_EQ(pool_count, 1);
+	CHECK(!EnumSystemLocalesW(NULL, 0));
 }
 
 /* Files: the by-handle information and extended searches. */
@@ -610,6 +849,8 @@ int main(void)
 	test_slist();
 	test_version();
 	test_misc();
+	test_thread_pool();
+	test_locale_names();
 	test_files();
 
 	mod_free(k32);

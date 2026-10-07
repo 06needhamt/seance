@@ -11,6 +11,15 @@ HRESULT dshow_copy_media_type(AM_MEDIA_TYPE *dst, const AM_MEDIA_TYPE *src);
 HRESULT dshow_bih_to_mt(const BITMAPINFOHEADER *bih, size_t size,
 			 DWORD rate, DWORD scale, int video_info2,
 			 AM_MEDIA_TYPE *mt);
+/*
+ * The ways a stream's format can be offered as an input type, one per
+ * variant, in the order to try them: VideoInfo, VideoInfo2, and for MPEG-1
+ * and MPEG-2 video the subtypes decoders know them by. S_OK with the type,
+ * or S_FALSE when there are no more variants.
+ */
+HRESULT dshow_input_variant(const BITMAPINFOHEADER *bih, size_t size,
+			    DWORD rate, DWORD scale, unsigned variant,
+			    AM_MEDIA_TYPE *mt);
 HRESULT dshow_mt_to_bih(const AM_MEDIA_TYPE *mt, BITMAPINFOHEADER **bih,
 			 size_t *size);
 
