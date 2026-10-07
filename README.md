@@ -41,6 +41,9 @@ is not supported or not yet exercised, are in
 renderer filters, DMOs, capture devices, a real Filter Graph Manager, network
 access and hardware decoding.
 
+DMOs and audio decoders and encoders are planned in
+[docs/DMO_AUDIO_PLAN.md](docs/DMO_AUDIO_PLAN.md).
+
 ## Prerequisites
 
 The codecs are i386 code, so the harness is built as a 32-bit Linux program.
