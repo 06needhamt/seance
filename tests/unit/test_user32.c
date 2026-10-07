@@ -471,6 +471,8 @@ static void test_strings(void)
 static void test_misc(void)
 {
 	FN(int, MessageBoxA, HWND, LPCSTR, LPCSTR, UINT);
+	FN(BOOL, TrackPopupMenu, HMENU, UINT, int, int, int, HWND, const RECT *);
+	FN(HWND, GetShellWindow, void);
 	FN(int, GetSystemMetrics, int);
 	FN(DWORD, GetSysColor, int);
 	FN(HBRUSH, GetSysColorBrush, int);
@@ -499,6 +501,10 @@ static void test_misc(void)
 	GDI(int, GetDeviceCaps, HDC, int);
 	GDI(DWORD, GetObjectType, HGDIOBJ);
 	GDI(int, GetObjectA, HGDIOBJ, int, LPVOID);
+
+	/* No menus are shown and there is no shell window. */
+	CHECK(!TrackPopupMenu(NULL, 0, 0, 0, 0, NULL, NULL));
+	CHECK(GetShellWindow() == NULL);
 
 	/* The default button answers. */
 	CHECK_EQ(MessageBoxA(NULL, "text", "caption", MB_OK), IDOK);

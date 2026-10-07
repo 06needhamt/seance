@@ -12,6 +12,8 @@
 #ifndef VFW_WIN32_HANDLE_H
 #define VFW_WIN32_HANDLE_H
 
+#include <time.h>
+
 #include "win32.h"
 
 enum kobj_type {
@@ -69,6 +71,14 @@ void wait_lock(void);
 void wait_unlock(void);
 /* Wakes waiters after a state change (call with the lock held). */
 void wait_broadcast(void);
+
+/*
+ * Waits, with the lock held, for the next wait_broadcast (it may come
+ * spuriously, so loop on the condition). deadline is from wait_deadline, or
+ * NULL to wait without limit. Returns 0, or -1 once the deadline passed.
+ */
+void wait_deadline(DWORD timeout_ms, struct timespec *deadline);
+int wait_block(const struct timespec *deadline);
 
 /*
  * Waits for one (all == FALSE) or all of objs, like WaitForMultipleObjects.

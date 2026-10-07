@@ -449,6 +449,24 @@ WINFN(BOOL) k32_HeapUnlock(HANDLE h)
 	return heap != NULL;
 }
 
+/* Every heap is an ordinary one: no low-fragmentation or other front end. */
+WINFN(BOOL) k32_HeapQueryInformation(HANDLE h, int cls, PVOID info, SIZE_T len,
+				     PSIZE_T needed)
+{
+	if (cls != 0 /* HeapCompatibilityInformation */) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	if (needed)
+		*needed = sizeof(ULONG);
+	if (len < sizeof(ULONG)) {
+		win_set_error(ERROR_INSUFFICIENT_BUFFER);
+		return FALSE;
+	}
+	*(ULONG *)info = 0;
+	return TRUE;
+}
+
 WINFN(BOOL) k32_HeapSetInformation(HANDLE h, int cls, PVOID info, SIZE_T len)
 {
 	return TRUE;
@@ -1062,6 +1080,7 @@ const struct builtin_export k32_memory_exports[] = {
 	E(HeapDestroy),
 	E(HeapFree),
 	E(HeapLock),
+	E(HeapQueryInformation),
 	E(HeapReAlloc),
 	E(HeapSetInformation),
 	E(HeapSize),

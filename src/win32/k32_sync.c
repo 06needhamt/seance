@@ -140,6 +140,16 @@ WINFN(void) k32_LeaveCriticalSection(LPCRITICAL_SECTION cs)
 	pthread_mutex_unlock(&c->mutex);
 }
 
+void k32_cs_enter(CRITICAL_SECTION *cs)
+{
+	k32_EnterCriticalSection(cs);
+}
+
+void k32_cs_leave(CRITICAL_SECTION *cs)
+{
+	k32_LeaveCriticalSection(cs);
+}
+
 WINFN(void) k32_DeleteCriticalSection(LPCRITICAL_SECTION cs)
 {
 	struct cs_impl *c = cs->LockSemaphore;
@@ -577,14 +587,30 @@ WINFN(DWORD) k32_SignalObjectAndWait(HANDLE signal, HANDLE wait, DWORD ms,
 	return ok ? k32_WaitForSingleObject(wait, ms) : WAIT_FAILED;
 }
 
+WINFN(HANDLE) k32_CreateEventExW(LPSECURITY_ATTRIBUTES sa, LPCWSTR name,
+				 DWORD flags, DWORD access)
+{
+	return k32_CreateEventW(sa, !!(flags & CREATE_EVENT_MANUAL_RESET),
+				!!(flags & CREATE_EVENT_INITIAL_SET), name);
+}
+
+WINFN(HANDLE) k32_CreateSemaphoreExW(LPSECURITY_ATTRIBUTES sa, LONG initial,
+				     LONG max, LPCWSTR name, DWORD flags,
+				     DWORD access)
+{
+	return k32_CreateSemaphoreW(sa, initial, max, name);
+}
+
 #define E(name) { #name, 0, (void *)k32_##name }
 
 const struct builtin_export k32_sync_exports[] = {
 	E(CreateEventA),
+	E(CreateEventExW),
 	E(CreateEventW),
 	E(CreateMutexA),
 	E(CreateMutexW),
 	E(CreateSemaphoreA),
+	E(CreateSemaphoreExW),
 	E(CreateSemaphoreW),
 	E(DeleteCriticalSection),
 	E(EnterCriticalSection),

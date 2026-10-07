@@ -63,6 +63,29 @@ static void test_paths(void)
 	CHECK_STR(b, "C:\\Program Files\\codec.dll");
 	CHECK(PathRemoveFileSpecA(b));
 	CHECK_STR(b, "C:\\Program Files");
+
+	/* A file spec is a name with no directory or drive. */
+	FN(BOOL, PathIsFileSpecA, LPCSTR);
+	FN(BOOL, PathIsFileSpecW, LPCWSTR);
+	FN(BOOL, PathRemoveFileSpecW, LPWSTR);
+	CHECK(PathIsFileSpecA("codec.ax"));
+	CHECK(!PathIsFileSpecA("dir\\codec.ax"));
+	CHECK(!PathIsFileSpecA("C:codec.ax"));
+	static const WCHAR plain[] = { 'c', '.', 'a', 'x', 0 };
+	static const WCHAR rooted[] = { '\\', 'c', '.', 'a', 'x', 0 };
+	CHECK(PathIsFileSpecW(plain));
+	CHECK(!PathIsFileSpecW(rooted));
+	WCHAR w[MAX_PATH] = { 'C', ':', '\\', 'P', 'r', 'o', 'g', '\\', 'x', '.', 'a', 'x', 0 };
+	CHECK(PathRemoveFileSpecW(w));
+	CHECK_EQ(w[7], 0);
+	CHECK_EQ(w[6], 'g');
+	/* Non-ASCII names shorten by characters, not bytes. */
+	WCHAR u[MAX_PATH] = { 'd', 0x00e9, 'c', '\\', 0x00e9, '.', 'a', 'x', 0 };
+	CHECK(PathRemoveFileSpecW(u));
+	CHECK_EQ(u[3], 0);
+	CHECK_EQ(u[1], 0x00e9);
+	WCHAR bare[MAX_PATH] = { 'x', '.', 'a', 'x', 0 };
+	CHECK(!PathRemoveFileSpecW(bare));
 	CHECK(PathCombineA(b, "C:\\Windows", "system32\\x.dll") == b);
 	CHECK_STR(b, "C:\\Windows\\system32\\x.dll");
 	CHECK(PathIsRelativeA("plugins\\x.dll"));

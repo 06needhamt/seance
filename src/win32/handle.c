@@ -202,6 +202,25 @@ void wait_broadcast(void)
 	pthread_cond_broadcast(&wait_cond);
 }
 
+void wait_deadline(DWORD timeout_ms, struct timespec *deadline)
+{
+	clock_gettime(CLOCK_MONOTONIC, deadline);
+	deadline->tv_sec += timeout_ms / 1000;
+	deadline->tv_nsec += (timeout_ms % 1000) * 1000000L;
+	if (deadline->tv_nsec >= 1000000000L) {
+		deadline->tv_sec++;
+		deadline->tv_nsec -= 1000000000L;
+	}
+}
+
+int wait_block(const struct timespec *deadline)
+{
+	int r = deadline ?
+		pthread_cond_timedwait(&wait_cond, &wait_mutex, deadline) :
+		pthread_cond_wait(&wait_cond, &wait_mutex);
+	return r == ETIMEDOUT ? -1 : 0;
+}
+
 DWORD wait_objects(DWORD n, struct kobject *const *objs, BOOL all,
 		   DWORD timeout_ms)
 {
@@ -215,15 +234,8 @@ DWORD wait_objects(DWORD n, struct kobject *const *objs, BOOL all,
 			return WAIT_FAILED;
 		}
 	}
-	if (timeout_ms != INFINITE) {
-		clock_gettime(CLOCK_MONOTONIC, &deadline);
-		deadline.tv_sec += timeout_ms / 1000;
-		deadline.tv_nsec += (timeout_ms % 1000) * 1000000L;
-		if (deadline.tv_nsec >= 1000000000L) {
-			deadline.tv_sec++;
-			deadline.tv_nsec -= 1000000000L;
-		}
-	}
+	if (timeout_ms != INFINITE)
+		wait_deadline(timeout_ms, &deadline);
 
 	wait_lock();
 	for (;;) {
@@ -252,10 +264,7 @@ DWORD wait_objects(DWORD n, struct kobject *const *objs, BOOL all,
 		}
 		if (timeout_ms == 0)
 			break;
-		int r = timeout_ms == INFINITE ?
-			pthread_cond_wait(&wait_cond, &wait_mutex) :
-			pthread_cond_timedwait(&wait_cond, &wait_mutex, &deadline);
-		if (r == ETIMEDOUT) {
+		if (wait_block(timeout_ms == INFINITE ? NULL : &deadline)) {
 			result = WAIT_TIMEOUT;
 			break;
 		}

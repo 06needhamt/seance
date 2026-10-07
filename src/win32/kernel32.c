@@ -160,6 +160,7 @@ static const struct builtin_export core_exports[] = {
 
 extern const struct builtin_export k32_memory_exports[];
 extern const struct builtin_export k32_sync_exports[];
+extern const struct builtin_export k32_modern_exports[];
 extern const struct builtin_export k32_thread_exports[];
 extern const struct builtin_export k32_time_exports[];
 extern const struct builtin_export k32_system_exports[];
@@ -174,6 +175,7 @@ static const struct builtin_export *const tables[] = {
 	core_exports,
 	k32_memory_exports,
 	k32_sync_exports,
+	k32_modern_exports,
 	k32_thread_exports,
 	k32_time_exports,
 	k32_system_exports,
