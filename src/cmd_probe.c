@@ -13,12 +13,14 @@
 #include "common/error.h"
 #include "common/fourcc.h"
 #include "common/unicode.h"
+#include "dmo/discover.h"
 #include "dshow/discover.h"
 #include "dshow/dshow.h"
 #include "loader/pe.h"
 #include "vfw/icm.h"
 #include "win32/codepage.h"
 #include "win32/ole.h"
+#include "xform.h"
 
 static int usage(void)
 {
@@ -27,7 +29,7 @@ static int usage(void)
 		"\n"
 		"  --fourcc <XXXX>    the handler to open a DLL as (default: from\n"
 		"                     vfw.ini, else 0, then what the codec reports)\n"
-		"  --clsid <{GUID}>   DirectShow class when a server has several\n"
+		"  --clsid <{GUID}>   the filter or DMO when a DLL has several\n"
 		"  --size <WxH>       frame size for the format checks (default\n"
 		"                     320x240, or the AVI's)\n");
 	return 2;
@@ -41,9 +43,12 @@ static int parse_clsid(const char *s, CLSID *clsid)
 	return bad;
 }
 
-/* Probe registration metadata without changing the persistent registry. */
-static void probe_dshow_connections(const char *path, const CLSID *clsid,
-				    const char *avi_path)
+/*
+ * The standard output formats a decoder (filter or DMO) connects with for
+ * an AVI's video stream.
+ */
+static void probe_connections(const char *path, const struct xform_class *c,
+			      const char *avi_path)
 {
 	struct avi_file *avi = avi_open(avi_path);
 	if (!avi) {
@@ -77,21 +82,20 @@ static void probe_dshow_connections(const char *path, const CLSID *clsid,
 		struct vfw_format f;
 		const char *name;
 		for (unsigned i = 0; (name = vfw_std_format(i, bih->biWidth, h, &f)); i++) {
-			struct dshow_filter *server = NULL;
-			IBaseFilter *filter = NULL;
-			struct dshow_host *host = NULL;
+			struct xform *x = NULL;
 			AM_MEDIA_TYPE output = {0};
-			hr = dshow_filter_open(path, clsid, 0, &server, &filter, NULL);
-			if (SUCCEEDED(hr) && SUCCEEDED(dshow_bih_to_mt(&f.bih, sizeof(f),
-					rate, scale, 0, &output)))
-				hr = dshow_host_create(filter, &input, &output, NULL, NULL,
-						       &host);
+			/* A fresh object each time: a refusal may leave it upset. */
+			hr = xform_create(path, c, &x);
+			if (SUCCEEDED(hr))
+				hr = dshow_bih_to_mt(&f.bih, sizeof(f), rate, scale,
+						     0, &output);
+			if (SUCCEEDED(hr))
+				hr = xform_connect(x, &input, &output, NULL, NULL);
 			if (SUCCEEDED(hr)) {
 				printf(" %s", name);
 				any = 1;
 			}
-			dshow_host_destroy(host);
-			dshow_filter_close(server, filter);
+			xform_close(x);
 			dshow_free_media_type(&output);
 		}
 	}
@@ -100,21 +104,20 @@ static void probe_dshow_connections(const char *path, const CLSID *clsid,
 	avi_close(avi);
 }
 
-/* The optional interfaces a decoder or encoder has, as the codec's own probe says what it can do. */
-static void probe_dshow_interfaces(const char *path, const struct qz_filter *f)
+/*
+ * The optional interfaces a decoder or encoder (filter or DMO) has, as the
+ * codec's own probe says what it can do.
+ */
+static void probe_interfaces(const char *path, const struct xform_class *c)
 {
-	enum dshow_role role = dshow_role(f);
-	struct dshow_filter *server = NULL;
-	IBaseFilter *filter = NULL;
+	struct xform *x = NULL;
 	char names[160];
 
-	if (role == DSHOW_OTHER ||
-	    FAILED(dshow_filter_open(path, &f->clsid, role == DSHOW_ENCODER,
-				     &server, &filter, NULL)))
+	if (FAILED(xform_create(path, c, &x)))
 		return;
-	if (dshow_filter_interfaces(filter, names, sizeof(names)))
+	if (dshow_filter_interfaces(xform_object(x), names, sizeof(names)))
 		printf("      interfaces: %s\n", names);
-	dshow_filter_close(server, filter);
+	xform_close(x);
 }
 
 static int probe_dshow(const char *path, const char *selected,
@@ -126,14 +129,15 @@ static int probe_dshow(const char *path, const char *selected,
 		return 2;
 	}
 
-	struct qz_filter *filters = NULL;
-	size_t count = 0;
+	struct dshow_server_found found;
 	HRESULT hr;
-	if (dshow_discover(path, &filters, &count, &hr)) {
+	if (dshow_server_discover(path, &found, &hr)) {
 		fprintf(stderr, "seance: %s\n", vfw_error());
 		return 1;
 	}
-	if (FAILED(hr) && !count) {
+	struct qz_filter *filters = found.filters;
+	size_t count = found.nfilters;
+	if (FAILED(hr) && !count && !found.ndmos) {
 		char name[24];
 		fprintf(stderr, "seance: %s: DllRegisterServer failed (%s)\n",
 			path, dshow_hr_name(hr, name));
@@ -141,21 +145,38 @@ static int probe_dshow(const char *path, const char *selected,
 	}
 
 	size_t shown = 0;
-	printf("DirectShow server: %s\n", path);
+	printf("%s server: %s\n", count || !found.ndmos ? "DirectShow" : "DMO",
+	       path);
 	for (size_t i = 0; i < count; i++) {
 		if (selected && memcmp(&filters[i].clsid, &wanted, sizeof(wanted)))
 			continue;
+		struct xform_class c = { filters[i].clsid, 0, 0 };
+		enum dshow_role role = dshow_role(&filters[i]);
 		dshow_print_filter(&filters[i], NULL, 1);
-		probe_dshow_interfaces(path, &filters[i]);
-		if (avi_path && dshow_role(&filters[i]) == DSHOW_DECODER)
-			probe_dshow_connections(path, &filters[i].clsid, avi_path);
+		if (role != DSHOW_OTHER)
+			probe_interfaces(path, &c);
+		if (avi_path && role == DSHOW_DECODER)
+			probe_connections(path, &c, avi_path);
 		shown++;
 	}
-	qz_filters_free(filters, count);
+	for (size_t i = 0; i < found.ndmos; i++) {
+		if (selected && memcmp(&found.dmos[i].clsid, &wanted,
+				       sizeof(wanted)))
+			continue;
+		struct xform_class c = { found.dmos[i].clsid, 1, 0 };
+		enum dmo_role role = dmo_role(&found.dmos[i]);
+		dmo_print(&found.dmos[i], NULL, 1);
+		if (dmo_role_is_codec(role))
+			probe_interfaces(path, &c);
+		if (avi_path && role == DMO_ROLE_VIDEO_DECODER)
+			probe_connections(path, &c, avi_path);
+		shown++;
+	}
+	dshow_server_found_free(&found);
 	if (!shown) {
 		fprintf(stderr, "seance: %s: %s\n", path,
 			selected ? "that CLSID is not registered by this server" :
-			"no DirectShow filters discovered");
+			"no DirectShow filters or DMOs discovered");
 		return 1;
 	}
 	return 0;

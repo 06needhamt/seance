@@ -5,8 +5,8 @@
 #
 # They are built without a C runtime, so each imports only what it names:
 # nothing, each other, or system DLLs such as kernel32, user32, gdi32,
-# advapi32, version, ole32, oleaut32, shell32, comctl32, comdlg32, winmm and
-# msvfw32 (whose mingw import libraries the harness's built-in DLLs stand in
+# advapi32, version, ole32, oleaut32, shell32, comctl32, comdlg32, winmm,
+# msvfw32 and msdmo (whose mingw import libraries the harness's built-in DLLs stand in
 # for).
 cmake_minimum_required(VERSION 3.20)
 project(seance-fixtures C RC)
@@ -144,6 +144,10 @@ fixture(testfilter testfilter.c testfilter_filter.c testfilter.def
 	OPTIONS -mpreferred-stack-boundary=2 -fno-builtin
 		-fno-tree-loop-distribute-patterns)
 set_target_properties(testfilter PROPERTIES SUFFIX ".ax")
+fixture(testdmo testdmo.c testdmo_dmo.c testdmo.def
+	LIBS msdmo ole32 advapi32 kernel32
+	OPTIONS -mpreferred-stack-boundary=2 -fno-builtin
+		-fno-tree-loop-distribute-patterns)
 
 # The same image as pe_reloc.dll with its relocations stripped.
 add_custom_command(OUTPUT ${VFW_FIXTURE_DIR}/pe_noreloc.dll

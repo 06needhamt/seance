@@ -20,6 +20,9 @@
  * Include DirectShow first so strmif.h supplies the complete definitions. */
 #include <aviriff.h>
 #include <dvdmedia.h>
+#include <mmreg.h>
+#include <ocidl.h>
+#include <dmo.h>
 
 /*
  * mingw's GUIDs, each as eight typedefs of char arrays whose sizes are its

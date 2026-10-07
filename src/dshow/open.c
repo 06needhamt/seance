@@ -39,7 +39,21 @@ HRESULT dshow_filter_open(const char *path, const CLSID *selected, int encoder,
 	qz_filters_free(found, count);
 	if (matches != 1)
 		return matches ? VFW_E_DUPLICATE_NAME : CLASS_E_CLASSNOTAVAILABLE;
+	hr = dshow_filter_create(path, &clsid, server, filter);
+	if (SUCCEEDED(hr) && chosen)
+		*chosen = clsid;
+	return hr;
+}
 
+HRESULT dshow_filter_create(const char *path, const CLSID *clsid,
+			    struct dshow_filter **server, IBaseFilter **filter)
+{
+	HRESULT hr = CLASS_E_CLASSNOTAVAILABLE;
+
+	if (!path || !clsid || !server || !filter)
+		return E_POINTER;
+	*server = NULL;
+	*filter = NULL;
 	struct dshow_filter *s = calloc(1, sizeof(*s));
 	if (!s)
 		return E_OUTOFMEMORY;
@@ -52,19 +66,18 @@ HRESULT dshow_filter_open(const char *path, const CLSID *selected, int encoder,
 		s->module, "DllGetClassObject");
 	IClassFactory *factory = NULL;
 	if (get)
-		hr = get(&clsid, &IID_IClassFactory, (void **)&factory);
+		hr = get(clsid, &IID_IClassFactory, (void **)&factory);
 	if (SUCCEEDED(hr))
 		hr = factory->lpVtbl->CreateInstance(factory, NULL, &IID_IBaseFilter,
 						      (void **)filter);
 	if (factory)
 		factory->lpVtbl->Release(factory);
 	if (FAILED(hr)) {
+		*filter = NULL;
 		mod_free(s->module);
 		free(s);
 		return hr;
 	}
-	if (chosen)
-		*chosen = clsid;
 	*server = s;
 	return S_OK;
 }

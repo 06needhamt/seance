@@ -80,6 +80,31 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		echo "smoke: unregister left filters behind" >&2
 		exit 1
 	fi
+
+	# DMOs: one registered through DMORegister, one whose keys the DLL
+	# writes itself; found the same ways.
+	rm -f "$reg"
+	probe=$($emu "$harness" probe "$fixtures/testdmo.dll")
+	printf '%s\n' "$probe" | grep -q "DMO server:"
+	printf '%s\n' "$probe" | grep -q "seance test DMO decoder"
+	printf '%s\n' "$probe" | grep -q "DMO, video encoder"
+	selected=$($emu "$harness" probe "$fixtures/testdmo.dll" --clsid \
+		'{5E6C9B41-3A7D-4F0E-9C11-0D2B7A6E4F80}')
+	if printf '%s\n' "$selected" | grep -q "seance test DMO encoder"; then
+		echo "smoke: --clsid did not select one DMO" >&2
+		exit 1
+	fi
+	$emu "$harness" register --dry-run "$fixtures/testdmo.dll" |
+		grep -q "seance test DMO encoder"
+	[ ! -e "$reg" ] || { echo "smoke: DMO --dry-run wrote $reg" >&2; exit 1; }
+	$emu "$harness" register "$fixtures/testdmo.dll" >/dev/null
+	VFW_INI=/nonexistent $emu "$harness" list |
+		grep -q "seance test DMO decoder"
+	$emu "$harness" unregister "$fixtures/testdmo.dll" >/dev/null
+	if VFW_INI=/nonexistent $emu "$harness" list | grep -q "seance test DMO"; then
+		echo "smoke: unregister left DMOs behind" >&2
+		exit 1
+	fi
 	rm -f "$reg"
 	unset VFW_REGISTRY
 	fails $emu "$harness" decode "$fixtures/testcodec.dll" "$junk" -o /dev/null \
@@ -245,6 +270,70 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 			exit 1
 		}
 		$emu "$harness" unregister "$fixtures/testfilter.ax" >/dev/null
+		unset VFW_REGISTRY
+
+		# DMOs: the same stream decoded through testdmo.dll, in each of its
+		# modes, matches testcodec; its encoder's output decodes back
+		# exactly through testcodec and testfilter.
+		for mode in "" DELAY BURST NOTACCEPTING SWITCH STRICT; do
+			env ${mode:+VFW_ENV_TESTDMO_$mode=1} $emu "$harness" decode \
+				"$fixtures/testdmo.dll" "$work/t.avi" \
+				-o "$work/dmo.y4m" 2>/dev/null
+			cmp -s "$work/in.y4m" "$work/dmo.y4m" || {
+				echo "smoke: DMO decode${mode:+ ($mode)} differs" >&2
+				exit 1
+			}
+		done
+		env VFW_ENV_TESTDMO_DELAY=1 $emu "$harness" decode \
+			"$fixtures/testdmo.dll" "$work/t.avi" -o "$work/dmo-start.y4m" \
+			--start 1 --frames 2 2>/dev/null
+		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/t.avi" \
+			-o "$work/dmo-start.ref.y4m" --start 1 --frames 2 2>/dev/null
+		cmp -s "$work/dmo-start.ref.y4m" "$work/dmo-start.y4m" || {
+			echo "smoke: DMO decode from --start differs" >&2
+			exit 1
+		}
+		for mode in "" NOTACCEPTING PRIVATE; do
+			env ${mode:+VFW_ENV_TESTDMO_$mode=1} $emu "$harness" encode \
+				"$fixtures/testdmo.dll" "$work/in.y4m" \
+				-o "$work/dmo.avi" --keyint 2 2>/dev/null
+			$emu "$harness" decode "$fixtures/testcodec.dll" "$work/dmo.avi" \
+				-o "$work/dmo-vfw.y4m" 2>/dev/null
+			$emu "$harness" decode "$fixtures/testfilter.ax" "$work/dmo.avi" \
+				-o "$work/dmo-dshow.y4m" 2>/dev/null
+			cmp -s "$work/in.y4m" "$work/dmo-vfw.y4m" &&
+			cmp -s "$work/in.y4m" "$work/dmo-dshow.y4m" || {
+				echo "smoke: DMO encode${mode:+ ($mode)} differs" >&2
+				exit 1
+			}
+		done
+		VFW_ENV_TESTDMO_PRIVATE=1 $emu "$harness" encode \
+			"$fixtures/testdmo.dll" "$work/in.y4m" -o "$work/dmo.avi" 2>&1 |
+			grep -q "4 bytes of extra data" || {
+			echo "smoke: the DMO's codec data is not in the stream" >&2
+			exit 1
+		}
+		$emu "$harness" encode "$fixtures/testdmo.dll" "$work/in.y4m" \
+			-o "$work/dmo-keys.avi" --keyint 3 --save-state \
+			"$work/dmo.state" 2>/dev/null
+		$emu "$harness" encode "$fixtures/testdmo.dll" "$work/in.y4m" \
+			-o "$work/dmo-state.avi" --state "$work/dmo.state" 2>/dev/null
+		cmp -s "$work/dmo-keys.avi" "$work/dmo-state.avi" || {
+			echo "smoke: DMO state did not carry the key interval" >&2
+			exit 1
+		}
+		$emu "$harness" probe "$fixtures/testdmo.dll" "$work/t.avi" |
+			grep -q "interfaces: ICodecAPI, IPersistStream"
+		reg="$work/registry"
+		export VFW_REGISTRY="$reg"
+		$emu "$harness" register "$fixtures/testdmo.dll" >/dev/null
+		VFW_INI=/nonexistent $emu "$harness" decode auto "$work/t.avi" \
+			-o "$work/dmo-auto.y4m" 2>/dev/null
+		cmp -s "$work/in.y4m" "$work/dmo-auto.y4m" || {
+			echo "smoke: registered DMO auto decode differs" >&2
+			exit 1
+		}
+		$emu "$harness" unregister "$fixtures/testdmo.dll" >/dev/null
 		unset VFW_REGISTRY
 		# The check itself works: without the reservation it trips.
 		# Not under an emulator, where the guest's memory is all below

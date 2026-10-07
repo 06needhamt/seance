@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * The GUIDs include/win32 declares in lists (VFW_OBJBASE_GUIDS,
- * VFW_DSHOW_GUIDS), defined once here.
+ * VFW_DSHOW_GUIDS, ...), defined once here.
  */
 #include "win32.h"
 
@@ -10,3 +10,7 @@
 
 VFW_OBJBASE_GUIDS(DEFINE)
 VFW_DSHOW_GUIDS(DEFINE)
+VFW_OLEAUTO_GUIDS(DEFINE)
+VFW_MMREG_GUIDS(DEFINE)
+VFW_DMO_GUIDS(DEFINE)
+VFW_DMO_SDK_GUIDS(DEFINE)

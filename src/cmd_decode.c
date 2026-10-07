@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * seance decode <codec> <in.avi> -o <out>: decompress an AVI's video
- * stream with a VfW codec and write the frames as Y4M, BMP files or raw.
+ * stream with a VfW codec, a DirectShow filter or a DMO and write the
+ * frames as Y4M, BMP files or raw.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,6 +16,7 @@
 #include "common/error.h"
 #include "common/fourcc.h"
 #include "common/unicode.h"
+#include "dmo/discover.h"
 #include "dshow/discover.h"
 #include "dshow/dshow.h"
 #include "loader/pe.h"
@@ -25,6 +27,7 @@
 #include "win32/codepage.h"
 #include "win32/ole.h"
 #include "win32/path.h"
+#include "xform.h"
 
 static int usage(void)
 {
@@ -38,7 +41,7 @@ static int usage(void)
 		"  --format <fmt>       y4m, bmp, yuv, bgr or raw, instead of the\n"
 		"                       extension\n"
 		"  --fourcc <XXXX>      the handler to open a DLL as\n"
-		"  --clsid <{GUID}>     DirectShow class when a server has several\n"
+		"  --clsid <{GUID}>     the filter or DMO when a DLL has several\n"
 		"  --output-format <f>  what the codec should decompress to: I420,\n"
 		"                       YV12, YUY2, UYVY, BGR32, BGR24, RGB565,\n"
 		"                       RGB555 or PAL8 (default: negotiated)\n"
@@ -154,7 +157,7 @@ static double now(void)
 	return t.tv_sec + t.tv_nsec / 1e9;
 }
 
-struct dshow_decode_output {
+struct com_decode_output {
 	struct output *output;
 	struct image_conv **conv;	/* replaced when the format changes */
 	REFERENCE_TIME first_time;	/* earlier samples are before --start */
@@ -167,7 +170,7 @@ struct dshow_decode_output {
  * and layout are fixed once the output file is open, so a change must keep
  * them; what may change is the pixel format, which gets a new converter.
  */
-static HRESULT dshow_format_change(struct dshow_decode_output *d,
+static HRESULT com_format_change(struct com_decode_output *d,
 				   const AM_MEDIA_TYPE *mt)
 {
 	BITMAPINFOHEADER *bih = NULL;
@@ -189,34 +192,28 @@ static HRESULT dshow_format_change(struct dshow_decode_output *d,
 	return S_OK;
 }
 
-static HRESULT dshow_write_sample(void *opaque, IMediaSample *sample,
-				  const AM_MEDIA_TYPE *dynamic)
+static HRESULT com_write_output(void *opaque, const struct xform_output *o,
+				const AM_MEDIA_TYPE *dynamic)
 {
-	struct dshow_decode_output *d = opaque;
-	BYTE *data = NULL;
-	LONG size = sample->lpVtbl->GetActualDataLength(sample);
+	struct com_decode_output *d = opaque;
 	if (dynamic && *d->conv) {
-		HRESULT hr = dshow_format_change(d, dynamic);
+		HRESULT hr = com_format_change(d, dynamic);
 		if (FAILED(hr))
 			return hr;
 	}
-	if ((dynamic && !*d->conv) || size < 0 ||
-	    FAILED(sample->lpVtbl->GetPointer(sample, &data)))
+	if (dynamic && !*d->conv)
 		return VFW_E_INVALIDMEDIATYPE;
 	/*
-	 * Filters needn't pass the preroll flag on, and may hold back frames
+	 * Decoders needn't pass the preroll flag on, and may hold back frames
 	 * (to reorder them) that come out after the ones asked for, so the
 	 * time stamps and the count decide too.
 	 */
-	REFERENCE_TIME t0 = 0, t1 = 0;
-	if (sample->lpVtbl->IsPreroll(sample) == S_OK ||
-	    (d->first_time && SUCCEEDED(sample->lpVtbl->GetTime(sample, &t0, &t1)) &&
-	     t0 < d->first_time) ||
+	if (o->preroll || (d->first_time && o->timed &&
+			   o->start < d->first_time) ||
 	    output_frames(d->output) >= d->limit)
 		return S_OK;
-	if (output_write(d->output, *d->conv, data, (size_t)size)) {
+	if (output_write(d->output, *d->conv, o->data, o->size))
 		return E_FAIL;
-	}
 	return S_OK;
 }
 
@@ -259,26 +256,52 @@ static char *registered_decoder(const BITMAPINFOHEADER *input, CLSID *clsid)
 		*clsid = best->f.clsid;
 	}
 	dshow_registered_free(filters, count);
+	if (path)
+		return path;
+
+	/* No filter: a DMO registered as a video decoder of the stream. */
+	struct dmo_registered *dmos = NULL;
+	count = dmo_registered(&dmos);
+	for (size_t i = 0; i < count && !path; i++) {
+		const struct dmo_reg *d = &dmos[i].d;
+		if (!dmos[i].path || dmo_role(d) != DMO_ROLE_VIDEO_DECODER)
+			continue;
+		for (size_t t = 0; t < d->nin && !path; t++) {
+			const DMO_PARTIAL_MEDIATYPE *type = &d->in[t];
+			int video = !memcmp(&type->type, &MEDIATYPE_Video,
+					    sizeof(GUID)) ||
+				    !memcmp(&type->type, &null_guid, sizeof(GUID));
+			int matches = !memcmp(&type->subtype, &subtype,
+					      sizeof(GUID)) ||
+				      !memcmp(&type->subtype, &null_guid,
+					      sizeof(GUID));
+			if (video && matches) {
+				path = path_to_unix(dmos[i].path);
+				*clsid = d->clsid;
+			}
+		}
+	}
+	dmo_registered_free(dmos, count);
 	return path;
 }
 
-static int decode_dshow(const char *target, const CLSID *selected,
+/* Decoding with a DirectShow filter or a DMO. */
+static int decode_com(const char *target, const CLSID *selected,
 			struct avi_file *avi, const struct avi_stream *s,
 			BITMAPINFOHEADER *in, size_t in_size, const char *out_path,
 			enum output_kind kind, const char *forced,
 			const char *state_path, unsigned long start,
 			unsigned long count, int keep_going)
 {
-	struct dshow_filter *server = NULL;
-	IBaseFilter *filter = NULL;
-	struct dshow_host *host = NULL;
+	struct xform *x = NULL;
+	int connected = 0;
 	BITMAPINFOHEADER *out = NULL;
 	struct image_conv *conv = NULL;
 	struct output *output = NULL;
 	BYTE *buf = NULL;
 	void *state = NULL;
 	AM_MEDIA_TYPE in_mt = {0}, out_mt = {0};
-	struct dshow_decode_output sink = {0};
+	struct com_decode_output sink = {0};
 	int status = 1;
 	char desc[160], name[24], fcc[FOURCC_STR_SIZE];
 
@@ -293,7 +316,7 @@ static int decode_dshow(const char *target, const CLSID *selected,
 		if (avi_chunk_is_frame(&s->chunks[i]) && s->chunks[i].size > largest)
 			largest = s->chunks[i].size;
 	in->biSizeImage = largest;
-	HRESULT hr = dshow_filter_open(target, selected, 0, &server, &filter, NULL);
+	HRESULT hr = xform_open(target, selected, 0, &x, NULL);
 	if (FAILED(hr)) {
 		fprintf(stderr, "seance: cannot open a unique decoder in %s (%s)\n",
 			target, dshow_hr_name(hr, name));
@@ -305,10 +328,11 @@ static int decode_dshow(const char *target, const CLSID *selected,
 			fprintf(stderr, "seance: %s\n", vfw_error());
 			goto done;
 		}
-		hr = dshow_filter_load_state(filter, state, n);
+		hr = dshow_filter_load_state(xform_object(x), state, n);
 		if (FAILED(hr)) {
-			fprintf(stderr, "seance: %s: filter refused this state (%s)\n",
-				state_path, dshow_hr_name(hr, name));
+			fprintf(stderr, "seance: %s: the %s refused this state "
+				"(%s)\n", state_path, xform_kind_name(x),
+				dshow_hr_name(hr, name));
 			goto done;
 		}
 	}
@@ -318,7 +342,7 @@ static int decode_dshow(const char *target, const CLSID *selected,
 	int passes = forced || kind == OUT_RAW ? 1 : 2;
 	HRESULT connect_hr = E_FAIL;
 	/* The input type a filter takes depends on how it names its formats. */
-	for (unsigned variant = 0; !host; variant++) {
+	for (unsigned variant = 0; !connected; variant++) {
 		dshow_free_media_type(&in_mt);
 		hr = dshow_input_variant(in, in_size, rate, scale, variant, &in_mt);
 		if (hr == S_FALSE)
@@ -328,7 +352,7 @@ static int decode_dshow(const char *target, const CLSID *selected,
 				goto media_error;
 			continue;
 		}
-		for (int pass = 0; pass < passes && !host; pass++) {
+		for (int pass = 0; pass < passes && !connected; pass++) {
 			for (unsigned i = 0; (format_name = vfw_std_format(i, in->biWidth,
 								     height, &fmt)); i++) {
 				if (forced && strcasecmp(forced, format_name))
@@ -344,9 +368,10 @@ static int decode_dshow(const char *target, const CLSID *selected,
 				if (FAILED(dshow_bih_to_mt(&fmt.bih, sizeof(fmt), rate,
 							   scale, 0, &out_mt)))
 					continue;
-				connect_hr = dshow_host_create(filter, &in_mt, &out_mt,
-							       dshow_write_sample, &sink, &host);
+				connect_hr = xform_connect(x, &in_mt, &out_mt,
+							   com_write_output, &sink);
 				if (SUCCEEDED(connect_hr)) {
+					connected = 1;
 					out = malloc(sizeof(fmt));
 					if (out)
 						memcpy(out, &fmt, sizeof(fmt));
@@ -357,18 +382,19 @@ static int decode_dshow(const char *target, const CLSID *selected,
 		}
 	}
 	hr = connect_hr;
-	if (!host || !out) {
+	if (!connected || !out) {
 		if (forced)
-			fprintf(stderr, "seance: filter won't connect to output format %s\n",
-				forced);
+			fprintf(stderr, "seance: the %s won't decode to output "
+				"format %s\n", xform_kind_name(x), forced);
 		else
-			fprintf(stderr, "seance: no suitable DirectShow output format (%s)\n",
-				dshow_hr_name(hr, name));
+			fprintf(stderr, "seance: no suitable %s output format (%s)\n",
+				xform_kind_name(x), dshow_hr_name(hr, name));
 		goto done;
 	}
 	conv = image_conv_new(out, vfw_format_size(out));
 	if (!conv && kind != OUT_RAW) {
-		fprintf(stderr, "seance: filter output (%s) cannot be converted\n",
+		fprintf(stderr, "seance: the %s's output (%s) cannot be "
+			"converted\n", xform_kind_name(x),
 			cli_format_desc(out, desc, sizeof(desc)));
 		goto done;
 	}
@@ -392,7 +418,7 @@ static int decode_dshow(const char *target, const CLSID *selected,
 			(REFERENCE_TIME)first_frame * scale * 10000000 / rate;
 		REFERENCE_TIME segment_stop =
 			(REFERENCE_TIME)s->frames * scale * 10000000 / rate;
-		hr = dshow_host_seek(host, segment_start, segment_stop);
+		hr = xform_seek(x, segment_start, segment_stop);
 		if (FAILED(hr)) {
 			fprintf(stderr, "seance: seek to frame %lu: %s\n", start,
 				dshow_hr_name(hr, name));
@@ -448,7 +474,7 @@ static int decode_dshow(const char *target, const CLSID *selected,
 			AM_SAMPLE_SPLICEPOINT : 0;
 		if (!show) flags |= AM_SAMPLE_PREROLL;
 		double t = now();
-		hr = dshow_host_push(host, buf, chunk->size, a, b, flags);
+		hr = xform_push(x, buf, chunk->size, a, b, flags);
 		busy += now() - t;
 		decoded++;
 		if (FAILED(hr)) {
@@ -460,7 +486,7 @@ static int decode_dshow(const char *target, const CLSID *selected,
 		}
 		frame++;
 	}
-	hr = dshow_host_end(host, 0);
+	hr = xform_end(x);
 	if (FAILED(hr)) {
 		fprintf(stderr, "seance: end of stream: %s\n", dshow_hr_name(hr, name));
 		goto done;
@@ -491,8 +517,7 @@ write_error:
 	fprintf(stderr, "seance: %s\n", vfw_error());
 done:
 	if (output) output_close(output);
-	dshow_host_destroy(host);
-	dshow_filter_close(server, filter);
+	xform_close(x);
 	dshow_free_media_type(&out_mt);
 	dshow_free_media_type(&in_mt);
 	image_conv_free(conv);
@@ -594,7 +619,8 @@ int cmd_decode(int argc, char **argv)
 	if (directshow || clsid_arg) {
 		CLSID clsid, *selected = NULL;
 		if (!directshow) {
-			fprintf(stderr, "seance: --clsid requires a DirectShow server\n");
+			fprintf(stderr, "seance: --clsid requires a DirectShow or "
+				"DMO server\n");
 			goto done;
 		}
 		if (fourcc) {
@@ -609,7 +635,7 @@ int cmd_decode(int argc, char **argv)
 			}
 			selected = &clsid;
 		}
-		status = decode_dshow(target, selected, avi, s, in, in_size,
+		status = decode_com(target, selected, avi, s, in, in_size,
 			out_path, kind, forced, state_path, start, count, keep_going);
 		goto done;
 	}
@@ -628,7 +654,7 @@ int cmd_decode(int argc, char **argv)
 			CLSID clsid;
 			char *server = registered_decoder(in, &clsid);
 			if (server) {
-				status = decode_dshow(server, &clsid, avi, s, in, in_size,
+				status = decode_com(server, &clsid, avi, s, in, in_size,
 					out_path, kind, forced, state_path, start, count,
 					keep_going);
 				free(server);

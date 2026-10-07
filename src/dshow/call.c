@@ -16,6 +16,16 @@ const char *dshow_hr_name(HRESULT hr, char buf[24])
 	case VFW_E_TYPE_NOT_ACCEPTED: return "VFW_E_TYPE_NOT_ACCEPTED";
 	case VFW_E_NOT_CONNECTED: return "VFW_E_NOT_CONNECTED";
 	case VFW_E_TIMEOUT: return "VFW_E_TIMEOUT";
+	case E_POINTER: return "E_POINTER";
+	case E_INVALIDARG: return "E_INVALIDARG";
+	case E_OUTOFMEMORY: return "E_OUTOFMEMORY";
+	case CLASS_E_CLASSNOTAVAILABLE: return "CLASS_E_CLASSNOTAVAILABLE";
+	case DMO_E_INVALIDSTREAMINDEX: return "DMO_E_INVALIDSTREAMINDEX";
+	case DMO_E_INVALIDTYPE: return "DMO_E_INVALIDTYPE";
+	case DMO_E_TYPE_NOT_SET: return "DMO_E_TYPE_NOT_SET";
+	case DMO_E_NOTACCEPTING: return "DMO_E_NOTACCEPTING";
+	case DMO_E_TYPE_NOT_ACCEPTED: return "DMO_E_TYPE_NOT_ACCEPTED";
+	case DMO_E_NO_MORE_ITEMS: return "DMO_E_NO_MORE_ITEMS";
 	default: snprintf(buf, 24, "0x%08lx", (unsigned long)hr); return buf;
 	}
 }

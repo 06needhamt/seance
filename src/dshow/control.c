@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Optional encoder interfaces.  Keeping these operations here, rather than in
- * cmd_encode, means command-line policy never leaks into the COM host.
+ * cmd_encode, means command-line policy never leaks into the COM host. Each
+ * takes any COM object, a DirectShow filter or a DMO, and asks it for the
+ * interface it needs.
  */
 #include <limits.h>
 #include <stdio.h>
@@ -12,16 +14,18 @@
 #include "win32/k32.h"
 #include "win32/ole.h"
 
-static HRESULT persist_stream(IBaseFilter *filter, IPersistStream **out)
+static HRESULT persist_stream(void *object, IPersistStream **out)
 {
-	if (!filter || !out)
+	IUnknown *unknown = object;
+
+	if (!unknown || !out)
 		return E_POINTER;
 	*out = NULL;
-	return filter->lpVtbl->QueryInterface(filter, &IID_IPersistStream,
-					      (void **)out);
+	return unknown->lpVtbl->QueryInterface(unknown, &IID_IPersistStream,
+					       (void **)out);
 }
 
-int dshow_filter_interfaces(IBaseFilter *filter, char *buf, size_t size)
+int dshow_filter_interfaces(void *object, char *buf, size_t size)
 {
 	static const struct {
 		const IID *iid;
@@ -31,7 +35,10 @@ int dshow_filter_interfaces(IBaseFilter *filter, char *buf, size_t size)
 		{ &IID_ICodecAPI, "ICodecAPI" },
 		{ &IID_IPersistStream, "IPersistStream" },
 		{ &IID_ISpecifyPropertyPages, "ISpecifyPropertyPages" },
+		{ &IID_IWMCodecPrivateData, "IWMCodecPrivateData" },
+		{ &IID_IPropertyBag, "IPropertyBag" },
 	};
+	IUnknown *filter = object;
 	int found = 0;
 	size_t used = 0;
 
@@ -107,13 +114,14 @@ static HRESULT codec_api_rate_mode(ICodecAPI *api)
  * An option that either takes is applied; one that none takes is an error, as
  * is a filter with neither.
  */
-HRESULT dshow_encoder_configure(IBaseFilter *filter,
+HRESULT dshow_encoder_configure(void *object,
 				const struct dshow_encoder_options *options)
 {
 	IAMVideoCompression *compression = NULL;
 	ICodecAPI *api = NULL;
 	HRESULT first = S_OK, hr;
 	int have_key = 0, have_quality = 0, have_rate = 0;
+	IUnknown *filter = object;
 
 	if (!filter || !options)
 		return E_POINTER;
@@ -212,8 +220,7 @@ HRESULT dshow_encoder_configure(IBaseFilter *filter,
 	return first;
 }
 
-HRESULT dshow_filter_load_state(IBaseFilter *filter, const void *data,
-				size_t size)
+HRESULT dshow_filter_load_state(void *filter, const void *data, size_t size)
 {
 	IPersistStream *persist;
 	IStream *stream = NULL;
@@ -250,7 +257,7 @@ done:
 	return hr;
 }
 
-HRESULT dshow_filter_save_state(IBaseFilter *filter, void **data, size_t *size)
+HRESULT dshow_filter_save_state(void *filter, void **data, size_t *size)
 {
 	IPersistStream *persist;
 	IStream *stream = NULL;

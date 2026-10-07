@@ -985,9 +985,11 @@ static void test_resource_languages(void)
 	const char *dir = getenv("VFW_FIXTURES");
 	char path[512];
 
-	if (!dir)
+	snprintf(path, sizeof(path), "%s/pe_basic.dll", dir ? dir : ".");
+	if (!dir || access(path, R_OK)) {
+		printf("test_kernel32: pe_basic.dll not built, skipping resource languages\n");
 		return;
-	snprintf(path, sizeof(path), "%s/pe_basic.dll", dir);
+	}
 	struct module *m = mod_load(path, NULL);
 	CHECK(m != NULL);
 	if (!m)

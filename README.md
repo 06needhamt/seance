@@ -41,6 +41,10 @@ is not supported or not yet exercised, are in
 renderer filters, DMOs, capture devices, a real Filter Graph Manager, network
 access and hardware decoding.
 
+DMOs are found, registered and run for video decoding and encoding as well;
+audio decoders and encoders (filters and DMOs) are planned in
+[docs/DMO_AUDIO_PLAN.md](docs/DMO_AUDIO_PLAN.md).
+
 ## Prerequisites
 
 The codecs are i386 code, so the harness is built as a 32-bit Linux program.
@@ -409,7 +413,7 @@ Windows Registry Editor Version 5.00
 `VFW_REGISTRY=` (empty) keeps the registry in memory only, starting empty
 each run.
 
-### DirectShow filters: `register` and `unregister`
+### DirectShow filters and DMOs: `register` and `unregister`
 
 ```sh
 build/seance register --dry-run filter.ax  # what it would register
@@ -437,7 +441,18 @@ to which each decoder actually connects.
 
 `list` shows the video decoders and encoders registered, from the
 filter categories and the older `HKCR\Filter` keys, with the DLL that
-serves each; `--all` shows every filter. A `.reg` file exported from
+serves each; `--all` shows every filter.
+
+DirectX Media Objects (DMOs) are found the same way. A DMO's DLL registers
+it from its `DllRegisterServer`, through the built-in msdmo.dll's
+`DMORegister` or by writing `HKCR\DirectShow\MediaObjects` itself, and
+`register`, `unregister` and `probe` show each DMO's CLSID, name, role,
+category and registered input and output types, and `probe` the interfaces
+a DMO decoder or encoder has and, given an AVI, the output formats a decoder
+takes for it. `list` adds the DMO decoders and encoders registered
+(`--all`: every DMO). `decode` and `encode` drive DMOs as they drive filters
+(below); audio is still to come, see
+[docs/DMO_AUDIO_PLAN.md](docs/DMO_AUDIO_PLAN.md). A `.reg` file exported from
 Windows with filters in it can be dropped in as the registry; the
 filters' DLLs are then found through the drive mapping.
 
@@ -446,6 +461,7 @@ filters' DLLs are then found through the drive mapping.
 ```sh
 build/seance decode codec.dll clip.avi -o clip.y4m
 build/seance decode filter.ax clip.avi -o clip.y4m --clsid '{GUID}'
+build/seance decode dmo.dll clip.avi -o clip.y4m
 build/seance decode auto clip.avi -o 'frame%05d.bmp' --start 250 --frames 10
 build/seance decode XVID clip.avi -o clip.yuv --output-format YV12
 
@@ -513,6 +529,23 @@ sync-point flag becomes the AVI keyframe flag. Quality, keyframe interval and
 bitrate use `IAMVideoCompression` and `ICodecAPI`, whichever the filter has
 (an option neither takes is an error); `--state` and `--save-state` use
 `IPersistStream`.
+
+A DMO is driven the same way, without a graph. The DLL's video decoder (or
+encoder) DMO is created from its `DllGetClassObject`, its input type set
+(each form tried, as for a filter) and then its output type, each first with
+`DMO_SET_TYPEF_TEST_ONLY`. Each AVI chunk goes in with `ProcessInput` as a
+buffer marked as a sync point and stamped with its time. Everything the DMO
+has comes out with `ProcessOutput`, asked again while it says
+`DMO_OUTPUT_DATA_BUFFERF_INCOMPLETE`. A DMO that answers
+`DMO_E_NOTACCEPTING` is drained first, and at the end `Discontinuity` lets
+out what it still holds. DMOs know no preroll and needn't stamp their output,
+so the harness gives each output the preroll flag and, if unstamped, the times
+of the input it came from. A change in `GetOutputCurrentType` is handled like
+a filter's new media type. For `--start`, the DMO is flushed. An encoder with
+`IWMCodecPrivateData` has its codec data appended to the stream header.
+Encoder options and state go through `ICodecAPI`/`IAMVideoCompression` and
+`IPersistStream`, as for filters. `decode auto` also tries the DMOs
+registered as video decoders, after the filters.
 
 Both commands print the frame count, the formats on each side and the time
 spent in the codec per frame. With `testcodec.dll`, encoding a clip and
