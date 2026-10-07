@@ -378,7 +378,12 @@ WINFN(PSLIST_ENTRY) k32_InterlockedFlushSList(PSLIST_HEADER h)
 
 WINFN(WORD) k32_QueryDepthSList(PSLIST_HEADER h)
 {
-	return h->Depth;
+	WORD depth;
+
+	pthread_mutex_lock(&slist_lock);
+	depth = h->Depth;
+	pthread_mutex_unlock(&slist_lock);
+	return depth;
 }
 
 #define E(name) { #name, 0, (void *)k32_##name }

@@ -33,7 +33,7 @@ struct filter {
 	LONG key_interval, pframes;
 	double quality;
 	DWORDLONG window;
-	BOOL async, no_eos, require_segment, segment, peer_info, dynamic, no_preroll;
+	BOOL async, no_eos, require_segment, segment, peer_info, dynamic, dynamic_extra, no_preroll;
 	LONG workers;
 	HRESULT async_error;
 	CRITICAL_SECTION transform_lock;
@@ -241,10 +241,21 @@ static HRESULT transform(struct filter*f,IMediaSample*input)
 		}
 	}
 	/* The encoder re-announces its output type on the first sample (TESTFILTER_DYNAMIC). */
-	if(SUCCEEDED(hr)&&f->dynamic&&f->encoder&&f->frame==0){
-		hr=out->peer->lpVtbl->QueryAccept(out->peer,&out->type);
-		if(hr==S_OK)hr=sample->lpVtbl->SetMediaType(sample,&out->type);
-		else if(SUCCEEDED(hr))hr=VFW_E_TYPE_NOT_ACCEPTED;
+	if(SUCCEEDED(hr)&&(f->dynamic||f->dynamic_extra)&&f->encoder&&f->frame==0){
+		AM_MEDIA_TYPE mt;
+		hr=copy_type(&mt,&out->type);
+		if(SUCCEEDED(hr)&&f->dynamic_extra){
+			/* TESTFILTER_DYNAMIC_EXTRA: format data (a sequence header, say) the file's stream header lacks. */
+			BYTE*bigger=CoTaskMemAlloc(mt.cbFormat+4);
+			if(!bigger)hr=E_OUTOFMEMORY;
+			else{for(DWORD i=0;i<mt.cbFormat;i++)bigger[i]=mt.pbFormat[i];for(DWORD i=0;i<4;i++)bigger[mt.cbFormat+i]=0xA5;CoTaskMemFree(mt.pbFormat);mt.pbFormat=bigger;mt.cbFormat+=4;}
+		}
+		if(SUCCEEDED(hr)){
+			hr=out->peer->lpVtbl->QueryAccept(out->peer,&mt);
+			if(hr==S_OK)hr=sample->lpVtbl->SetMediaType(sample,&mt);
+			else if(SUCCEEDED(hr))hr=VFW_E_TYPE_NOT_ACCEPTED;
+			free_type(&mt);
+		}
 	}
 	if(SUCCEEDED(hr)){sample->lpVtbl->SetPreroll(sample,!f->no_preroll&&input->lpVtbl->IsPreroll(input)==S_OK);sample->lpVtbl->SetDiscontinuity(sample,input->lpVtbl->IsDiscontinuity(input)==S_OK);hr=out->peer_mem->lpVtbl->Receive(out->peer_mem,sample);}
 	sample->lpVtbl->Release(sample);f->frame++;return hr;
@@ -263,5 +274,5 @@ static HRESULT WINAPI filter_vendor(IBaseFilter*p,LPWSTR*out){return E_NOTIMPL;}
 static IBaseFilterVtbl filter_vtbl={filter_qi,filter_addref,filter_release,filter_class,filter_stop,filter_pause,filter_run,filter_state,filter_set_clock,filter_get_clock,filter_enum,filter_find,filter_info,filter_join,filter_vendor};
 
 static BOOL env_on(const char*name){char value[2];return GetEnvironmentVariableA(name,value,sizeof(value))==1&&value[0]=='1';}
-HRESULT testfilter_create(BOOL encoder,REFIID iid,void**out){if(!out)return E_POINTER;*out=NULL;struct filter*f=alloc(sizeof(*f));if(!f)return E_OUTOFMEMORY;f->iface.lpVtbl=&filter_vtbl;f->compression.lpVtbl=&compression_vtbl;f->persist.lpVtbl=&persist_vtbl;f->refs=1;f->encoder=encoder;f->quality=0.75;f->async=env_on("TESTFILTER_ASYNC");f->no_eos=env_on("TESTFILTER_NO_EOS");f->require_segment=env_on("TESTFILTER_REQUIRE_SEGMENT");f->peer_info=env_on("TESTFILTER_PEER_INFO");f->dynamic=env_on("TESTFILTER_DYNAMIC");f->no_preroll=env_on("TESTFILTER_NO_PREROLL");InitializeCriticalSection(&f->transform_lock);f->input=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_INPUT};f->output=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_OUTPUT};InterlockedIncrement(&objects);HRESULT hr=filter_qi(&f->iface,iid,out);filter_release(&f->iface);return hr;}
+HRESULT testfilter_create(BOOL encoder,REFIID iid,void**out){if(!out)return E_POINTER;*out=NULL;struct filter*f=alloc(sizeof(*f));if(!f)return E_OUTOFMEMORY;f->iface.lpVtbl=&filter_vtbl;f->compression.lpVtbl=&compression_vtbl;f->persist.lpVtbl=&persist_vtbl;f->refs=1;f->encoder=encoder;f->quality=0.75;f->async=env_on("TESTFILTER_ASYNC");f->no_eos=env_on("TESTFILTER_NO_EOS");f->require_segment=env_on("TESTFILTER_REQUIRE_SEGMENT");f->peer_info=env_on("TESTFILTER_PEER_INFO");f->dynamic=env_on("TESTFILTER_DYNAMIC");f->dynamic_extra=env_on("TESTFILTER_DYNAMIC_EXTRA");f->no_preroll=env_on("TESTFILTER_NO_PREROLL");InitializeCriticalSection(&f->transform_lock);f->input=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_INPUT};f->output=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_OUTPUT};InterlockedIncrement(&objects);HRESULT hr=filter_qi(&f->iface,iid,out);filter_release(&f->iface);return hr;}
 LONG testfilter_objects(void){return objects;}

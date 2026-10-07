@@ -214,8 +214,31 @@ struct dshow_encode_output {
 	struct avi_writer *writer;
 	uint64_t bytes;
 	unsigned long written, keys;
-	GUID subtype;		/* the compressed format the file was opened for */
+	BITMAPINFOHEADER format;	/* what the file's stream header says */
 };
+
+/*
+ * Whether a media type a sample announces describes the format the file was
+ * opened for. The stream header is written once, before the first sample, so a
+ * type that adds format data (a sequence header) or changes the codec or
+ * picture would leave the file describing something else than it holds.
+ */
+static int dshow_same_format(const struct dshow_encode_output *out,
+			     const AM_MEDIA_TYPE *mt)
+{
+	BITMAPINFOHEADER *bih = NULL;
+	size_t size = 0;
+	int same = 0;
+
+	if (SUCCEEDED(dshow_mt_to_bih(mt, &bih, &size))) {
+		BITMAPINFOHEADER a = *bih, b = out->format;
+
+		a.biSizeImage = b.biSizeImage = 0;	/* an upper bound, not a format */
+		same = size == sizeof(b) && !memcmp(&a, &b, sizeof(a));
+		free(bih);
+	}
+	return same;
+}
 
 static HRESULT dshow_write_encoded(void *opaque, IMediaSample *sample,
 				   const AM_MEDIA_TYPE *dynamic)
@@ -225,12 +248,7 @@ static HRESULT dshow_write_encoded(void *opaque, IMediaSample *sample,
 	LONG size = sample->lpVtbl->GetActualDataLength(sample);
 	if (!out->writer)
 		return VFW_E_WRONG_STATE;
-	/*
-	 * A new type on a sample may refine the format (a sequence header, a
-	 * frame rate) but the file's stream header was written for one codec, so
-	 * it must stay the same one.
-	 */
-	if ((dynamic && memcmp(&dynamic->subtype, &out->subtype, sizeof(GUID))) ||
+	if ((dynamic && !dshow_same_format(out, dynamic)) ||
 	    size < 0 || FAILED(sample->lpVtbl->GetPointer(sample, &data)))
 		return VFW_E_INVALIDMEDIATYPE;
 	int key = sample->lpVtbl->IsSyncPoint(sample) == S_OK;
@@ -317,7 +335,7 @@ static int dshow_try_input(IBaseFilter *filter, const BITMAPINFOHEADER *input,
 		hr = dshow_bih_to_mt(&encoded, sizeof(encoded), rate, scale, 0,
 				     &out_mt);
 	if (SUCCEEDED(hr)) {
-		sink->subtype = out_mt.subtype;
+		sink->format = encoded;
 		hr = dshow_host_create(filter, &in_mt, &out_mt, dshow_write_encoded,
 				       sink, host);
 	}

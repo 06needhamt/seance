@@ -177,6 +177,15 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 			echo "smoke: DirectShow encode with a type change differs" >&2
 			exit 1
 		}
+		# A type that adds format data the file's stream header lacks can't be
+		# followed, and says so rather than writing a misleading file.
+		if env VFW_ENV_TESTFILTER_DYNAMIC_EXTRA=1 $emu "$harness" encode \
+			"$fixtures/testfilter.ax" "$work/in.y4m" \
+			-o "$work/dshow-extra.avi" 2>"$work/extra.err"; then
+			echo "smoke: encode should refuse a type that adds format data" >&2
+			exit 1
+		fi
+		grep -q VFW_E_INVALIDMEDIATYPE "$work/extra.err"
 		$emu "$harness" encode "$fixtures/testfilter.ax" "$work/in.y4m" \
 			-o "$work/dshow-state.avi" --state "$work/dshow.state" --clsid \
 			'{5E6C9B32-3A7D-4F0E-9C11-0D2B7A6E4F80}' \
