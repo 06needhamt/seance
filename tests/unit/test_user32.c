@@ -502,6 +502,22 @@ static void test_misc(void)
 	GDI(DWORD, GetObjectType, HGDIOBJ);
 	GDI(int, GetObjectA, HGDIOBJ, int, LPVOID);
 
+	/* Menus can be built and thrown away, though nothing shows them. */
+	{
+		FN(HMENU, CreatePopupMenu, void);
+		FN(HMENU, CreateMenu, void);
+		FN(BOOL, InsertMenuItemW, HMENU, UINT, BOOL, const void *);
+		FN(BOOL, DestroyMenu, HMENU);
+		BYTE info[48] = { 48 };
+		HMENU a = CreatePopupMenu(), b = CreateMenu();
+
+		CHECK(a != NULL && b != NULL && a != b);
+		CHECK(InsertMenuItemW(a, 0, TRUE, info));
+		CHECK(!InsertMenuItemW(NULL, 0, TRUE, info));
+		CHECK(!InsertMenuItemW(a, 0, TRUE, NULL));
+		CHECK(DestroyMenu(a) && DestroyMenu(b));
+	}
+
 	/* No menus are shown and there is no shell window. */
 	CHECK(!TrackPopupMenu(NULL, 0, 0, 0, 0, NULL, NULL));
 	CHECK(GetShellWindow() == NULL);

@@ -207,8 +207,12 @@ void *heap_alloc(HANDLE handle, DWORD flags, SIZE_T size)
 		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
 		return NULL;
 	}
-	b = (flags & HEAP_ZERO_MEMORY) ? calloc(1, sizeof(*b) + size) :
-					 malloc(sizeof(*b) + size);
+	/*
+	 * Always zeroed, which HEAP_ZERO_MEMORY only promises: memory fresh from a
+	 * Windows heap usually is, and code that was never run on anything else
+	 * can depend on it.
+	 */
+	b = calloc(1, sizeof(*b) + size);
 	if (!b) {
 		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
 		return NULL;

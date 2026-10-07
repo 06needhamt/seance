@@ -876,6 +876,42 @@ static void test_drivers32(void)
 	vfw_registry_reload();
 }
 
+/* The CryptoAPI hash, key and parameter calls are not offered. */
+static void test_crypt_unsupported(void)
+{
+	struct module *k = mod_load("kernel32.dll", NULL);
+	DWORD (WINAPI *last)(void) = mod_get_proc(k, "GetLastError");
+	FN(BOOL, CryptAcquireContextA, ULONG_PTR *, LPCSTR, LPCSTR, DWORD, DWORD);
+	FN(BOOL, CryptReleaseContext, ULONG_PTR, DWORD);
+	FN(BOOL, CryptCreateHash, ULONG_PTR, UINT, ULONG_PTR, DWORD, ULONG_PTR *);
+	FN(BOOL, CryptDestroyHash, ULONG_PTR);
+	FN(BOOL, CryptGetHashParam, ULONG_PTR, DWORD, BYTE *, DWORD *, DWORD);
+	FN(BOOL, CryptSetHashParam, ULONG_PTR, DWORD, const BYTE *, DWORD);
+	FN(BOOL, CryptSignHashA, ULONG_PTR, DWORD, LPCSTR, DWORD, BYTE *, DWORD *);
+	FN(BOOL, CryptDecrypt, ULONG_PTR, ULONG_PTR, BOOL, DWORD, BYTE *, DWORD *);
+	FN(BOOL, CryptGetProvParam, ULONG_PTR, DWORD, BYTE *, DWORD *, DWORD);
+	FN(BOOL, CryptSetProvParam, ULONG_PTR, DWORD, const BYTE *, DWORD);
+	ULONG_PTR prov = 0, hash = 99;
+	DWORD len = 0;
+	BYTE buf[8];
+
+	CHECK(CryptAcquireContextA(&prov, NULL, NULL, 1, 0xf0000000));
+	/* No algorithm can be hashed with, so no hash ever exists. */
+	CHECK(!CryptCreateHash(prov, 0x8003 /* CALG_MD5 */, 0, 0, &hash));
+	CHECK_EQ(last(), (DWORD)NTE_BAD_ALGID);
+	CHECK_EQ(hash, 0);
+	CHECK(!CryptDestroyHash(5));
+	CHECK(!CryptGetHashParam(5, 2, buf, &len, 0));
+	CHECK(!CryptSetHashParam(5, 2, buf, 0));
+	CHECK(!CryptSignHashA(5, 1, NULL, 0, buf, &len));
+	CHECK(!CryptDecrypt(5, 0, TRUE, 0, buf, &len));
+	CHECK(!CryptGetProvParam(prov, 1, buf, &len, 0));
+	CHECK(!CryptSetProvParam(prov, 1, buf, 0));
+	CHECK_EQ(last(), ERROR_INVALID_PARAMETER);
+	CHECK(CryptReleaseContext(prov, 0));
+	mod_free(k);
+}
+
 int main(void)
 {
 	const char *tmpdir = getenv("TMPDIR");
@@ -906,6 +942,7 @@ int main(void)
 	test_sandbox();
 	test_memory_only();
 	test_fixture();
+	test_crypt_unsupported();
 
 	mod_free(adv);
 	char cmd[512];

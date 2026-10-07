@@ -203,7 +203,8 @@ CRTFN(size_t) crt__msize(void *p) { return malloc_usable_size(p); }
 CRTFN(void *) crt_malloc(size_t n)
 {
 	void *p;
-	while (!(p = malloc(n)) && crt_malloc_retry(n))
+	/* Zeroed, as memory fresh from a Windows heap usually is. */
+	while (!(p = calloc(1, n)) && crt_malloc_retry(n))
 		;
 	return p;
 }

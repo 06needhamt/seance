@@ -4,6 +4,11 @@
  * libraries use it for (the system RNG seeds their hash tables and tags).
  * Other algorithms are reported as not found, as Windows does for a name it
  * doesn't know, so a caller that wants one can say so.
+ *
+ * ncrypt.dll, the key storage API the same libraries import for client
+ * certificates, is here too: it forwards the same three functions, and has
+ * no key storage provider to open, so every NCrypt* call reports that the
+ * provider or key handle isn't valid.
  */
 #include <stdlib.h>
 #include <strings.h>
@@ -83,6 +88,60 @@ WINFN(NTSTATUS) bcrypt_BCryptGenRandom(void *h, BYTE *buf, ULONG len,
 	return STATUS_SUCCESS;
 }
 
+#define NTE_INVALID_HANDLE ((NTSTATUS)0x80090026)
+#define NTE_NOT_SUPPORTED  ((NTSTATUS)0x80090029)
+
+WINFN(NTSTATUS) bcrypt_NCryptOpenStorageProvider(void **prov, LPCWSTR name, DWORD flags)
+{
+	if (prov)
+		*prov = NULL;
+	return NTE_NOT_SUPPORTED;
+}
+
+WINFN(NTSTATUS) bcrypt_NCryptOpenKey(void *prov, void **key, LPCWSTR name,
+				     DWORD spec, DWORD flags)
+{
+	if (key)
+		*key = NULL;
+	return NTE_INVALID_HANDLE;
+}
+
+WINFN(NTSTATUS) bcrypt_NCryptFreeObject(void *object)
+{
+	return NTE_INVALID_HANDLE;
+}
+
+WINFN(NTSTATUS) bcrypt_NCryptDeleteKey(void *key, DWORD flags)
+{
+	return NTE_INVALID_HANDLE;
+}
+
+WINFN(NTSTATUS) bcrypt_NCryptGetProperty(void *object, LPCWSTR property, BYTE *out,
+					 DWORD size, DWORD *got, DWORD flags)
+{
+	if (got)
+		*got = 0;
+	return NTE_INVALID_HANDLE;
+}
+
+WINFN(NTSTATUS) bcrypt_NCryptSignHash(void *key, void *padding, BYTE *hash,
+				      DWORD hash_size, BYTE *sig, DWORD sig_size,
+				      DWORD *got, DWORD flags)
+{
+	if (got)
+		*got = 0;
+	return NTE_INVALID_HANDLE;
+}
+
+WINFN(NTSTATUS) bcrypt_NCryptDecrypt(void *key, BYTE *in, DWORD in_size,
+				     void *padding, BYTE *out, DWORD out_size,
+				     DWORD *got, DWORD flags)
+{
+	if (got)
+		*got = 0;
+	return NTE_INVALID_HANDLE;
+}
+
 #define E(name) { #name, 0, (void *)bcrypt_##name }
 
 static const struct builtin_export exports[] = {
@@ -95,3 +154,21 @@ static const struct builtin_export exports[] = {
 static const struct builtin_export *const tables[] = { exports, NULL };
 
 const struct builtin_dll builtin_bcrypt = { "bcrypt.dll", NULL, tables, 0 };
+
+static const struct builtin_export ncrypt_exports[] = {
+	E(BCryptCloseAlgorithmProvider),
+	E(BCryptGenRandom),
+	E(BCryptOpenAlgorithmProvider),
+	E(NCryptDecrypt),
+	E(NCryptDeleteKey),
+	E(NCryptFreeObject),
+	E(NCryptGetProperty),
+	E(NCryptOpenKey),
+	E(NCryptOpenStorageProvider),
+	E(NCryptSignHash),
+	BUILTIN_END
+};
+
+static const struct builtin_export *const ncrypt_tables[] = { ncrypt_exports, NULL };
+
+const struct builtin_dll builtin_ncrypt = { "ncrypt.dll", NULL, ncrypt_tables, 0 };

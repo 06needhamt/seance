@@ -18,6 +18,15 @@
 #define STATUS_INVALID_HANDLE ((LONG)0xC0000008)
 #define STATUS_NOT_FOUND     ((LONG)0xC0000225)
 
+static size_t wcslen16(const WCHAR *s)
+{
+	size_t n = 0;
+
+	while (s[n])
+		n++;
+	return n;
+}
+
 static void *get(struct module *m, const char *name)
 {
 	void *p = mod_get_proc(m, name);
@@ -251,6 +260,411 @@ static void test_msvcrt(void)
 	mod_free(c);
 }
 
+/* ws2_32: Winsock for a machine with no network. */
+
+#define WSAEINVAL 10022
+#define WSAENOTSOCK 10038
+#define WSAENETDOWN 10050
+#define WSANOTINITIALISED 10093
+#define WSAHOST_NOT_FOUND 11001
+
+static void test_winsock(void)
+{
+	struct module *m = mod_load("ws2_32.dll", NULL);
+	struct module *alias = mod_load("wsock32.dll", NULL);
+	CHECK(m != NULL && alias != NULL);
+	if (!m)
+		return;
+	FN(m, int, WSAStartup, WORD, void *);
+	FN(m, int, WSACleanup, void);
+	FN(m, int, WSAGetLastError, void);
+	FN(m, UINT_PTR, socket, int, int, int);
+	FN(m, int, closesocket, UINT_PTR);
+	FN(m, int, connect, UINT_PTR, const void *, int);
+	FN(m, int, select, int, void *, void *, void *, const void *);
+	FN(m, int, __WSAFDIsSet, UINT_PTR, void *);
+	FN(m, int, getaddrinfo, const char *, const char *, const void *, void **);
+	FN(m, void, freeaddrinfo, void *);
+	FN(m, int, getnameinfo, const void *, int, char *, DWORD, char *, DWORD, int);
+	FN(m, int, gethostname, char *, int);
+	FN(m, int, inet_pton, int, const char *, void *);
+	FN(m, const char *, inet_ntop, int, const void *, char *, SIZE_T);
+	FN(m, unsigned short, htons, unsigned short);
+	FN(m, DWORD, ntohl, DWORD);
+	struct { WORD ver, high; char d[257], s[129]; unsigned short a, b; char *v; } data;
+
+	/* Nothing works before it is started. */
+	CHECK_EQ(socket(2, 1, 6), ~(UINT_PTR)0);
+	CHECK_EQ(WSAGetLastError(), WSANOTINITIALISED);
+	CHECK_EQ(WSACleanup(), -1);
+	CHECK_EQ(WSAStartup(0x0003, &data), 10092);	/* WSAVERNOTSUPPORTED: 3.0 */
+	CHECK_EQ(WSAStartup(0x0202, &data), 0);
+	CHECK_EQ(data.ver, 0x0202);
+	CHECK_EQ(data.high, 0x0202);
+
+	/* There is no network: no socket can be made, and no handle is one. */
+	CHECK_EQ(socket(2, 1, 6), ~(UINT_PTR)0);
+	CHECK_EQ(WSAGetLastError(), WSAENETDOWN);
+	CHECK_EQ(socket(99, 1, 0), ~(UINT_PTR)0);
+	CHECK_EQ(WSAGetLastError(), 10047);	/* WSAEAFNOSUPPORT */
+	CHECK_EQ(closesocket(5), -1);
+	CHECK_EQ(WSAGetLastError(), WSAENOTSOCK);
+	CHECK_EQ(connect(5, NULL, 0), -1);
+	CHECK_EQ(WSAGetLastError(), WSAENOTSOCK);
+	CHECK_EQ(select(0, NULL, NULL, NULL, NULL), -1);
+	CHECK_EQ(WSAGetLastError(), WSAEINVAL);
+	struct { UINT n; UINT_PTR s[64]; } set = { 2, { 7, 9 } };
+	CHECK_EQ(__WSAFDIsSet(9, &set), 1);
+	CHECK_EQ(__WSAFDIsSet(8, &set), 0);
+
+	/* The pure functions work. */
+	CHECK_EQ(htons(0x1234), 0x3412);
+	CHECK_EQ(ntohl(0x01020304), 0x04030201);
+	BYTE addr[16];
+	char text[64];
+	CHECK_EQ(inet_pton(2, "192.168.1.20", addr), 1);
+	CHECK(addr[0] == 192 && addr[3] == 20);
+	CHECK_EQ(inet_pton(2, "300.1.1.1", addr), 0);
+	CHECK_EQ(inet_pton(23, "::1", addr), 1);	/* Windows' AF_INET6 is 23 */
+	CHECK(inet_ntop(23, addr, text, sizeof(text)) == text);
+	CHECK_STR(text, "::1");
+	CHECK_EQ(inet_pton(99, "x", addr), -1);
+	char host[32];
+	CHECK_EQ(gethostname(host, sizeof(host)), 0);
+	CHECK(host[0] != 0);
+
+	/* Numeric addresses resolve; names don't. */
+	struct { int flags, family, type, proto; SIZE_T len; char *canon; void *addr; void *next; } *ai = NULL;
+	void *res = NULL;
+	CHECK_EQ(getaddrinfo("10.1.2.3", "8080", NULL, &res), 0);
+	ai = res;
+	CHECK(ai != NULL);
+	if (ai) {
+		struct { short family; unsigned short port; BYTE addr[4]; } *sa = ai->addr;
+		char name[64], serv[16];
+
+		CHECK_EQ(ai->family, 2);
+		CHECK_EQ(ai->len, 16);
+		CHECK_EQ(sa->family, 2);
+		CHECK_EQ(sa->port, htons(8080));
+		CHECK(sa->addr[0] == 10 && sa->addr[3] == 3);
+		CHECK_EQ(getnameinfo(ai->addr, (int)ai->len, name, sizeof(name), serv,
+				     sizeof(serv), 3), 0);
+		CHECK_STR(name, "10.1.2.3");
+		CHECK_STR(serv, "8080");
+		freeaddrinfo(res);
+	}
+	CHECK_EQ(getaddrinfo("example.invalid", "80", NULL, &res), WSAHOST_NOT_FOUND);
+	CHECK(res == NULL);
+	CHECK_EQ(getaddrinfo("10.1.2.3", "http", NULL, &res), 10109);
+
+	CHECK_EQ(WSACleanup(), 0);
+	CHECK_EQ(WSACleanup(), -1);
+	if (alias)
+		mod_free(alias);
+	mod_free(m);
+}
+
+/* ncrypt, and the Direct3D family that isn't there. */
+
+static void test_ncrypt_and_graphics(void)
+{
+	struct module *m = mod_load("ncrypt.dll", NULL);
+	CHECK(m != NULL);
+	if (m) {
+		FN(m, LONG, BCryptGenRandom, void *, BYTE *, ULONG, ULONG);
+		FN(m, LONG, NCryptOpenStorageProvider, void **, LPCWSTR, DWORD);
+		FN(m, LONG, NCryptOpenKey, void *, void **, LPCWSTR, DWORD, DWORD);
+		FN(m, LONG, NCryptFreeObject, void *);
+		FN(m, LONG, NCryptSignHash, void *, void *, BYTE *, DWORD, BYTE *, DWORD,
+		   DWORD *, DWORD);
+		BYTE r[8];
+		void *prov = (void *)1, *key = (void *)1;
+		DWORD got = 5;
+
+		/* It carries bcrypt's functions, and no key storage provider. */
+		CHECK_EQ(BCryptGenRandom(NULL, r, sizeof(r), 2), 0);
+		CHECK_EQ(NCryptOpenStorageProvider(&prov, NULL, 0), (LONG)0x80090029);
+		CHECK(prov == NULL);
+		CHECK_EQ(NCryptOpenKey(NULL, &key, NULL, 0, 0), (LONG)0x80090026);
+		CHECK(key == NULL);
+		CHECK_EQ(NCryptFreeObject(NULL), (LONG)0x80090026);
+		CHECK_EQ(NCryptSignHash(NULL, NULL, r, 8, r, 8, &got, 0), (LONG)0x80090026);
+		CHECK_EQ(got, 0);
+		mod_free(m);
+	}
+
+	/* No adapter: every way in says so, with no object. */
+	m = mod_load("dxva2.dll", NULL);
+	CHECK(m != NULL);
+	if (m) {
+		FN(m, HRESULT, DXVA2CreateDirect3DDeviceManager9, UINT *, void **);
+		UINT token = 7;
+		void *mgr = (void *)1;
+
+		CHECK_EQ(DXVA2CreateDirect3DDeviceManager9(&token, &mgr), (HRESULT)0x8876086A);
+		CHECK(mgr == NULL);
+		CHECK_EQ(token, 0);
+		mod_free(m);
+	}
+	m = mod_load("d3d11.dll", NULL);
+	CHECK(m != NULL);
+	if (m) {
+		FN(m, HRESULT, D3D11CreateDevice, void *, UINT, HMODULE, UINT, const UINT *,
+		   UINT, UINT, void **, UINT *, void **);
+		void *device = (void *)1, *context = (void *)1;
+		UINT level = 9;
+
+		CHECK_EQ(D3D11CreateDevice(NULL, 1, NULL, 0, NULL, 0, 7, &device, &level,
+					   &context), (HRESULT)0x887A0004);
+		CHECK(device == NULL && context == NULL);
+		CHECK_EQ(level, 0);
+		mod_free(m);
+	}
+	m = mod_load("dxgi.dll", NULL);
+	CHECK(m != NULL);
+	if (m) {
+		FN(m, HRESULT, CreateDXGIFactory, const GUID *, void **);
+		FN(m, HRESULT, CreateDXGIFactory1, const GUID *, void **);
+		FN(m, HRESULT, CreateDXGIFactory2, UINT, const GUID *, void **);
+		void *factory = (void *)1;
+
+		CHECK_EQ(CreateDXGIFactory(NULL, &factory), (HRESULT)0x887A0004);
+		CHECK(factory == NULL);
+		CHECK_EQ(CreateDXGIFactory1(NULL, &factory), (HRESULT)0x887A0004);
+		CHECK_EQ(CreateDXGIFactory2(0, NULL, &factory), (HRESULT)0x887A0004);
+		mod_free(m);
+	}
+}
+
+typedef void (*handler_fn)(int);
+
+static int raised;
+
+static void raise_handler(int sig)
+{
+	raised = sig;
+}
+
+/* The CRT functions added with the rest of the real-world libraries. */
+static void test_msvcrt_files(void)
+{
+	struct module *c = mod_load("msvcrt.dll", NULL);
+	CHECK(c != NULL);
+	if (!c)
+		return;
+	CFN(c, int, _mkdir, const char *);
+	CFN(c, int, _rmdir, const char *);
+	CFN(c, int, _unlink, const char *);
+	CFN(c, int, _open, const char *, int, ...);
+	CFN(c, int, _write, int, const void *, unsigned);
+	CFN(c, int, _close, int);
+	CFN(c, int, _stat, const char *, void *);
+	CFN(c, int, _wstat, const WCHAR *, void *);
+	CFN(c, int, _fstat, int, void *);
+	CFN(c, intptr_t, _findfirst, const char *, void *);
+	CFN(c, int, _findnext, intptr_t, void *);
+	CFN(c, int, _findclose, intptr_t);
+	CFN(c, intptr_t, _wfindfirst, const WCHAR *, void *);
+	CFN(c, int, _wfindnext, intptr_t, void *);
+	CFN(c, char *, _getcwd, char *, int);
+	CFN(c, void *, _wfopen, const WCHAR *, const WCHAR *);
+	CFN(c, int, fclose, void *);
+	CFN(c, WCHAR *, _wfullpath, WCHAR *, const WCHAR *, size_t);
+	CFN(c, WCHAR *, _wgetenv, const WCHAR *);
+	CFN(c, size_t, wcstombs, char *, const WCHAR *, size_t);
+	CFN(c, size_t, mbstowcs, WCHAR *, const char *, size_t);
+	CFN(c, handler_fn, signal, int, handler_fn);
+	CFN(c, int, raise, int);
+	CFN(c, int, _getmaxstdio, void);
+	CFN(c, int, _setmaxstdio, int);
+	CFN(c, int, _open_osfhandle, intptr_t, int);
+
+	/* A file and a directory, to look at. */
+	CHECK_EQ(_mkdir("C:\\WINDOWS\\TEMP\\crtfiles"), 0);
+	int fd = _open("C:\\WINDOWS\\TEMP\\crtfiles\\a.txt", 0x0002 | 0x0100, 0640);
+	CHECK(fd >= 3);
+	CHECK_EQ(_write(fd, "twelve bytes", 12), 12);
+	CHECK_EQ(_close(fd), 0);
+	CHECK_EQ(_close(_open("C:\\WINDOWS\\TEMP\\crtfiles\\b.log", 0x0002 | 0x0100, 0600)), 0);
+
+	/* struct _stat: dev, 16-bit ino, mode, nlink, uid, gid, rdev, size, times. */
+	struct { uint32_t dev; uint16_t ino, mode; int16_t nlink, uid, gid; uint32_t rdev;
+		 int32_t size, atime, mtime, ctime; } st;
+	CHECK_EQ(sizeof(st), 36);
+	CHECK_EQ(_stat("C:\\WINDOWS\\TEMP\\crtfiles\\a.txt", &st), 0);
+	CHECK_EQ(st.size, 12);
+	CHECK_EQ(st.mode & 0xf000, 0x8000);		/* _S_IFREG */
+	CHECK_EQ(st.mode & 0x1c0, 0x180);		/* owner read and write */
+	CHECK_EQ(st.nlink, 1);
+	CHECK(st.mtime > 1600000000);
+	CHECK_EQ(_stat("C:\\WINDOWS\\TEMP\\crtfiles", &st), 0);
+	CHECK_EQ(st.mode & 0xf000, 0x4000);		/* _S_IFDIR */
+	CHECK_EQ(_stat("C:\\WINDOWS\\TEMP\\crtfiles\\none", &st), -1);
+	static const WCHAR wname[] = { 'C', ':', '\\', 'W', 'I', 'N', 'D', 'O', 'W', 'S',
+		'\\', 'T', 'E', 'M', 'P', '\\', 'c', 'r', 't', 'f', 'i', 'l', 'e', 's', '\\',
+		'a', '.', 't', 'x', 't', 0 };
+	CHECK_EQ(_wstat(wname, &st), 0);
+	CHECK_EQ(st.size, 12);
+	fd = _open("C:\\WINDOWS\\TEMP\\crtfiles\\a.txt", 0);
+	CHECK_EQ(_fstat(fd, &st), 0);
+	CHECK_EQ(st.size, 12);
+	CHECK_EQ(st.mode & 0xf000, 0x8000);
+	CHECK_EQ(_close(fd), 0);
+
+	/* _findfirst: names, sizes and attributes, ended by _findclose. */
+	struct { unsigned attrib; int32_t tc, ta, tw; uint32_t size; char name[260]; } fd1;
+	intptr_t h = _findfirst("C:\\WINDOWS\\TEMP\\crtfiles\\*.txt", &fd1);
+	CHECK(h != -1);
+	CHECK_STR(fd1.name, "a.txt");
+	CHECK_EQ(fd1.size, 12);
+	CHECK(!(fd1.attrib & 0x10));
+	CHECK_EQ(_findnext(h, &fd1), -1);		/* only one .txt */
+	CHECK_EQ(errno, ENOENT);
+	CHECK_EQ(_findclose(h), 0);
+	h = _findfirst("C:\\WINDOWS\\TEMP\\crtfiles\\*.*", &fd1);
+	int names = 0;
+	while (h != -1) {
+		names++;
+		if (_findnext(h, &fd1))
+			break;
+	}
+	CHECK_EQ(names, 4);		/* ".", "..", a.txt, b.log */
+	if (h != -1)
+		_findclose(h);
+	CHECK_EQ(_findfirst("C:\\WINDOWS\\TEMP\\crtfiles\\*.nothing", &fd1), -1);
+	static const WCHAR wpat[] = { 'C', ':', '\\', 'W', 'I', 'N', 'D', 'O', 'W', 'S',
+		'\\', 'T', 'E', 'M', 'P', '\\', 'c', 'r', 't', 'f', 'i', 'l', 'e', 's', '\\',
+		'*', '.', 'l', 'o', 'g', 0 };
+	struct { unsigned attrib; int32_t tc, ta, tw; uint32_t size; WCHAR name[260]; } wd;
+	h = _wfindfirst(wpat, &wd);
+	CHECK(h != -1);
+	CHECK(wd.name[0] == 'b' && wd.name[1] == '.' && wd.name[3] == 'o');
+	CHECK_EQ(_wfindnext(h, &wd), -1);
+	if (h != -1)
+		_findclose(h);
+
+	/* _wfopen, and _wfullpath over the current directory. */
+	static const WCHAR rb[] = { 'r', 'b', 0 };
+	void *f = _wfopen(wname, rb);
+	CHECK(f != NULL);
+	if (f)
+		fclose(f);
+	WCHAR full[260];
+	static const WCHAR rel[] = { 'x', '.', 'd', 'l', 'l', 0 };
+	CHECK(_wfullpath(full, rel, 260) == full);
+	CHECK(full[1] == ':' && full[2] == '\\');
+	CHECK_EQ(full[wcslen16(full) - 1], 'l');
+	CHECK(_wfullpath(full, rel, 3) == NULL);	/* too small */
+	WCHAR *dyn = _wfullpath(NULL, rel, 0);
+	CHECK(dyn != NULL);
+	free(dyn);
+	char cwd[260];
+	CHECK(_getcwd(cwd, sizeof(cwd)) == cwd);
+	CHECK(cwd[1] == ':' && cwd[2] == '\\');
+	CHECK(_getcwd(cwd, 2) == NULL);
+	char *allocated = _getcwd(NULL, 0);
+	CHECK(allocated != NULL && !strcmp(allocated, cwd));
+	free(allocated);
+
+	/* The environment, as UTF-16; and the multibyte conversions. */
+	setenv("SEANCE_WENV", "value", 1);
+	static const WCHAR wvar[] = { 'S', 'E', 'A', 'N', 'C', 'E', '_', 'W', 'E', 'N', 'V', 0 };
+	WCHAR *ev = _wgetenv(wvar);
+	CHECK(ev != NULL && ev[0] == 'v' && ev[4] == 'e' && ev[5] == 0);
+	static const WCHAR wnone[] = { 'N', 'O', 'P', 'E', 0 };
+	CHECK(_wgetenv(wnone) == NULL);
+	static const WCHAR hello[] = { 'h', 'e', 'l', 'l', 'o', 0 };
+	char mb[16];
+	CHECK_EQ(wcstombs(NULL, hello, 0), 5);
+	CHECK_EQ(wcstombs(mb, hello, sizeof(mb)), 5);
+	CHECK_STR(mb, "hello");
+	CHECK_EQ(wcstombs(mb, hello, 3), 3);		/* what fits, unterminated */
+	WCHAR wide[16];
+	CHECK_EQ(mbstowcs(NULL, "hello", 0), 5);
+	CHECK_EQ(mbstowcs(wide, "hello", 16), 5);
+	CHECK(wide[0] == 'h' && wide[4] == 'o' && wide[5] == 0);
+
+	/* signal and raise, in software. */
+	CHECK(signal(2, raise_handler) == (handler_fn)0);	/* SIGINT: was SIG_DFL */
+	CHECK_EQ(raise(2), 0);
+	CHECK_EQ(raised, 2);
+	raised = 0;
+	CHECK(signal(2, (handler_fn)1) == (handler_fn)0);	/* the handler is used once */
+	CHECK_EQ(raise(2), 0);					/* SIG_IGN */
+	CHECK_EQ(raised, 0);
+	CHECK(signal(77, raise_handler) == (handler_fn)-1);	/* not a signal */
+	CHECK_EQ(raise(77), -1);
+
+	/* The stdio limit is a number. */
+	CHECK_EQ(_getmaxstdio(), 512);
+	CHECK_EQ(_setmaxstdio(1024), 1024);
+	CHECK_EQ(_getmaxstdio(), 1024);
+	CHECK_EQ(_setmaxstdio(8), -1);
+	CHECK_EQ(_open_osfhandle(0x1234, 0), -1);
+
+	CHECK_EQ(_unlink("C:\\WINDOWS\\TEMP\\crtfiles\\a.txt"), 0);
+	CHECK_EQ(_unlink("C:\\WINDOWS\\TEMP\\crtfiles\\b.log"), 0);
+	CHECK_EQ(_rmdir("C:\\WINDOWS\\TEMP\\crtfiles"), 0);
+	mod_free(c);
+}
+
+/*
+ * Memory comes back zeroed from malloc, operator new and HeapAlloc, as it
+ * usually does from a fresh Windows heap: the Intel Quick Sync library, for
+ * one, destroys a member it never initialised if its set-up fails.
+ */
+static void test_zeroed_allocation(void)
+{
+	struct module *c = mod_load("msvcrt.dll", NULL);
+	struct module *k = mod_load("kernel32.dll", NULL);
+	CHECK(c && k);
+	if (!c || !k)
+		return;
+	CFN(c, void *, malloc, size_t);
+	CFN(c, void, free, void *);
+	void *(*operator_new)(size_t) = (void *(*)(size_t))get(c, "??2@YAPAXI@Z");
+	FN(k, HANDLE, GetProcessHeap, void);
+	FN(k, LPVOID, HeapAlloc, HANDLE, DWORD, SIZE_T);
+	FN(k, BOOL, HeapFree, HANDLE, DWORD, LPVOID);
+
+	/* Dirty a block and give it back, so the next one is a reused one. */
+	for (int round = 0; round < 3; round++) {
+		BYTE *p = malloc(300);
+		int clean = 1;
+
+		memset(p, 0xaa, 300);
+		free(p);
+		p = malloc(300);
+		for (int i = 0; i < 300; i++)
+			clean &= p[i] == 0;
+		CHECK(clean);
+		free(p);
+
+		p = operator_new(300);
+		clean = 1;
+		memset(p, 0xaa, 300);
+		free(p);
+		p = operator_new(300);
+		for (int i = 0; i < 300; i++)
+			clean &= p[i] == 0;
+		CHECK(clean);
+		free(p);
+
+		p = HeapAlloc(GetProcessHeap(), 0, 300);
+		clean = 1;
+		memset(p, 0xaa, 300);
+		HeapFree(GetProcessHeap(), 0, p);
+		p = HeapAlloc(GetProcessHeap(), 0, 300);
+		for (int i = 0; i < 300; i++)
+			clean &= p[i] == 0;
+		CHECK(clean);
+		HeapFree(GetProcessHeap(), 0, p);
+	}
+	mod_free(k);
+	mod_free(c);
+}
+
 int main(void)
 {
 	char root[256];
@@ -269,6 +683,10 @@ int main(void)
 	test_crypt32();
 	test_d3d9();
 	test_msvcrt();
+	test_msvcrt_files();
+	test_winsock();
+	test_zeroed_allocation();
+	test_ncrypt_and_graphics();
 
 	char cmd[512];
 	snprintf(cmd, sizeof(cmd), "rm -rf '%s'", root);

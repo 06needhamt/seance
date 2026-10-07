@@ -839,7 +839,8 @@ CRTFN(int) crt__callnewh(size_t size)
 static void *cxx_new(size_t size)
 {
 	for (;;) {
-		void *p = malloc(size ? size : 1);
+		/* Zeroed, as memory fresh from a Windows heap usually is. */
+		void *p = calloc(1, size ? size : 1);
 		if (p || !crt__callnewh(size))
 			return p;
 	}
