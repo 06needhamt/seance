@@ -890,6 +890,14 @@ struct ICodecAPI {
 	const ICodecAPIVtbl *lpVtbl;
 };
 
+/* CODECAPI_AVEncCommonRateControlMode's values (codecapi.h). */
+enum {
+	eAVEncCommonRateControlMode_CBR = 0,
+	eAVEncCommonRateControlMode_PeakConstrainedVBR = 1,
+	eAVEncCommonRateControlMode_UnconstrainedVBR = 2,
+	eAVEncCommonRateControlMode_Quality = 3,
+};
+
 /* IAMVideoCompression: an encoder's keyframe and quality settings. */
 typedef struct IAMVideoCompression IAMVideoCompression;
 typedef struct IAMVideoCompressionVtbl {

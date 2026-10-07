@@ -77,6 +77,31 @@ static HRESULT codec_api_set(ICodecAPI *api, const GUID *setting, ULONG value)
 }
 
 /*
+ * Makes the mean bit rate count. It applies only in the constant and variable
+ * bit rate modes, so an encoder in quality mode (which is what some default
+ * to) would take the setting and ignore it. Such an encoder is switched to
+ * constant bit rate; one in another mode, or with no rate-control mode at
+ * all, is left as it is. S_OK, or a failure if it needs the switch and can't.
+ */
+static HRESULT codec_api_rate_mode(ICodecAPI *api)
+{
+	VARIANT v;
+	HRESULT hr = api->lpVtbl->IsSupported(api, &CODECAPI_AVEncCommonRateControlMode);
+
+	if (hr != S_OK)
+		return FAILED(hr) ? hr : S_OK;
+	memset(&v, 0, sizeof(v));
+	hr = api->lpVtbl->GetValue(api, &CODECAPI_AVEncCommonRateControlMode, &v);
+	if (SUCCEEDED(hr) && (v.vt == VT_UI4 || v.vt == VT_I4) &&
+	    v.ulVal != eAVEncCommonRateControlMode_Quality)
+		return S_OK;
+	/* In quality mode, or can't tell: switch. */
+	hr = codec_api_set(api, &CODECAPI_AVEncCommonRateControlMode,
+			   eAVEncCommonRateControlMode_CBR);
+	return hr == S_FALSE ? E_NOTIMPL : hr;
+}
+
+/*
  * Applies the options through the interfaces the filter has: IAMVideoCompression
  * (the DirectShow one) and ICodecAPI (the Media Foundation one carried over).
  * An option that either takes is applied; one that none takes is an error, as
@@ -161,9 +186,11 @@ HRESULT dshow_encoder_configure(IBaseFilter *filter,
 				rate_error = hr;
 		}
 		if (api) {
-			hr = codec_api_set(api, &CODECAPI_AVEncCommonMeanBitRate,
-					   options->bitrate > ULONG_MAX ? ULONG_MAX :
-					   (ULONG)options->bitrate);
+			hr = codec_api_rate_mode(api);
+			if (SUCCEEDED(hr))
+				hr = codec_api_set(api, &CODECAPI_AVEncCommonMeanBitRate,
+						   options->bitrate > ULONG_MAX ? ULONG_MAX :
+						   (ULONG)options->bitrate);
 			if (hr == S_OK)
 				have_rate = 1;
 			else if (FAILED(hr) && SUCCEEDED(rate_error))

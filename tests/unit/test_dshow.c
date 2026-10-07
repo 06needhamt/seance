@@ -18,7 +18,8 @@ struct fake_filter {
 	ICodecAPI api;
 	ULONG refs;
 	int api_on, no_compression, api_no_rate, no_persist;
-	ULONG api_gop, api_quality, api_rate;
+	int api_no_mode, api_mode_locked;
+	ULONG api_gop, api_quality, api_rate, api_mode;
 	LONG key_rate, pframes;
 	double quality;
 	DWORDLONG window;
@@ -103,8 +104,27 @@ static HRESULT WINAPI api_supported(ICodecAPI *p, const GUID *api)
 {
 	if (guid_eq(api, &CODECAPI_AVEncCommonMeanBitRate))
 		return from_api(p)->api_no_rate ? S_FALSE : S_OK;
+	if (guid_eq(api, &CODECAPI_AVEncCommonRateControlMode))
+		return from_api(p)->api_no_mode ? S_FALSE : S_OK;
 	return guid_eq(api, &CODECAPI_AVEncMPVGOPSize) ||
 	       guid_eq(api, &CODECAPI_AVEncCommonQuality) ? S_OK : S_FALSE;
+}
+
+static HRESULT WINAPI api_modifiable(ICodecAPI *p, const GUID *api)
+{
+	if (guid_eq(api, &CODECAPI_AVEncCommonRateControlMode) &&
+	    from_api(p)->api_mode_locked)
+		return S_FALSE;
+	return api_supported(p, api);
+}
+
+static HRESULT WINAPI api_get(ICodecAPI *p, const GUID *api, VARIANT *v)
+{
+	if (!guid_eq(api, &CODECAPI_AVEncCommonRateControlMode))
+		return E_NOTIMPL;
+	v->vt = VT_UI4;
+	v->ulVal = from_api(p)->api_mode;
+	return S_OK;
 }
 
 static HRESULT WINAPI api_set(ICodecAPI *p, const GUID *api, VARIANT *v)
@@ -119,6 +139,8 @@ static HRESULT WINAPI api_set(ICodecAPI *p, const GUID *api, VARIANT *v)
 		f->api_quality = v->ulVal;
 	else if (guid_eq(api, &CODECAPI_AVEncCommonMeanBitRate))
 		f->api_rate = v->ulVal;
+	else if (guid_eq(api, &CODECAPI_AVEncCommonRateControlMode))
+		f->api_mode = v->ulVal;
 	else
 		return E_NOTIMPL;
 	return S_OK;
@@ -129,7 +151,8 @@ static const ICodecAPIVtbl api_vtbl = {
 	.AddRef = api_addref,
 	.Release = api_release,
 	.IsSupported = api_supported,
-	.IsModifiable = api_supported,
+	.IsModifiable = api_modifiable,
+	.GetValue = api_get,
 	.SetValue = api_set,
 };
 
@@ -495,6 +518,35 @@ static void encoder_codec_api(void)
 	CHECK(f.api_gop == 12);
 	options.bitrate = -1;
 	CHECK(dshow_encoder_configure(&f.filter, &options) == S_OK);
+
+	/*
+	 * The mean bit rate only counts in the bit rate modes: an encoder in
+	 * quality mode is switched to CBR, one already in a bit rate mode (or with
+	 * no mode at all) is left alone, and one stuck in quality mode fails.
+	 */
+	options.bitrate = 800000;
+	f.api_no_rate = 0;
+	f.api_mode = eAVEncCommonRateControlMode_Quality;
+	f.api_rate = 0;
+	CHECK(dshow_encoder_configure(&f.filter, &options) == S_OK);
+	CHECK(f.api_mode == eAVEncCommonRateControlMode_CBR && f.api_rate == 800000);
+	f.api_mode = eAVEncCommonRateControlMode_UnconstrainedVBR;
+	f.api_rate = 0;
+	CHECK(dshow_encoder_configure(&f.filter, &options) == S_OK);
+	CHECK(f.api_mode == eAVEncCommonRateControlMode_UnconstrainedVBR);
+	CHECK(f.api_rate == 800000);
+	f.api_no_mode = 1;
+	f.api_mode = eAVEncCommonRateControlMode_Quality;
+	f.api_rate = 0;
+	CHECK(dshow_encoder_configure(&f.filter, &options) == S_OK);
+	CHECK(f.api_mode == eAVEncCommonRateControlMode_Quality && f.api_rate == 800000);
+	f.api_no_mode = 0;
+	f.api_mode_locked = 1;
+	f.api_rate = 0;
+	CHECK(dshow_encoder_configure(&f.filter, &options) == E_NOTIMPL);
+	CHECK(f.api_rate == 0);
+	f.api_mode_locked = 0;
+	options.bitrate = -1;
 
 	/* Neither interface at all. */
 	f.api_on = 0;
