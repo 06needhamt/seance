@@ -55,6 +55,8 @@
 #define ERROR_TOO_MANY_POSTS           298
 #define ERROR_INVALID_ADDRESS          487
 #define ERROR_NOACCESS                 998
+#define ERROR_OLD_WIN_VERSION          1150
+#define ERROR_NOT_FOUND                1168
 #define ERROR_INVALID_FLAGS            1004
 #define ERROR_NO_TOKEN                 1008
 #define ERROR_BADDB                    1009
@@ -487,6 +489,110 @@ typedef struct _RTL_CRITICAL_SECTION {
 	HANDLE LockSemaphore;
 	ULONG_PTR SpinCount;
 } CRITICAL_SECTION, *LPCRITICAL_SECTION, RTL_CRITICAL_SECTION;
+
+/* Slim reader/writer locks, condition variables and one-time
+ * initialisation: one pointer-sized word each, zero when idle. */
+typedef struct _RTL_SRWLOCK { PVOID Ptr; } RTL_SRWLOCK, SRWLOCK, *PSRWLOCK;
+typedef struct _RTL_CONDITION_VARIABLE { PVOID Ptr; }
+	RTL_CONDITION_VARIABLE, CONDITION_VARIABLE, *PCONDITION_VARIABLE;
+typedef struct _RTL_RUN_ONCE { PVOID Ptr; }
+	RTL_RUN_ONCE, INIT_ONCE, *PINIT_ONCE;
+
+/* Interlocked singly linked lists (the 32-bit layout). */
+typedef struct _SLIST_ENTRY {
+	struct _SLIST_ENTRY *Next;
+} SLIST_ENTRY, *PSLIST_ENTRY;
+
+typedef union _SLIST_HEADER {
+	ULONGLONG Alignment;
+	struct {
+		SLIST_ENTRY Next;
+		WORD Depth;
+		WORD Sequence;
+	};
+} SLIST_HEADER, *PSLIST_HEADER;
+
+typedef struct _GROUP_AFFINITY {
+	ULONG_PTR Mask;
+	WORD Group;
+	WORD Reserved[3];
+} GROUP_AFFINITY, *PGROUP_AFFINITY;
+
+typedef struct _PROCESSOR_NUMBER {
+	WORD Group;
+	BYTE Number;
+	BYTE Reserved;
+} PROCESSOR_NUMBER, *PPROCESSOR_NUMBER;
+
+#define INIT_ONCE_CHECK_ONLY       0x00000001
+#define INIT_ONCE_ASYNC            0x00000002
+#define INIT_ONCE_INIT_FAILED      0x00000004
+
+#define CREATE_EVENT_MANUAL_RESET  0x00000001
+#define CREATE_EVENT_INITIAL_SET   0x00000002
+
+#define CONDITION_VARIABLE_LOCKMODE_SHARED 0x00000001
+
+/* VerifyVersionInfo's type mask and conditions. */
+#define VER_MINORVERSION     0x0000001
+#define VER_MAJORVERSION     0x0000002
+#define VER_BUILDNUMBER      0x0000004
+#define VER_PLATFORMID       0x0000008
+#define VER_SERVICEPACKMINOR 0x0000010
+#define VER_SERVICEPACKMAJOR 0x0000020
+#define VER_SUITENAME        0x0000040
+#define VER_PRODUCT_TYPE     0x0000080
+#define VER_EQUAL            1
+#define VER_GREATER          2
+#define VER_GREATER_EQUAL    3
+#define VER_LESS             4
+#define VER_LESS_EQUAL       5
+#define VER_AND              6
+#define VER_OR               7
+
+typedef struct _BY_HANDLE_FILE_INFORMATION {
+	DWORD dwFileAttributes;
+	FILETIME ftCreationTime;
+	FILETIME ftLastAccessTime;
+	FILETIME ftLastWriteTime;
+	DWORD dwVolumeSerialNumber;
+	DWORD nFileSizeHigh;
+	DWORD nFileSizeLow;
+	DWORD nNumberOfLinks;
+	DWORD nFileIndexHigh;
+	DWORD nFileIndexLow;
+} BY_HANDLE_FILE_INFORMATION, *LPBY_HANDLE_FILE_INFORMATION;
+
+typedef struct _COORD { SHORT X; SHORT Y; } COORD, *PCOORD;
+typedef struct _SMALL_RECT {
+	SHORT Left;
+	SHORT Top;
+	SHORT Right;
+	SHORT Bottom;
+} SMALL_RECT, *PSMALL_RECT;
+typedef struct _CONSOLE_SCREEN_BUFFER_INFO {
+	COORD dwSize;
+	COORD dwCursorPosition;
+	WORD wAttributes;
+	SMALL_RECT srWindow;
+	COORD dwMaximumWindowSize;
+} CONSOLE_SCREEN_BUFFER_INFO, *PCONSOLE_SCREEN_BUFFER_INFO;
+
+/* FindFirstFileEx's FINDEX_INFO_LEVELS and FINDEX_SEARCH_OPS. */
+#define FindExInfoStandard         0
+#define FindExInfoBasic            1
+#define FindExSearchNameMatch      0
+#define FindExSearchLimitToDirectories 1
+#define FindExSearchLimitToDevices 2
+#define FIND_FIRST_EX_CASE_SENSITIVE 0x00000001
+#define FIND_FIRST_EX_LARGE_FETCH    0x00000002
+
+#define FILE_NAME_NORMALIZED       0x0
+#define FILE_NAME_OPENED           0x8
+#define VOLUME_NAME_DOS            0x0
+
+typedef BOOL (WINAPI *PINIT_ONCE_FN)(PINIT_ONCE once, PVOID param,
+					PVOID *context);
 
 typedef struct _STARTUPINFOA {
 	DWORD cb;

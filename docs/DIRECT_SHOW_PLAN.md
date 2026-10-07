@@ -374,6 +374,27 @@ strmbase — same constraints as `testcodec.c`/`pe_com.c`), generic and small:
      `validate_media.sh` cover worker delivery, seeks, timeout reporting and
      both VfW/DirectShow interoperability directions.
 
+6. **Real-world filters. (Started.)** Running `tests/samples.sh` over LAV
+   Filters 0.83 (see `MISSING_FEATURES.md`) showed what the fixtures can't:
+   - The runtime gaps are closed for LAV Video: SLists, SRW locks, condition
+     variables and `InitOnce` in `k32_modern.c`, the smaller kernel32,
+     shlwapi, user32 and msvcrt functions it imports, and built-in `bcrypt`,
+     `crypt32` and `d3d9` that offer just what its libraries call.
+   - The host's source and sink pins now belong to filter objects that answer
+     `GetClassID`, `QueryFilterInfo`, `EnumPins` and `FindPin`, as the
+     filters at the other end of a real connection do; a filter looking at its
+     peer used to crash.
+   - A sample may carry a new media type: `decode` follows a change of pixel
+     format (the picture size must stay), `encode` accepts a refinement of the
+     same compressed format, and the host adopts the type as the pin's.
+   - `decode` drops frames before `--start` by time stamp and past `--frames`
+     by count, as a filter need not flag preroll or deliver in step.
+   - The fixture gained `TESTFILTER_PEER_INFO` (inspects its peer pins),
+     `TESTFILTER_DYNAMIC` (the decoder moves to YV12 after one frame, the
+     encoder re-announces its type) and `TESTFILTER_NO_PREROLL`.
+   - Still open: `ICodecAPI`, the fixture's own-allocator mode, an
+     `IMediaEventSink::Notify` error mode and a strict below-2 GB mode.
+
 ## Critical files
 
 - New: `include/win32/dshow.h`, `src/dshow/*.c|h`, `src/win32/quartz.c`,

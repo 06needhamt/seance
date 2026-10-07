@@ -123,6 +123,32 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 			echo "smoke: asynchronous seek decode differs" >&2
 			exit 1
 		}
+		# A filter that announces a new output format mid-stream (here YV12,
+		# with its chroma swapped) must be followed, not rejected; and one that
+		# doesn't flag its preroll frames must not leak them into the output.
+		VFW_ENV_TESTFILTER_DYNAMIC=1 \
+			$emu "$harness" decode "$fixtures/testfilter.ax" "$work/t.avi" \
+			-o "$work/dynamic.y4m" 2>/dev/null
+		cmp -s "$work/in.y4m" "$work/dynamic.y4m" || {
+			echo "smoke: dynamic format change decode differs" >&2
+			exit 1
+		}
+		VFW_ENV_TESTFILTER_NO_PREROLL=1 \
+			$emu "$harness" decode "$fixtures/testfilter.ax" "$work/t.avi" \
+			-o "$work/noprerollstart.y4m" --start 1 2>/dev/null
+		cmp -s "$work/start.ref.y4m" "$work/noprerollstart.y4m" || {
+			echo "smoke: decode without preroll flags differs" >&2
+			exit 1
+		}
+		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/t.avi" \
+			-o "$work/frames.ref.y4m" --start 1 --frames 1 2>/dev/null
+		VFW_ENV_TESTFILTER_NO_PREROLL=1 \
+			$emu "$harness" decode "$fixtures/testfilter.ax" "$work/t.avi" \
+			-o "$work/frames.y4m" --start 1 --frames 1 2>/dev/null
+		cmp -s "$work/frames.ref.y4m" "$work/frames.y4m" || {
+			echo "smoke: decode --frames count differs" >&2
+			exit 1
+		}
 		if env VFW_ENV_TESTFILTER_NO_EOS=1 VFW_TIMEOUT=1 $emu \
 			"$harness" decode "$fixtures/testfilter.ax" "$work/t.avi" \
 			-o "$work/timeout.y4m" 2>"$work/timeout.err"; then
@@ -142,6 +168,24 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 			echo "smoke: DirectShow encode differs" >&2
 			exit 1
 		}
+		VFW_ENV_TESTFILTER_DYNAMIC=1 \
+			$emu "$harness" encode "$fixtures/testfilter.ax" "$work/in.y4m" \
+			-o "$work/dshow-dyn.avi" 2>/dev/null
+		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/dshow-dyn.avi" \
+			-o "$work/dshow-dyn.y4m" 2>/dev/null
+		cmp -s "$work/in.y4m" "$work/dshow-dyn.y4m" || {
+			echo "smoke: DirectShow encode with a type change differs" >&2
+			exit 1
+		}
+		# A type that adds format data the file's stream header lacks can't be
+		# followed, and says so rather than writing a misleading file.
+		if env VFW_ENV_TESTFILTER_DYNAMIC_EXTRA=1 $emu "$harness" encode \
+			"$fixtures/testfilter.ax" "$work/in.y4m" \
+			-o "$work/dshow-extra.avi" 2>"$work/extra.err"; then
+			echo "smoke: encode should refuse a type that adds format data" >&2
+			exit 1
+		fi
+		grep -q VFW_E_INVALIDMEDIATYPE "$work/extra.err"
 		$emu "$harness" encode "$fixtures/testfilter.ax" "$work/in.y4m" \
 			-o "$work/dshow-state.avi" --state "$work/dshow.state" --clsid \
 			'{5E6C9B32-3A7D-4F0E-9C11-0D2B7A6E4F80}' \

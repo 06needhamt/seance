@@ -802,6 +802,22 @@ WINFN(HANDLE) k32_FindFirstFileW(LPCWSTR pattern, LPWIN32_FIND_DATAW data)
 	return find_first(pattern, data, 1);
 }
 
+WINFN(HANDLE) k32_FindFirstFileExW(LPCWSTR pattern, DWORD level,
+				   LPVOID data, DWORD op, LPVOID filter,
+				   DWORD flags)
+{
+	/*
+	 * The basic level only leaves out the short name, which we never
+	 * give. A directories-only search is a hint a caller must check for
+	 * itself, so is ignored like on filesystems that can't do it.
+	 */
+	if (level > FindExInfoBasic || op > FindExSearchLimitToDevices) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return INVALID_HANDLE_VALUE;
+	}
+	return find_first(pattern, data, 1);
+}
+
 static BOOL find_next_handle(HANDLE h, void *data)
 {
 	struct find *f = (struct find *)handle_ref(h, KOBJ_FIND);
@@ -1151,6 +1167,96 @@ WINFN(BOOL) k32_GetVolumeInformationA(LPCSTR root, LPSTR name, DWORD name_size,
 	return TRUE;
 }
 
+WINFN(BOOL) k32_GetFileInformationByHandle(HANDLE h,
+					   LPBY_HANDLE_FILE_INFORMATION info)
+{
+	struct file *f = file_of(h);
+	struct stat st;
+
+	if (!f)
+		return FALSE;
+	if (fstat(f->fd, &st)) {
+		kobj_unref(&f->obj);
+		return WIN_ERRNO(FALSE);
+	}
+	kobj_unref(&f->obj);
+	memset(info, 0, sizeof(*info));
+	info->dwFileAttributes = attributes_of(&st);
+	timespec_to_filetime(&st.st_mtim, &info->ftLastWriteTime);
+	timespec_to_filetime(&st.st_atim, &info->ftLastAccessTime);
+	timespec_to_filetime(&st.st_ctim, &info->ftCreationTime);
+	info->dwVolumeSerialNumber = (DWORD)st.st_dev;
+	if (!S_ISDIR(st.st_mode)) {
+		info->nFileSizeHigh = (DWORD)((ULONGLONG)st.st_size >> 32);
+		info->nFileSizeLow = (DWORD)st.st_size;
+	}
+	info->nNumberOfLinks = (DWORD)st.st_nlink;
+	info->nFileIndexHigh = (DWORD)((ULONGLONG)st.st_ino >> 32);
+	info->nFileIndexLow = (DWORD)st.st_ino;
+	return TRUE;
+}
+
+/* The \\?\ path of the file behind a handle, as UTF-8 (malloc()ed). */
+static char *final_path(HANDLE h)
+{
+	struct file *f = file_of(h);
+	char *win = NULL, *out = NULL;
+
+	if (!f)
+		return NULL;
+	if (f->path && f->path[0] == '/')
+		win = path_to_windows(f->path);
+	kobj_unref(&f->obj);
+	if (!win) {
+		win_set_error(ERROR_INVALID_HANDLE);
+		return NULL;
+	}
+	if (asprintf(&out, "\\\\?\\%s", win) < 0)
+		out = NULL;
+	free(win);
+	return out;
+}
+
+WINFN(DWORD) k32_GetFinalPathNameByHandleA(HANDLE h, LPSTR buf, DWORD size,
+					   DWORD flags)
+{
+	char *p = final_path(h);
+	DWORD n;
+
+	if (!p)
+		return 0;
+	n = copy_out_a(p, buf, size);
+	free(p);
+	return n;
+}
+
+WINFN(DWORD) k32_GetFinalPathNameByHandleW(HANDLE h, LPWSTR buf, DWORD size,
+					   DWORD flags)
+{
+	char *p = final_path(h);
+	DWORD n;
+
+	if (!p)
+		return 0;
+	n = copy_out_w(p, buf, size);
+	free(p);
+	return n;
+}
+
+/* Overlapped I/O is never left pending, so there is nothing to cancel. */
+WINFN(BOOL) k32_CancelIoEx(HANDLE h, LPOVERLAPPED o)
+{
+	win_set_error(ERROR_NOT_FOUND);
+	return FALSE;
+}
+
+WINFN(BOOL) k32_PeekNamedPipe(HANDLE h, LPVOID buf, DWORD size, LPDWORD read,
+			      LPDWORD avail, LPDWORD left)
+{
+	win_set_error(ERROR_INVALID_FUNCTION);
+	return FALSE;
+}
+
 /* Console. */
 
 WINFN(BOOL) k32_GetConsoleMode(HANDLE h, LPDWORD mode)
@@ -1172,6 +1278,27 @@ WINFN(BOOL) k32_SetConsoleCtrlHandler(void *handler, BOOL add) { return TRUE; }
 WINFN(BOOL) k32_AllocConsole(void) { return TRUE; }
 WINFN(BOOL) k32_FreeConsole(void) { return TRUE; }
 WINFN(BOOL) k32_SetConsoleTitleA(LPCSTR title) { return TRUE; }
+
+/* There is no console to read from or describe; the callers cope. */
+WINFN(BOOL) k32_ReadConsoleW(HANDLE h, LPVOID buf, DWORD n, LPDWORD read,
+			     LPVOID control)
+{
+	win_set_error(ERROR_INVALID_HANDLE);
+	return FALSE;
+}
+
+WINFN(BOOL) k32_GetConsoleScreenBufferInfo(HANDLE h,
+					   PCONSOLE_SCREEN_BUFFER_INFO info)
+{
+	win_set_error(ERROR_INVALID_HANDLE);
+	return FALSE;
+}
+
+WINFN(BOOL) k32_SetConsoleTextAttribute(HANDLE h, WORD attrs)
+{
+	win_set_error(ERROR_INVALID_HANDLE);
+	return FALSE;
+}
 
 WINFN(BOOL) k32_WriteConsoleA(HANDLE h, const void *buf, DWORD n,
 			      LPDWORD written, LPVOID reserved)
@@ -1424,6 +1551,7 @@ WINFN(BOOL) k32_FlushViewOfFile(LPCVOID addr, SIZE_T bytes)
 
 const struct builtin_export k32_file_exports[] = {
 	E(AllocConsole),
+	E(CancelIoEx),
 	E(CopyFileA),
 	E(CopyFileW),
 	E(CreateDirectoryA),
@@ -1436,6 +1564,7 @@ const struct builtin_export k32_file_exports[] = {
 	E(DeleteFileW),
 	E(FindClose),
 	E(FindFirstFileA),
+	E(FindFirstFileExW),
 	E(FindFirstFileW),
 	E(FindNextFileA),
 	E(FindNextFileW),
@@ -1445,6 +1574,7 @@ const struct builtin_export k32_file_exports[] = {
 	E(GetConsoleCP),
 	E(GetConsoleMode),
 	E(GetConsoleOutputCP),
+	E(GetConsoleScreenBufferInfo),
 	E(GetCurrentDirectoryA),
 	E(GetCurrentDirectoryW),
 	E(GetDiskFreeSpaceA),
@@ -1453,10 +1583,13 @@ const struct builtin_export k32_file_exports[] = {
 	E(GetDriveTypeW),
 	E(GetFileAttributesA),
 	E(GetFileAttributesW),
+	E(GetFileInformationByHandle),
 	E(GetFileSize),
 	E(GetFileSizeEx),
 	E(GetFileTime),
 	E(GetFileType),
+	E(GetFinalPathNameByHandleA),
+	E(GetFinalPathNameByHandleW),
 	E(GetFullPathNameA),
 	E(GetFullPathNameW),
 	E(GetLogicalDrives),
@@ -1478,11 +1611,14 @@ const struct builtin_export k32_file_exports[] = {
 	E(MoveFileExW),
 	E(MoveFileW),
 	E(OpenFileMappingA),
+	E(PeekNamedPipe),
+	E(ReadConsoleW),
 	E(ReadFile),
 	E(RemoveDirectoryA),
 	E(RemoveDirectoryW),
 	E(SetConsoleCtrlHandler),
 	E(SetConsoleMode),
+	E(SetConsoleTextAttribute),
 	E(SetConsoleTitleA),
 	E(SetCurrentDirectoryA),
 	E(SetCurrentDirectoryW),

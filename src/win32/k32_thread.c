@@ -319,6 +319,12 @@ WINFN(DWORD) k32_SuspendThread(HANDLE h)
 	return prev;
 }
 
+HANDLE thread_create_ex(SIZE_T stack, LPTHREAD_START_ROUTINE start, LPVOID param,
+			DWORD flags, LPDWORD tid)
+{
+	return k32_CreateThread(NULL, stack, start, param, flags, tid);
+}
+
 WINFN(BOOL) k32_TerminateThread(HANDLE h, DWORD code)
 {
 	TRACE("TerminateThread(%p, %u) is not supported", h, code);
@@ -522,10 +528,84 @@ WINFN(BOOL) k32_GetExitCodeProcess(HANDLE process, LPDWORD code)
 	return TRUE;
 }
 
+/* Threads' registers are not readable or writable from outside. */
+WINFN(BOOL) k32_GetThreadContext(HANDLE thread, PVOID context)
+{
+	win_set_error(ERROR_NOT_SUPPORTED);
+	return FALSE;
+}
+
+WINFN(BOOL) k32_SetThreadContext(HANDLE thread, const void *context)
+{
+	win_set_error(ERROR_NOT_SUPPORTED);
+	return FALSE;
+}
+
+/* Only this process can be opened. */
+WINFN(HANDLE) k32_OpenProcess(DWORD access, BOOL inherit, DWORD pid)
+{
+	if (pid != (DWORD)getpid()) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return NULL;
+	}
+	return PSEUDO_PROCESS;
+}
+
+/* One group of CPUs, all of them allowed: nothing is ever restricted. */
+WINFN(BOOL) k32_GetThreadGroupAffinity(HANDLE thread, PGROUP_AFFINITY a)
+{
+	DWORD n = peb_get()->NumberOfProcessors;
+
+	memset(a, 0, sizeof(*a));
+	a->Mask = n >= 32 ? 0xffffffff : (1u << n) - 1;
+	return TRUE;
+}
+
+WINFN(BOOL) k32_SetThreadGroupAffinity(HANDLE thread, const GROUP_AFFINITY *a,
+				       PGROUP_AFFINITY previous)
+{
+	if (a->Group) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	if (previous)
+		k32_GetThreadGroupAffinity(thread, previous);
+	return TRUE;
+}
+
+/*
+ * Thread-pool timers and waits are not provided: creating one fails, the
+ * way it does when the pool can't start, which callers have to expect. The
+ * rest are for the NULL a failed create leaves them.
+ */
+WINFN(PVOID) k32_CreateThreadpoolTimer(PVOID cb, PVOID ctx, PVOID env)
+{
+	win_set_error(ERROR_CALL_NOT_IMPLEMENTED);
+	return NULL;
+}
+
+WINFN(PVOID) k32_CreateThreadpoolWait(PVOID cb, PVOID ctx, PVOID env)
+{
+	win_set_error(ERROR_CALL_NOT_IMPLEMENTED);
+	return NULL;
+}
+
+WINFN(void) k32_SetThreadpoolTimer(PVOID timer, PFILETIME due, DWORD period,
+				   DWORD window) { }
+WINFN(void) k32_SetThreadpoolWait(PVOID wait, HANDLE h, PFILETIME timeout) { }
+WINFN(void) k32_CloseThreadpoolTimer(PVOID timer) { }
+WINFN(void) k32_CloseThreadpoolWait(PVOID wait) { }
+WINFN(void) k32_WaitForThreadpoolTimerCallbacks(PVOID timer, BOOL cancel) { }
+WINFN(void) k32_FreeLibraryWhenCallbackReturns(PVOID instance, HMODULE m) { }
+
 #define E(name) { #name, 0, (void *)k32_##name }
 
 const struct builtin_export k32_thread_exports[] = {
+	E(CloseThreadpoolTimer),
+	E(CloseThreadpoolWait),
 	E(CreateThread),
+	E(CreateThreadpoolTimer),
+	E(CreateThreadpoolWait),
 	E(ExitProcess),
 	E(ExitThread),
 	E(FatalAppExitA),
@@ -533,6 +613,7 @@ const struct builtin_export k32_thread_exports[] = {
 	E(FlsFree),
 	E(FlsGetValue),
 	E(FlsSetValue),
+	E(FreeLibraryWhenCallbackReturns),
 	E(GetCurrentProcess),
 	E(GetCurrentProcessId),
 	E(GetCurrentThread),
@@ -541,14 +622,21 @@ const struct builtin_export k32_thread_exports[] = {
 	E(GetExitCodeThread),
 	E(GetPriorityClass),
 	E(GetProcessAffinityMask),
+	E(GetThreadContext),
+	E(GetThreadGroupAffinity),
 	E(GetThreadId),
 	E(GetThreadPriority),
+	E(OpenProcess),
 	E(ResumeThread),
 	E(SetPriorityClass),
 	E(SetProcessAffinityMask),
 	E(SetThreadAffinityMask),
+	E(SetThreadContext),
+	E(SetThreadGroupAffinity),
 	E(SetThreadIdealProcessor),
 	E(SetThreadPriority),
+	E(SetThreadpoolTimer),
+	E(SetThreadpoolWait),
 	E(Sleep),
 	E(SleepEx),
 	E(SuspendThread),
@@ -559,5 +647,6 @@ const struct builtin_export k32_thread_exports[] = {
 	E(TlsFree),
 	E(TlsGetValue),
 	E(TlsSetValue),
+	E(WaitForThreadpoolTimerCallbacks),
 	BUILTIN_END
 };

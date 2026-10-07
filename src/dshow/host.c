@@ -9,11 +9,20 @@
 #include "dshow/dshow.h"
 #include "win32/ole.h"
 
+/* The harness's own filters, which the two host pins belong to. */
+struct host_filter {
+  IBaseFilter filter;
+  struct dshow_host *host;
+  struct host_pin *pin;		/* its one pin */
+  const WCHAR *name;
+};
+
 struct host_pin {
   IPin pin;
   IMemInputPin mem;
   PIN_DIRECTION direction;
   struct dshow_host *host;
+  struct host_filter *owner;
   IPin *peer;
   AM_MEDIA_TYPE type;
   int connected;
@@ -31,6 +40,7 @@ struct dshow_host {
   IMemInputPin *mem;
   IMemAllocator *allocator;
   struct host_pin source, sink;
+  struct host_filter source_filter, sink_filter;
   struct host_graph graph;
   dshow_output_fn callback;
   void *opaque;
@@ -141,8 +151,13 @@ static HRESULT WINAPI pin_type(IPin *p, AM_MEDIA_TYPE *out) {
 static HRESULT WINAPI pin_info(IPin *p, PIN_INFO *out) {
   if (!out)
     return E_POINTER;
+  struct host_pin *pin = (void *)p;
   memset(out, 0, sizeof(*out));
-  out->dir = ((struct host_pin *)p)->direction;
+  out->dir = pin->direction;
+  out->pFilter = &pin->owner->filter;
+  out->pFilter->lpVtbl->AddRef(out->pFilter);
+  for (int i = 0; i < MAX_PIN_NAME - 1 && pin->owner->name[i]; i++)
+    out->achName[i] = pin->owner->name[i];
   return S_OK;
 }
 static HRESULT WINAPI pin_direction(IPin *p, PIN_DIRECTION *out) {
@@ -151,7 +166,20 @@ static HRESULT WINAPI pin_direction(IPin *p, PIN_DIRECTION *out) {
   *out = ((struct host_pin *)p)->direction;
   return S_OK;
 }
-static HRESULT WINAPI pin_id(IPin *p, LPWSTR *out) { return E_NOTIMPL; }
+static HRESULT WINAPI pin_id(IPin *p, LPWSTR *out) {
+  static const WCHAR in[] = {'I', 'n', 0}, outp[] = {'O', 'u', 't', 0};
+  if (!out)
+    return E_POINTER;
+  const WCHAR *id = ((struct host_pin *)p)->direction == PINDIR_INPUT ? in : outp;
+  size_t n = 0;
+  while (id[n])
+    n++;
+  *out = ole_taskmem_alloc((n + 1) * sizeof(WCHAR));
+  if (!*out)
+    return E_OUTOFMEMORY;
+  memcpy(*out, id, (n + 1) * sizeof(WCHAR));
+  return S_OK;
+}
 static HRESULT WINAPI pin_accept(IPin *p, const AM_MEDIA_TYPE *mt) {
   return mt && guid_eq(&mt->majortype, &MEDIATYPE_Video) ? S_OK : S_FALSE;
 }
@@ -200,6 +228,164 @@ static const IPinVtbl pin_vtbl = {pin_qi,
                                   pin_end_flush,
                                   pin_segment};
 
+/*
+ * The filters at the two ends. A filter looks at the filter on the other side
+ * of a pin (QueryPinInfo, then GetClassID or QueryFilterInfo) to recognise
+ * what it is connected to, so they have to answer; they are always running
+ * and have no pins to list.
+ */
+static struct host_filter *filter_of(IBaseFilter *f) { return (void *)f; }
+static HRESULT WINAPI filt_qi(IBaseFilter *f, REFIID iid, void **out) {
+  if (!out)
+    return E_POINTER;
+  if (guid_eq(iid, &IID_IUnknown) || guid_eq(iid, &IID_IPersist) ||
+      guid_eq(iid, &IID_IMediaFilter) || guid_eq(iid, &IID_IBaseFilter)) {
+    *out = f;
+    return S_OK;
+  }
+  *out = NULL;
+  return E_NOINTERFACE;
+}
+static ULONG WINAPI filt_addref(IBaseFilter *f) { return 2; }
+static ULONG WINAPI filt_release(IBaseFilter *f) { return 1; }
+static HRESULT WINAPI filt_class(IBaseFilter *f, CLSID *clsid) {
+  /* No class is registered for these: a private one names them. */
+  static const CLSID id = {0x5ea4ce00, 0x5ea4, 0x4ce0, {0x5e, 0xa4, 0xce, 0x00, 0x5e, 0xa4, 0xce, 0x01}};
+  if (!clsid)
+    return E_POINTER;
+  *clsid = id;
+  return S_OK;
+}
+static HRESULT WINAPI filt_state_change(IBaseFilter *f) { return S_OK; }
+static HRESULT WINAPI filt_run(IBaseFilter *f, REFERENCE_TIME start) { return S_OK; }
+static HRESULT WINAPI filt_state(IBaseFilter *f, DWORD timeout, FILTER_STATE *st) {
+  if (!st)
+    return E_POINTER;
+  *st = State_Running;
+  return S_OK;
+}
+static HRESULT WINAPI filt_set_clock(IBaseFilter *f, IReferenceClock *c) { return S_OK; }
+static HRESULT WINAPI filt_get_clock(IBaseFilter *f, IReferenceClock **c) {
+  if (!c)
+    return E_POINTER;
+  *c = NULL;
+  return S_OK;
+}
+
+/* IEnumPins over the filter's one pin; a copy of its position per Clone. */
+struct host_enum_pins {
+  IEnumPins e;
+  LONG refs;
+  struct host_filter *filter;
+  int pos;
+};
+static HRESULT WINAPI enum_qi(IEnumPins *e, REFIID iid, void **out) {
+  if (!out)
+    return E_POINTER;
+  if (guid_eq(iid, &IID_IUnknown) || guid_eq(iid, &IID_IEnumPins)) {
+    *out = e;
+    ((struct host_enum_pins *)e)->refs++;
+    return S_OK;
+  }
+  *out = NULL;
+  return E_NOINTERFACE;
+}
+static ULONG WINAPI enum_addref(IEnumPins *e) { return ++((struct host_enum_pins *)e)->refs; }
+static ULONG WINAPI enum_release(IEnumPins *e) {
+  struct host_enum_pins *x = (void *)e;
+  ULONG n = --x->refs;
+  if (!n)
+    free(x);
+  return n;
+}
+static HRESULT WINAPI enum_next(IEnumPins *e, ULONG count, IPin **pins, ULONG *fetched) {
+  struct host_enum_pins *x = (void *)e;
+  ULONG got = 0;
+  if (!pins || (!fetched && count != 1))
+    return E_POINTER;
+  if (count && !x->pos) {
+    pins[got++] = &x->filter->pin->pin;
+    x->pos = 1;
+  }
+  if (fetched)
+    *fetched = got;
+  return got == count ? S_OK : S_FALSE;
+}
+static HRESULT WINAPI enum_skip(IEnumPins *e, ULONG count) {
+  struct host_enum_pins *x = (void *)e;
+  if (count && x->pos)
+    return S_FALSE;
+  if (count)
+    x->pos = 1;
+  return count > 1 ? S_FALSE : S_OK;
+}
+static HRESULT WINAPI enum_reset(IEnumPins *e) {
+  ((struct host_enum_pins *)e)->pos = 0;
+  return S_OK;
+}
+static HRESULT WINAPI enum_clone(IEnumPins *e, IEnumPins **out);
+static const IEnumPinsVtbl enum_vtbl = {enum_qi,   enum_addref, enum_release,
+                                        enum_next, enum_skip,   enum_reset,
+                                        enum_clone};
+static HRESULT enum_new(struct host_filter *f, int pos, IEnumPins **out) {
+  struct host_enum_pins *x = calloc(1, sizeof(*x));
+  if (!out)
+    return E_POINTER;
+  if (!x)
+    return E_OUTOFMEMORY;
+  x->e.lpVtbl = &enum_vtbl;
+  x->refs = 1;
+  x->filter = f;
+  x->pos = pos;
+  *out = &x->e;
+  return S_OK;
+}
+static HRESULT WINAPI enum_clone(IEnumPins *e, IEnumPins **out) {
+  struct host_enum_pins *x = (void *)e;
+  return enum_new(x->filter, x->pos, out);
+}
+static HRESULT WINAPI filt_enum_pins(IBaseFilter *f, IEnumPins **e) {
+  return enum_new(filter_of(f), 0, e);
+}
+static HRESULT WINAPI filt_find_pin(IBaseFilter *f, LPCWSTR id, IPin **pin) {
+  struct host_filter *hf = filter_of(f);
+  LPWSTR mine = NULL;
+  if (!pin)
+    return E_POINTER;
+  *pin = NULL;
+  if (!id || FAILED(pin_id(&hf->pin->pin, &mine)))
+    return VFW_E_NOT_FOUND;
+  int same = 1;
+  for (size_t i = 0; same; i++) {
+    same = id[i] == mine[i];
+    if (!mine[i])
+      break;
+  }
+  ole_taskmem_free(mine);
+  if (!same)
+    return VFW_E_NOT_FOUND;
+  *pin = &hf->pin->pin;
+  return S_OK;
+}
+static HRESULT WINAPI filt_info(IBaseFilter *f, FILTER_INFO *info) {
+  struct host_filter *hf = filter_of(f);
+  if (!info)
+    return E_POINTER;
+  memset(info, 0, sizeof(*info));
+  for (int i = 0; i < MAX_FILTER_NAME - 1 && hf->name[i]; i++)
+    info->achName[i] = hf->name[i];
+  info->pGraph = &hf->host->graph.graph;
+  info->pGraph->lpVtbl->AddRef(info->pGraph);
+  return S_OK;
+}
+static HRESULT WINAPI filt_join(IBaseFilter *f, IFilterGraph *g, LPCWSTR name) { return S_OK; }
+static HRESULT WINAPI filt_vendor(IBaseFilter *f, LPWSTR *info) { return E_NOTIMPL; }
+static const IBaseFilterVtbl filter_vtbl = {
+    filt_qi,        filt_addref,    filt_release,    filt_class,
+    filt_state_change, filt_state_change, filt_run,  filt_state,
+    filt_set_clock, filt_get_clock, filt_enum_pins,  filt_find_pin,
+    filt_info,      filt_join,      filt_vendor};
+
 static HRESULT WINAPI mem_qi(IMemInputPin *p, REFIID iid, void **out) {
   return pin_qi(&from_mem(p)->pin, iid, out);
 }
@@ -228,6 +414,14 @@ static HRESULT WINAPI mem_receive(IMemInputPin *p, IMediaSample *s) {
   AM_MEDIA_TYPE *dynamic = NULL;
   s->lpVtbl->GetMediaType(s, &dynamic);
   HRESULT hr = h->callback ? h->callback(h->opaque, s, dynamic) : S_OK;
+  if (dynamic && SUCCEEDED(hr)) {
+    /* From here on the connection has this type. */
+    AM_MEDIA_TYPE next;
+    if (SUCCEEDED(dshow_copy_media_type(&next, dynamic))) {
+      dshow_free_media_type(&from_mem(p)->type);
+      from_mem(p)->type = next;
+    }
+  }
   if (dynamic) {
     dshow_free_media_type(dynamic);
     ole_taskmem_free(dynamic);
@@ -357,14 +551,24 @@ HRESULT dshow_host_create(IBaseFilter *f, const AM_MEDIA_TYPE *in,
   h->opaque = opaque;
   pthread_mutex_init(&h->mutex, NULL);
   pthread_cond_init(&h->changed, NULL);
+  static const WCHAR source_name[] = {'S', 'e', 'a', 'n', 'c', 'e', ' ', 'S', 'o', 'u', 'r', 'c', 'e', 0};
+  static const WCHAR sink_name[] = {'S', 'e', 'a', 'n', 'c', 'e', ' ', 'S', 'i', 'n', 'k', 0};
+  h->source_filter = (struct host_filter){
+      .filter = {&filter_vtbl}, .host = h, .pin = &h->source,
+      .name = source_name};
+  h->sink_filter = (struct host_filter){
+      .filter = {&filter_vtbl}, .host = h, .pin = &h->sink,
+      .name = sink_name};
   h->source = (struct host_pin){.pin = {&pin_vtbl},
                                 .mem = {&mem_vtbl},
                                 .direction = PINDIR_OUTPUT,
-                                .host = h};
+                                .host = h,
+                                .owner = &h->source_filter};
   h->sink = (struct host_pin){.pin = {&pin_vtbl},
                               .mem = {&mem_vtbl},
                               .direction = PINDIR_INPUT,
-                              .host = h};
+                              .host = h,
+                              .owner = &h->sink_filter};
   h->graph = (struct host_graph){
       .graph = {&graph_vtbl}, .events = {&event_vtbl}, .host = h};
   static const WCHAR name[] = {'s', 'e', 'a', 'n', 'c', 'e', 0};

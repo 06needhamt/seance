@@ -311,6 +311,17 @@ comdlg32 are built in too, headless:
   optional AVI utilities can load. Those utilities report
   `AVIERR_UNSUPPORTED`; seance commands use the native AVI reader instead.
 
+- **d3d9:** there is no adapter. `Direct3DCreate9` returns NULL and
+  `Direct3DCreate9Ex` fails with `D3DERR_NOTAVAILABLE`, which video filters
+  take as "decode in software".
+- **bcrypt:** just the `RNG` provider and `BCryptGenRandom`; other algorithms
+  are not found.
+- **crypt32:** certificate stores that are always empty.
+- **kernel32, newer calls:** slim reader/writer locks, condition variables,
+  `InitOnce` and interlocked lists work (built on one process-wide lock, so
+  they are correct but not fast). Thread-pool timers and waits can't be
+  created.
+
 A function a built-in DLL doesn't implement still lets a codec load:
 `info` shows which of its imports those are, and calling one stops the
 harness with a message naming it.
@@ -443,8 +454,11 @@ the codec's output exactly, in whatever format it is. A DirectShow `.ax`
 server is loaded without registration, its decoder is connected between the
 built-in source and sink pins, and compressed AVI chunks are delivered as
 timestamped media samples. `--clsid` selects a class when necessary.
-For `--start`, the DirectShow graph is flushed and given a new segment before
-frames are preroll-fed from the preceding keyframe. Output and EOS may arrive
+A sample that carries a new media type is followed when only the pixel
+format changes. For `--start`, the DirectShow graph is flushed and given a new
+segment before frames are preroll-fed from the preceding keyframe; frames
+before the start (by time stamp) or past `--frames` are dropped even if the
+filter doesn't flag them as preroll. Output and EOS may arrive
 from a filter worker thread; EOS waits are bounded by `VFW_TIMEOUT` (five
 seconds by default).
 

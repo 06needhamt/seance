@@ -8,6 +8,7 @@
 #include "dshow/dshow.h"
 #include "loader/modules.h"
 #include "runtime/runtime.h"
+#include "win32/ole.h"
 #include "test.h"
 
 struct fake_filter {
@@ -317,6 +318,41 @@ static void allocator(void)
 	CHECK(astart == start && astop == stop);
 	CHECK(s[0]->lpVtbl->SetActualDataLength(s[0], 101) ==
 	      VFW_E_BUFFER_OVERFLOW);
+
+	/*
+	 * A media type on a sample stays through GetProperties and
+	 * SetProperties, which a filter does to copy a sample's properties:
+	 * the properties point at the sample's own copy, which must not be
+	 * freed before it is read back.
+	 */
+	BITMAPINFOHEADER bih = { .biSize = sizeof(bih), .biWidth = 2, .biHeight = 2,
+		.biPlanes = 1, .biBitCount = 12,
+		.biCompression = mmioFOURCC('I', '4', '2', '0'), .biSizeImage = 6 };
+	AM_MEDIA_TYPE mt, *back = NULL;
+	AM_SAMPLE2_PROPERTIES props;
+	IMediaSample2 *s2 = NULL;
+
+	CHECK(dshow_bih_to_mt(&bih, sizeof(bih), 25, 1, 0, &mt) == S_OK);
+	CHECK(s[0]->lpVtbl->GetMediaType(s[0], &back) == S_FALSE && !back);
+	CHECK(s[0]->lpVtbl->SetMediaType(s[0], &mt) == S_OK);
+	CHECK(s[0]->lpVtbl->QueryInterface(s[0], &IID_IMediaSample2,
+					   (void **)&s2) == S_OK);
+	if (s2) {
+		CHECK(s2->lpVtbl->GetProperties(s2, sizeof(props), (BYTE *)&props) == S_OK);
+		CHECK(props.dwSampleFlags & AM_SAMPLE_TYPECHANGED);
+		CHECK(props.pMediaType != NULL);
+		CHECK(s2->lpVtbl->SetProperties(s2, sizeof(props), (BYTE *)&props) == S_OK);
+		s2->lpVtbl->Release(s2);
+	}
+	CHECK(s[0]->lpVtbl->GetMediaType(s[0], &back) == S_OK && back);
+	if (back) {
+		CHECK(!memcmp(&back->subtype, &mt.subtype, sizeof(GUID)));
+		CHECK_EQ(back->cbFormat, mt.cbFormat);
+		CHECK(back->pbFormat && !memcmp(back->pbFormat, mt.pbFormat, mt.cbFormat));
+		dshow_free_media_type(back);
+		ole_taskmem_free(back);
+	}
+	dshow_free_media_type(&mt);
 	s[0]->lpVtbl->Release(s[0]);
 	s[1]->lpVtbl->Release(s[1]);
 	CHECK(a->lpVtbl->Decommit(a) == S_OK);
@@ -436,6 +472,8 @@ static void fixture_host(void)
 	IBaseFilter *filter = NULL;
 	setenv("VFW_ENV_TESTFILTER_ASYNC", "1", 1);
 	setenv("VFW_ENV_TESTFILTER_REQUIRE_SEGMENT", "1", 1);
+	/* The filter examines the pins it's connected to, as real ones do. */
+	setenv("VFW_ENV_TESTFILTER_PEER_INFO", "1", 1);
 	CHECK(get != NULL);
 	CHECK(get && get(&decoder, &IID_IClassFactory, (void **)&factory) == S_OK);
 	CHECK(factory && factory->lpVtbl->CreateInstance(factory, NULL,
@@ -469,6 +507,7 @@ static void fixture_host(void)
 	dshow_host_destroy(host);
 	unsetenv("VFW_ENV_TESTFILTER_ASYNC");
 	unsetenv("VFW_ENV_TESTFILTER_REQUIRE_SEGMENT");
+	unsetenv("VFW_ENV_TESTFILTER_PEER_INFO");
 	if(filter)filter->lpVtbl->Release(filter);
 
 	dshow_free_media_type(&in_mt); dshow_free_media_type(&out_mt);

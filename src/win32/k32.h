@@ -55,6 +55,14 @@ char *k32_full_path(const char *name);
 /* CreateThread with the defaults, for threads the built-in DLLs run. */
 HANDLE thread_create(LPTHREAD_START_ROUTINE start, LPVOID param);
 
+/* CreateThread, for _beginthreadex: stack size, CREATE_SUSPENDED, thread id. */
+HANDLE thread_create_ex(SIZE_T stack, LPTHREAD_START_ROUTINE start, LPVOID param,
+			DWORD flags, LPDWORD tid);
+
+/* EnterCriticalSection and LeaveCriticalSection, for the other k32 files. */
+void k32_cs_enter(CRITICAL_SECTION *cs);
+void k32_cs_leave(CRITICAL_SECTION *cs);
+
 /* SetEvent, or PulseEvent with pulse. */
 BOOL event_signal(HANDLE h, int pulse);
 

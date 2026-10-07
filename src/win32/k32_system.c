@@ -5,6 +5,7 @@
  */
 #include <cpuid.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -123,6 +124,137 @@ WINFN(BOOL) k32_GetVersionExW(OSVERSIONINFOW *v)
 }
 
 /* System information. */
+
+/*
+ * VerSetConditionMask and VerifyVersionInfo: each field of the version has
+ * three bits of the mask, the comparison to make with it (VER_EQUAL...).
+ */
+
+WINFN(ULONGLONG) k32_VerSetConditionMask(ULONGLONG mask, DWORD types, BYTE cond)
+{
+	for (int i = 0; i < 8; i++)
+		if (types & (1u << i)) {
+			mask &= ~(7ull << (3 * i));
+			mask |= (ULONGLONG)(cond & 7) << (3 * i);
+		}
+	return mask;
+}
+
+/* Whether actual satisfies cond against wanted: 1 yes, 0 no. */
+static int ver_test(unsigned cond, LONGLONG actual, LONGLONG wanted)
+{
+	switch (cond) {
+	case VER_GREATER:       return actual > wanted;
+	case VER_GREATER_EQUAL: return actual >= wanted;
+	case VER_LESS:          return actual < wanted;
+	case VER_LESS_EQUAL:    return actual <= wanted;
+	default:                return actual == wanted;
+	}
+}
+
+/* The condition (VER_EQUAL if none given) for the field with this type bit. */
+static unsigned ver_cond(ULONGLONG mask, DWORD type)
+{
+	int i = __builtin_ctz(type);
+	unsigned c = (mask >> (3 * i)) & 7;
+
+	return c ? c : VER_EQUAL;
+}
+
+WINFN(BOOL) k32_VerifyVersionInfoW(OSVERSIONINFOEXW *want, DWORD types,
+				   ULONGLONG mask)
+{
+	OSVERSIONINFOEXW have;
+	BOOL r = TRUE;
+
+	memset(&have, 0, sizeof(have));
+	have.dwOSVersionInfoSize = sizeof(have);
+	k32_GetVersionExW((OSVERSIONINFOW *)&have);
+	if (!types || want->dwOSVersionInfoSize < sizeof(OSVERSIONINFOW)) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+
+	/*
+	 * Major, minor and service pack are compared as one number, the
+	 * first that differs deciding: "5.1 or later" is satisfied by 6.0.
+	 */
+	static const DWORD chain[] = {
+		VER_MAJORVERSION, VER_MINORVERSION, VER_SERVICEPACKMAJOR,
+		VER_SERVICEPACKMINOR,
+	};
+	LONGLONG hv[] = { have.dwMajorVersion, have.dwMinorVersion,
+			  have.wServicePackMajor, have.wServicePackMinor };
+	LONGLONG wv[] = { want->dwMajorVersion, want->dwMinorVersion,
+			  want->wServicePackMajor, want->wServicePackMinor };
+	int decided = 0;
+	unsigned last = VER_EQUAL;
+	for (int i = 0; i < 4 && !decided; i++) {
+		if (!(types & chain[i]))
+			continue;
+		unsigned c = ver_cond(mask, chain[i]);
+
+		last = c;
+		if (hv[i] != wv[i]) {
+			r = c != VER_EQUAL && ver_test(c, hv[i], wv[i]);
+			decided = 1;
+		}
+	}
+	if (!decided)
+		r = ver_test(last, 0, 0);	/* all equal: only strict tests fail */
+	if (r && (types & VER_BUILDNUMBER))
+		r = ver_test(ver_cond(mask, VER_BUILDNUMBER), have.dwBuildNumber,
+			     want->dwBuildNumber);
+	if (r && (types & VER_PLATFORMID))
+		r = ver_test(ver_cond(mask, VER_PLATFORMID), have.dwPlatformId,
+			     want->dwPlatformId);
+	if (r && (types & VER_PRODUCT_TYPE))
+		r = ver_test(ver_cond(mask, VER_PRODUCT_TYPE), have.wProductType,
+			     want->wProductType);
+	if (r && (types & VER_SUITENAME)) {
+		unsigned c = ver_cond(mask, VER_SUITENAME);
+		WORD both = have.wSuiteMask & want->wSuiteMask;
+
+		r = c == VER_OR ? both != 0 : both == want->wSuiteMask;
+	}
+	if (!r)
+		win_set_error(ERROR_OLD_WIN_VERSION);
+	return r;
+}
+
+WINFN(void) k32_FlushProcessWriteBuffers(void)
+{
+	__sync_synchronize();
+}
+
+/* Pointers are never really encoded, which is what callers can't tell. */
+WINFN(PVOID) k32_EncodePointer(PVOID p) { return p; }
+WINFN(PVOID) k32_DecodePointer(PVOID p) { return p; }
+
+/* One processor group, one NUMA node. */
+
+WINFN(BOOL) k32_GetNumaHighestNodeNumber(ULONG *node)
+{
+	*node = 0;
+	return TRUE;
+}
+
+WINFN(BOOL) k32_GetLogicalProcessorInformationEx(DWORD relationship,
+						 PVOID buffer, PDWORD length)
+{
+	/* Callers that want the topology fall back to GetSystemInfo. */
+	win_set_error(ERROR_NOT_SUPPORTED);
+	return FALSE;
+}
+
+WINFN(void) k32_GetCurrentProcessorNumberEx(PPROCESSOR_NUMBER n)
+{
+	int cpu = sched_getcpu();
+
+	n->Group = 0;
+	n->Number = cpu < 0 ? 0 : cpu & 0x3f;
+	n->Reserved = 0;
+}
 
 WINFN(void) k32_GetSystemInfo(LPSYSTEM_INFO si)
 {
@@ -829,12 +961,18 @@ const struct builtin_export k32_system_exports[] = {
 	E(GetComputerNameA),
 	E(GetComputerNameW),
 	{ "GetEnvironmentStrings", 0, (void *)k32_GetEnvironmentStringsA },
+	E(DecodePointer),
+	E(EncodePointer),
+	E(FlushProcessWriteBuffers),
+	E(GetCurrentProcessorNumberEx),
 	E(GetEnvironmentStringsA),
 	E(GetEnvironmentStringsW),
 	E(GetEnvironmentVariableA),
 	E(GetEnvironmentVariableW),
 	E(GetErrorMode),
+	E(GetLogicalProcessorInformationEx),
 	E(GetNativeSystemInfo),
+	E(GetNumaHighestNodeNumber),
 	E(GetStartupInfoA),
 	E(GetStartupInfoW),
 	E(GetSystemDirectoryA),
@@ -854,5 +992,7 @@ const struct builtin_export k32_system_exports[] = {
 	E(SetEnvironmentVariableA),
 	E(SetEnvironmentVariableW),
 	E(SetErrorMode),
+	E(VerSetConditionMask),
+	E(VerifyVersionInfoW),
 	BUILTIN_END
 };

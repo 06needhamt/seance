@@ -6,6 +6,8 @@
  * has no bias. That keeps codec behaviour independent of the host's zone.
  */
 #include <string.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
 #include <time.h>
 
 #include "win32/internal.h"
@@ -225,6 +227,97 @@ WINFN(DWORD) k32_GetTimeZoneInformation(LPTIME_ZONE_INFORMATION tz)
 	return TIME_ZONE_ID_UNKNOWN;
 }
 
+WINFN(BOOL) k32_GetSystemTimeAdjustment(PDWORD adjustment, PDWORD increment,
+					PBOOL disabled)
+{
+	/* The clock is never slewed: 15.625 ms ticks, adjustment disabled. */
+	*adjustment = *increment = 156250;
+	*disabled = TRUE;
+	return TRUE;
+}
+
+static void duration_filetime(const struct timespec *ts, LPFILETIME ft)
+{
+	to_filetime((ULONGLONG)ts->tv_sec * TICKS_PER_S + ts->tv_nsec / 100, ft);
+}
+
+/* The creation time is when /proc/self appeared; the exit time is unset. */
+static void start_time(LPFILETIME ft)
+{
+	struct stat st;
+
+	if (stat("/proc/self", &st)) {
+		to_filetime(filetime_now(), ft);
+		return;
+	}
+	to_filetime(((ULONGLONG)st.st_ctim.tv_sec + EPOCH_DIFF) * TICKS_PER_S +
+		    st.st_ctim.tv_nsec / 100, ft);
+}
+
+WINFN(BOOL) k32_GetProcessTimes(HANDLE process, LPFILETIME creation,
+				LPFILETIME exit, LPFILETIME kernel,
+				LPFILETIME user)
+{
+	struct rusage ru;
+
+	if (process != (HANDLE)(LONG_PTR)-1 || getrusage(RUSAGE_SELF, &ru)) {
+		win_set_error(ERROR_INVALID_HANDLE);
+		return FALSE;
+	}
+	start_time(creation);
+	to_filetime(0, exit);
+	to_filetime(((ULONGLONG)ru.ru_stime.tv_sec * 1000000 +
+		     ru.ru_stime.tv_usec) * 10, kernel);
+	to_filetime(((ULONGLONG)ru.ru_utime.tv_sec * 1000000 +
+		     ru.ru_utime.tv_usec) * 10, user);
+	return TRUE;
+}
+
+/*
+ * The running thread's times are real (all of its CPU time is counted as user
+ * time); any other thread's are not tracked, so read as zero.
+ */
+WINFN(BOOL) k32_GetThreadTimes(HANDLE thread, LPFILETIME creation,
+			       LPFILETIME exit, LPFILETIME kernel,
+			       LPFILETIME user)
+{
+	struct timespec ts = { 0, 0 };
+
+	if (thread == (HANDLE)(LONG_PTR)-2)
+		clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+	start_time(creation);
+	to_filetime(0, exit);
+	to_filetime(0, kernel);
+	duration_filetime(&ts, user);
+	return TRUE;
+}
+
+WINFN(BOOL) k32_SystemTimeToTzSpecificLocalTime(const TIME_ZONE_INFORMATION *tz,
+						const SYSTEMTIME *utc,
+						LPSYSTEMTIME local)
+{
+	FILETIME ft;
+	LONG bias = tz ? tz->Bias + tz->StandardBias : 0;
+
+	if (!k32_SystemTimeToFileTime(utc, &ft))
+		return FALSE;
+	to_filetime(from_filetime(&ft) - (LONGLONG)bias * 60 * TICKS_PER_S, &ft);
+	return k32_FileTimeToSystemTime(&ft, local);
+}
+
+WINFN(BOOL) k32_TzSpecificLocalTimeToSystemTime(const TIME_ZONE_INFORMATION *tz,
+						const SYSTEMTIME *local,
+						LPSYSTEMTIME utc)
+{
+	FILETIME ft;
+	LONG bias = tz ? tz->Bias + tz->StandardBias : 0;
+
+	if (!k32_SystemTimeToFileTime(local, &ft))
+		return FALSE;
+	to_filetime(from_filetime(&ft) + (LONGLONG)bias * 60 * TICKS_PER_S, &ft);
+	return k32_FileTimeToSystemTime(&ft, utc);
+}
+
 #define E(name) { #name, 0, (void *)k32_##name }
 
 const struct builtin_export k32_time_exports[] = {
@@ -234,8 +327,11 @@ const struct builtin_export k32_time_exports[] = {
 	E(FileTimeToLocalFileTime),
 	E(FileTimeToSystemTime),
 	E(GetLocalTime),
+	E(GetProcessTimes),
 	E(GetSystemTime),
+	E(GetSystemTimeAdjustment),
 	E(GetSystemTimeAsFileTime),
+	E(GetThreadTimes),
 	E(GetTickCount),
 	E(GetTickCount64),
 	E(GetTimeZoneInformation),
@@ -245,5 +341,7 @@ const struct builtin_export k32_time_exports[] = {
 	E(SetLocalTime),
 	E(SetSystemTime),
 	E(SystemTimeToFileTime),
+	E(SystemTimeToTzSpecificLocalTime),
+	E(TzSpecificLocalTimeToSystemTime),
 	BUILTIN_END
 };

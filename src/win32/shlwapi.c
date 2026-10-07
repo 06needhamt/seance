@@ -128,6 +128,26 @@ WINFN(BOOL) sl_PathIsDirectoryW(LPCWSTR p) { return wide_pred(p, sl_PathIsDirect
 WINFN(BOOL) sl_PathIsRelativeW(LPCWSTR p) { return p && !((p[0]&&p[1]==':')||p[0]=='\\'||p[0]=='/'); }
 WINFN(BOOL) sl_PathIsURLW(LPCWSTR p) { char *a=utf16_to_utf8_dup(p); BOOL r=a&&sl_PathIsURLA(a); free(a); return r; }
 
+/* A file name alone: no directory, drive or separator in it. */
+WINFN(BOOL) sl_PathIsFileSpecA(LPCSTR p)
+{ if (!p) return FALSE; for (; *p; p++) if (sep(*p) || *p == ':') return FALSE; return TRUE; }
+WINFN(BOOL) sl_PathIsFileSpecW(LPCWSTR p)
+{ if (!p) return FALSE; for (; *p; p++) if (*p == '\\' || *p == '/' || *p == ':') return FALSE; return TRUE; }
+/* Removing only shortens, so the UTF-8 answer's length gives the UTF-16 one. */
+WINFN(BOOL) sl_PathRemoveFileSpecW(LPWSTR p)
+{
+	char *a = utf16_to_utf8_dup(p);
+	BOOL ok = a && sl_PathRemoveFileSpecA(a);
+
+	if (ok) {
+		int n = cp_to_utf16(CP_UTF8, a, -1, NULL, 0, 0);
+		if (n > 0)
+			p[n - 1] = 0;
+	}
+	free(a);
+	return ok;
+}
+
 WINFN(HRESULT) sl_DllGetVersion(DLLVERSIONINFO *v)
 { if(!v || v->cbSize<sizeof(*v)) return E_INVALIDARG; v->dwMajorVersion=6; v->dwMinorVersion=0; v->dwBuildNumber=2900; v->dwPlatformID=2; return S_OK; }
 
@@ -136,10 +156,12 @@ static const struct builtin_export exports[] = {
 	E(DllGetVersion), E(PathAddBackslashA), E(PathAddBackslashW), E(PathAppendA),
 	E(PathCombineA), E(PathFileExistsA), E(PathFileExistsW), E(PathFindExtensionA),
 	E(PathFindExtensionW), E(PathFindFileNameA), E(PathFindFileNameW),
-	E(PathIsDirectoryA), E(PathIsDirectoryW), E(PathIsRelativeA), E(PathIsRelativeW),
+	E(PathIsDirectoryA), E(PathIsDirectoryW), E(PathIsFileSpecA), E(PathIsFileSpecW),
+	E(PathIsRelativeA), E(PathIsRelativeW),
 	E(PathIsRootA), E(PathIsURLA), E(PathIsURLW), E(PathMatchSpecA), E(PathQuoteSpacesA),
 	E(PathRemoveBackslashA), E(PathRemoveExtensionA), E(PathRemoveExtensionW),
-	E(PathRemoveFileSpecA), E(PathRenameExtensionA), E(PathRenameExtensionW),
+	E(PathRemoveFileSpecA), E(PathRemoveFileSpecW), E(PathRenameExtensionA),
+	E(PathRenameExtensionW),
 	E(PathSkipRootA), E(PathStripPathA), E(PathUnquoteSpacesA), E(StrCatBuffA),
 	E(StrCatBuffW), E(StrChrA), E(StrChrIA), E(StrChrIW), E(StrChrW), E(StrCmpNA),
 	E(StrCmpNIA), E(StrCmpNIW), E(StrCmpNW), E(StrCpyNA), E(StrCpyNW), E(StrStrA),

@@ -156,8 +156,38 @@ static double now(void)
 
 struct dshow_decode_output {
 	struct output *output;
-	struct image_conv *conv;
+	struct image_conv **conv;	/* replaced when the format changes */
+	REFERENCE_TIME first_time;	/* earlier samples are before --start */
+	unsigned long limit;		/* frames to write */
 };
+
+/*
+ * A sample carrying a new media type changes the format of it and of every
+ * sample after it (the filter has first asked QueryAccept). Picture size
+ * and layout are fixed once the output file is open, so a change must keep
+ * them; what may change is the pixel format, which gets a new converter.
+ */
+static HRESULT dshow_format_change(struct dshow_decode_output *d,
+				   const AM_MEDIA_TYPE *mt)
+{
+	BITMAPINFOHEADER *bih = NULL;
+	size_t size = 0;
+	HRESULT hr = dshow_mt_to_bih(mt, &bih, &size);
+
+	if (FAILED(hr))
+		return hr;
+	LONG height = bih->biHeight < 0 ? -bih->biHeight : bih->biHeight;
+	struct image_conv *next = NULL;
+	if (bih->biWidth == image_width(*d->conv) &&
+	    height == image_height(*d->conv))
+		next = image_conv_new(bih, size);
+	free(bih);
+	if (!next)
+		return VFW_E_INVALIDMEDIATYPE;
+	image_conv_free(*d->conv);
+	*d->conv = next;
+	return S_OK;
+}
 
 static HRESULT dshow_write_sample(void *opaque, IMediaSample *sample,
 				  const AM_MEDIA_TYPE *dynamic)
@@ -165,11 +195,26 @@ static HRESULT dshow_write_sample(void *opaque, IMediaSample *sample,
 	struct dshow_decode_output *d = opaque;
 	BYTE *data = NULL;
 	LONG size = sample->lpVtbl->GetActualDataLength(sample);
-	if (dynamic || size < 0 || FAILED(sample->lpVtbl->GetPointer(sample, &data)))
+	if (dynamic && *d->conv) {
+		HRESULT hr = dshow_format_change(d, dynamic);
+		if (FAILED(hr))
+			return hr;
+	}
+	if ((dynamic && !*d->conv) || size < 0 ||
+	    FAILED(sample->lpVtbl->GetPointer(sample, &data)))
 		return VFW_E_INVALIDMEDIATYPE;
-	if (sample->lpVtbl->IsPreroll(sample) == S_OK)
+	/*
+	 * Filters needn't pass the preroll flag on, and may hold back frames
+	 * (to reorder them) that come out after the ones asked for, so the
+	 * time stamps and the count decide too.
+	 */
+	REFERENCE_TIME t0 = 0, t1 = 0;
+	if (sample->lpVtbl->IsPreroll(sample) == S_OK ||
+	    (d->first_time && SUCCEEDED(sample->lpVtbl->GetTime(sample, &t0, &t1)) &&
+	     t0 < d->first_time) ||
+	    output_frames(d->output) >= d->limit)
 		return S_OK;
-	if (output_write(d->output, d->conv, data, (size_t)size)) {
+	if (output_write(d->output, *d->conv, data, (size_t)size)) {
 		return E_FAIL;
 	}
 	return S_OK;
@@ -353,7 +398,10 @@ static int decode_dshow(const char *target, const CLSID *selected,
 		goto done;
 	}
 	sink.output = output;
-	sink.conv = conv;
+	sink.conv = &conv;
+	sink.limit = want;
+	sink.first_time = start ?
+		(REFERENCE_TIME)start * scale * 10000000 / rate : 0;
 
 	size_t cap = 0;
 	unsigned long decoded = 0, errors = 0;

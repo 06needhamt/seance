@@ -280,6 +280,19 @@ WINFN(BOOL) user_WinHelpA(HWND hwnd, LPCSTR file, UINT command,
 	return FALSE;
 }
 
+/* No menus are shown, so a popup menu is dismissed without a choice. */
+WINFN(BOOL) user_TrackPopupMenu(HMENU menu, UINT flags, int x, int y,
+				int reserved, HWND hwnd, const RECT *rc)
+{
+	return FALSE;
+}
+
+/* There is no shell window. */
+WINFN(HWND) user_GetShellWindow(void)
+{
+	return NULL;
+}
+
 #define E(name) { #name, 0, (void *)user_##name }
 
 const struct builtin_export u32_legacy_exports[] = {
@@ -302,12 +315,13 @@ const struct builtin_export u32_legacy_exports[] = {
 	E(GetNextDlgTabItem),
 	E(GetScrollPos),
 	E(GetScrollRange),
+	E(GetShellWindow),
 	E(GetSubMenu),
 	E(GetTopWindow),
 	E(GetUpdateRect),
 	E(GetWindow),
-	E(GetWindowWord),
 	E(GetWindowPlacement),
+	E(GetWindowWord),
 	E(GrayStringA),
 	E(IsDialogMessageA),
 	E(MapDialogRect),
@@ -319,6 +333,7 @@ const struct builtin_export u32_legacy_exports[] = {
 	E(SetScrollRange),
 	E(SetWindowsHookExA),
 	E(TabbedTextOutA),
+	E(TrackPopupMenu),
 	E(UnhookWindowsHookEx),
 	E(WinHelpA),
 	BUILTIN_END
