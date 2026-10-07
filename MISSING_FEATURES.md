@@ -85,17 +85,53 @@ asks the filter on the other side of a pin for its class and pins);
 `decode` rejected a sample carrying a new media type, and let through frames
 before `--start` or after `--frames` when a filter doesn't flag preroll.
 
-### Still blocked
+### Second round: the rest of the package
 
-| Component | First blocker |
+The same package, the same day, working through what the first round left:
+
+| Item | Result |
 |---|---|
-| `LAVAudio.ax`, `LAVSplitter.ax` | `ncrypt.dll` (needed through `avformat-lav-63.dll`), then `ws2_32.dll`; and unimplemented CRT/advapi32 calls: `_findclose`, `_wfindfirst`/`_wfindnext`, `_wstat`/`_stat`, `_wfopen`, `_wfullpath`, `_wgetenv`, `_getcwd`, `_open_osfhandle`, `_getmaxstdio`/`_setmaxstdio`, `raise`, `wcstombs`, `CryptCreateHash` and relatives. Audio filters and splitters are outside the DirectShow scope, so these are noted rather than planned. |
-| `IntelQuickSyncDecoder.dll` | `dxva2.dll`, `d3d11.dll`, `dxgi.dll`: hardware decoding, which the harness can't offer |
-| `avformat-lav-63.dll`, `libbluray.dll` and the other FFmpeg libraries as standalone DLLs | They aren't filters or codecs; `libbluray.dll` and the others now load without unimplemented imports, `avformat` and `swresample` still have the calls listed above |
+| `avformat-lav-63.dll`, `LAVAudio.ax`, `LAVSplitter.ax` | 0 unimplemented imports and every DLL found. Added: `ws2_32.dll` (and its `wsock32.dll` name) as Winsock with no network, `ncrypt.dll` (bcrypt's RNG plus key-store calls that report no provider), the CRT calls `_findfirst` family, `_stat`/`_wstat`, `_wfopen`, `_wfullpath`, `_wgetenv`, `_getcwd`, `_open_osfhandle`, `_getmaxstdio`/`_setmaxstdio`, `signal`/`raise`, `wcstombs`/`mbstowcs`; `CryptCreateHash` and the other CryptoAPI hash/key calls (which fail: no algorithm), `InsertMenuItemW`/`CreatePopupMenu`, `UrlGetPartW`, `CompareStringEx`, `LCMapStringEx`, `EnumSystemLocalesW`. `register --dry-run` finds LAV Audio's filter and LAV Splitter's two. |
+| `IntelQuickSyncDecoder.dll` | 0 unimplemented imports and it loads: `dxva2.dll`, `d3d11.dll` and `dxgi.dll` exist and report no adapter (`DXGI_ERROR_UNSUPPORTED`, `D3DERR_NOTAVAILABLE`). |
+| Thread-pool timers and waits | Real now (`k32_pool.c`): timers, waits, work items and `TrySubmitThreadpoolCallback`, with the `...WhenCallbackReturns` requests. |
+| LAV Video inputs | See below. |
+| LAV Video's hardware settings | `HWAccel` 1 to 5 (CUDA, Quick Sync, DXVA2 copy-back and native, D3D11) all fall back to software and decode identically. |
 
-Not yet exercised: other LAV Video inputs (HEVC, VP9, AV1, WMV), its
-hardware-acceleration settings, and anything that depends on thread-pool
-timers.
+LAV Video, FFmpeg-made 64x48 AVIs, each compared with `ffmpeg -fps_mode
+passthrough -pix_fmt yuv420p`:
+
+| Input | Result |
+|---|---|
+| H.264, HEVC, VP9, AV1 | byte-identical |
+| WMV1, WMV2, MS-MPEG4 v3 (`MP43`), H.263, FLV1, Theora, FFV1, MPEG-4 (`XVID`) | byte-identical |
+| MPEG-1, MPEG-2 | byte-identical, once offered as `MPEG1Video`/`MPEG2_VIDEO` with an `MPEG1VIDEOINFO`/`MPEG2VIDEOINFO` (LAV refuses the FOURCC subtype); `decode` and `probe` now try that form after `VideoInfo` and `VideoInfo2` |
+| HuffYUV (4:2:2) | identical in `YUY2`; in `YV12` it differs by LAV's own chroma conversion |
+| Cinepak, MS Video 1 | identical in `BGR24` (the DIB comes out bottom-up, as for a VfW codec) |
+| Motion JPEG | identical to FFmpeg's `yuvj420p` decode |
+
+What the second round found and fixed in the harness, each with a test:
+`SleepConditionVariable` let a thread that began waiting after a wake-up take it
+from the thread it was meant for, which deadlocks FFmpeg's thread pool when it
+wakes a worker and then waits for the answer on the same variable (it is now a
+first-in first-out wait queue); and LAV's Quick Sync mode destroyed a member its
+constructor never set when set-up failed, which only works if fresh memory is
+zero, so memory from `malloc`, `operator new` and `HeapAlloc` is now always
+zeroed (as a fresh Windows heap usually gives). `struct _stat` also had the
+wrong layout in `_fstat` and is now MSVCRT's.
+
+### Still not supported
+
+| Component | Limit |
+|---|---|
+| `LAVAudio.ax`, `LAVSplitter.ax` | They load and register, but audio decoders and splitters are outside the DirectShow scope (video transform decoders and encoders), so nothing drives them. |
+| Network | Winsock starts and resolves numeric addresses, but no socket can be created: `socket` fails as if the network were down, so FFmpeg's protocols find nothing reachable. |
+| CryptoAPI hashes, keys; NCrypt | There is no hashing algorithm to create and no key storage provider to open. |
+| Hardware decoding | Every route (DXVA2, D3D11, Quick Sync, CUDA) reports no hardware and LAV decodes in software. |
+
+Not yet exercised: VC-1 / WMV3 (no encoder to make a stream with here),
+interlaced and field-coded streams, 10-bit and 4:4:4 sources (the standard
+output list is 8-bit), more than one video stream, and LAV Video's other
+settings (format selection, deinterlacing, dithering).
 
 ## In-repository baseline
 

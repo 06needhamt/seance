@@ -317,10 +317,20 @@ comdlg32 are built in too, headless:
 - **bcrypt:** just the `RNG` provider and `BCryptGenRandom`; other algorithms
   are not found.
 - **crypt32:** certificate stores that are always empty.
+- **ws2_32, wsock32:** Winsock for a machine with no network. It starts,
+  converts byte order and address text, and resolves numeric addresses, but
+  `socket` fails as if the network were down and names don't resolve.
+- **ncrypt:** bcrypt's random numbers; there is no key storage provider.
+- **dxva2, d3d11, dxgi:** no adapter, like d3d9, so decoders fall back to
+  software.
 - **kernel32, newer calls:** slim reader/writer locks, condition variables,
   `InitOnce` and interlocked lists work (built on one process-wide lock, so
-  they are correct but not fast). Thread-pool timers and waits can't be
-  created.
+  they are correct but not fast). Thread-pool timers, waits and work items
+  run on a thread each.
+- **Memory:** `malloc`, `operator new` and `HeapAlloc` return zeroed memory, as
+  a fresh Windows heap usually does, since code that was only ever run there
+  can depend on it. (This also makes a codec's output repeatable.)
+- **CryptoAPI:** the random numbers work; hashes and keys can't be created.
 
 A function a built-in DLL doesn't implement still lets a codec load:
 `info` shows which of its imports those are, and calling one stops the
@@ -454,7 +464,10 @@ the codec's output exactly, in whatever format it is. A DirectShow `.ax`
 server is loaded without registration, its decoder is connected between the
 built-in source and sink pins, and compressed AVI chunks are delivered as
 timestamped media samples. `--clsid` selects a class when necessary.
-A sample that carries a new media type is followed when only the pixel
+A stream's format is offered to the filter as `VideoInfo`, then
+`VideoInfo2`, then, for MPEG-1 and MPEG-2 video, as the `MPEG1Video` or
+`MPEG2_VIDEO` subtype that decoders register for; the first the filter accepts
+is used. A sample that carries a new media type is followed when only the pixel
 format changes. For `--start`, the DirectShow graph is flushed and given a new
 segment before frames are preroll-fed from the preceding keyframe; frames
 before the start (by time stamp) or past `--frames` are dropped even if the

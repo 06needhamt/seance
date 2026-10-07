@@ -411,6 +411,11 @@ strmbase — same constraints as `testcodec.c`/`pe_com.c`), generic and small:
      needing a mode of their own are tested in `test_dshow_modes`.
    - Still open by design: `EnumMatchingFilters` and moniker-returning
      `RegisterFilter`, which need a filter graph manager.
+   - The rest of the LAV package (see `MISSING_FEATURES.md`): thread-pool
+     objects, an offline `ws2_32`, `ncrypt`, `dxva2`/`d3d11`/`dxgi` that report
+     no adapter, and the CRT and shell functions its libraries import.
+     `decode` and `probe` also try MPEG-1/2 video under the subtypes decoders
+     register for. 18 codecs decode through LAV Video identically to FFmpeg (14 directly in YV12).
 
 ## Critical files
 
