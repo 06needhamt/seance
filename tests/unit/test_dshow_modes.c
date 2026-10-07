@@ -1,8 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * The host's reaction to errors a filter reports through IMediaEventSink.
- * Its own program: the fixture reads its modes from the environment as it
- * first sees it, so a mode can't be switched on after another test has run.
+ * Fixture modes that need a process of their own, since the fixture reads
+ * them from the environment as it first sees it: the host's reaction to errors
+ * a filter reports through IMediaEventSink, with the filter also supplying its
+ * own allocator (whose samples it insists on getting back).
  */
 #include <stdlib.h>
 #include <string.h>
@@ -46,6 +47,7 @@ static void fixture_notify_error(void)
 	IClassFactory *factory = NULL;
 	IBaseFilter *filter = NULL;
 	setenv("VFW_ENV_TESTFILTER_NOTIFY_ERROR", "1", 1);
+	setenv("VFW_ENV_TESTFILTER_OWN_ALLOCATOR", "1", 1);
 	CHECK(get && get(&decoder, &IID_IClassFactory, (void **)&factory) == S_OK);
 	CHECK(factory && factory->lpVtbl->CreateInstance(factory, NULL,
 		&IID_IBaseFilter, (void **)&filter) == S_OK);
@@ -90,6 +92,7 @@ static void fixture_notify_error(void)
 	CHECK(host && dshow_host_end(host,1000)==VFW_E_INVALID_FILE_FORMAT);
 	dshow_host_destroy(host);
 	unsetenv("VFW_ENV_TESTFILTER_NOTIFY_ERROR");
+	unsetenv("VFW_ENV_TESTFILTER_OWN_ALLOCATOR");
 	if (filter) filter->lpVtbl->Release(filter);
 	dshow_free_media_type(&in_mt);
 	dshow_free_media_type(&out_mt);
@@ -102,5 +105,5 @@ static void fixture_notify_error(void)
 int main(void)
 {
 	fixture_notify_error();
-	return test_summary("test_dshow_notify");
+	return test_summary("test_dshow_modes");
 }

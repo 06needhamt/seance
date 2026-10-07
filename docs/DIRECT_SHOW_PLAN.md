@@ -243,7 +243,7 @@ strmbase — same constraints as `testcodec.c`/`pe_com.c`), generic and small:
    - `IPersist`, `ISequentialStream`, `IStream`/`STATSTG`, `IPersistStream`
      and `IEnumMoniker` (with `IMoniker` opaque) went into
      `include/win32/objbase.h`, where objidl.h's interfaces belong; the rest
-     is in `dshow.h`. `ICodecAPI` is only named by its IID for now.
+     is in `dshow.h`. `ICodecAPI` came in Phase 6.
    - GUIDs are kept as lists (`VFW_OBJBASE_GUIDS`, `VFW_DSHOW_GUIDS`, entries
      `G(name, Data1, Data2, Data3, Data4...)`), declared `extern` through
      `VFW_GUID_DECLARE` and defined once in `src/win32/guids.c`.
@@ -392,8 +392,25 @@ strmbase — same constraints as `testcodec.c`/`pe_com.c`), generic and small:
    - The fixture gained `TESTFILTER_PEER_INFO` (inspects its peer pins),
      `TESTFILTER_DYNAMIC` (the decoder moves to YV12 after one frame, the
      encoder re-announces its type) and `TESTFILTER_NO_PREROLL`.
-   - Still open: `ICodecAPI`, the fixture's own-allocator mode, an
-     `IMediaEventSink::Notify` error mode and a strict below-2 GB mode.
+   - The plan's remaining items are done:
+     - `ICodecAPI`: `dshow_encoder_configure` sets the GOP size, quality
+       (as a percentage) and mean bit rate through it as well as through
+       `IAMVideoCompression`; `probe` lists a filter's optional interfaces.
+       Fixture: `TESTFILTER_CODECAPI` gives the encoder `ICodecAPI` instead.
+     - An error a filter reports by `IMediaEventSink::Notify`
+       (`EC_ERRORABORT`, `EC_STREAM_ERROR_STOPPED`, `EC_ERRORABORTEX`) with
+       `Receive` returning S_OK now fails the next push and the end of the
+       stream, until a seek. Fixture: `TESTFILTER_NOTIFY_ERROR`.
+     - Fixture `TESTFILTER_OWN_ALLOCATOR`: the input pin supplies an
+       allocator (three or more buffers, a prefix, alignment) and refuses
+       samples that aren't its own.
+     - Fixture `TESTFILTER_STRICT`: refuses any pointer from the host at or
+       above 2 GB; `smoke.sh` shows it trips without the low-memory
+       reservation.
+     The fixture reads these from the environment once per process, so those
+     needing a mode of their own are tested in `test_dshow_modes`.
+   - Still open by design: `EnumMatchingFilters` and moniker-returning
+     `RegisterFilter`, which need a filter graph manager.
 
 ## Critical files
 

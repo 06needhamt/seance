@@ -488,7 +488,8 @@ For a DirectShow `.ax` server, `encode` selects its video encoder (or the
 class named by `--clsid`), negotiates the source or a converted standard raw
 format on the input pin, and writes each compressed output sample to AVI. Its
 sync-point flag becomes the AVI keyframe flag. Quality, keyframe interval and
-bitrate use `IAMVideoCompression`; `--state` and `--save-state` use
+bitrate use `IAMVideoCompression` and `ICodecAPI`, whichever the filter has
+(an option neither takes is an error); `--state` and `--save-state` use
 `IPersistStream`.
 
 Both commands print the frame count, the formats on each side and the time

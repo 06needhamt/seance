@@ -114,6 +114,41 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 			echo "smoke: DirectShow decode differs" >&2
 			exit 1
 		}
+		# A filter that supplies its own allocator (three or more buffers, with a
+		# prefix and alignment) has the host fill its samples, both ways.
+		VFW_ENV_TESTFILTER_OWN_ALLOCATOR=1 \
+			$emu "$harness" decode "$fixtures/testfilter.ax" "$work/t.avi" \
+			-o "$work/dshow-own.y4m" 2>/dev/null
+		cmp -s "$work/in.y4m" "$work/dshow-own.y4m" || {
+			echo "smoke: own-allocator DirectShow decode differs" >&2
+			exit 1
+		}
+		VFW_ENV_TESTFILTER_OWN_ALLOCATOR=1 \
+			$emu "$harness" encode "$fixtures/testfilter.ax" "$work/in.y4m" \
+			-o "$work/dshow-own.avi" 2>/dev/null
+		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/dshow-own.avi" \
+			-o "$work/dshow-own-vfw.y4m" 2>/dev/null
+		cmp -s "$work/in.y4m" "$work/dshow-own-vfw.y4m" || {
+			echo "smoke: own-allocator DirectShow encode differs" >&2
+			exit 1
+		}
+		# Every pointer the host gives a DirectShow filter is below 2 GB too.
+		VFW_ENV_TESTFILTER_STRICT=1 \
+			$emu "$harness" decode "$fixtures/testfilter.ax" "$work/t.avi" \
+			-o "$work/dshow-strict.y4m" 2>/dev/null
+		cmp -s "$work/in.y4m" "$work/dshow-strict.y4m" || {
+			echo "smoke: strict DirectShow decode differs" >&2
+			exit 1
+		}
+		VFW_ENV_TESTFILTER_STRICT=1 \
+			$emu "$harness" encode "$fixtures/testfilter.ax" "$work/in.y4m" \
+			-o "$work/dshow-strict.avi" 2>/dev/null
+		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/dshow-strict.avi" \
+			-o "$work/dshow-strict-vfw.y4m" 2>/dev/null
+		cmp -s "$work/in.y4m" "$work/dshow-strict-vfw.y4m" || {
+			echo "smoke: strict DirectShow encode differs" >&2
+			exit 1
+		}
 		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/t.avi" \
 			-o "$work/start.ref.y4m" --start 1 2>/dev/null
 		VFW_ENV_TESTFILTER_ASYNC=1 VFW_ENV_TESTFILTER_REQUIRE_SEGMENT=1 \
@@ -218,6 +253,9 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 			fails env VFW_LOW_MEMORY=0 $emu "$harness" encode \
 				"$fixtures/testcodec.dll" "$work/in.y4m" \
 				-o "$work/t2.avi"
+			fails env VFW_LOW_MEMORY=0 VFW_ENV_TESTFILTER_STRICT=1 \
+				$emu "$harness" decode "$fixtures/testfilter.ax" \
+				"$work/t.avi" -o "$work/t2.y4m"
 		fi
 		echo "smoke: the codec saw no pointers above 2 GB"
 	fi
