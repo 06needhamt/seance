@@ -6,8 +6,7 @@
  * some DMOs do), each with its HKCR\CLSID\{...}\InprocServer32 key;
  * DllUnregisterServer takes it all away again.
  *
- * The DMO objects themselves come with the DMO host (Phase 2 of
- * docs/DMO_AUDIO_PLAN.md); until then no class can be created.
+ * The DMOs themselves live in testdmo_dmo.c.
  */
 #include "fixture.h"
 #include <dmoreg.h>
@@ -31,19 +30,40 @@ static const WCHAR video_encoder[] =
 	0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } }
 #define RGB24_GUID { 0xe436eb7d, 0x524f, 0x11ce, \
 	{ 0x9f, 0x53, 0x00, 0x20, 0xaf, 0x0b, 0xa7, 0x70 } }
+#define RGB32_GUID { 0xe436eb7e, 0x524f, 0x11ce, \
+	{ 0x9f, 0x53, 0x00, 0x20, 0xaf, 0x0b, 0xa7, 0x70 } }
 #define VIDS FOURCC_GUID('v', 'i', 'd', 's')
 
 static const DMO_PARTIAL_MEDIATYPE tst0[] = {
 	{ VIDS, FOURCC_GUID('T', 'S', 'T', '0') },
 };
+/* The raw formats testdmo_dmo.c handles. */
 static const DMO_PARTIAL_MEDIATYPE raw[] = {
-	{ VIDS, FOURCC_GUID('Y', 'U', 'Y', '2') }, { VIDS, RGB24_GUID },
+	{ VIDS, FOURCC_GUID('I', '4', '2', '0') },
+	{ VIDS, FOURCC_GUID('Y', 'V', '1', '2') },
+	{ VIDS, FOURCC_GUID('Y', 'U', 'Y', '2') },
+	{ VIDS, FOURCC_GUID('U', 'Y', 'V', 'Y') },
+	{ VIDS, RGB24_GUID }, { VIDS, RGB32_GUID },
 };
 
 static const WCHAR decoder_name[] = L"seance test DMO decoder";
 static const WCHAR encoder_name[] = L"seance test DMO encoder";
 
 static HINSTANCE self;
+HRESULT testdmo_create(BOOL encoder, REFIID riid, void **out);
+LONG testdmo_objects(void);
+
+static const GUID iid_unknown = { 0, 0, 0, { 0xc0, 0, 0, 0, 0, 0, 0, 0x46 } };
+static const GUID iid_factory = { 1, 0, 0, { 0xc0, 0, 0, 0, 0, 0, 0, 0x46 } };
+
+static int guid_eq(const GUID *a, const GUID *b)
+{
+	const BYTE *x = (const BYTE *)a, *y = (const BYTE *)b;
+	for (int i = 0; i < 16; i++)
+		if (x[i] != y[i])
+			return 0;
+	return 1;
+}
 
 static int wlen(const WCHAR *s)
 {
@@ -163,7 +183,8 @@ HRESULT WINAPI DllRegisterServer(void)
 	if (SUCCEEDED(hr = register_class(&clsid_decoder, decoder_name)) &&
 	    SUCCEEDED(hr = register_class(&clsid_encoder, encoder_name)) &&
 	    SUCCEEDED(hr = DMORegister(decoder_name, &clsid_decoder,
-				       &video_decoder, 0, 1, tst0, 2, raw)))
+				       &video_decoder, 0, 1, tst0,
+				       sizeof(raw) / sizeof(*raw), raw)))
 		hr = register_encoder();
 	return hr;
 }
@@ -177,15 +198,55 @@ HRESULT WINAPI DllUnregisterServer(void)
 	return S_OK;
 }
 
+/* Class factories: one per DMO. */
+struct factory { IClassFactory iface; BOOL encoder; };
+
+static HRESULT WINAPI cf_qi(IClassFactory *cf, REFIID riid, void **ppv)
+{
+	if (guid_eq(riid, &iid_unknown) || guid_eq(riid, &iid_factory)) {
+		*ppv = cf;
+		return S_OK;
+	}
+	*ppv = NULL;
+	return E_NOINTERFACE;
+}
+
+static ULONG WINAPI cf_addref(IClassFactory *cf) { return 2; }
+static ULONG WINAPI cf_release(IClassFactory *cf) { return 1; }
+
+static HRESULT WINAPI cf_create(IClassFactory *cf, IUnknown *outer,
+				REFIID riid, void **ppv)
+{
+	*ppv = NULL;
+	return outer ? CLASS_E_NOAGGREGATION :
+		testdmo_create(((struct factory *)cf)->encoder, riid, ppv);
+}
+
+static HRESULT WINAPI cf_lock(IClassFactory *cf, BOOL lock) { return S_OK; }
+
+static const IClassFactoryVtbl cf_vtbl = {
+	cf_qi, cf_addref, cf_release, cf_create, cf_lock
+};
+static struct factory decoder_factory = {
+	{ (IClassFactoryVtbl *)&cf_vtbl }, FALSE
+};
+static struct factory encoder_factory = {
+	{ (IClassFactoryVtbl *)&cf_vtbl }, TRUE
+};
+
 HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void **ppv)
 {
+	if (guid_eq(clsid, &clsid_decoder))
+		return cf_qi(&decoder_factory.iface, riid, ppv);
+	if (guid_eq(clsid, &clsid_encoder))
+		return cf_qi(&encoder_factory.iface, riid, ppv);
 	*ppv = NULL;
 	return CLASS_E_CLASSNOTAVAILABLE;
 }
 
 HRESULT WINAPI DllCanUnloadNow(void)
 {
-	return S_OK;
+	return testdmo_objects() ? S_FALSE : S_OK;
 }
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)

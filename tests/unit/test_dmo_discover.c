@@ -66,9 +66,9 @@ static void check_dmos(const struct dmo_reg *d, size_t n)
 			CHECK_STR(name, "seance test DMO decoder");
 			CHECK(guid_eq(&d[i].category, &DMOCATEGORY_VIDEO_DECODER));
 			CHECK_EQ(dmo_role(&d[i]), DMO_ROLE_VIDEO_DECODER);
-			CHECK(d[i].nin == 1 && d[i].nout == 2 &&
+			CHECK(d[i].nin == 1 && d[i].nout == 6 &&
 			      guid_eq(&d[i].in[0].subtype, &st_tst0) &&
-			      guid_eq(&d[i].out[1].subtype,
+			      guid_eq(&d[i].out[4].subtype,
 				      &MEDIASUBTYPE_RGB24));
 		} else {
 			/* Written by the DLL itself, not by DMORegister. */
@@ -76,7 +76,7 @@ static void check_dmos(const struct dmo_reg *d, size_t n)
 			CHECK_STR(name, "seance test DMO encoder");
 			CHECK(guid_eq(&d[i].category, &DMOCATEGORY_VIDEO_ENCODER));
 			CHECK_EQ(dmo_role(&d[i]), DMO_ROLE_VIDEO_ENCODER);
-			CHECK(d[i].nin == 2 && d[i].nout == 1 &&
+			CHECK(d[i].nin == 6 && d[i].nout == 1 &&
 			      guid_eq(&d[i].out[0].subtype, &st_tst0));
 		}
 		CHECK_EQ(d[i].flags, 0);

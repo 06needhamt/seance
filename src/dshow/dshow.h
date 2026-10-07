@@ -33,18 +33,22 @@ struct dshow_encoder_options {
 	LONGLONG bitrate;
 };
 
-HRESULT dshow_encoder_configure(IBaseFilter *filter,
+/*
+ * These take any COM object, a filter (IBaseFilter) or a DMO (IMediaObject),
+ * and ask it for what they need: IAMVideoCompression or ICodecAPI, and
+ * IPersistStream for the state.
+ */
+HRESULT dshow_encoder_configure(void *object,
 				const struct dshow_encoder_options *options);
 /*
  * Which of the optional interfaces an encoder or decoder has
- * (IAMVideoCompression, ICodecAPI, IPersistStream, ISpecifyPropertyPages),
- * names separated by commas in buf. Returns how many.
+ * (IAMVideoCompression, ICodecAPI, IPersistStream, ISpecifyPropertyPages,
+ * IWMCodecPrivateData, IPropertyBag), names separated by commas in buf.
+ * Returns how many.
  */
-int dshow_filter_interfaces(IBaseFilter *filter, char *buf, size_t size);
-HRESULT dshow_filter_load_state(IBaseFilter *filter, const void *data,
-				size_t size);
-HRESULT dshow_filter_save_state(IBaseFilter *filter, void **data,
-				size_t *size);
+int dshow_filter_interfaces(void *object, char *buf, size_t size);
+HRESULT dshow_filter_load_state(void *object, const void *data, size_t size);
+HRESULT dshow_filter_save_state(void *object, void **data, size_t *size);
 
 /* Human-readable HRESULT used by tracing and diagnostics. */
 const char *dshow_hr_name(HRESULT hr, char buf[24]);
@@ -105,6 +109,9 @@ void dshow_host_destroy(struct dshow_host *host);
 HRESULT dshow_filter_open(const char *path, const CLSID *selected,
 			  int encoder, struct dshow_filter **server,
 			  IBaseFilter **filter, CLSID *clsid);
+/* One class known to be a filter, created without looking at the others. */
+HRESULT dshow_filter_create(const char *path, const CLSID *clsid,
+			    struct dshow_filter **server, IBaseFilter **filter);
 void dshow_filter_close(struct dshow_filter *server, IBaseFilter *filter);
 
 #endif

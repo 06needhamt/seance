@@ -144,7 +144,7 @@ fixture(testfilter testfilter.c testfilter_filter.c testfilter.def
 	OPTIONS -mpreferred-stack-boundary=2 -fno-builtin
 		-fno-tree-loop-distribute-patterns)
 set_target_properties(testfilter PROPERTIES SUFFIX ".ax")
-fixture(testdmo testdmo.c testdmo.def
+fixture(testdmo testdmo.c testdmo_dmo.c testdmo.def
 	LIBS msdmo ole32 advapi32 kernel32
 	OPTIONS -mpreferred-stack-boundary=2 -fno-builtin
 		-fno-tree-loop-distribute-patterns)

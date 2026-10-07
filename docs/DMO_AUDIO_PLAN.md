@@ -266,14 +266,31 @@ include/win32/mmreg.h    WAVEFORMATEXTENSIBLE, format tags, KSDATAFORMAT GUIDs
      list and printing.
    - `dshow_guid_name` names an audio format-tag subtype as
      `wave format 0x0055`.
-   - `testdmo.dll` has no DMO objects yet (its `DllGetClassObject` fails);
-     they come with Phase 2. Tests: `test_msdmo`, `test_dmo_discover`, and
-     the DMO cases in `smoke.sh`.
-2. **DMO video decode and encode.** `buffer.c`, `host.c`, CLI integration.
-   Milestone: `tests/unit/test_dmo.c` runs the decoder in every fixture mode
-   with no leaked references (`DllCanUnloadNow == S_OK`); an AVI made by
-   `testcodec.dll` decodes identically through all three backends, and
-   `encode testdmo.dll` → `decode testcodec.dll` is byte-exact.
+   - Tests: `test_msdmo`, `test_dmo_discover`, and the DMO cases in
+     `smoke.sh`.
+2. **DMO video decode and encode.** (Done.) `buffer.c`, `host.c`, CLI
+   integration. Milestone: `tests/unit/test_dmo.c` runs the decoder in every
+   fixture mode with no leaked references (`DllCanUnloadNow == S_OK`); an AVI
+   made by `testcodec.dll` decodes identically through all three backends,
+   and `encode testdmo.dll` → `decode testcodec.dll` is byte-exact.
+   - `src/dmo/host.c` keeps everything it hands the DMO (types, the output
+     buffer descriptor, out-parameters) in its own heap object, below 2 GB,
+     never on the caller's stack. The fixture's strict mode found this.
+   - An output is matched to its input by time stamp when the DMO stamps it,
+     else taken as the oldest; an input that never gives output (a
+     difference frame with no key yet) then doesn't put the rest out of step.
+   - The commands go through `src/xform.c`, one interface over the
+     DirectShow host and the DMO host, so `decode`, `encode` and `probe`
+     have one path for both. `dshow_filter_open` was split so a known class
+     is created without running discovery again (`dshow_filter_create`), and
+     the encoder controls and state helpers take any COM object.
+   - `testdmo.dll`'s DMOs hold their input until `ProcessOutput`, as real
+     DMOs do, and have the modes `DELAY` (one picture late, unstamped),
+     `BURST` (pictures in pairs, `INCOMPLETE`), `NOTACCEPTING`, `SWITCH`
+     (I420 to YV12 after the first picture), `PRIVATE`
+     (`IWMCodecPrivateData`) and `STRICT`. Its encoder has `ICodecAPI` (GOP
+     size) and `IPersistStream`. `test_dmo` runs each mode in a child
+     process, since the fixture reads them as it first sees the environment.
 3. **Audio media and I/O.** Shared media-type layer, WAV reader and writer,
    AVI audio streams in the reader and writer, `convert` and `avi` showing
    audio streams. Milestone: `test_wav`, `test_avi` audio cases (including

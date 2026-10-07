@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * seance encode <codec> <input> -o <out.avi>: compress video with a
- * VfW codec or DirectShow transform into an AVI.
+ * VfW codec, DirectShow filter or DMO into an AVI.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -25,6 +25,7 @@
 #include "vfw/icm.h"
 #include "win32/codepage.h"
 #include "win32/ole.h"
+#include "xform.h"
 
 static int usage(void)
 {
@@ -37,7 +38,7 @@ static int usage(void)
 		"                       files (frame%%04d.bmp), or raw frames with\n"
 		"                       --input-format and --size\n"
 		"  --fourcc <XXXX>      the handler to open a DLL as\n"
-		"  --clsid <{GUID}>     DirectShow class when a server has several\n"
+		"  --clsid <{GUID}>     the filter or DMO when a DLL has several\n"
 		"  --quality <q>        0 to 10000 (default: the codec's)\n"
 		"  --keyint <n>         a keyframe every n frames; 0 for only the\n"
 		"                       first (default: the codec's)\n"
@@ -210,11 +211,12 @@ static double now(void)
 	return t.tv_sec + t.tv_nsec / 1e9;
 }
 
-struct dshow_encode_output {
+struct com_encode_output {
 	struct avi_writer *writer;
 	uint64_t bytes;
 	unsigned long written, keys;
-	BITMAPINFOHEADER format;	/* what the file's stream header says */
+	BITMAPINFOHEADER *format;	/* what the file's stream header says */
+	size_t format_size;
 };
 
 /*
@@ -223,40 +225,39 @@ struct dshow_encode_output {
  * type that adds format data (a sequence header) or changes the codec or
  * picture would leave the file describing something else than it holds.
  */
-static int dshow_same_format(const struct dshow_encode_output *out,
-			     const AM_MEDIA_TYPE *mt)
+static int com_same_format(const struct com_encode_output *out,
+			   const AM_MEDIA_TYPE *mt)
 {
 	BITMAPINFOHEADER *bih = NULL;
 	size_t size = 0;
 	int same = 0;
 
-	if (SUCCEEDED(dshow_mt_to_bih(mt, &bih, &size))) {
-		BITMAPINFOHEADER a = *bih, b = out->format;
-
-		a.biSizeImage = b.biSizeImage = 0;	/* an upper bound, not a format */
-		same = size == sizeof(b) && !memcmp(&a, &b, sizeof(a));
+	if (out->format && SUCCEEDED(dshow_mt_to_bih(mt, &bih, &size))) {
+		/* biSizeImage is an upper bound, not part of the format. */
+		DWORD a = bih->biSizeImage, b = out->format->biSizeImage;
+		bih->biSizeImage = out->format->biSizeImage = 0;
+		same = size == out->format_size &&
+		       !memcmp(bih, out->format, size);
+		bih->biSizeImage = a;
+		out->format->biSizeImage = b;
 		free(bih);
 	}
 	return same;
 }
 
-static HRESULT dshow_write_encoded(void *opaque, IMediaSample *sample,
-				   const AM_MEDIA_TYPE *dynamic)
+static HRESULT com_write_encoded(void *opaque, const struct xform_output *o,
+				 const AM_MEDIA_TYPE *dynamic)
 {
-	struct dshow_encode_output *out = opaque;
-	BYTE *data = NULL;
-	LONG size = sample->lpVtbl->GetActualDataLength(sample);
+	struct com_encode_output *out = opaque;
 	if (!out->writer)
 		return VFW_E_WRONG_STATE;
-	if ((dynamic && !dshow_same_format(out, dynamic)) ||
-	    size < 0 || FAILED(sample->lpVtbl->GetPointer(sample, &data)))
+	if (dynamic && !com_same_format(out, dynamic))
 		return VFW_E_INVALIDMEDIATYPE;
-	int key = sample->lpVtbl->IsSyncPoint(sample) == S_OK;
-	if (avi_writer_add(out->writer, data, (DWORD)size, key))
+	if (avi_writer_add(out->writer, o->data, (DWORD)o->size, o->sync))
 		return E_FAIL;
 	out->written++;
-	out->keys += key;
-	out->bytes += (DWORD)size;
+	out->keys += o->sync;
+	out->bytes += o->size;
 	return S_OK;
 }
 
@@ -275,49 +276,15 @@ static int write_file(const char *path, const void *data, size_t size)
 	return failed ? -1 : 0;
 }
 
-static int encoder_class(const char *path, const CLSID *selected, CLSID *clsid,
-			 FOURCC *compression)
-{
-	struct qz_filter *filters = NULL;
-	size_t count = 0;
-	HRESULT registration;
-	if (dshow_discover(path, &filters, &count, &registration))
-		return -1;
-	int matches = 0;
-	for (size_t i = 0; i < count; i++) {
-		if (dshow_role(&filters[i]) != DSHOW_ENCODER ||
-		    (selected && memcmp(selected, &filters[i].clsid, sizeof(*selected))))
-			continue;
-		FOURCC subtype = 0;
-		for (size_t p = 0; p < filters[i].npins && !subtype; p++) {
-			if (!(filters[i].pins[p].flags & REG_PINFLAG_B_OUTPUT))
-				continue;
-			for (size_t t = 0; t < filters[i].pins[p].ntypes; t++) {
-				const GUID *g = &filters[i].pins[p].types[t].minor;
-				static const BYTE tail[8] = {0x80, 0, 0, 0xaa,
-							     0, 0x38, 0x9b, 0x71};
-				if (g->Data2 == 0 && g->Data3 == 0x10 &&
-				    !memcmp(g->Data4, tail, sizeof(tail))) {
-					subtype = g->Data1;
-					break;
-				}
-			}
-		}
-		if (subtype) {
-			*clsid = filters[i].clsid;
-			*compression = subtype;
-			matches++;
-		}
-	}
-	qz_filters_free(filters, count);
-	return matches == 1 ? 0 : -1;
-}
-
-static int dshow_try_input(IBaseFilter *filter, const BITMAPINFOHEADER *input,
-			   size_t input_size, FOURCC compression, DWORD rate,
-			   DWORD scale, struct dshow_encode_output *sink,
-			   struct dshow_host **host, BITMAPINFOHEADER **output,
-			   size_t *output_size)
+/*
+ * Connects the encoder with this input format and its compression; the
+ * output format the stream header gets (with any codec data the encoder
+ * adds) in *output. 0, or -1 if the encoder won't take it.
+ */
+static int com_try_input(struct xform *x, const BITMAPINFOHEADER *input,
+			 size_t input_size, FOURCC compression, DWORD rate,
+			 DWORD scale, struct com_encode_output *sink,
+			 BITMAPINFOHEADER **output, size_t *output_size)
 {
 	AM_MEDIA_TYPE in_mt = {0}, out_mt = {0};
 	BITMAPINFOHEADER encoded = *input;
@@ -334,30 +301,30 @@ static int dshow_try_input(IBaseFilter *filter, const BITMAPINFOHEADER *input,
 	if (SUCCEEDED(hr))
 		hr = dshow_bih_to_mt(&encoded, sizeof(encoded), rate, scale, 0,
 				     &out_mt);
+	if (SUCCEEDED(hr))
+		hr = xform_connect(x, &in_mt, &out_mt, com_write_encoded, sink);
+	if (SUCCEEDED(hr))
+		hr = dshow_mt_to_bih(xform_output_type(x), output, output_size);
 	if (SUCCEEDED(hr)) {
-		sink->format = encoded;
-		hr = dshow_host_create(filter, &in_mt, &out_mt, dshow_write_encoded,
-				       sink, host);
-	}
-	if (SUCCEEDED(hr)) {
-		*output = malloc(sizeof(encoded));
-		if (!*output)
+		free(sink->format);
+		sink->format_size = *output_size;
+		if (!(sink->format = malloc(*output_size)))
 			hr = E_OUTOFMEMORY;
-		else {
-			**output = encoded;
-			*output_size = sizeof(encoded);
-		}
+		else
+			memcpy(sink->format, *output, *output_size);
 	}
-	if (FAILED(hr) && *host) {
-		dshow_host_destroy(*host);
-		*host = NULL;
+	if (FAILED(hr)) {
+		free(*output);
+		*output = NULL;
+		xform_disconnect(x);
 	}
 	dshow_free_media_type(&out_mt);
 	dshow_free_media_type(&in_mt);
 	return SUCCEEDED(hr) ? 0 : -1;
 }
 
-static int encode_dshow(const char *target, const CLSID *selected,
+/* Encoding with a DirectShow filter or a DMO. */
+static int encode_com(const char *target, const CLSID *selected,
 			struct source *src, const char *out_path, const char *forced,
 			const char *state_path, const char *save_path,
 			unsigned long start, unsigned long count,
@@ -365,26 +332,27 @@ static int encode_dshow(const char *target, const CLSID *selected,
 			unsigned long bitrate, DWORD rate, DWORD scale,
 			const struct avi_writer_options *writer_options)
 {
-	struct dshow_filter *server = NULL;
-	IBaseFilter *filter = NULL;
-	struct dshow_host *host = NULL;
+	struct xform *x = NULL;
+	int connected = 0;
 	struct feed feed = {0};
 	BITMAPINFOHEADER *output_format = NULL;
 	size_t output_size = 0;
-	struct dshow_encode_output sink = {0};
+	struct com_encode_output sink = {0};
 	void *state = NULL, *saved = NULL;
 	size_t saved_size = 0;
 	int status = 1;
 	char error[24], fcc[FOURCC_STR_SIZE], desc[160];
-	CLSID clsid;
+	struct xform_class found;
 	FOURCC compression;
 
-	if (encoder_class(target, selected, &clsid, &compression)) {
-		fprintf(stderr, "seance: %s: no unique DirectShow video encoder\n",
-			target);
+	HRESULT hr = xform_find(target, selected, 1, &found);
+	if (FAILED(hr)) {
+		fprintf(stderr, "seance: %s: no unique DirectShow or DMO video "
+			"encoder\n", target);
 		goto done;
 	}
-	HRESULT hr = dshow_filter_open(target, &clsid, 1, &server, &filter, NULL);
+	compression = found.compression;
+	hr = xform_create(target, &found, &x);
 	if (FAILED(hr)) {
 		fprintf(stderr, "seance: cannot open encoder in %s (%s)\n", target,
 			dshow_hr_name(hr, error));
@@ -403,10 +371,11 @@ static int encode_dshow(const char *target, const CLSID *selected,
 			fprintf(stderr, "seance: %s\n", vfw_error());
 			goto done;
 		}
-		hr = dshow_filter_load_state(filter, state, n);
+		hr = dshow_filter_load_state(xform_object(x), state, n);
 		if (FAILED(hr)) {
-			fprintf(stderr, "seance: %s: filter refused this state (%s)\n",
-				state_path, dshow_hr_name(hr, error));
+			fprintf(stderr, "seance: %s: the %s refused this state "
+				"(%s)\n", state_path, xform_kind_name(x),
+				dshow_hr_name(hr, error));
 			goto done;
 		}
 	}
@@ -418,7 +387,7 @@ static int encode_dshow(const char *target, const CLSID *selected,
 	};
 	if (options.key_interval >= 0 || options.quality >= 0.0 ||
 	    options.bitrate >= 0) {
-		hr = dshow_encoder_configure(filter, &options);
+		hr = dshow_encoder_configure(xform_object(x), &options);
 		if (FAILED(hr)) {
 			fprintf(stderr, "seance: encoder options were refused (%s)\n",
 				dshow_hr_name(hr, error));
@@ -430,24 +399,26 @@ static int encode_dshow(const char *target, const CLSID *selected,
 	const BITMAPINFOHEADER *native = source_format(src, &native_size);
 	LONG width = native->biWidth;
 	LONG height = native->biHeight < 0 ? -native->biHeight : native->biHeight;
-	if (!forced && !dshow_try_input(filter, native, native_size, compression,
-			rate, scale, &sink, &host, &output_format, &output_size)) {
+	if (!forced && !com_try_input(x, native, native_size, compression,
+			rate, scale, &sink, &output_format, &output_size)) {
+		connected = 1;
 		memcpy(&feed.fmt, native, native_size);
 		feed.fmt_size = native_size;
 		feed.name = source_format_name(src);
 	} else {
 		struct vfw_format candidate;
 		const char *name;
-		for (unsigned i = 0; !host &&
+		for (unsigned i = 0; !connected &&
 		     (name = vfw_std_format(i, width, height, &candidate)); i++) {
 			if (candidate.bih.biBitCount == 8 ||
 			    (forced && strcasecmp(forced, name)))
 				continue;
-			if (dshow_try_input(filter, &candidate.bih,
+			if (com_try_input(x, &candidate.bih,
 					vfw_format_size(&candidate.bih), compression,
-					rate, scale, &sink, &host, &output_format,
+					rate, scale, &sink, &output_format,
 					&output_size))
 				continue;
+			connected = 1;
 			feed.fmt = candidate;
 			feed.fmt_size = vfw_format_size(&candidate.bih);
 			feed.name = name;
@@ -466,7 +437,7 @@ static int encode_dshow(const char *target, const CLSID *selected,
 			}
 		}
 	}
-	if (!host) {
+	if (!connected) {
 		fprintf(stderr, "seance: encoder takes neither %s nor %s standard "
 			"input format\n", source_format_name(src),
 			forced ? "the requested" : "any");
@@ -514,7 +485,7 @@ static int encode_dshow(const char *target, const CLSID *selected,
 		if (!pushed)
 			flags |= AM_SAMPLE_DATADISCONTINUITY;
 		double then = now();
-		hr = dshow_host_push(host, bits, input_bytes, a, b, flags);
+		hr = xform_push(x, bits, input_bytes, a, b, flags);
 		busy += now() - then;
 		if (FAILED(hr)) {
 			fprintf(stderr, "seance: frame %lu: %s\n", read - 1,
@@ -523,19 +494,19 @@ static int encode_dshow(const char *target, const CLSID *selected,
 		}
 		pushed++;
 	}
-	hr = dshow_host_end(host, 0);
+	hr = xform_end(x);
 	if (FAILED(hr)) {
 		fprintf(stderr, "seance: end of stream: %s\n",
 			dshow_hr_name(hr, error));
 		goto done;
 	}
-	dshow_host_destroy(host);
-	host = NULL;
+	xform_disconnect(x);
 	if (save_path) {
-		hr = dshow_filter_save_state(filter, &saved, &saved_size);
+		hr = dshow_filter_save_state(xform_object(x), &saved, &saved_size);
 		if (FAILED(hr) || write_file(save_path, saved, saved_size)) {
 			if (FAILED(hr))
-				vfw_set_error("filter has no state to save (%s)",
+				vfw_set_error("the %s has no state to save (%s)",
+					xform_kind_name(x),
 					dshow_hr_name(hr, error));
 			fprintf(stderr, "seance: %s\n", vfw_error());
 			goto done;
@@ -566,8 +537,8 @@ conversion_error:
 done:
 	if (sink.writer)
 		avi_writer_close(sink.writer);
-	dshow_host_destroy(host);
-	dshow_filter_close(server, filter);
+	xform_close(x);
+	free(sink.format);
 	image_conv_free(feed.from);
 	image_conv_free(feed.to);
 	free(feed.tmp);
@@ -668,7 +639,7 @@ int cmd_encode(int argc, char **argv)
 	if (directshow || clsid_arg) {
 		CLSID clsid, *selected = NULL;
 		if (!directshow) {
-			fprintf(stderr, "seance: --clsid requires a DirectShow server\n");
+			fprintf(stderr, "seance: --clsid requires a DirectShow or DMO server\n");
 			source_close(src);
 			return 2;
 		}
@@ -686,7 +657,7 @@ int cmd_encode(int argc, char **argv)
 			}
 			selected = &clsid;
 		}
-		int status = encode_dshow(target, selected, src, out_path, forced,
+		int status = encode_com(target, selected, src, out_path, forced,
 			state_path, save_path, start, count, quality, keyint, bitrate,
 			rate, scale, &wo);
 		source_close(src);
