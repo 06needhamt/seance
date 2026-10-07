@@ -214,6 +214,7 @@ struct dshow_encode_output {
 	struct avi_writer *writer;
 	uint64_t bytes;
 	unsigned long written, keys;
+	GUID subtype;		/* the compressed format the file was opened for */
 };
 
 static HRESULT dshow_write_encoded(void *opaque, IMediaSample *sample,
@@ -224,7 +225,13 @@ static HRESULT dshow_write_encoded(void *opaque, IMediaSample *sample,
 	LONG size = sample->lpVtbl->GetActualDataLength(sample);
 	if (!out->writer)
 		return VFW_E_WRONG_STATE;
-	if (dynamic || size < 0 || FAILED(sample->lpVtbl->GetPointer(sample, &data)))
+	/*
+	 * A new type on a sample may refine the format (a sequence header, a
+	 * frame rate) but the file's stream header was written for one codec, so
+	 * it must stay the same one.
+	 */
+	if ((dynamic && memcmp(&dynamic->subtype, &out->subtype, sizeof(GUID))) ||
+	    size < 0 || FAILED(sample->lpVtbl->GetPointer(sample, &data)))
 		return VFW_E_INVALIDMEDIATYPE;
 	int key = sample->lpVtbl->IsSyncPoint(sample) == S_OK;
 	if (avi_writer_add(out->writer, data, (DWORD)size, key))
@@ -309,9 +316,11 @@ static int dshow_try_input(IBaseFilter *filter, const BITMAPINFOHEADER *input,
 	if (SUCCEEDED(hr))
 		hr = dshow_bih_to_mt(&encoded, sizeof(encoded), rate, scale, 0,
 				     &out_mt);
-	if (SUCCEEDED(hr))
+	if (SUCCEEDED(hr)) {
+		sink->subtype = out_mt.subtype;
 		hr = dshow_host_create(filter, &in_mt, &out_mt, dshow_write_encoded,
 				       sink, host);
+	}
 	if (SUCCEEDED(hr)) {
 		*output = malloc(sizeof(encoded));
 		if (!*output)

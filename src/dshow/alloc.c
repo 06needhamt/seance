@@ -90,7 +90,16 @@ static HRESULT WINAPI sample_get_mt(IMediaSample2*p,AM_MEDIA_TYPE **out)
 	HRESULT hr=dshow_copy_media_type(*out,&s->mt); if(FAILED(hr)){ole_taskmem_free(*out);*out=NULL;} return hr;
 }
 static HRESULT WINAPI sample_set_mt(IMediaSample2*p,AM_MEDIA_TYPE *mt)
-{struct sample*s=sample_from(p);dshow_free_media_type(&s->mt);s->have_mt=0;if(!mt)return S_OK;HRESULT hr=dshow_copy_media_type(&s->mt,mt);s->have_mt=SUCCEEDED(hr);return hr;}
+{
+	struct sample*s=sample_from(p);
+	/* SetProperties hands back the type GetProperties pointed at: ours. */
+	if(mt&&mt==&s->mt)return S_OK;
+	AM_MEDIA_TYPE copy={0};
+	if(mt){HRESULT hr=dshow_copy_media_type(&copy,mt);if(FAILED(hr)){dshow_free_media_type(&copy);return hr;}}
+	dshow_free_media_type(&s->mt);
+	s->mt=copy;s->have_mt=mt!=NULL;
+	return S_OK;
+}
 static HRESULT WINAPI sample_disc(IMediaSample2*p){return flag_get(sample_from(p),AM_SAMPLE_DATADISCONTINUITY);}
 static HRESULT WINAPI sample_set_disc(IMediaSample2*p,BOOL v){return flag_set(sample_from(p),AM_SAMPLE_DATADISCONTINUITY,v);}
 static HRESULT WINAPI sample_get_media(IMediaSample2*p,LONGLONG*a,LONGLONG*b){struct sample*s=sample_from(p);if(!s->have_media_time)return VFW_E_MEDIA_TIME_NOT_SET;if(a)memcpy(a,&s->media_start,sizeof(*a));if(b)memcpy(b,&s->media_stop,sizeof(*b));return S_OK;}

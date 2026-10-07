@@ -33,7 +33,7 @@ struct filter {
 	LONG key_interval, pframes;
 	double quality;
 	DWORDLONG window;
-	BOOL async, no_eos, require_segment, segment;
+	BOOL async, no_eos, require_segment, segment, peer_info, dynamic, no_preroll;
 	LONG workers;
 	HRESULT async_error;
 	CRITICAL_SECTION transform_lock;
@@ -142,8 +142,35 @@ static HRESULT WINAPI filter_enum(IBaseFilter*p,IEnumPins**out){if(!out)return E
 static HRESULT WINAPI pin_qi(IPin*p,REFIID iid,void**out){if(!out)return E_POINTER;struct pin*x=(void*)p;if(eq(iid,&iid_unknown)||eq(iid,&iid_pin))*out=p;else if(x->direction==PINDIR_INPUT&&eq(iid,&iid_mem_input))*out=&x->mem;else{*out=NULL;return E_NOINTERFACE;}x->filter->iface.lpVtbl->AddRef(&x->filter->iface);return S_OK;}
 static ULONG WINAPI pin_addref(IPin*p){struct pin*x=(void*)p;return x->filter->iface.lpVtbl->AddRef(&x->filter->iface);}
 static ULONG WINAPI pin_release(IPin*p){struct pin*x=(void*)p;return x->filter->iface.lpVtbl->Release(&x->filter->iface);}
-static HRESULT WINAPI pin_receive_connection(IPin*p,IPin*peer,const AM_MEDIA_TYPE*mt){struct pin*x=(void*)p;if(!peer||!mt)return E_POINTER;if(x->direction!=PINDIR_INPUT)return VFW_E_INVALID_DIRECTION;if(x->connected)return VFW_E_ALREADY_CONNECTED;HRESULT hr=copy_type(&x->type,mt);if(FAILED(hr))return hr;x->peer=peer;peer->lpVtbl->AddRef(peer);x->connected=TRUE;return S_OK;}
-static HRESULT WINAPI pin_connect(IPin*p,IPin*peer,const AM_MEDIA_TYPE*mt){struct pin*x=(void*)p;if(!peer||!mt)return E_POINTER;if(x->direction!=PINDIR_OUTPUT)return VFW_E_INVALID_DIRECTION;if(x->connected)return VFW_E_ALREADY_CONNECTED;HRESULT hr=peer->lpVtbl->ReceiveConnection(peer,p,mt);if(FAILED(hr))return hr;hr=peer->lpVtbl->QueryInterface(peer,&iid_mem_input,(void**)&x->peer_mem);if(FAILED(hr)){peer->lpVtbl->Disconnect(peer);return hr;}hr=x->peer_mem->lpVtbl->GetAllocator(x->peer_mem,&x->allocator);if(FAILED(hr))return hr;ALLOCATOR_PROPERTIES want={2,(LONG)(mt->lSampleSize?mt->lSampleSize:1),1,0},actual;hr=x->allocator->lpVtbl->SetProperties(x->allocator,&want,&actual);if(SUCCEEDED(hr))hr=x->peer_mem->lpVtbl->NotifyAllocator(x->peer_mem,x->allocator,FALSE);if(SUCCEEDED(hr))hr=x->allocator->lpVtbl->Commit(x->allocator);if(FAILED(hr))return hr;copy_type(&x->type,mt);x->peer=peer;peer->lpVtbl->AddRef(peer);x->connected=TRUE;return S_OK;}
+/*
+ * What real filters do with the pin they are connected to (TESTFILTER_PEER_INFO):
+ * find its filter and look at the filter, to know what is on the other side.
+ * The peer has to be a whole filter with a pin of its own, not just a pin.
+ */
+static BOOL inspect_peer(IPin*peer){
+	PIN_INFO pi;
+	CLSID id;
+	FILTER_INFO fi;
+	IEnumPins*e=NULL;
+	IPin*first=NULL;
+	ULONG got=0;
+	LPWSTR pin_name=NULL;
+	BOOL ok;
+	if(FAILED(peer->lpVtbl->QueryPinInfo(peer,&pi))||!pi.pFilter)return FALSE;
+	ok=SUCCEEDED(pi.pFilter->lpVtbl->GetClassID(pi.pFilter,&id));
+	ok=ok&&SUCCEEDED(pi.pFilter->lpVtbl->EnumPins(pi.pFilter,&e))&&e;
+	ok=ok&&e->lpVtbl->Next(e,1,&first,&got)==S_OK&&got==1&&first;
+	if(first){ok=ok&&first==peer;first->lpVtbl->Release(first);}
+	if(e)e->lpVtbl->Release(e);
+	ok=ok&&SUCCEEDED(pi.pFilter->lpVtbl->QueryFilterInfo(pi.pFilter,&fi))&&fi.pGraph&&fi.achName[0];
+	if(ok)fi.pGraph->lpVtbl->Release(fi.pGraph);
+	pi.pFilter->lpVtbl->Release(pi.pFilter);
+	ok=ok&&SUCCEEDED(peer->lpVtbl->QueryId(peer,&pin_name))&&pin_name&&pin_name[0];
+	if(pin_name)CoTaskMemFree(pin_name);
+	return ok;
+}
+static HRESULT WINAPI pin_receive_connection(IPin*p,IPin*peer,const AM_MEDIA_TYPE*mt){struct pin*x=(void*)p;if(!peer||!mt)return E_POINTER;if(x->filter->peer_info&&!inspect_peer(peer))return E_UNEXPECTED;if(x->direction!=PINDIR_INPUT)return VFW_E_INVALID_DIRECTION;if(x->connected)return VFW_E_ALREADY_CONNECTED;HRESULT hr=copy_type(&x->type,mt);if(FAILED(hr))return hr;x->peer=peer;peer->lpVtbl->AddRef(peer);x->connected=TRUE;return S_OK;}
+static HRESULT WINAPI pin_connect(IPin*p,IPin*peer,const AM_MEDIA_TYPE*mt){struct pin*x=(void*)p;if(!peer||!mt)return E_POINTER;if(x->filter->peer_info&&!inspect_peer(peer))return E_UNEXPECTED;if(x->direction!=PINDIR_OUTPUT)return VFW_E_INVALID_DIRECTION;if(x->connected)return VFW_E_ALREADY_CONNECTED;HRESULT hr=peer->lpVtbl->ReceiveConnection(peer,p,mt);if(FAILED(hr))return hr;hr=peer->lpVtbl->QueryInterface(peer,&iid_mem_input,(void**)&x->peer_mem);if(FAILED(hr)){peer->lpVtbl->Disconnect(peer);return hr;}hr=x->peer_mem->lpVtbl->GetAllocator(x->peer_mem,&x->allocator);if(FAILED(hr))return hr;ALLOCATOR_PROPERTIES want={2,(LONG)(mt->lSampleSize?mt->lSampleSize:1),1,0},actual;hr=x->allocator->lpVtbl->SetProperties(x->allocator,&want,&actual);if(SUCCEEDED(hr))hr=x->peer_mem->lpVtbl->NotifyAllocator(x->peer_mem,x->allocator,FALSE);if(SUCCEEDED(hr))hr=x->allocator->lpVtbl->Commit(x->allocator);if(FAILED(hr))return hr;copy_type(&x->type,mt);x->peer=peer;peer->lpVtbl->AddRef(peer);x->connected=TRUE;return S_OK;}
 static HRESULT WINAPI pin_disconnect(IPin*p){struct pin*x=(void*)p;if(!x->connected)return S_FALSE;if(x->allocator){x->allocator->lpVtbl->Decommit(x->allocator);x->allocator->lpVtbl->Release(x->allocator);}if(x->peer_mem)x->peer_mem->lpVtbl->Release(x->peer_mem);x->peer->lpVtbl->Release(x->peer);free_type(&x->type);x->allocator=NULL;x->peer_mem=NULL;x->peer=NULL;x->connected=FALSE;return S_OK;}
 static HRESULT WINAPI pin_connected(IPin*p,IPin**out){if(!out)return E_POINTER;struct pin*x=(void*)p;if(!x->connected){*out=NULL;return VFW_E_NOT_CONNECTED;}*out=x->peer;x->peer->lpVtbl->AddRef(x->peer);return S_OK;}
 static HRESULT WINAPI pin_type(IPin*p,AM_MEDIA_TYPE*out){if(!out)return E_POINTER;struct pin*x=(void*)p;return x->connected?copy_type(out,&x->type):VFW_E_NOT_CONNECTED;}
@@ -192,7 +219,34 @@ static HRESULT transform(struct filter*f,IMediaSample*input)
 		else if((DWORD)sample->lpVtbl->GetSize(sample)<raw)hr=VFW_E_BUFFER_OVERFLOW;
 		else{for(DWORD i=0;i<raw;i++)dst[i]=f->picture[i];f->valid=TRUE;sample->lpVtbl->SetActualDataLength(sample,raw);sample->lpVtbl->SetSyncPoint(sample,input->lpVtbl->IsSyncPoint(input)==S_OK);}
 	}
-	if(SUCCEEDED(hr)){sample->lpVtbl->SetPreroll(sample,input->lpVtbl->IsPreroll(input)==S_OK);sample->lpVtbl->SetDiscontinuity(sample,input->lpVtbl->IsDiscontinuity(input)==S_OK);hr=out->peer_mem->lpVtbl->Receive(out->peer_mem,sample);}
+	/*
+	 * TESTFILTER_DYNAMIC: from the second frame on, the decoder switches its
+	 * output to YV12 (the chroma planes swapped), announcing it with the type
+	 * on the first sample that has it, after the receiver accepts it.
+	 */
+	if(SUCCEEDED(hr)&&f->dynamic&&!f->encoder&&f->frame>=1&&ob->biCompression==mmioFOURCC('I','4','2','0')){
+		DWORD luma=(DWORD)ob->biWidth*(DWORD)(ob->biHeight<0?-ob->biHeight:ob->biHeight),chroma=luma/4;
+		for(DWORD i=0;i<chroma;i++){BYTE t=dst[luma+i];dst[luma+i]=dst[luma+chroma+i];dst[luma+chroma+i]=t;}
+		if(f->frame==1){
+			AM_MEDIA_TYPE mt;
+			hr=copy_type(&mt,&out->type);
+			if(SUCCEEDED(hr)){
+				media_bih(&mt)->biCompression=mmioFOURCC('Y','V','1','2');
+				mt.subtype.Data1=mmioFOURCC('Y','V','1','2');
+				hr=out->peer->lpVtbl->QueryAccept(out->peer,&mt);
+				if(hr==S_OK)hr=sample->lpVtbl->SetMediaType(sample,&mt);
+				else if(SUCCEEDED(hr))hr=VFW_E_TYPE_NOT_ACCEPTED;
+				free_type(&mt);
+			}
+		}
+	}
+	/* The encoder re-announces its output type on the first sample (TESTFILTER_DYNAMIC). */
+	if(SUCCEEDED(hr)&&f->dynamic&&f->encoder&&f->frame==0){
+		hr=out->peer->lpVtbl->QueryAccept(out->peer,&out->type);
+		if(hr==S_OK)hr=sample->lpVtbl->SetMediaType(sample,&out->type);
+		else if(SUCCEEDED(hr))hr=VFW_E_TYPE_NOT_ACCEPTED;
+	}
+	if(SUCCEEDED(hr)){sample->lpVtbl->SetPreroll(sample,!f->no_preroll&&input->lpVtbl->IsPreroll(input)==S_OK);sample->lpVtbl->SetDiscontinuity(sample,input->lpVtbl->IsDiscontinuity(input)==S_OK);hr=out->peer_mem->lpVtbl->Receive(out->peer_mem,sample);}
 	sample->lpVtbl->Release(sample);f->frame++;return hr;
 }
 struct async_sample { struct filter *filter; IMediaSample *sample; HRESULT result; };
@@ -209,5 +263,5 @@ static HRESULT WINAPI filter_vendor(IBaseFilter*p,LPWSTR*out){return E_NOTIMPL;}
 static IBaseFilterVtbl filter_vtbl={filter_qi,filter_addref,filter_release,filter_class,filter_stop,filter_pause,filter_run,filter_state,filter_set_clock,filter_get_clock,filter_enum,filter_find,filter_info,filter_join,filter_vendor};
 
 static BOOL env_on(const char*name){char value[2];return GetEnvironmentVariableA(name,value,sizeof(value))==1&&value[0]=='1';}
-HRESULT testfilter_create(BOOL encoder,REFIID iid,void**out){if(!out)return E_POINTER;*out=NULL;struct filter*f=alloc(sizeof(*f));if(!f)return E_OUTOFMEMORY;f->iface.lpVtbl=&filter_vtbl;f->compression.lpVtbl=&compression_vtbl;f->persist.lpVtbl=&persist_vtbl;f->refs=1;f->encoder=encoder;f->quality=0.75;f->async=env_on("TESTFILTER_ASYNC");f->no_eos=env_on("TESTFILTER_NO_EOS");f->require_segment=env_on("TESTFILTER_REQUIRE_SEGMENT");InitializeCriticalSection(&f->transform_lock);f->input=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_INPUT};f->output=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_OUTPUT};InterlockedIncrement(&objects);HRESULT hr=filter_qi(&f->iface,iid,out);filter_release(&f->iface);return hr;}
+HRESULT testfilter_create(BOOL encoder,REFIID iid,void**out){if(!out)return E_POINTER;*out=NULL;struct filter*f=alloc(sizeof(*f));if(!f)return E_OUTOFMEMORY;f->iface.lpVtbl=&filter_vtbl;f->compression.lpVtbl=&compression_vtbl;f->persist.lpVtbl=&persist_vtbl;f->refs=1;f->encoder=encoder;f->quality=0.75;f->async=env_on("TESTFILTER_ASYNC");f->no_eos=env_on("TESTFILTER_NO_EOS");f->require_segment=env_on("TESTFILTER_REQUIRE_SEGMENT");f->peer_info=env_on("TESTFILTER_PEER_INFO");f->dynamic=env_on("TESTFILTER_DYNAMIC");f->no_preroll=env_on("TESTFILTER_NO_PREROLL");InitializeCriticalSection(&f->transform_lock);f->input=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_INPUT};f->output=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_OUTPUT};InterlockedIncrement(&objects);HRESULT hr=filter_qi(&f->iface,iid,out);filter_release(&f->iface);return hr;}
 LONG testfilter_objects(void){return objects;}

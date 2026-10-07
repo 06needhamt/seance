@@ -3,7 +3,7 @@
 # Runs `info` and `probe` over every DLL in a directory of codecs you supply
 # (*.dll, *.drv, *.ax, *.acm, any case), and reports for each whether it
 # parses, which of its imports aren't implemented, and whether it opens and
-# answers ICM_GETINFO. Nothing specific to any codec is checked. It fails
+# answers ICM_GETINFO (a DirectShow server is reported with its filters). Nothing specific to any codec is checked. It fails
 # only if the harness itself crashes or hangs, or a file can't be parsed.
 #
 # usage: tests/samples.sh <seance> <dir> [<timeout in seconds>]
@@ -57,7 +57,9 @@ for f in "$dir"/*; do
 		continue
 	fi
 	handler=$(sed -n "s/.*handler '\\(.*\\)'.*/\\1/p" "$out" | head -n 1)
-	if [ $rc -eq 0 ]; then
+	if grep -q '^DirectShow server:' "$out"; then
+		state="DirectShow server, $(grep -c '^  {' "$out") filter(s)"
+	elif [ $rc -eq 0 ]; then
 		state="opens as '${handler:-?}'"
 	else
 		state="doesn't open: $(grep 'seance:' "$out" | head -n 1 |
