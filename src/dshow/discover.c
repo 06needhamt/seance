@@ -47,8 +47,7 @@ static int fourcc_shaped(const GUID *g)
 	       !memcmp(g->Data4, tail, sizeof(tail));
 }
 
-/* An uncompressed video subtype: RGB, or a raw YUV FOURCC. */
-static int uncompressed(const GUID *minor)
+int dshow_uncompressed_video(const GUID *minor)
 {
 	static const GUID *const rgb[] = {
 		&MEDIASUBTYPE_RGB1, &MEDIASUBTYPE_RGB4, &MEDIASUBTYPE_RGB8,
@@ -87,8 +86,8 @@ static int pin_video(const struct qz_pin *p, int compressed)
 		    !guid_eq(&t->major, &guid_null))
 			continue;
 		int any = guid_eq(&t->minor, &guid_null);
-		if (compressed ? !any && !uncompressed(&t->minor) :
-				 any || uncompressed(&t->minor))
+		if (compressed ? !any && !dshow_uncompressed_video(&t->minor) :
+				 any || dshow_uncompressed_video(&t->minor))
 			return 1;
 	}
 	return 0;
@@ -212,6 +211,14 @@ static char *server_path(const GUID *clsid)
 	return NULL;
 }
 
+char *dshow_server_path(const GUID *clsid)
+{
+	reg_lock();
+	char *s = server_path(clsid);
+	reg_unlock();
+	return s;
+}
+
 static const char *base_name(const char *path)
 {
 	const char *b = path;
@@ -268,11 +275,55 @@ static size_t keep_own(struct qz_filter *f, size_t n, const struct module *m)
 	return kept;
 }
 
-static int run_server(const char *path, const char *entry, int sandbox,
-		      struct qz_filter **out, size_t *n, HRESULT *result)
+/*
+ * Keeps the DMOs this module serves: those DMORegister recorded (with no
+ * InprocServer32 or one naming its file), then those found in the
+ * registry whose InprocServer32 names it. found is taken.
+ */
+static size_t own_dmos(struct dmo_reg *d, size_t n, struct dmo_reg *found,
+		       size_t nfound, const struct module *m,
+		       struct dmo_reg **out)
 {
-	*out = NULL;
-	*n = 0;
+	struct dmo_reg *all = realloc(d, (n + nfound + 1) * sizeof(*all));
+	size_t kept = 0;
+
+	if (!all) {
+		dmo_regs_free(d, n);
+		dmo_regs_free(found, nfound);
+		*out = NULL;
+		return 0;
+	}
+	reg_lock();
+	for (size_t i = 0; i < n + nfound; i++) {
+		struct dmo_reg *r = i < n ? &all[i] : &found[i - n];
+		char *path = server_path(&r->clsid);
+		int own = path ? names_module(path, m) : i < n;
+		for (size_t j = 0; j < kept && own; j++)
+			own = !guid_eq(&all[j].clsid, &r->clsid) ||
+			      !guid_eq(&all[j].category, &r->category);
+		if (!own) {
+			dmo_reg_clear(r);
+		} else if (r != &all[kept]) {
+			all[kept] = *r;
+			memset(r, 0, sizeof(*r));
+		}
+		kept += own;
+		free(path);
+	}
+	reg_unlock();
+	free(found);
+	if (!kept) {
+		free(all);
+		all = NULL;
+	}
+	*out = all;
+	return kept;
+}
+
+static int run_server(const char *path, const char *entry, int sandbox,
+		      struct dshow_server_found *out, HRESULT *result)
+{
+	memset(out, 0, sizeof(*out));
 	*result = E_FAIL;
 	if (runtime_enter())
 		return -1;
@@ -299,10 +350,17 @@ static int run_server(const char *path, const char *entry, int sandbox,
 	int inited = init && uninit && SUCCEEDED(init(NULL));
 
 	quartz_capture_begin();
+	msdmo_capture_begin();
 	*result = call_server(m, entry);
 	struct qz_filter *f = NULL;
 	size_t count = quartz_capture_end(&f);
 	count = keep_own(f, count, m);
+	struct dmo_reg *d = NULL, *found = NULL;
+	size_t ndmos = msdmo_capture_end(&d), nfound = 0;
+	int registering = strcmp(entry, "DllUnregisterServer") != 0;
+	if (registering)
+		nfound = msdmo_registered(&found);
+	ndmos = own_dmos(d, ndmos, found, nfound, m, &d);
 
 	if (inited)
 		uninit();
@@ -315,22 +373,61 @@ static int run_server(const char *path, const char *entry, int sandbox,
 		free(f);
 		f = NULL;
 	}
-	*out = f;
-	*n = count;
+	out->filters = f;
+	out->nfilters = count;
+	out->dmos = d;
+	out->ndmos = ndmos;
 	return 0;
+}
+
+void dshow_server_found_free(struct dshow_server_found *f)
+{
+	qz_filters_free(f->filters, f->nfilters);
+	dmo_regs_free(f->dmos, f->ndmos);
+	memset(f, 0, sizeof(*f));
+}
+
+int dshow_server_discover(const char *path, struct dshow_server_found *out,
+			  HRESULT *hr)
+{
+	return run_server(path, "DllRegisterServer", 1, out, hr);
+}
+
+int dshow_server_register(const char *path, int unregister,
+			  struct dshow_server_found *out, HRESULT *hr)
+{
+	return run_server(path, unregister ? "DllUnregisterServer" :
+			  "DllRegisterServer", 0, out, hr);
+}
+
+/* The filters alone. */
+static int filters_only(int r, struct dshow_server_found *found,
+			struct qz_filter **out, size_t *n)
+{
+	*out = found->filters;
+	*n = found->nfilters;
+	found->filters = NULL;
+	found->nfilters = 0;
+	dshow_server_found_free(found);
+	return r;
 }
 
 int dshow_discover(const char *path, struct qz_filter **out, size_t *n,
 		   HRESULT *hr)
 {
-	return run_server(path, "DllRegisterServer", 1, out, n, hr);
+	struct dshow_server_found found;
+	int r = dshow_server_discover(path, &found, hr);
+
+	return filters_only(r, &found, out, n);
 }
 
 int dshow_register(const char *path, int unregister, struct qz_filter **out,
 		   size_t *n, HRESULT *hr)
 {
-	return run_server(path, unregister ? "DllUnregisterServer" :
-			  "DllRegisterServer", 0, out, n, hr);
+	struct dshow_server_found found;
+	int r = dshow_server_register(path, unregister, &found, hr);
+
+	return filters_only(r, &found, out, n);
 }
 
 /* Registered filters. */
@@ -560,6 +657,12 @@ const char *dshow_guid_name(const GUID *g, char *buf)
 				 guid_names[i].name);
 			return buf;
 		}
+	}
+	if (fourcc_shaped(g) && g->Data1 <= 0xffff) {
+		/* A WAVEFORMATEX format tag rather than a FOURCC. */
+		snprintf(buf, DSHOW_GUID_NAME_SIZE, "wave format 0x%04lx",
+			 (unsigned long)g->Data1);
+		return buf;
 	}
 	if (fourcc_shaped(g)) {
 		char f[FOURCC_STR_SIZE];

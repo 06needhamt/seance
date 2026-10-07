@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * seance list [--no-open] [--all]: the codecs registered in vfw.ini, and
- * the DirectShow filters registered in the registry.
+ * the DirectShow filters and DMOs registered in the registry.
  */
 #include <stdio.h>
 #include <string.h>
@@ -10,6 +10,7 @@
 #include "common/error.h"
 #include "common/fourcc.h"
 #include "common/unicode.h"
+#include "dmo/discover.h"
 #include "dshow/discover.h"
 #include "runtime/runtime.h"
 #include "vfw/icm.h"
@@ -37,6 +38,29 @@ static void list_filters(int all)
 		       "filter server's filters.\n",
 		       all || !n ? "" : " that decode or encode video");
 	dshow_registered_free(r, n);
+}
+
+/* The DMOs registered, decoders and encoders unless all. */
+static void list_dmos(int all)
+{
+	struct dmo_registered *r = NULL;
+	size_t n = dmo_registered(&r), shown = 0;
+	const char *file = reg_file_path();
+
+	printf("\n%s registered in %s:\n",
+	       all ? "DMOs" : "DMO decoders and encoders",
+	       *file ? file : "the registry (in memory)");
+	for (size_t i = 0; i < n; i++) {
+		if (!all && !dmo_role_is_codec(dmo_role(&r[i].d)))
+			continue;
+		dmo_print(&r[i].d, r[i].path ? r[i].path : "(no InprocServer32)",
+			  0);
+		shown++;
+	}
+	if (!shown)
+		printf("  none%s. seance register <dmo.dll> registers a DLL's "
+		       "DMOs.\n", all || !n ? "" : " that decode or encode");
+	dmo_registered_free(r, n);
 }
 
 static void list_codecs(int open)
@@ -91,8 +115,8 @@ int cmd_list(int argc, char **argv)
 				"\n"
 				"  --no-open   don't open the codecs to ask their "
 				"names\n"
-				"  --all       list every DirectShow filter "
-				"registered, not just video ones\n");
+				"  --all       list every DirectShow filter and "
+				"DMO registered, not just codecs\n");
 			return 2;
 		}
 	}
@@ -102,5 +126,6 @@ int cmd_list(int argc, char **argv)
 	}
 	list_codecs(open);
 	list_filters(all);
+	list_dmos(all);
 	return 0;
 }

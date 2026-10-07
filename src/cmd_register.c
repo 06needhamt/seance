@@ -1,12 +1,13 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * seance register [--dry-run] <filter.ax>
- * seance unregister <filter.ax>
+ * seance register [--dry-run] <server>
+ * seance unregister <server>
  *
- * Runs a DirectShow filter server's DllRegisterServer (or
- * DllUnregisterServer), so its filters are in the registry for this
- * harness the way they would be on Windows, and shows the filters it
- * registers. --dry-run runs it in a registry sandbox, changing nothing.
+ * Runs a COM server's DllRegisterServer (or DllUnregisterServer): a
+ * DirectShow filter's .ax or a DMO's DLL, so its filters and DMOs are in
+ * the registry for this harness the way they would be on Windows, and
+ * shows what it registers. --dry-run runs it in a registry sandbox,
+ * changing nothing.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,6 +15,7 @@
 
 #include "commands.h"
 #include "common/error.h"
+#include "dmo/discover.h"
 #include "dshow/discover.h"
 #include "win32/quartz.h"
 #include "win32/reg.h"
@@ -21,10 +23,10 @@
 static int usage(const char *cmd)
 {
 	if (!strcmp(cmd, "unregister"))
-		fprintf(stderr, "usage: seance unregister <filter.ax>\n");
+		fprintf(stderr, "usage: seance unregister <filter.ax|dmo.dll>\n");
 	else
 		fprintf(stderr,
-			"usage: seance register [--dry-run] <filter.ax>\n"
+			"usage: seance register [--dry-run] <filter.ax|dmo.dll>\n"
 			"\n"
 			"  --dry-run   show what it registers without changing "
 			"the registry\n");
@@ -48,11 +50,10 @@ int cmd_register(int argc, char **argv)
 	if (!path)
 		return usage(argv[0]);
 
-	struct qz_filter *f = NULL;
-	size_t n = 0;
+	struct dshow_server_found found;
 	HRESULT hr;
-	if (dry_run ? dshow_discover(path, &f, &n, &hr) :
-		      dshow_register(path, unregister, &f, &n, &hr)) {
+	if (dry_run ? dshow_server_discover(path, &found, &hr) :
+		      dshow_server_register(path, unregister, &found, &hr)) {
 		fprintf(stderr, "seance: %s\n", vfw_error());
 		return 1;
 	}
@@ -62,15 +63,17 @@ int cmd_register(int argc, char **argv)
 			printf("Unregistered %s.\n", path);
 	} else {
 		if (dry_run)
-			printf("Filters %s would register:\n", path);
+			printf("What %s would register:\n", path);
 		else
 			printf("Registered %s:\n", path);
-		if (!n)
-			printf("  no filters\n");
-		for (size_t i = 0; i < n; i++)
-			dshow_print_filter(&f[i], NULL, 1);
+		if (!found.nfilters && !found.ndmos)
+			printf("  no filters or DMOs\n");
+		for (size_t i = 0; i < found.nfilters; i++)
+			dshow_print_filter(&found.filters[i], NULL, 1);
+		for (size_t i = 0; i < found.ndmos; i++)
+			dmo_print(&found.dmos[i], NULL, 1);
 	}
-	qz_filters_free(f, n);
+	dshow_server_found_free(&found);
 	if (FAILED(hr)) {
 		fprintf(stderr, "seance: %s failed: 0x%08lx\n",
 			unregister ? "DllUnregisterServer" : "DllRegisterServer",

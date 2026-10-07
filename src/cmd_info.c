@@ -103,7 +103,7 @@ static void print_header(const char *path, const struct pe_image *img)
 		printf("kind:            VfW codec or driver (DriverProc)\n");
 	else if (dshow_is_server(img))
 		printf("kind:            COM server, perhaps DirectShow filters "
-		       "(seance register --dry-run lists them)\n");
+		       "or DMOs (seance register --dry-run lists them)\n");
 	printf("timestamp:       0x%08x%s\n", fh->TimeDateStamp, when);
 	printf("linker:          %u.%u\n", o->MajorLinkerVersion,
 	       o->MinorLinkerVersion);

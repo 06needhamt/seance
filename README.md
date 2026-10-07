@@ -412,7 +412,7 @@ Windows Registry Editor Version 5.00
 `VFW_REGISTRY=` (empty) keeps the registry in memory only, starting empty
 each run.
 
-### DirectShow filters: `register` and `unregister`
+### DirectShow filters and DMOs: `register` and `unregister`
 
 ```sh
 build/seance register --dry-run filter.ax  # what it would register
@@ -440,7 +440,15 @@ to which each decoder actually connects.
 
 `list` shows the video decoders and encoders registered, from the
 filter categories and the older `HKCR\Filter` keys, with the DLL that
-serves each; `--all` shows every filter. A `.reg` file exported from
+serves each; `--all` shows every filter.
+
+DirectX Media Objects (DMOs) are found the same way. A DMO's DLL registers
+it from its `DllRegisterServer`, through the built-in msdmo.dll's
+`DMORegister` or by writing `HKCR\DirectShow\MediaObjects` itself, and
+`register`, `unregister` and `probe` show each DMO's CLSID, name, role,
+category and registered input and output types. `list` adds the DMO
+decoders and encoders registered (`--all`: every DMO). `decode` and `encode`
+don't drive DMOs yet; see [docs/DMO_AUDIO_PLAN.md](docs/DMO_AUDIO_PLAN.md). A `.reg` file exported from
 Windows with filters in it can be dropped in as the registry; the
 filters' DLLs are then found through the drive mapping.
 

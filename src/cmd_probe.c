@@ -13,6 +13,7 @@
 #include "common/error.h"
 #include "common/fourcc.h"
 #include "common/unicode.h"
+#include "dmo/discover.h"
 #include "dshow/discover.h"
 #include "dshow/dshow.h"
 #include "loader/pe.h"
@@ -126,14 +127,15 @@ static int probe_dshow(const char *path, const char *selected,
 		return 2;
 	}
 
-	struct qz_filter *filters = NULL;
-	size_t count = 0;
+	struct dshow_server_found found;
 	HRESULT hr;
-	if (dshow_discover(path, &filters, &count, &hr)) {
+	if (dshow_server_discover(path, &found, &hr)) {
 		fprintf(stderr, "seance: %s\n", vfw_error());
 		return 1;
 	}
-	if (FAILED(hr) && !count) {
+	struct qz_filter *filters = found.filters;
+	size_t count = found.nfilters;
+	if (FAILED(hr) && !count && !found.ndmos) {
 		char name[24];
 		fprintf(stderr, "seance: %s: DllRegisterServer failed (%s)\n",
 			path, dshow_hr_name(hr, name));
@@ -141,7 +143,8 @@ static int probe_dshow(const char *path, const char *selected,
 	}
 
 	size_t shown = 0;
-	printf("DirectShow server: %s\n", path);
+	printf("%s server: %s\n", count || !found.ndmos ? "DirectShow" : "DMO",
+	       path);
 	for (size_t i = 0; i < count; i++) {
 		if (selected && memcmp(&filters[i].clsid, &wanted, sizeof(wanted)))
 			continue;
@@ -151,11 +154,18 @@ static int probe_dshow(const char *path, const char *selected,
 			probe_dshow_connections(path, &filters[i].clsid, avi_path);
 		shown++;
 	}
-	qz_filters_free(filters, count);
+	for (size_t i = 0; i < found.ndmos; i++) {
+		if (selected && memcmp(&found.dmos[i].clsid, &wanted,
+				       sizeof(wanted)))
+			continue;
+		dmo_print(&found.dmos[i], NULL, 1);
+		shown++;
+	}
+	dshow_server_found_free(&found);
 	if (!shown) {
 		fprintf(stderr, "seance: %s: %s\n", path,
 			selected ? "that CLSID is not registered by this server" :
-			"no DirectShow filters discovered");
+			"no DirectShow filters or DMOs discovered");
 		return 1;
 	}
 	return 0;

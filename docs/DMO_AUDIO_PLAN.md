@@ -244,11 +244,31 @@ include/win32/mmreg.h    WAVEFORMATEXTENSIBLE, format tags, KSDATAFORMAT GUIDs
    - Running CI's "Build without mingw-w64" configuration locally found
      `test_kernel32` failing without the fixtures; it now skips that check
      as its other fixture checks do.
-1. **msdmo and discovery.** The built-in msdmo.dll with capture mode, DMO
-   discovery, `register`/`unregister`/`list`/`info`/`probe` for DMOs.
-   Milestone: `test_msdmo` registers and unregisters a fake DMO and reads the
-   keys back; `testdmo.dll`'s two DMOs are discovered without touching the
-   registry, then registered and listed.
+1. **msdmo and discovery.** (Done.) The built-in msdmo.dll with capture
+   mode, DMO discovery, `register`/`unregister`/`list`/`info`/`probe` for
+   DMOs. Milestone: `test_msdmo` registers and unregisters a fake DMO and
+   reads the keys back; `testdmo.dll`'s two DMOs are discovered without
+   touching the registry, then registered and listed.
+   - `src/win32/msdmo.c`: `DMORegister`/`DMOUnregister` (writing the
+     `MediaObjects` key with its name, `InputTypes`, `OutputTypes` and a
+     `Keyed` subkey, and the `Categories` entries), `DMOEnum` and its
+     `IEnumDMO`, `DMOGetTypes`, `DMOGetName`, and the six `Mo*MediaType`
+     helpers. `msdmo.h` gives registrations as data (`struct dmo_reg`, one
+     per category), read from the user's and the machine's classes, and the
+     capture mode.
+   - Discovery stayed in `dshow/discover.c`, since one `DllRegisterServer`
+     run gives both: `dshow_server_discover`/`dshow_server_register` return
+     filters and DMOs. A DMO counts if `DMORegister` recorded it, or if its
+     keys are in the registry afterwards with an `InprocServer32` naming the
+     DLL (the fixture's encoder writes its keys itself, as some DMOs do).
+     `src/dmo/discover.c` has roles (from the category, else from the
+     types: video or audio, decoder or encoder, effect), the registered
+     list and printing.
+   - `dshow_guid_name` names an audio format-tag subtype as
+     `wave format 0x0055`.
+   - `testdmo.dll` has no DMO objects yet (its `DllGetClassObject` fails);
+     they come with Phase 2. Tests: `test_msdmo`, `test_dmo_discover`, and
+     the DMO cases in `smoke.sh`.
 2. **DMO video decode and encode.** `buffer.c`, `host.c`, CLI integration.
    Milestone: `tests/unit/test_dmo.c` runs the decoder in every fixture mode
    with no leaked references (`DllCanUnloadNow == S_OK`); an AVI made by

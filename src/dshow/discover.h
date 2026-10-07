@@ -12,6 +12,7 @@
 
 #include "loader/pe.h"
 #include "win32.h"
+#include "win32/msdmo.h"
 #include "win32/quartz.h"
 
 /* What a filter is for, judged from its pins and category. */
@@ -24,9 +25,12 @@ enum dshow_role {
 enum dshow_role dshow_role(const struct qz_filter *f);
 const char *dshow_role_name(enum dshow_role role);
 
+/* Whether a video subtype is uncompressed: RGB, or a raw YUV FOURCC. */
+int dshow_uncompressed_video(const GUID *subtype);
+
 /*
- * Whether an image is a filter server rather than a VfW codec: it exports
- * DllGetClassObject and not DriverProc.
+ * Whether an image is a COM server (filters, DMOs) rather than a VfW codec:
+ * it exports DllGetClassObject and not DriverProc.
  */
 int dshow_is_server(const struct pe_image *img);
 
@@ -49,6 +53,29 @@ int dshow_discover(const char *path, struct qz_filter **out, size_t *n,
 int dshow_register(const char *path, int unregister, struct qz_filter **out,
 		   size_t *n, HRESULT *hr);
 
+/*
+ * What a server registers: DirectShow filters and DMOs. A DMO counts if
+ * DMORegister recorded it, or if its keys are in the registry afterwards
+ * and its InprocServer32 names this DLL (some DMOs write the keys
+ * themselves).
+ */
+struct dshow_server_found {
+	struct qz_filter *filters;
+	size_t nfilters;
+	struct dmo_reg *dmos;
+	size_t ndmos;
+};
+
+/* dshow_discover and dshow_register, giving DMOs too. */
+int dshow_server_discover(const char *path, struct dshow_server_found *out,
+			  HRESULT *hr);
+int dshow_server_register(const char *path, int unregister,
+			  struct dshow_server_found *out, HRESULT *hr);
+void dshow_server_found_free(struct dshow_server_found *f);
+
+/* The InprocServer32 of clsid (UTF-8, malloc()ed), or NULL. */
+char *dshow_server_path(const GUID *clsid);
+
 /* A filter registered on this machine. */
 struct dshow_registered {
 	struct qz_filter f;
@@ -66,7 +93,8 @@ void dshow_registered_free(struct dshow_registered *r, size_t n);
 
 /*
  * A GUID's name for people: "MEDIATYPE_Video", a FOURCC subtype as
- * 'TST0', else its {...} form. buf needs DSHOW_GUID_NAME_SIZE bytes.
+ * 'TST0', an audio format tag as "wave format 0x0055", else its {...}
+ * form. buf needs DSHOW_GUID_NAME_SIZE bytes.
  */
 #define DSHOW_GUID_NAME_SIZE 48
 const char *dshow_guid_name(const GUID *g, char *buf);

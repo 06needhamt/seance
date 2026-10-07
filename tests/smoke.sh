@@ -80,6 +80,31 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		echo "smoke: unregister left filters behind" >&2
 		exit 1
 	fi
+
+	# DMOs: one registered through DMORegister, one whose keys the DLL
+	# writes itself; found the same ways.
+	rm -f "$reg"
+	probe=$($emu "$harness" probe "$fixtures/testdmo.dll")
+	printf '%s\n' "$probe" | grep -q "DMO server:"
+	printf '%s\n' "$probe" | grep -q "seance test DMO decoder"
+	printf '%s\n' "$probe" | grep -q "DMO, video encoder"
+	selected=$($emu "$harness" probe "$fixtures/testdmo.dll" --clsid \
+		'{5E6C9B41-3A7D-4F0E-9C11-0D2B7A6E4F80}')
+	if printf '%s\n' "$selected" | grep -q "seance test DMO encoder"; then
+		echo "smoke: --clsid did not select one DMO" >&2
+		exit 1
+	fi
+	$emu "$harness" register --dry-run "$fixtures/testdmo.dll" |
+		grep -q "seance test DMO encoder"
+	[ ! -e "$reg" ] || { echo "smoke: DMO --dry-run wrote $reg" >&2; exit 1; }
+	$emu "$harness" register "$fixtures/testdmo.dll" >/dev/null
+	VFW_INI=/nonexistent $emu "$harness" list |
+		grep -q "seance test DMO decoder"
+	$emu "$harness" unregister "$fixtures/testdmo.dll" >/dev/null
+	if VFW_INI=/nonexistent $emu "$harness" list | grep -q "seance test DMO"; then
+		echo "smoke: unregister left DMOs behind" >&2
+		exit 1
+	fi
 	rm -f "$reg"
 	unset VFW_REGISTRY
 	fails $emu "$harness" decode "$fixtures/testcodec.dll" "$junk" -o /dev/null \
