@@ -20,8 +20,10 @@
 #include "win32/commctrl.h"
 #include "win32/commdlg.h"
 #include "win32/mmsystem.h"
+#include "win32/mmreg.h"
 #include "win32/vfw.h"
 #include "win32/aviriff.h"
 #include "win32/dshow.h"
+#include "win32/dmo.h"
 
 #endif /* VFW_WIN32_H */

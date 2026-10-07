@@ -62,7 +62,7 @@ int main(void)
 	CHECK(isctype_('A',0x100)); CHECK(wcmp(wa,wb,1)==0); CHECK(wcmp(wa,wb,2)<0);
 	int *mb=proc(c,"__mb_cur_max"); CHECK_EQ(*mb,1);
 
-	HWAVEOUT h=NULL; WAVEFORMATEX fmt={WAVE_FORMAT_PCM,1,8000,8000,1,8};
+	HWAVEOUT h=NULL; WAVEFORMATEX fmt={WAVE_FORMAT_PCM,1,8000,8000,1,8,0};
 	UINT (WINAPI *open_)(HWAVEOUT*,UINT,const WAVEFORMATEX*,DWORD_PTR,DWORD_PTR,DWORD)=proc(m,"waveOutOpen");
 	UINT (WINAPI *prep)(HWAVEOUT,WAVEHDR*,UINT)=proc(m,"waveOutPrepareHeader");
 	UINT (WINAPI *write_)(HWAVEOUT,WAVEHDR*,UINT)=proc(m,"waveOutWrite");

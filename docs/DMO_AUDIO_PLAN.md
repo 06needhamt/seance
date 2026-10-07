@@ -215,8 +215,35 @@ include/win32/mmreg.h    WAVEFORMATEXTENSIBLE, format tags, KSDATAFORMAT GUIDs
 
 ## Phases
 
-0. **Headers and ABI.** `dmo.h`, `mmreg.h`, the audio GUIDs, ABI entries.
-   Milestone: `check_abi` passes.
+0. **Headers and ABI.** (Done.) `dmo.h`, `mmreg.h`, the audio GUIDs, ABI
+   entries. Milestone: `check_abi` passes.
+   - `include/win32/dmo.h`: `IMediaObject`, `IMediaBuffer`, `IEnumDMO`,
+     `IMediaObjectInPlace`, `IDMOQualityControl`,
+     `IDMOVideoOutputOptimizations`, `IWMCodecPrivateData`;
+     `DMO_MEDIA_TYPE`, `DMO_OUTPUT_DATA_BUFFER`, `DMO_PARTIAL_MEDIATYPE`; the
+     flags, `DMO_E_*` results and `DMOCATEGORY_*` GUIDs (`VFW_DMO_GUIDS`).
+   - `include/win32/mmreg.h`: `WAVEFORMATEXTENSIBLE`, `MPEG1WAVEFORMAT`,
+     `MPEGLAYER3WAVEFORMAT`, the common `WAVE_FORMAT_*` tags, speaker masks,
+     `WAVE_FORMAT_SUBTYPE_INIT(tag)` and the `KSDATAFORMAT_SUBTYPE_PCM`/
+     `_IEEE_FLOAT` GUIDs (`VFW_MMREG_GUIDS`).
+   - `IErrorLog` and `IPropertyBag` went into `oleauto.h`, next to `VARIANT`
+     (`VFW_OLEAUTO_GUIDS`); `MEDIATYPE_Audio`, `FORMAT_WaveFormatEx`, the PCM,
+     float, MPEG audio and AC-3 subtypes and
+     `CLSID_AudioCompressorCategory` into `dshow.h`'s list.
+   - `WAVEFORMATEX` in `mmsystem.h` had no `cbSize` (16 bytes, not 18); it
+     is fixed and checked now, along with `WAVEFORMAT`, `PCMWAVEFORMAT` and
+     `WAVEHDR`.
+   - mingw-w64 doesn't declare `IWMCodecPrivateData` or the
+     `DMO_INPUT_STREAMF_*`/`DMO_OUTPUT_STREAMF_*` flags. They carry the
+     Windows SDK's values, their GUID is in a separate
+     `VFW_DMO_SDK_GUIDS` list that `check_abi` leaves out, and the flags are
+     in `tests/abi/constants_skip.txt`.
+   - `mingw_guids.sh` reads `ocidl.h`, `mediaobj.h` and `dmoreg.h` too, and
+     gets the `KSDATAFORMAT` subtypes by expanding their `STATIC_` macros,
+     which mmreg.h builds from the format tag.
+   - Running CI's "Build without mingw-w64" configuration locally found
+     `test_kernel32` failing without the fixtures; it now skips that check
+     as its other fixture checks do.
 1. **msdmo and discovery.** The built-in msdmo.dll with capture mode, DMO
    discovery, `register`/`unregister`/`list`/`info`/`probe` for DMOs.
    Milestone: `test_msdmo` registers and unregisters a fake DMO and reads the

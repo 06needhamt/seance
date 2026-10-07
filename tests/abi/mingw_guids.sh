@@ -18,7 +18,7 @@ guids() {
 		printf '#include <%s>\n' "$h"
 	done
 }
-for set in "dshow.h dvdmedia.h" "icodecapi.h"; do
+for set in "dshow.h dvdmedia.h ocidl.h mediaobj.h dmoreg.h" "icodecapi.h"; do
 	# shellcheck disable=SC2086
 	guids $set | "$cc" -std=c11 -E -P -x c - |
 		tr '\n' ' ' | tr ';' '\n' |
@@ -29,3 +29,14 @@ done
 # turn into values, but each also has a STATIC_ macro holding them.
 printf '#include <windows.h>\n#include <codecapi.h>\n' | "$cc" -std=c11 -E -dD -x c - |
 	sed -n 's/^#define STATIC_\(CODECAPI_[A-Za-z0-9_]*\) *\(0x[0-9a-fA-F]*, *0x[0-9a-fA-F]*, *0x[0-9a-fA-F]*\), *\(0x.*\)$/ABI_GUID(\1, \2, \3)/p'
+
+# mmreg.h's KSDATAFORMAT subtypes are the same kind, but their STATIC_ macros
+# are built from the format tag, so they are expanded rather than read.
+printf '#include <windows.h>\n#include <mmreg.h>\n' | "$cc" -std=c11 -E -dD -x c - |
+	sed -n 's/^#define STATIC_\(KSDATAFORMAT_SUBTYPE_[A-Za-z0-9_]*\) .*$/\1/p' |
+	sort -u |
+	while read -r name; do
+		printf 'ABI_GUID(%s, STATIC_%s)\n' "$name" "$name"
+	done |
+	{ printf '#include <windows.h>\n#include <mmreg.h>\n#define ABI_GUID(...) @ABI_GUID(__VA_ARGS__)\n'; cat; } |
+	"$cc" -std=c11 -E -P -x c - | sed -n 's/^.*@\(ABI_GUID(.*)\)$/\1/p'

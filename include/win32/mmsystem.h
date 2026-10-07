@@ -70,11 +70,25 @@ typedef DWORD FOURCC;
 #define WHDR_INQUEUE  0x00000010
 
 #pragma pack(push, 1)
+/* An audio format: WAVEFORMAT and PCMWAVEFORMAT are the older forms. */
 typedef struct waveformat_tag {
 	WORD wFormatTag, nChannels;
 	DWORD nSamplesPerSec, nAvgBytesPerSec;
+	WORD nBlockAlign;
+} WAVEFORMAT, *PWAVEFORMAT, *LPWAVEFORMAT;
+
+typedef struct pcmwaveformat_tag {
+	WAVEFORMAT wf;
+	WORD wBitsPerSample;
+} PCMWAVEFORMAT, *PPCMWAVEFORMAT, *LPPCMWAVEFORMAT;
+
+/* cbSize bytes of format-specific data follow (see mmreg.h). */
+typedef struct tWAVEFORMATEX {
+	WORD wFormatTag, nChannels;
+	DWORD nSamplesPerSec, nAvgBytesPerSec;
 	WORD nBlockAlign, wBitsPerSample;
-} WAVEFORMATEX, *LPWAVEFORMATEX;
+	WORD cbSize;
+} WAVEFORMATEX, *PWAVEFORMATEX, *LPWAVEFORMATEX;
 
 typedef struct wavehdr_tag {
 	LPSTR lpData;

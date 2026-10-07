@@ -356,4 +356,45 @@ typedef DWORD OLE_COLOR;
 #define CTL_E_OUTOFMEMORY       ((HRESULT)0x800A0007)
 #define CTL_E_ILLEGALFUNCTIONCALL ((HRESULT)0x800A0005)
 
+/*
+ * IErrorLog and IPropertyBag (ocidl.h): settings read and written by name,
+ * as some codecs (DMO encoders among them) take them.
+ */
+typedef struct IErrorLog IErrorLog;
+typedef struct IErrorLogVtbl {
+	HRESULT (WINAPI *QueryInterface)(IErrorLog *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IErrorLog *This);
+	ULONG (WINAPI *Release)(IErrorLog *This);
+	HRESULT (WINAPI *AddError)(IErrorLog *This, LPCOLESTR name,
+				   EXCEPINFO *info);
+} IErrorLogVtbl;
+struct IErrorLog {
+	const IErrorLogVtbl *lpVtbl;
+};
+
+typedef struct IPropertyBag IPropertyBag;
+typedef struct IPropertyBagVtbl {
+	HRESULT (WINAPI *QueryInterface)(IPropertyBag *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IPropertyBag *This);
+	ULONG (WINAPI *Release)(IPropertyBag *This);
+	HRESULT (WINAPI *Read)(IPropertyBag *This, LPCOLESTR name,
+			       VARIANT *value, IErrorLog *log);
+	HRESULT (WINAPI *Write)(IPropertyBag *This, LPCOLESTR name,
+				VARIANT *value);
+} IPropertyBagVtbl;
+struct IPropertyBag {
+	const IPropertyBagVtbl *lpVtbl;
+};
+
+/* Their GUIDs, in VFW_GUID_DECLARE's form (see objbase.h). */
+#define VFW_OLEAUTO_GUIDS(G) \
+	G(IID_IErrorLog, 0x3127ca40, 0x446e, 0x11ce, \
+	  0x81, 0x35, 0x00, 0xaa, 0x00, 0x4b, 0xb8, 0x51) \
+	G(IID_IPropertyBag, 0x55272a00, 0x42cb, 0x11ce, \
+	  0x81, 0x35, 0x00, 0xaa, 0x00, 0x4b, 0xb8, 0x51)
+
+VFW_OLEAUTO_GUIDS(VFW_GUID_DECLARE)
+
 #endif /* VFW_WIN32_OLEAUTO_H */

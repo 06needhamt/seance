@@ -312,6 +312,34 @@
 	S(DRVCONFIGINFO) O(DRVCONFIGINFO, dwDCISize) \
 	O(DRVCONFIGINFO, lpszDCISectionName) O(DRVCONFIGINFO, lpszDCIAliasName) \
 	S(DRIVERPROC) C(mmioFOURCC('a', 'b', 'c', 'd')) \
+	S(WAVEFORMAT) O(WAVEFORMAT, wFormatTag) O(WAVEFORMAT, nChannels) \
+	O(WAVEFORMAT, nSamplesPerSec) O(WAVEFORMAT, nAvgBytesPerSec) \
+	O(WAVEFORMAT, nBlockAlign) \
+	S(PCMWAVEFORMAT) O(PCMWAVEFORMAT, wf) O(PCMWAVEFORMAT, wBitsPerSample) \
+	S(WAVEFORMATEX) A(WAVEFORMATEX) O(WAVEFORMATEX, wFormatTag) \
+	O(WAVEFORMATEX, nChannels) O(WAVEFORMATEX, nSamplesPerSec) \
+	O(WAVEFORMATEX, nAvgBytesPerSec) O(WAVEFORMATEX, nBlockAlign) \
+	O(WAVEFORMATEX, wBitsPerSample) O(WAVEFORMATEX, cbSize) \
+	S(WAVEHDR) O(WAVEHDR, lpData) O(WAVEHDR, dwBufferLength) \
+	O(WAVEHDR, dwBytesRecorded) O(WAVEHDR, dwUser) O(WAVEHDR, dwFlags) \
+	O(WAVEHDR, dwLoops) O(WAVEHDR, lpNext) O(WAVEHDR, reserved) \
+	/* mmreg.h */ \
+	S(WAVEFORMATEXTENSIBLE) A(WAVEFORMATEXTENSIBLE) \
+	O(WAVEFORMATEXTENSIBLE, Format) O(WAVEFORMATEXTENSIBLE, Samples) \
+	O(WAVEFORMATEXTENSIBLE, Samples.wValidBitsPerSample) \
+	O(WAVEFORMATEXTENSIBLE, Samples.wSamplesPerBlock) \
+	O(WAVEFORMATEXTENSIBLE, dwChannelMask) \
+	O(WAVEFORMATEXTENSIBLE, SubFormat) \
+	S(MPEG1WAVEFORMAT) O(MPEG1WAVEFORMAT, wfx) \
+	O(MPEG1WAVEFORMAT, fwHeadLayer) O(MPEG1WAVEFORMAT, dwHeadBitrate) \
+	O(MPEG1WAVEFORMAT, fwHeadMode) O(MPEG1WAVEFORMAT, fwHeadModeExt) \
+	O(MPEG1WAVEFORMAT, wHeadEmphasis) O(MPEG1WAVEFORMAT, fwHeadFlags) \
+	O(MPEG1WAVEFORMAT, dwPTSLow) O(MPEG1WAVEFORMAT, dwPTSHigh) \
+	S(MPEGLAYER3WAVEFORMAT) O(MPEGLAYER3WAVEFORMAT, wfx) \
+	O(MPEGLAYER3WAVEFORMAT, wID) O(MPEGLAYER3WAVEFORMAT, fdwFlags) \
+	O(MPEGLAYER3WAVEFORMAT, nBlockSize) \
+	O(MPEGLAYER3WAVEFORMAT, nFramesPerBlock) \
+	O(MPEGLAYER3WAVEFORMAT, nCodecDelay) \
 	/* vfw.h: constants */ \
 	S(HIC) C(ICVERSION) C(ICTYPE_VIDEO) C(ICTYPE_AUDIO) \
 	C(ICERR_OK) C(ICERR_DONTDRAW) C(ICERR_NEWPALETTE) C(ICERR_GOTOKEYFRAME) \
@@ -864,9 +892,61 @@
 	O(IAMVideoCompressionVtbl, GetInfo) \
 	O(IAMVideoCompressionVtbl, OverrideKeyFrame) \
 	O(IAMVideoCompressionVtbl, OverrideFrameSize) \
-	S(ISpecifyPropertyPagesVtbl) O(ISpecifyPropertyPagesVtbl, GetPages)
+	S(ISpecifyPropertyPagesVtbl) O(ISpecifyPropertyPagesVtbl, GetPages) \
+	/* oleauto.h: ocidl.h's property bag */ \
+	S(IErrorLogVtbl) O(IErrorLogVtbl, AddError) \
+	S(IPropertyBagVtbl) O(IPropertyBagVtbl, Read) \
+	O(IPropertyBagVtbl, Write) \
+	/* dmo.h: mediaobj.h, dmoreg.h */ \
+	S(DMO_MEDIA_TYPE) A(DMO_MEDIA_TYPE) O(DMO_MEDIA_TYPE, majortype) \
+	O(DMO_MEDIA_TYPE, subtype) O(DMO_MEDIA_TYPE, bFixedSizeSamples) \
+	O(DMO_MEDIA_TYPE, bTemporalCompression) \
+	O(DMO_MEDIA_TYPE, lSampleSize) O(DMO_MEDIA_TYPE, formattype) \
+	O(DMO_MEDIA_TYPE, pUnk) O(DMO_MEDIA_TYPE, cbFormat) \
+	O(DMO_MEDIA_TYPE, pbFormat) \
+	S(DMO_OUTPUT_DATA_BUFFER) A(DMO_OUTPUT_DATA_BUFFER) \
+	O(DMO_OUTPUT_DATA_BUFFER, pBuffer) O(DMO_OUTPUT_DATA_BUFFER, dwStatus) \
+	O(DMO_OUTPUT_DATA_BUFFER, rtTimestamp) \
+	O(DMO_OUTPUT_DATA_BUFFER, rtTimelength) \
+	S(DMO_PARTIAL_MEDIATYPE) O(DMO_PARTIAL_MEDIATYPE, type) \
+	O(DMO_PARTIAL_MEDIATYPE, subtype) \
+	S(IMediaBufferVtbl) O(IMediaBufferVtbl, SetLength) \
+	O(IMediaBufferVtbl, GetMaxLength) \
+	O(IMediaBufferVtbl, GetBufferAndLength) \
+	S(IMediaObjectVtbl) O(IMediaObjectVtbl, GetStreamCount) \
+	O(IMediaObjectVtbl, GetInputStreamInfo) \
+	O(IMediaObjectVtbl, GetOutputStreamInfo) \
+	O(IMediaObjectVtbl, GetInputType) O(IMediaObjectVtbl, GetOutputType) \
+	O(IMediaObjectVtbl, SetInputType) O(IMediaObjectVtbl, SetOutputType) \
+	O(IMediaObjectVtbl, GetInputCurrentType) \
+	O(IMediaObjectVtbl, GetOutputCurrentType) \
+	O(IMediaObjectVtbl, GetInputSizeInfo) \
+	O(IMediaObjectVtbl, GetOutputSizeInfo) \
+	O(IMediaObjectVtbl, GetInputMaxLatency) \
+	O(IMediaObjectVtbl, SetInputMaxLatency) O(IMediaObjectVtbl, Flush) \
+	O(IMediaObjectVtbl, Discontinuity) \
+	O(IMediaObjectVtbl, AllocateStreamingResources) \
+	O(IMediaObjectVtbl, FreeStreamingResources) \
+	O(IMediaObjectVtbl, GetInputStatus) O(IMediaObjectVtbl, ProcessInput) \
+	O(IMediaObjectVtbl, ProcessOutput) O(IMediaObjectVtbl, Lock) \
+	S(IEnumDMOVtbl) O(IEnumDMOVtbl, Next) O(IEnumDMOVtbl, Skip) \
+	O(IEnumDMOVtbl, Reset) O(IEnumDMOVtbl, Clone) \
+	S(IMediaObjectInPlaceVtbl) O(IMediaObjectInPlaceVtbl, Process) \
+	O(IMediaObjectInPlaceVtbl, Clone) \
+	O(IMediaObjectInPlaceVtbl, GetLatency) \
+	S(IDMOQualityControlVtbl) O(IDMOQualityControlVtbl, SetNow) \
+	O(IDMOQualityControlVtbl, SetStatus) \
+	O(IDMOQualityControlVtbl, GetStatus) \
+	S(IDMOVideoOutputOptimizationsVtbl) \
+	O(IDMOVideoOutputOptimizationsVtbl, QueryOperationModePreferences) \
+	O(IDMOVideoOutputOptimizationsVtbl, SetOperationMode) \
+	O(IDMOVideoOutputOptimizationsVtbl, GetCurrentOperationMode) \
+	O(IDMOVideoOutputOptimizationsVtbl, GetCurrentSampleRequirements)
 
 /* Every GUID list in include/win32, compared with mingw's values. */
 #define VFW_ABI_GUIDS(G) \
 	VFW_OBJBASE_GUIDS(G) \
-	VFW_DSHOW_GUIDS(G)
+	VFW_OLEAUTO_GUIDS(G) \
+	VFW_MMREG_GUIDS(G) \
+	VFW_DSHOW_GUIDS(G) \
+	VFW_DMO_GUIDS(G)
