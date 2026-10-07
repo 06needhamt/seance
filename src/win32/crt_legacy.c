@@ -38,6 +38,38 @@ CRTFN(void) crt_exit(int status) { exit(status); }
 CRTFN(char *) crt_getenv(const char *name) { return getenv(name); }
 CRTFN(time_t) crt_time(time_t *out) { return time(out); }
 CRTFN(struct tm *) crt_localtime(const time_t *t) { return localtime(t); }
+/*
+ * The harness runs in UTC (see k32_time.c): no zone offset, no daylight
+ * saving. MSVC's struct tm is the nine ints of the C standard, without
+ * glibc's trailing fields.
+ */
+static int tz_daylight, tz_dstbias;
+static long tz_timezone;
+
+CRTFN(void) crt__tzset(void) { }
+CRTFN(int *) crt___p__daylight(void) { return &tz_daylight; }
+CRTFN(int *) crt___p__dstbias(void) { return &tz_dstbias; }
+CRTFN(long *) crt___p__timezone(void) { return &tz_timezone; }
+
+CRTFN(struct tm *) crt_gmtime(const time_t *t)
+{
+	static struct { int fields[9]; } out;
+	struct tm tm;
+
+	if (!t || !gmtime_r(t, &tm))
+		return NULL;
+	out.fields[0] = tm.tm_sec;
+	out.fields[1] = tm.tm_min;
+	out.fields[2] = tm.tm_hour;
+	out.fields[3] = tm.tm_mday;
+	out.fields[4] = tm.tm_mon;
+	out.fields[5] = tm.tm_year;
+	out.fields[6] = tm.tm_wday;
+	out.fields[7] = tm.tm_yday;
+	out.fields[8] = 0;
+	return (struct tm *)&out;
+}
+
 CRTFN(size_t) crt_strftime(char *s, size_t n, const char *fmt,
 			    const struct tm *tm) { return strftime(s, n, fmt, tm); }
 CRTFN(int) crt_sscanf(const char *s, const char *fmt, ...)
@@ -147,6 +179,7 @@ CRTFN(void *) crt_ostream_endl(void *self)
 const struct builtin_export crt_legacy_exports[] = {
 	E(_EH_prolog), E(_access), E(_adjust_fdiv), E(_assert), E(_errno), E(_filelengthi64),
 	E(_fstat), E(_isctype), E(_lseek), E(_read), E(_write),
+	E(_tzset), E(__p__daylight), E(__p__dstbias), E(__p__timezone), E(gmtime),
 	E(clock), E(exit), E(fscanf), E(getenv), E(localeconv), E(setlocale),
 	E(localtime), E(sscanf), E(strftime), E(time),
 	M("??0Init@ios_base@std@@QAE@XZ", crt_ios_init_ctor),

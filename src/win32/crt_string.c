@@ -9,6 +9,7 @@
 #include <ctype.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <malloc.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -96,6 +97,17 @@ CRTFN(int) crt_wcsncmp(const WCHAR *a, const WCHAR *b, size_t n)
 {
 	while (n-- && *a && *a == *b) a++, b++;
 	return n == (size_t)-1 ? 0 : (int)*a - (int)*b;
+}
+CRTFN(WCHAR *) crt_wcsrchr(const WCHAR *s, WCHAR c)
+{
+	const WCHAR *last = NULL;
+
+	for (;; s++) {
+		if (*s == c)
+			last = s;
+		if (!*s)
+			return (WCHAR *)last;
+	}
 }
 CRTFN(int) crt_strcoll(const char *a, const char *b) { return strcoll(a, b); }
 CRTFN(size_t) crt_strxfrm(char *d, const char *s, size_t n) { return strxfrm(d, s, n); }
@@ -186,6 +198,8 @@ CRTFN(long) crt_labs(long v) { return labs(v); }
 /* The CRT heap: its own malloc/free/calloc/realloc, independent of
  * kernel32's HeapAlloc/GlobalAlloc family - a codec may use either. On
  * failure each asks the new handler under _set_new_mode(1). */
+CRTFN(size_t) crt__msize(void *p) { return malloc_usable_size(p); }
+
 CRTFN(void *) crt_malloc(size_t n)
 {
 	void *p;
@@ -222,7 +236,7 @@ const struct builtin_export crt_string_exports[] = {
 	E(strcmp), E(strncmp), E(strchr), E(strrchr), E(strstr),
 	E(strpbrk), E(strspn), E(strcspn), E(strtok), E(strerror),
 	E(_stricmp), E(_strnicmp), E(_strdup), E(_strrev), E(_strlwr), E(_strupr),
-	E(wcslen), E(wcscpy), E(wcscat), E(wcscmp), E(wcsncmp),
+	E(_msize), E(wcslen), E(wcsrchr), E(wcscpy), E(wcscat), E(wcscmp), E(wcsncmp),
 	E(strcoll), E(strxfrm),
 	E(atoi), E(atol), E(atof), E(strtol), E(strtoul), E(strtod),
 	E(_itoa), E(_ltoa), E(_ultoa),

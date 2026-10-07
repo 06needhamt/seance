@@ -28,6 +28,8 @@ CRTFN(double) crt_modf(double x, double *ip) { return modf(x, ip); }
 
 /* MSVC's own names for functions ISO C only standardised later, or never
  * under this name; same semantics as their libm counterparts. */
+/* The handler for math library errors: never called, so never needed. */
+CRTFN(void) crt___setusermatherr(void *handler) { (void)handler; }
 CRTFN(double) crt__hypot(double x, double y) { return hypot(x, y); }
 CRTFN(double) crt__copysign(double x, double y) { return copysign(x, y); }
 CRTFN(double) crt__logb(double x) { return logb(x); }
@@ -226,7 +228,7 @@ const struct builtin_export crt_math_exports[] = {
 	E(sinh), E(cosh), E(tanh), E(exp), E(log), E(log10), E(pow),
 	E(sqrt), E(fabs), E(floor), E(ceil), E(fmod), E(frexp), E(ldexp),
 	E(modf),
-	E(_hypot), E(_copysign), E(_logb), E(_scalb), E(_nextafter),
+	E(__setusermatherr), E(_hypot), E(_copysign), E(_logb), E(_scalb), E(_nextafter),
 	E(_finite), E(_isnan), E(_fpclass), E(_matherr),
 	E(_control87), E(_controlfp), E(_controlfp_s),
 	E(sinf), E(cosf), E(sqrtf), E(fabsf), E(powf), E(floorf), E(ceilf),
