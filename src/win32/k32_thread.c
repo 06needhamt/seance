@@ -573,39 +573,10 @@ WINFN(BOOL) k32_SetThreadGroupAffinity(HANDLE thread, const GROUP_AFFINITY *a,
 	return TRUE;
 }
 
-/*
- * Thread-pool timers and waits are not provided: creating one fails, the
- * way it does when the pool can't start, which callers have to expect. The
- * rest are for the NULL a failed create leaves them.
- */
-WINFN(PVOID) k32_CreateThreadpoolTimer(PVOID cb, PVOID ctx, PVOID env)
-{
-	win_set_error(ERROR_CALL_NOT_IMPLEMENTED);
-	return NULL;
-}
-
-WINFN(PVOID) k32_CreateThreadpoolWait(PVOID cb, PVOID ctx, PVOID env)
-{
-	win_set_error(ERROR_CALL_NOT_IMPLEMENTED);
-	return NULL;
-}
-
-WINFN(void) k32_SetThreadpoolTimer(PVOID timer, PFILETIME due, DWORD period,
-				   DWORD window) { }
-WINFN(void) k32_SetThreadpoolWait(PVOID wait, HANDLE h, PFILETIME timeout) { }
-WINFN(void) k32_CloseThreadpoolTimer(PVOID timer) { }
-WINFN(void) k32_CloseThreadpoolWait(PVOID wait) { }
-WINFN(void) k32_WaitForThreadpoolTimerCallbacks(PVOID timer, BOOL cancel) { }
-WINFN(void) k32_FreeLibraryWhenCallbackReturns(PVOID instance, HMODULE m) { }
-
 #define E(name) { #name, 0, (void *)k32_##name }
 
 const struct builtin_export k32_thread_exports[] = {
-	E(CloseThreadpoolTimer),
-	E(CloseThreadpoolWait),
 	E(CreateThread),
-	E(CreateThreadpoolTimer),
-	E(CreateThreadpoolWait),
 	E(ExitProcess),
 	E(ExitThread),
 	E(FatalAppExitA),
@@ -613,7 +584,6 @@ const struct builtin_export k32_thread_exports[] = {
 	E(FlsFree),
 	E(FlsGetValue),
 	E(FlsSetValue),
-	E(FreeLibraryWhenCallbackReturns),
 	E(GetCurrentProcess),
 	E(GetCurrentProcessId),
 	E(GetCurrentThread),
@@ -635,8 +605,6 @@ const struct builtin_export k32_thread_exports[] = {
 	E(SetThreadGroupAffinity),
 	E(SetThreadIdealProcessor),
 	E(SetThreadPriority),
-	E(SetThreadpoolTimer),
-	E(SetThreadpoolWait),
 	E(Sleep),
 	E(SleepEx),
 	E(SuspendThread),
@@ -647,6 +615,5 @@ const struct builtin_export k32_thread_exports[] = {
 	E(TlsFree),
 	E(TlsGetValue),
 	E(TlsSetValue),
-	E(WaitForThreadpoolTimerCallbacks),
 	BUILTIN_END
 };
