@@ -603,6 +603,26 @@ static void test_msvcrt_files(void)
 	CHECK_EQ(_setmaxstdio(8), -1);
 	CHECK_EQ(_open_osfhandle(0x1234, 0), -1);
 
+	/* The descriptor takes the handle over: reading works through it, and
+	 * the handle is closed, so only the descriptor is left to close. */
+	{
+		struct module *k = mod_load("kernel32.dll", NULL);
+		FN(k, HANDLE, CreateFileA, LPCSTR, DWORD, DWORD, void *, DWORD, DWORD, HANDLE);
+		FN(k, BOOL, CloseHandle, HANDLE);
+		CFN(c, int, _read, int, void *, unsigned);
+		char buf[16] = "";
+		HANDLE h = CreateFileA("C:\\WINDOWS\\TEMP\\crtfiles\\a.txt", 0x80000000,
+				       1, NULL, 3, 0x80, NULL);
+		CHECK(h != INVALID_HANDLE_VALUE);
+		int ofd = _open_osfhandle((intptr_t)h, 0);
+		CHECK(ofd >= 3);
+		CHECK_EQ(_read(ofd, buf, 12), 12);
+		CHECK(!memcmp(buf, "twelve bytes", 12));
+		CHECK(!CloseHandle(h));
+		CHECK_EQ(_close(ofd), 0);
+		mod_free(k);
+	}
+
 	CHECK_EQ(_unlink("C:\\WINDOWS\\TEMP\\crtfiles\\a.txt"), 0);
 	CHECK_EQ(_unlink("C:\\WINDOWS\\TEMP\\crtfiles\\b.log"), 0);
 	CHECK_EQ(_rmdir("C:\\WINDOWS\\TEMP\\crtfiles"), 0);

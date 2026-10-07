@@ -25,6 +25,7 @@
 
 #include "runtime/builtin.h"
 #include "win32/codepage.h"
+#include "win32/handle.h"
 #include "win32/internal.h"
 #include "win32/k32.h"
 #include "win32/path.h"
@@ -444,18 +445,25 @@ CRTFN(char *) crt__getcwd(char *buf, int size)
 }
 
 /*
- * A descriptor for a Win32 file handle: one onto the same file, which the
- * caller then owns as the CRT's, leaving the handle its own to close.
+ * A descriptor for a Win32 file handle. The descriptor takes the handle over,
+ * as the real call does: it is a new descriptor onto the same file, and the
+ * handle itself is closed, so closing the descriptor releases the file and
+ * the handle is no longer usable. (The standard handles are not closed: they
+ * belong to the process, not to the caller.)
  */
 CRTFN(int) crt__open_osfhandle(intptr_t handle, int flags)
 {
 	int fd = file_handle_fd((HANDLE)handle);
+	int nfd;
 
 	if (fd < 0) {
 		errno = EBADF;
 		return -1;
 	}
-	return dup(fd);
+	nfd = dup(fd);
+	if (nfd >= 0 && fd > 2)
+		handle_close((HANDLE)handle);
+	return nfd;
 }
 
 /* The stdio file limit is only a number here. */
