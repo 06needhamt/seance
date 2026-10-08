@@ -25,23 +25,31 @@ struct xform {
 	void *opaque;
 };
 
-/* The first FOURCC-shaped subtype among types; 0 if none. */
-static FOURCC fourcc_of(const GUID *g)
+/*
+ * An encoder's output: a FOURCC-shaped subtype for video, a format tag's
+ * subtype for audio; 0 if g is neither.
+ */
+static DWORD compression_of(const GUID *g, int audio)
 {
 	static const BYTE tail[8] = { 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71 };
 
-	return g->Data2 == 0 && g->Data3 == 0x10 &&
-	       !memcmp(g->Data4, tail, sizeof(tail)) && g->Data1 > 0xffff ?
-	       g->Data1 : 0;
+	if (g->Data2 || g->Data3 != 0x10 || memcmp(g->Data4, tail, sizeof(tail)))
+		return 0;
+	if (audio)
+		return g->Data1 && g->Data1 <= 0xffff &&
+		       g->Data1 != WAVE_FORMAT_PCM &&
+		       g->Data1 != WAVE_FORMAT_IEEE_FLOAT ? g->Data1 : 0;
+	return g->Data1 > 0xffff ? g->Data1 : 0;
 }
 
-static FOURCC filter_compression(const struct qz_filter *f)
+static DWORD filter_compression(const struct qz_filter *f, int audio)
 {
 	for (size_t p = 0; p < f->npins; p++) {
 		if (!(f->pins[p].flags & REG_PINFLAG_B_OUTPUT))
 			continue;
 		for (size_t t = 0; t < f->pins[p].ntypes; t++) {
-			FOURCC c = fourcc_of(&f->pins[p].types[t].minor);
+			DWORD c = compression_of(&f->pins[p].types[t].minor,
+						 audio);
 			if (c)
 				return c;
 		}
@@ -49,18 +57,24 @@ static FOURCC filter_compression(const struct qz_filter *f)
 	return 0;
 }
 
-static FOURCC dmo_compression(const struct dmo_reg *d)
+static DWORD dmo_compression(const struct dmo_reg *d, int audio)
 {
 	for (size_t t = 0; t < d->nout; t++) {
-		FOURCC c = fourcc_of(&d->out[t].subtype);
+		DWORD c = compression_of(&d->out[t].subtype, audio);
 		if (c)
 			return c;
 	}
 	return 0;
 }
 
-HRESULT xform_find(const char *path, const CLSID *selected, int encoder,
-		   struct xform_class *found)
+static enum dmo_role dmo_codec_role(int audio, int encoder)
+{
+	return audio ? (encoder ? DMO_ROLE_AUDIO_ENCODER : DMO_ROLE_AUDIO_DECODER) :
+		       (encoder ? DMO_ROLE_VIDEO_ENCODER : DMO_ROLE_VIDEO_DECODER);
+}
+
+HRESULT xform_find(const char *path, const CLSID *selected, int audio,
+		   int encoder, struct xform_class *found)
 {
 	struct dshow_server_found f;
 	HRESULT registration;
@@ -74,9 +88,9 @@ HRESULT xform_find(const char *path, const CLSID *selected, int encoder,
 	for (size_t i = 0; i < f.nfilters; i++) {
 		const struct qz_filter *q = &f.filters[i];
 		if ((selected && memcmp(selected, &q->clsid, sizeof(*selected))) ||
-		    dshow_role(q) != (encoder ? DSHOW_ENCODER : DSHOW_DECODER))
+		    dshow_role(q) != dshow_codec_role(audio, encoder))
 			continue;
-		FOURCC c = encoder ? filter_compression(q) : 0;
+		DWORD c = encoder ? filter_compression(q, audio) : 0;
 		if (encoder && !c)
 			continue;
 		found->clsid = q->clsid;
@@ -87,14 +101,13 @@ HRESULT xform_find(const char *path, const CLSID *selected, int encoder,
 	for (size_t i = 0; i < f.ndmos; i++) {
 		const struct dmo_reg *d = &f.dmos[i];
 		if ((selected && memcmp(selected, &d->clsid, sizeof(*selected))) ||
-		    dmo_role(d) != (encoder ? DMO_ROLE_VIDEO_ENCODER :
-					      DMO_ROLE_VIDEO_DECODER))
+		    dmo_role(d) != dmo_codec_role(audio, encoder))
 			continue;
 		/* One DMO in several categories is still one. */
 		if (matches && found->dmo &&
 		    !memcmp(&found->clsid, &d->clsid, sizeof(CLSID)))
 			continue;
-		FOURCC c = encoder ? dmo_compression(d) : 0;
+		DWORD c = encoder ? dmo_compression(d, audio) : 0;
 		if (encoder && !c)
 			continue;
 		found->clsid = d->clsid;
@@ -131,11 +144,11 @@ HRESULT xform_create(const char *path, const struct xform_class *c,
 	return S_OK;
 }
 
-HRESULT xform_open(const char *path, const CLSID *selected, int encoder,
-		   struct xform **x, struct xform_class *found)
+HRESULT xform_open(const char *path, const CLSID *selected, int audio,
+		   int encoder, struct xform **x, struct xform_class *found)
 {
 	struct xform_class c;
-	HRESULT hr = xform_find(path, selected, encoder, &c);
+	HRESULT hr = xform_find(path, selected, audio, encoder, &c);
 
 	if (x)
 		*x = NULL;
@@ -220,12 +233,17 @@ HRESULT xform_connect(struct xform *x, const AM_MEDIA_TYPE *in,
 	x->opaque = opaque;
 	if (x->c.dmo)
 		return dmo_host_create(x->mo, in, out, from_dmo, x, &x->dmo_host);
-	if (FAILED(hr = dshow_copy_media_type(&x->out, out)))
-		return hr;
 	hr = dshow_host_create(x->filter, in, out, callback ? from_sample : NULL,
 			       x, &x->host);
-	if (FAILED(hr))
+	/* The type connected: a partial one, completed by the filter. */
+	if (SUCCEEDED(hr))
+		hr = dshow_copy_media_type(&x->out,
+					   dshow_host_output_type(x->host));
+	if (FAILED(hr)) {
+		dshow_host_destroy(x->host);
+		x->host = NULL;
 		dshow_free_media_type(&x->out);
+	}
 	return hr;
 }
 

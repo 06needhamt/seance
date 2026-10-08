@@ -2,6 +2,7 @@
 /*
  * Helpers the CLI commands share.
  */
+#include <ctype.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -10,9 +11,11 @@
 #include <strings.h>
 #include <unistd.h>
 
+#include "avi/avi.h"
 #include "cmd_util.h"
 #include "common/error.h"
 #include "common/fourcc.h"
+#include "in/audio.h"
 #include "runtime/runtime.h"
 #include "vfw/icm.h"
 #include "vfw/registry.h"
@@ -29,6 +32,105 @@ int cli_parse_count(const char *opt, const char *s, unsigned long *out)
 	}
 	*out = v;
 	return 0;
+}
+
+int cli_parse_position(const char *opt, const char *s, struct cli_position *p)
+{
+	const char *q = s;
+	double secs = 0, part;
+	char *end;
+	int fields = 0;
+
+	memset(p, 0, sizeof(*p));
+	if (*s && strspn(s, "0123456789") == strlen(s)) {
+		errno = 0;
+		p->count = strtoull(s, &end, 10);
+		if (!errno)
+			return 0;
+	} else {
+		/* [h:]m:s, or a number and a unit. */
+		int ok = 1;
+		for (;;) {
+			if (!isdigit((unsigned char)*q) && *q != '.') {
+				ok = 0;
+				break;
+			}
+			errno = 0;
+			part = strtod(q, &end);
+			if (end == q || errno) {
+				ok = 0;
+				break;
+			}
+			secs = secs * 60 + part;
+			fields++;
+			q = end;
+			if (*q != ':')
+				break;
+			if (fields == 3) {
+				ok = 0;
+				break;
+			}
+			q++;
+		}
+		if (ok && fields > 1 && !*q) {
+			p->is_time = 1;
+		} else if (ok && fields == 1 && !strcmp(q, "s")) {
+			p->is_time = 1;
+		} else if (ok && fields == 1 && !strcmp(q, "ms")) {
+			p->is_time = 1;
+			secs /= 1000;
+		}
+		if (p->is_time && secs < 1e12) {
+			p->seconds = secs;
+			return 0;
+		}
+		p->is_time = 0;
+	}
+	fprintf(stderr, "seance: %s wants a count, or a time such as 2.5s, "
+		"1500ms or 1:02.5, not '%s'\n", opt, s);
+	return -1;
+}
+
+unsigned long long cli_position_units(const struct cli_position *p,
+				      DWORD rate, DWORD scale)
+{
+	if (!p->is_time)
+		return p->count;
+	if (!rate || !scale)
+		return 0;
+	/* A hair over, so 0.1s at 10 per second is 1, not 0.99999. */
+	return (unsigned long long)(p->seconds * rate / scale + 1e-6);
+}
+
+int cli_wants_audio(const char *in, long stream, int want, const char *format,
+		    const char *out, const char *const *audio_kinds)
+{
+	const char *dot = out ? strrchr(out, '.') : NULL;
+	const char *name = format ? format :
+			   dot && !strchr(dot, '/') ? dot + 1 : "";
+	enum audio_source_kind k = audio_source_kind_of_path(in);
+	struct avi_file *avi;
+	int audio;
+
+	if (want || k == AUDIO_SOURCE_WAV || k == AUDIO_SOURCE_RAW)
+		return 1;
+	if (!strcmp(in, "-"))
+		return 0;
+	for (size_t i = 0; audio_kinds && audio_kinds[i]; i++)
+		if (!strcasecmp(name, audio_kinds[i]))
+			return 1;
+	k = audio_source_sniff(in);
+	if (k != AUDIO_SOURCE_AVI)
+		return k == AUDIO_SOURCE_WAV;
+	if (!(avi = avi_open(in)))
+		return 0;	/* reported by the video path */
+	if (stream >= 0)
+		audio = (unsigned long)stream < avi->nstreams &&
+			avi_stream_wfx(&avi->streams[stream]);
+	else
+		audio = avi_video_stream(avi) < 0 && avi_audio_stream(avi) >= 0;
+	avi_close(avi);
+	return audio;
 }
 
 int cli_parse_size(const char *opt, const char *s, LONG *w, LONG *h)

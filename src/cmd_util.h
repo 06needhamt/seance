@@ -13,6 +13,33 @@
 /* Parses a non-negative number for option opt; prints the error. 0 or -1. */
 int cli_parse_count(const char *opt, const char *s, unsigned long *out);
 
+/*
+ * A position or a length in a stream: a count of its frames or samples
+ * ("250"), or a time, with a unit ("2.5s", "1500ms") or as [h:]m:s
+ * ("1:02.5"). Prints an error and returns -1 if s is neither.
+ */
+struct cli_position {
+	int is_time;
+	double seconds;
+	unsigned long long count;
+};
+int cli_parse_position(const char *opt, const char *s, struct cli_position *p);
+
+/*
+ * Whether a command is to work on audio rather than video: asked for
+ * (want), the input a WAV file (by name or contents) or raw PCM, the
+ * stream chosen (stream, or -1) an audio one, an output kind (format, else
+ * out's extension) that only audio has (one of audio_kinds), or an AVI
+ * file without video but with audio. Standard input ("-") is video unless
+ * asked or the output says otherwise.
+ */
+int cli_wants_audio(const char *in, long stream, int want, const char *format,
+		    const char *out, const char *const *audio_kinds);
+
+/* A position in units of scale / rate seconds (frames, or samples). */
+unsigned long long cli_position_units(const struct cli_position *p,
+				      DWORD rate, DWORD scale);
+
 /* Parses WxH (each 1..16384) for option opt; prints the error. 0 or -1. */
 int cli_parse_size(const char *opt, const char *s, LONG *w, LONG *h);
 

@@ -3,6 +3,7 @@
  * seance encode <codec> <input> -o <out.avi>: compress video with a
  * VfW codec, DirectShow filter or DMO into an AVI.
  */
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +12,7 @@
 #include <time.h>
 
 #include "avi/avi.h"
+#include "cmd_audio.h"
 #include "cmd_util.h"
 #include "commands.h"
 #include "common/error.h"
@@ -33,6 +35,7 @@ static int usage(void)
 		"usage: seance encode <codec.dll | fourcc> <input> -o <out.avi> "
 		"[options]\n"
 		"\n"
+		"Video:\n"
 		"  input                .y4m (4:2:0 or mono; \"-\" for stdin), an\n"
 		"                       uncompressed .avi, a .bmp file or numbered\n"
 		"                       files (frame%%04d.bmp), or raw frames with\n"
@@ -48,15 +51,29 @@ static int usage(void)
 		"  --input-format <f>   raw input: I420, YV12, YUY2, UYVY, BGR32,\n"
 		"                       BGR24 (top-down), RGB565, RGB555\n"
 		"  --size <WxH>         raw input: the frame size\n"
-		"  --stream <n>         AVI input: the video stream\n"
+		"  --stream <n>         AVI input: the stream\n"
 		"  --codec-input <f>    convert frames to this format for the codec\n"
 		"                       (default: as they are if it takes them, else\n"
 		"                       the first standard format it takes)\n"
-		"  --start <n>          first input frame (default 0)\n"
+		"  --start <pos>        first input frame, or a time (2.5s)\n"
 		"  --frames <n>         number of frames (default: all)\n"
+		"  --duration <len>     how much to encode, as frames or a time\n"
 		"  --state <file>       codec state to set first (ICM_SETSTATE)\n"
 		"  --save-state <file>  write the codec's state afterwards\n"
-		"  --odml               write OpenDML (AVI 2.0) indexes\n");
+		"  --odml               write OpenDML (AVI 2.0) indexes\n"
+		"\n"
+		"Audio, with a DirectShow filter or DMO (taken for a .wav input,\n"
+		"raw PCM, an AVI without video, a .wav or .pcm output, or --audio):\n"
+		"  input                .wav (\"-\" for stdin), an AVI's PCM stream,\n"
+		"                       or raw PCM with --raw\n"
+		"  -o <out>             .avi, .wav, or .pcm (the packets alone)\n"
+		"  --audio              the first audio stream of an AVI\n"
+		"  --clsid, --quality, --bitrate, --stream, --state, --save-state\n"
+		"                       as for video\n"
+		"  --start <pos>        where to begin: a sample number or a time\n"
+		"  --duration <len>     how much: samples or a time\n"
+		"  --raw <f> --sample-rate <hz> --channels <n>\n"
+		"                       raw PCM input: u8, s16, s24, s32, f32, f64\n");
 	return 2;
 }
 
@@ -345,7 +362,7 @@ static int encode_com(const char *target, const CLSID *selected,
 	struct xform_class found;
 	FOURCC compression;
 
-	HRESULT hr = xform_find(target, selected, 1, &found);
+	HRESULT hr = xform_find(target, selected, 0, 1, &found);
 	if (FAILED(hr)) {
 		fprintf(stderr, "seance: %s: no unique DirectShow or DMO video "
 			"encoder\n", target);
@@ -557,9 +574,13 @@ int cmd_encode(int argc, char **argv)
 	const char *forced = NULL, *state_path = NULL, *save_path = NULL;
 	unsigned long start = 0, count = (unsigned long)-1, quality = (unsigned long)-1;
 	unsigned long keyint = (unsigned long)-1, bitrate = 0, stream = (unsigned long)-1;
+	unsigned long channels = 0, hz = 0;
+	const char *raw = NULL;
+	int want_audio = 0;
 	DWORD rate = 0, scale = 0;
 	struct source_options so = { .stream = -1 };
 	struct avi_writer_options wo = { 0 };
+	struct audio_codec_job job = { .source.stream = -1, .quality = -1 };
 
 	for (int i = 1; i < argc; i++) {
 		const char *a = argv[i];
@@ -600,7 +621,22 @@ int cmd_encode(int argc, char **argv)
 			if (cli_parse_count(a, argv[++i], &bitrate))
 				return 2;
 		} else if (!strcmp(a, "--start") && v) {
-			if (cli_parse_count(a, argv[++i], &start))
+			if (cli_parse_position(a, argv[++i], &job.start))
+				return 2;
+			job.has_start = 1;
+		} else if (!strcmp(a, "--duration") && v) {
+			if (cli_parse_position(a, argv[++i], &job.duration))
+				return 2;
+			job.has_duration = 1;
+		} else if (!strcmp(a, "--audio")) {
+			want_audio = 1;
+		} else if (!strcmp(a, "--raw") && v) {
+			raw = argv[++i];
+		} else if (!strcmp(a, "--channels") && v) {
+			if (cli_parse_count(a, argv[++i], &channels))
+				return 2;
+		} else if (!strcmp(a, "--sample-rate") && v) {
+			if (cli_parse_count(a, argv[++i], &hz))
 				return 2;
 		} else if (!strcmp(a, "--frames") && v) {
 			if (cli_parse_count(a, argv[++i], &count))
@@ -628,10 +664,70 @@ int cmd_encode(int argc, char **argv)
 	if (stream != (unsigned long)-1)
 		so.stream = stream > 1000 ? 1000 : (int)stream;
 
+	/* Audio: a WAV, raw PCM, or an AVI's audio stream. */
+	if (raw || cli_wants_audio(path, so.stream, want_audio, NULL, out_path,
+				   audio_only_kinds)) {
+		if (fourcc || forced || keyint != (unsigned long)-1 || rate ||
+		    count != (unsigned long)-1 || so.raw_format || wo.force_odml) {
+			fprintf(stderr, "seance: --fourcc, --codec-input, --keyint, "
+				"--rate, --frames, --input-format and --odml are "
+				"for video\n");
+			return 2;
+		}
+		if (clsid_arg && parse_clsid(clsid_arg, &job.clsid_value)) {
+			fprintf(stderr, "seance: --clsid wants a GUID, not '%s'\n",
+				clsid_arg);
+			return 2;
+		}
+		job.clsid = clsid_arg ? &job.clsid_value : NULL;
+		job.codec = target;
+		job.in = path;
+		job.out = out_path;
+		job.source.stream = so.stream;
+		job.state = state_path;
+		job.save_state = save_path;
+		job.quality = quality == (unsigned long)-1 ? -1 : (long)quality;
+		job.bitrate = bitrate;
+		if (raw) {
+			job.source.kind = AUDIO_SOURCE_RAW;
+			job.source.channels = channels;
+			job.source.rate = hz;
+			if (audio_sample_from_name(raw, &job.source.raw_sample)) {
+				fprintf(stderr, "seance: %s\n", vfw_error());
+				return 2;
+			}
+		}
+		return encode_audio(&job);
+	}
+	if (raw || channels || hz) {
+		fprintf(stderr, "seance: --raw, --channels and --sample-rate are "
+			"for audio\n");
+		return 2;
+	}
+
 	struct source *src = source_open(path, &so);
 	if (!src) {
 		fprintf(stderr, "seance: %s\n", vfw_error());
 		return 1;
+	}
+	/* --start and --duration in frames, at the rate the frames will have. */
+	{
+		DWORD r = rate, sc = scale;
+		if (!r)
+			source_rate(src, &r, &sc);
+		if (!r || !sc) {
+			r = 25;
+			sc = 1;
+		}
+		if (job.has_start) {
+			unsigned long long n = cli_position_units(&job.start, r, sc);
+			start = n > ULONG_MAX ? ULONG_MAX : (unsigned long)n;
+		}
+		if (job.has_duration) {
+			unsigned long long n = cli_position_units(&job.duration, r, sc);
+			if (n < count)
+				count = (unsigned long)n;
+		}
 	}
 	struct pe_image *image = pe_open(target);
 	int directshow = image && dshow_is_server(image);

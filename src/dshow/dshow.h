@@ -93,9 +93,17 @@ struct dshow_filter;
 typedef HRESULT (*dshow_output_fn)(void *opaque, IMediaSample *sample,
 				   const AM_MEDIA_TYPE *dynamic_type);
 
+/*
+ * Connects filter between the host's source and sink, input in and output
+ * out, and runs it. out may be partial (a major type and subtype, with no
+ * format), for a filter to complete: dshow_host_output_type gives the type
+ * it connected with.
+ */
 HRESULT dshow_host_create(IBaseFilter *filter, const AM_MEDIA_TYPE *input,
 			  const AM_MEDIA_TYPE *output, dshow_output_fn callback,
 			  void *opaque, struct dshow_host **host);
+/* The output connection's type, as changed by any dynamic change since. */
+const AM_MEDIA_TYPE *dshow_host_output_type(const struct dshow_host *host);
 HRESULT dshow_host_push(struct dshow_host *host, const void *data, size_t size,
 			REFERENCE_TIME start, REFERENCE_TIME stop, DWORD flags);
 HRESULT dshow_host_seek(struct dshow_host *host, REFERENCE_TIME start,

@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * AVI reader and writer: round trips through every index kind, OpenDML
- * files with several RIFF chunks, and damaged files.
+ * files with several RIFF chunks, audio streams beside video and alone,
+ * and damaged files.
  *
  * With VFW_KEEP_TEST_FILES=<dir> the files are written there and kept,
  * for tests/validate_media.sh to check with ffprobe.
@@ -14,6 +15,7 @@
 #include "avi/avi.h"
 #include "common/error.h"
 #include "common/fourcc.h"
+#include "media/audio.h"
 #include "test.h"
 
 #define FCC(a, b, c, d) mmioFOURCC(a, b, c, d)
@@ -353,6 +355,313 @@ static void test_sizes(void)
 	cleanup("sizes.avi");
 }
 
+static WAVEFORMATEX pcm_format(WORD channels, DWORD rate)
+{
+	WAVEFORMATEXTENSIBLE x;
+	audio_pcm_format(AUDIO_S16, channels, rate, 0, AUDIO_FORM_PLAIN, &x);
+	return x.Format;
+}
+
+/*
+ * Video at 25 frames per second and 16-bit stereo PCM at 44100 Hz,
+ * interleaved: a frame, then its 1764 samples in chunks of `per` samples.
+ */
+static int write_av(const char *name, unsigned frames, unsigned per,
+		    const struct avi_writer_options *opts)
+{
+	BITMAPINFOHEADER bih = rgb_format(32, 16, 24);
+	WAVEFORMATEX wf = pcm_format(2, 44100);
+	struct avi_writer *w = avi_writer_create(path_of(name), opts);
+	BYTE frame[32 * 16 * 3], audio[4 * 1764];
+	unsigned sample = 0;
+	int v, a;
+
+	if (!w)
+		return -1;
+	v = avi_writer_add_video(w, &bih, sizeof(bih), 0, 25, 1);
+	a = avi_writer_add_audio(w, &wf, sizeof(wf), 0, 0, 0);
+	if (v != 0 || a != 1) {
+		avi_writer_close(w);
+		return -1;
+	}
+	for (unsigned f = 0; f < frames; f++) {
+		fill(frame, f, sizeof(frame));
+		if (avi_writer_write(w, v, frame, sizeof(frame), f % 5 == 0))
+			break;
+		for (unsigned done = 0; done < 1764; done += per) {
+			unsigned n = 1764 - done < per ? 1764 - done : per;
+			for (unsigned i = 0; i < 4 * n; i++)
+				audio[i] = pattern(1000, 4 * (size_t)sample + i);
+			sample += n;
+			if (avi_writer_write(w, a, audio, 4 * n, 0))
+				break;
+		}
+	}
+	return avi_writer_close(w);
+}
+
+/* Checks the audio stream of a write_av file: every sample, in order. */
+static void check_av_audio(struct avi_file *avi, unsigned frames)
+{
+	struct avi_stream *s = &avi->streams[1];
+	uint64_t at = 0;
+	unsigned bad = 0, badstart = 0;
+	BYTE buf[4 * 1764];
+
+	CHECK_EQ(s->length, 1764ull * frames);
+	for (size_t c = 0; c < s->nchunks; c++) {
+		struct avi_chunk *k = &s->chunks[c];
+		badstart += k->start != at / 4 ||
+			    (k->flags & AVIIF_KEYFRAME) == 0 ||
+			    k->id != FCC('0', '1', 'w', 'b');
+		if (k->size > sizeof(buf) || avi_read_chunk(avi, k, buf)) {
+			bad++;
+			continue;
+		}
+		for (unsigned i = 0; i < k->size; i++)
+			bad += buf[i] != pattern(1000, at + i);
+		at += k->size;
+	}
+	CHECK_EQ(at, 4 * 1764ull * frames);
+	CHECK_EQ(bad, 0);
+	CHECK_EQ(badstart, 0);
+}
+
+static void test_av(void)
+{
+	CHECK_EQ(write_av("av.avi", 10, 600, NULL), 0);
+	struct avi_file *avi = avi_open(path_of("av.avi"));
+	CHECK(avi);
+	if (!avi)
+		return;
+	CHECK_EQ(avi->nstreams, 2);
+	CHECK_EQ(avi->index_source, AVI_INDEX_IDX1);
+	CHECK_EQ(avi_video_stream(avi), 0);
+	CHECK_EQ(avi_audio_stream(avi), 1);
+	CHECK_EQ(avi->header.dwStreams, 2);
+	CHECK_EQ(avi->header.dwTotalFrames, 10);
+	CHECK_EQ(avi->header.dwMicroSecPerFrame, 40000);
+	CHECK_EQ(avi->header.dwMaxBytesPerSec, 1536 * 25 + 176400);
+
+	struct avi_stream *v = &avi->streams[0], *a = &avi->streams[1];
+	CHECK_EQ(v->nchunks, 10);
+	CHECK_EQ(v->length, 10);
+	CHECK_EQ(v->chunks[3].start, 3);
+	CHECK_EQ(avi_stream_time(v, 3), 1200000);
+	CHECK(avi_stream_wfx(v) == NULL);
+	CHECK(avi_stream_bih(a) == NULL);
+
+	CHECK_EQ(a->header.fccType, FCC('a', 'u', 'd', 's'));
+	CHECK_EQ(a->header.dwScale, 1);
+	CHECK_EQ(a->header.dwRate, 44100);
+	CHECK_EQ(a->header.dwSampleSize, 4);
+	CHECK_EQ(a->header.dwLength, 17640);
+	CHECK_EQ(a->header.dwSuggestedBufferSize, 2400);
+	CHECK_EQ(a->nchunks, 30);
+	const WAVEFORMATEX *wf = avi_stream_wfx(a);
+	WAVEFORMATEX want = pcm_format(2, 44100);
+	CHECK(wf && a->format_size == sizeof(want) &&
+	      !memcmp(wf, &want, sizeof(want)));
+	/* 600, 600 and 564 samples a frame. */
+	CHECK_EQ(a->chunks[2].size, 564 * 4);
+	CHECK_EQ(a->chunks[4].start, 1764 + 600);
+	CHECK_EQ(avi_stream_time(a, a->chunks[3].start), 400000);
+	check_av_audio(avi, 10);
+	avi_close(avi);
+
+	/* The same, indexed by a scan of the movi list. */
+	struct avi_writer_options o = { .no_idx1 = 1 };
+	CHECK_EQ(write_av("av_scan.avi", 4, 1764, &o), 0);
+	avi = avi_open(path_of("av_scan.avi"));
+	CHECK(avi);
+	if (avi) {
+		CHECK_EQ(avi->index_source, AVI_INDEX_SCAN);
+		CHECK_EQ(avi->streams[1].nchunks, 4);
+		check_av_audio(avi, 4);
+		avi_close(avi);
+	}
+	cleanup("av_scan.avi");
+}
+
+/* Video and audio over several RIFF chunks, and with the idx1 only. */
+static void test_av_odml(void)
+{
+	struct avi_writer_options o = { .riff_limit = 64 << 10 };
+	unsigned n = 60;
+
+	CHECK_EQ(write_av("av_odml.avi", n, 1000, &o), 0);
+	struct avi_file *avi = avi_open(path_of("av_odml.avi"));
+	CHECK(avi);
+	if (!avi)
+		return;
+	CHECK(avi->riff_count > 3);
+	CHECK_EQ(avi->index_source, AVI_INDEX_ODML);
+	CHECK_EQ(avi->total_frames, n);
+	CHECK_EQ(avi->streams[0].nchunks, n);
+	CHECK_EQ(avi->streams[0].chunks[0].id, FCC('0', '0', 'd', 'b'));
+	CHECK_EQ(avi->streams[1].nchunks, 2 * n);
+	CHECK_EQ(avi->streams[1].header.dwLength, 1764 * n);
+	check_av_audio(avi, n);
+	int riffs = (int)avi->riff_count;
+	avi_close(avi);
+
+	/* Without the OpenDML indexes: idx1, then a scan of the AVIX parts. */
+	void *buf;
+	size_t len;
+	const char *copy = path_of("av_odml_idx1.avi");
+	CHECK_EQ(vfw_read_file(path_of("av_odml.avi"), &buf, &len), 0);
+	int fd = open(copy, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	CHECK(fd >= 0 && write(fd, buf, len) == (ssize_t)len);
+	close(fd);
+	free(buf);
+	CHECK_EQ(patch_fourcc(copy, FCC('i', 'n', 'd', 'x'),
+			      FCC('J', 'U', 'N', 'K')), 0);
+	avi = avi_open(copy);
+	CHECK(avi);
+	if (avi) {
+		CHECK_EQ(avi->index_source, AVI_INDEX_IDX1);
+		CHECK_EQ(avi->riff_count, riffs);
+		CHECK_EQ(avi->streams[0].nchunks, n);
+		check_av_audio(avi, n);
+		avi_close(avi);
+	}
+	unlink(copy);
+}
+
+/* Audio alone, constant rate (compressed blocks) and variable rate. */
+static void test_audio_only(void)
+{
+	/* An IMA ADPCM-like format: 256-byte blocks of 505 samples. */
+	BYTE fmt[20] = { 0 };
+	WAVEFORMATEX *wf = (WAVEFORMATEX *)fmt;
+	wf->wFormatTag = WAVE_FORMAT_IMA_ADPCM;
+	wf->nChannels = 1;
+	wf->nSamplesPerSec = 22050;
+	wf->nAvgBytesPerSec = 11155;
+	wf->nBlockAlign = 256;
+	wf->wBitsPerSample = 4;
+	wf->cbSize = 2;
+	fmt[18] = 0xf9;	/* 505 samples a block */
+	fmt[19] = 0x01;
+	BYTE block[512];
+
+	struct avi_writer *w = avi_writer_create(path_of("audio.avi"), NULL);
+	CHECK(w);
+	if (!w)
+		return;
+	CHECK_EQ(avi_writer_add_audio(w, fmt, sizeof(fmt), 0, 0, 0), 0);
+	for (unsigned i = 0; i < 6; i++) {
+		fill(block, i, sizeof(block));
+		/* One block, then two. */
+		CHECK_EQ(avi_writer_write(w, 0, block, 256 * (1 + i % 2), 0), 0);
+	}
+	/* Streams can't be added once chunks are written. */
+	CHECK_EQ(avi_writer_add_audio(w, fmt, sizeof(fmt), 0, 0, 0), -1);
+	CHECK_EQ(avi_writer_write(w, 1, block, 4, 0), -1);
+	CHECK_EQ(avi_writer_close(w), 0);
+
+	struct avi_file *avi = avi_open(path_of("audio.avi"));
+	CHECK(avi);
+	if (!avi)
+		return;
+	CHECK_EQ(avi_video_stream(avi), -1);
+	CHECK_EQ(avi_audio_stream(avi), 0);
+	CHECK_EQ(avi->header.dwTotalFrames, 0);
+	CHECK_EQ(avi->header.dwMicroSecPerFrame, 0);
+	struct avi_stream *s = &avi->streams[0];
+	CHECK_EQ(s->header.dwScale, 256);
+	CHECK_EQ(s->header.dwRate, 11155);
+	CHECK_EQ(s->header.dwSampleSize, 256);
+	CHECK_EQ(s->header.dwLength, 9);
+	CHECK_EQ(s->length, 9);
+	CHECK_EQ(s->chunks[0].id, FCC('0', '0', 'w', 'b'));
+	CHECK_EQ(s->chunks[3].start, 4);
+	CHECK_EQ(avi_stream_time(s, 4), 4ll * 256 * 10000000 / 11155);
+	CHECK_EQ(s->format_size, sizeof(fmt));
+	CHECK(!memcmp(s->format, fmt, sizeof(fmt)));
+	avi_close(avi);
+
+	/* Variable rate: one 1152-sample frame a chunk. */
+	WAVEFORMATEX mp3 = { WAVE_FORMAT_MPEGLAYER3, 2, 44100, 16000, 1152, 0, 0 };
+	w = avi_writer_create(path_of("vbr.avi"), NULL);
+	CHECK(w);
+	if (!w)
+		return;
+	CHECK_EQ(avi_writer_add_audio(w, &mp3, sizeof(mp3), 44100, 1152, 0), 0);
+	for (unsigned i = 0; i < 20; i++) {
+		fill(block, i, 100 + i);
+		CHECK_EQ(avi_writer_write(w, 0, block, 100 + i, 0), 0);
+	}
+	CHECK_EQ(avi_writer_close(w), 0);
+	avi = avi_open(path_of("vbr.avi"));
+	CHECK(avi);
+	if (!avi)
+		return;
+	s = &avi->streams[0];
+	CHECK_EQ(s->header.dwSampleSize, 0);
+	CHECK_EQ(s->header.dwLength, 20);
+	CHECK_EQ(s->length, 20);
+	CHECK_EQ(s->chunks[7].start, 7);
+	CHECK_EQ(s->chunks[7].size, 107);
+	CHECK_EQ(avi_stream_time(s, 7), 7ll * 1152 * 10000000 / 44100);
+	avi_close(avi);
+}
+
+/* Audio formats as files have them: short, or with a cbSize too big. */
+static void test_audio_formats(void)
+{
+	WAVEFORMATEX wf = pcm_format(1, 8000);
+	BYTE big[24];
+	struct avi_writer *w;
+	struct avi_file *avi;
+
+	w = avi_writer_create(path_of("fmt16.avi"), NULL);
+	CHECK(w && avi_writer_add_audio(w, &wf, 16, 0, 0, 0) == 0);
+	CHECK(w && avi_writer_write(w, 0, "abcd", 4, 0) == 0);
+	CHECK(w && avi_writer_close(w) == 0);
+	avi = avi_open(path_of("fmt16.avi"));
+	CHECK(avi);
+	if (avi) {
+		const WAVEFORMATEX *got = avi_stream_wfx(&avi->streams[0]);
+		CHECK(got != NULL);
+		CHECK_EQ(avi->streams[0].format_size, 18);
+		CHECK(got && got->cbSize == 0 && got->nSamplesPerSec == 8000);
+		avi_close(avi);
+	}
+
+	memset(big, 0x55, sizeof(big));
+	memcpy(big, &wf, 16);
+	((WAVEFORMATEX *)big)->cbSize = 40;
+	w = avi_writer_create(path_of("fmtbig.avi"), NULL);
+	CHECK(w && avi_writer_add_audio(w, big, sizeof(big), 0, 0, 0) == 0);
+	CHECK(w && avi_writer_close(w) == 0);
+	avi = avi_open(path_of("fmtbig.avi"));
+	CHECK(avi);
+	if (avi) {
+		const WAVEFORMATEX *got = avi_stream_wfx(&avi->streams[0]);
+		CHECK(got && got->cbSize == 6);
+		CHECK_EQ(avi->streams[0].nchunks, 0);
+		CHECK_EQ(avi->streams[0].length, 0);
+		avi_close(avi);
+	}
+	/* A start offset counts in the times. */
+	avi = avi_open(path_of("fmt16.avi"));
+	if (avi) {
+		avi->streams[0].header.dwStart = 8000;
+		CHECK_EQ(avi_stream_time(&avi->streams[0], 4000), 15000000);
+		avi_close(avi);
+	}
+	/* A bad audio format isn't written. */
+	w = avi_writer_create(path_of("fmtbad.avi"), NULL);
+	wf.nBlockAlign = 0;
+	CHECK(w && avi_writer_add_audio(w, &wf, sizeof(wf), 0, 0, 0) == -1);
+	/* Nor is a file without streams. */
+	CHECK(w && avi_writer_close(w) == -1);
+	cleanup("fmt16.avi");
+	cleanup("fmtbig.avi");
+	unlink(path_of("fmtbad.avi"));
+}
+
 static void test_bad_files(void)
 {
 	const char *p = path_of("bad.avi");
@@ -404,19 +713,25 @@ static unsigned check_sane(const char *path, unsigned *opened)
 			free(b);
 		}
 		avi_stream_bih(s);
+		const WAVEFORMATEX *wf = avi_stream_wfx(s);
+		if (wf && (s->format_size < sizeof(*wf) ||
+			   wf->cbSize > s->format_size - sizeof(*wf)))
+			bad++;
+		if (s->nchunks && s->chunks[s->nchunks - 1].start > s->length)
+			bad++;
 	}
 	avi_close(avi);
 	return bad;
 }
 
-static void test_damage(void)
+static void test_damage(const char *name)
 {
 	void *orig;
 	size_t len;
 	const char *p = path_of("damaged.avi");
 	unsigned bad = 0, opened = 0;
 
-	if (vfw_read_file(path_of("odml.avi"), &orig, &len)) {
+	if (vfw_read_file(path_of(name), &orig, &len)) {
 		CHECK(0);
 		return;
 	}
@@ -441,7 +756,7 @@ static void test_damage(void)
 		CHECK(avi);
 		if (avi) {
 			CHECK(avi->truncated);
-			CHECK(avi->streams[0].nchunks > 100);
+			CHECK(avi->streams[0].nchunks > 30);
 			avi_close(avi);
 		}
 	}
@@ -490,9 +805,18 @@ int main(void)
 	test_odml_small();
 	test_odml_segments();
 	test_sizes();
+	test_av();
+	test_av_odml();
+	test_audio_only();
+	test_audio_formats();
 	test_bad_files();
-	test_damage();
+	test_damage("odml.avi");
+	test_damage("av_odml.avi");
 	cleanup("plain.avi");
+	cleanup("av.avi");
+	cleanup("av_odml.avi");
+	cleanup("audio.avi");
+	cleanup("vbr.avi");
 	cleanup("odml1.avi");
 	cleanup("odml.avi");
 	if (!keep)

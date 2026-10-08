@@ -12,6 +12,7 @@
 
 #include "avi/avi.h"
 #include "common/error.h"
+#include "media/audio.h"
 
 #define FCC(a, b, c, d) mmioFOURCC(a, b, c, d)
 #define ID_RIFF FCC('R', 'I', 'F', 'F')
@@ -128,7 +129,7 @@ static int add_chunk(struct avi_stream *s, uint64_t offset, DWORD size,
 			FAIL("out of memory");
 		s->chunks = c;
 	}
-	s->chunks[s->nchunks++] = (struct avi_chunk){ offset, size, flags, id };
+	s->chunks[s->nchunks++] = (struct avi_chunk){ offset, size, flags, id, 0 };
 	return 0;
 }
 
@@ -514,6 +515,57 @@ static int build_index(struct parse *p)
 	return scan_movi(p, 0);
 }
 
+/*
+ * Gives an audio stream's format the shape avi.h promises: at least a
+ * WAVEFORMATEX, with cbSize no more than the bytes after it.
+ */
+static int fix_audio_format(struct avi_stream *s)
+{
+	WAVEFORMATEX *wf;
+
+	if (s->header.fccType != FCC('a', 'u', 'd', 's') ||
+	    s->format_size < 16)
+		return 0;
+	if (s->format_size < sizeof(*wf)) {
+		BYTE *f = realloc(s->format, sizeof(*wf));
+		if (!f) {
+			vfw_set_error("out of memory");
+			return -1;
+		}
+		memset(f + s->format_size, 0, sizeof(*wf) - s->format_size);
+		s->format = f;
+		s->format_size = sizeof(*wf);
+	}
+	wf = (WAVEFORMATEX *)s->format;
+	if (wf->cbSize > s->format_size - sizeof(*wf))
+		wf->cbSize = (WORD)(s->format_size - sizeof(*wf));
+	return 0;
+}
+
+/* Counts frames, and where each chunk starts in the stream's units. */
+static void place_chunks(struct avi_stream *s)
+{
+	DWORD sample_size = s->header.fccType == FCC('v', 'i', 'd', 's') ?
+			    0 : s->header.dwSampleSize;
+	uint64_t bytes = 0;
+
+	s->length = 0;
+	for (size_t c = 0; c < s->nchunks; c++) {
+		struct avi_chunk *k = &s->chunks[c];
+		int frame = avi_chunk_is_frame(k);
+
+		s->frames += frame;
+		if (sample_size) {
+			k->start = bytes / sample_size;
+			bytes += k->size;
+			s->length = bytes / sample_size;
+		} else {
+			k->start = s->length;
+			s->length += frame;
+		}
+	}
+}
+
 struct avi_file *avi_open(const char *path)
 {
 	struct avi_file *avi = calloc(1, sizeof(*avi));
@@ -585,8 +637,9 @@ struct avi_file *avi_open(const char *path)
 
 	for (unsigned i = 0; i < avi->nstreams; i++) {
 		struct avi_stream *s = &avi->streams[i];
-		for (size_t c = 0; c < s->nchunks; c++)
-			s->frames += avi_chunk_is_frame(&s->chunks[c]);
+		if (fix_audio_format(s))
+			goto fail;
+		place_chunks(s);
 	}
 	if (!avi->total_frames)
 		avi->total_frames = avi->header.dwTotalFrames;
@@ -635,6 +688,28 @@ int avi_video_stream(const struct avi_file *avi)
 		if (avi->streams[i].header.fccType == FCC('v', 'i', 'd', 's'))
 			return (int)i;
 	return -1;
+}
+
+int avi_audio_stream(const struct avi_file *avi)
+{
+	for (unsigned i = 0; i < avi->nstreams; i++)
+		if (avi_stream_wfx(&avi->streams[i]))
+			return (int)i;
+	return -1;
+}
+
+const WAVEFORMATEX *avi_stream_wfx(const struct avi_stream *s)
+{
+	if (s->header.fccType != FCC('a', 'u', 'd', 's') ||
+	    s->format_size < sizeof(WAVEFORMATEX))
+		return NULL;
+	return (const WAVEFORMATEX *)s->format;
+}
+
+int64_t avi_stream_time(const struct avi_stream *s, uint64_t units)
+{
+	return audio_ticks(s->header.dwStart + units, s->header.dwScale,
+			   s->header.dwRate);
 }
 
 const BITMAPINFOHEADER *avi_stream_bih(const struct avi_stream *s)

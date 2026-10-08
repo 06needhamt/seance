@@ -15,18 +15,27 @@
 #include "win32/msdmo.h"
 #include "win32/quartz.h"
 
-/* What a filter is for, judged from its pins and category. */
+/*
+ * What a filter is for, judged from its pins and category: a major type
+ * (video, then audio) and a direction.
+ */
 enum dshow_role {
 	DSHOW_OTHER,
-	DSHOW_DECODER,		/* compressed video in, uncompressed out */
-	DSHOW_ENCODER,		/* the reverse, or a video compressor */
+	DSHOW_VIDEO_DECODER,	/* compressed video in, uncompressed out */
+	DSHOW_VIDEO_ENCODER,	/* the reverse, or a video compressor */
+	DSHOW_AUDIO_DECODER,	/* compressed audio in, PCM or float out */
+	DSHOW_AUDIO_ENCODER,	/* the reverse, or an audio compressor */
 };
 
 enum dshow_role dshow_role(const struct qz_filter *f);
 const char *dshow_role_name(enum dshow_role role);
+/* The decoder or encoder role of a major type. */
+enum dshow_role dshow_codec_role(int audio, int encoder);
 
 /* Whether a video subtype is uncompressed: RGB, or a raw YUV FOURCC. */
 int dshow_uncompressed_video(const GUID *subtype);
+/* Whether an audio subtype is uncompressed: PCM or float. */
+int dshow_uncompressed_audio(const GUID *subtype);
 
 /*
  * Whether an image is a COM server (filters, DMOs) rather than a VfW codec:
@@ -85,7 +94,8 @@ struct dshow_registered {
 /*
  * The filters registered in every filter category (HKCR\CLSID\{category}
  * \Instance, the categories being those under ActiveMovieCategories plus
- * the legacy and video compressor ones) and the legacy way (HKCR\Filter);
+ * the legacy, video compressor and audio compressor ones) and the legacy
+ * way (HKCR\Filter);
  * malloc()ed, to free with dshow_registered_free. Returns the count.
  */
 size_t dshow_registered_filters(struct dshow_registered **out);
