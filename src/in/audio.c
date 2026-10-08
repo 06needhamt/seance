@@ -36,6 +36,7 @@ struct audio_source {
 	struct avi_file *avi;
 	const struct avi_stream *stream;
 	size_t chunk;
+	int64_t end;		/* where the last packet read ends */
 };
 
 const char *audio_source_kind_name(enum audio_source_kind kind)
@@ -63,8 +64,7 @@ enum audio_source_kind audio_source_kind_of_path(const char *path)
 	return AUDIO_SOURCE_AUTO;
 }
 
-/* What a file holds, from its first 12 bytes. */
-static enum audio_source_kind sniff(const char *path)
+enum audio_source_kind audio_source_sniff(const char *path)
 {
 	BYTE b[12];
 	int fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -209,7 +209,8 @@ struct audio_source *audio_source_open(const char *path,
 	s->fd = -1;
 	s->kind = o->kind;
 	if (s->kind == AUDIO_SOURCE_AUTO)
-		s->kind = !strcmp(path, "-") ? AUDIO_SOURCE_WAV : sniff(path);
+		s->kind = !strcmp(path, "-") ? AUDIO_SOURCE_WAV :
+			  audio_source_sniff(path);
 	if (s->kind == AUDIO_SOURCE_AUTO)
 		s->kind = audio_source_kind_of_path(path);
 
@@ -271,6 +272,11 @@ int64_t audio_source_duration(const struct audio_source *s)
 	return s->duration;
 }
 
+int64_t audio_source_packet_end(const struct audio_source *s)
+{
+	return s->end;
+}
+
 int audio_source_truncated(const struct audio_source *s)
 {
 	return s->truncated || (s->wav && wav_truncated(s->wav));
@@ -326,10 +332,20 @@ int audio_source_read(struct audio_source *s, const BYTE **data,
 		*len = k->size;
 		*time = avi_stream_time(s->stream, k->start) -
 			avi_stream_time(s->stream, 0);
+		DWORD sample_size = s->stream->header.dwSampleSize;
+		s->end = avi_stream_time(s->stream, k->start + (sample_size ?
+					 k->size / sample_size : 1)) -
+			 avi_stream_time(s->stream, 0);
 		return 1;
 	}
 
-	size_t want = PACKET_BYTES / s->block * s->block;
+	/*
+	 * PCM in runs of whole sample frames; a compressed format a block
+	 * (its packet) at a time, or for a byte stream (a block of 1), a few
+	 * kilobytes.
+	 */
+	size_t want = s->pcm ? PACKET_BYTES / s->block * s->block :
+		      s->block > 1 ? s->block : 4096;
 	long r;
 
 	if (!want)
@@ -351,5 +367,6 @@ int audio_source_read(struct audio_source *s, const BYTE **data,
 	*len = (size_t)r;
 	*time = bytes_to_time(s, s->pos);
 	s->pos += (uint64_t)r;
+	s->end = bytes_to_time(s, s->pos);
 	return 1;
 }

@@ -86,9 +86,9 @@ size_t audio_pcm_format(enum audio_sample s, WORD channels, DWORD rate,
 
 /*
  * The PCM types a decoder of `in` is offered, in order: want alone when it
- * isn't AUDIO_NONE, else 16-bit, 24-bit and 32-bit integers and 32-bit
- * float; each plain and then extensible up to two channels, the other way
- * round above, at the input's channels and rate.
+ * isn't AUDIO_NONE, else 16-bit, 24-bit and 32-bit integers, 32-bit
+ * float and 8-bit; each plain and then extensible up to two channels, the
+ * other way round above, at the input's channels and rate.
  * Returns how many were written (at most max).
  */
 size_t audio_output_preferences(const WAVEFORMATEX *in, size_t size,

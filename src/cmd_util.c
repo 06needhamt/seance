@@ -11,9 +11,11 @@
 #include <strings.h>
 #include <unistd.h>
 
+#include "avi/avi.h"
 #include "cmd_util.h"
 #include "common/error.h"
 #include "common/fourcc.h"
+#include "in/audio.h"
 #include "runtime/runtime.h"
 #include "vfw/icm.h"
 #include "vfw/registry.h"
@@ -98,6 +100,37 @@ unsigned long long cli_position_units(const struct cli_position *p,
 		return 0;
 	/* A hair over, so 0.1s at 10 per second is 1, not 0.99999. */
 	return (unsigned long long)(p->seconds * rate / scale + 1e-6);
+}
+
+int cli_wants_audio(const char *in, long stream, int want, const char *format,
+		    const char *out, const char *const *audio_kinds)
+{
+	const char *dot = out ? strrchr(out, '.') : NULL;
+	const char *name = format ? format :
+			   dot && !strchr(dot, '/') ? dot + 1 : "";
+	enum audio_source_kind k = audio_source_kind_of_path(in);
+	struct avi_file *avi;
+	int audio;
+
+	if (want || k == AUDIO_SOURCE_WAV || k == AUDIO_SOURCE_RAW)
+		return 1;
+	if (!strcmp(in, "-"))
+		return 0;
+	for (size_t i = 0; audio_kinds && audio_kinds[i]; i++)
+		if (!strcasecmp(name, audio_kinds[i]))
+			return 1;
+	k = audio_source_sniff(in);
+	if (k != AUDIO_SOURCE_AVI)
+		return k == AUDIO_SOURCE_WAV;
+	if (!(avi = avi_open(in)))
+		return 0;	/* reported by the video path */
+	if (stream >= 0)
+		audio = (unsigned long)stream < avi->nstreams &&
+			avi_stream_wfx(&avi->streams[stream]);
+	else
+		audio = avi_video_stream(avi) < 0 && avi_audio_stream(avi) >= 0;
+	avi_close(avi);
+	return audio;
 }
 
 int cli_parse_size(const char *opt, const char *s, LONG *w, LONG *h)

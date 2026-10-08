@@ -157,7 +157,7 @@ static void test_dry_run(const char *server)
 
 	/* A filter server registers no DMOs. */
 	CHECK_EQ(dshow_server_discover(fixture("testfilter.ax"), &found, &hr), 0);
-	CHECK_EQ(found.nfilters, 2);
+	CHECK_EQ(found.nfilters, 4);
 	CHECK_EQ(found.ndmos, 0);
 	dshow_server_found_free(&found);
 }

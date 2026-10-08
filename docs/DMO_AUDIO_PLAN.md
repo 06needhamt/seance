@@ -335,10 +335,42 @@ include/win32/mmreg.h    WAVEFORMATEXTENSIBLE, format tags, KSDATAFORMAT GUIDs
      the damage run over a file with audio), `test_cli`, smoke cases, and
      `validate_media.sh` comparing every PCM format, sample conversion,
      trimming and MP3 copying with FFmpeg.
-4. **Audio through DirectShow.** The host's per-major-type table, audio
-   roles, `decode`/`encode` with `--audio`/`--stream`/`--duration`.
+4. **Audio through DirectShow.** (Done.) The host's per-major-type table,
+   audio roles, `decode`/`encode` with `--audio`/`--stream`/`--duration`.
    Milestone: `TSTA` encode → decode through `testfilter.ax` round-trips a
    WAV exactly, in every fixture mode.
+   - The host needed less than a table: its sink takes a new type of the
+     same major type, audio input samples get buffers of two seconds (at
+     least a megabyte) rather than `lSampleSize`, and the output type is
+     the one the filter connected with. An output type may be partial (a
+     major type and subtype), for an encoder to complete, as filters do
+     when `IPin::Connect` leaves the choice to them.
+   - `enum dshow_role` is a major type and a direction: video or audio,
+     decoder or encoder (audio encoders also by
+     `CLSID_AudioCompressorCategory`, which the registered list now
+     reads). `xform_find` takes both; an audio encoder names its output by
+     format tag.
+   - `src/cmd_audio.c` holds the audio halves of `decode` and `encode`.
+     Decoders are offered the preference list (with 8-bit added last);
+     outputs are written as they come, trimmed to the sample by count, and
+     a change to other PCM of the same channels and rate is converted
+     back. Encoders get the PCM as it is or converted, a partial output
+     type, and an AVI stream timed by the first packet. `probe` shows the
+     PCM an audio decoder takes for a file and what an encoder makes of
+     one; `decode auto` finds registered audio decoders by tag.
+   - The fixture's `TSTA` codec is in `tests/fixtures/tsta.h`, for the DMO
+     pair to share. Its modes are `AUDIO_SPLIT` (pieces of 300 frames),
+     `AUDIO_HOLD` (each packet's PCM held until the next, the last until
+     the end of the stream), `AUDIO_FLOAT` (float from the second packet)
+     and `AUDIO_RATE` (a claimed rate change, which must fail cleanly).
+   - A compressed WAV is now read a block at a time, a packet for a
+     decoder. Standard input (`-`) stays Y4M for `encode` unless
+     `--audio`.
+   - Tests: `test_dshow_audio` (each mode in a child process, with
+     `DllCanUnloadNow` checked), `test_discover` for the four classes and
+     roles, smoke cases for every mode and option, and `validate_media.sh`
+     checks that FFmpeg's s24 and 6-channel PCM come back exactly and that
+     FFmpeg reads the TSTA AVI.
 5. **Audio through DMOs.** The same over `testdmo.dll`.
    Milestone: as Phase 4, and the DirectShow and DMO `TSTA` outputs match.
 6. **Real codecs and docs.** `tests/samples.sh` reports DMOs and audio

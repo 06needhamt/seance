@@ -25,6 +25,17 @@ struct cli_position {
 };
 int cli_parse_position(const char *opt, const char *s, struct cli_position *p);
 
+/*
+ * Whether a command is to work on audio rather than video: asked for
+ * (want), the input a WAV file (by name or contents) or raw PCM, the
+ * stream chosen (stream, or -1) an audio one, an output kind (format, else
+ * out's extension) that only audio has (one of audio_kinds), or an AVI
+ * file without video but with audio. Standard input ("-") is video unless
+ * asked or the output says otherwise.
+ */
+int cli_wants_audio(const char *in, long stream, int want, const char *format,
+		    const char *out, const char *const *audio_kinds);
+
 /* A position in units of scale / rate seconds (frames, or samples). */
 unsigned long long cli_position_units(const struct cli_position *p,
 				      DWORD rate, DWORD scale);

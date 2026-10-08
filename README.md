@@ -44,7 +44,8 @@ access and hardware decoding.
 DMOs are found, registered and run for video decoding and encoding as well.
 Audio files are read and written without a codec: WAV (and RF64), raw PCM
 and AVI audio streams, through `avi` and `convert`. Audio decoders and
-encoders (filters and DMOs) are the next phases of
+encoders that are DirectShow filters run through `decode` and `encode`;
+audio DMOs are the next phase of
 [docs/DMO_AUDIO_PLAN.md](docs/DMO_AUDIO_PLAN.md).
 
 ## Prerequisites
@@ -589,6 +590,53 @@ Both commands print the frame count, the formats on each side and the time
 spent in the codec per frame. With `testcodec.dll`, encoding a clip and
 decoding it again gives the input back byte for byte, which the unit tests
 and `validate_media` check for Y4M, BMP, raw and AVI input.
+
+#### Audio
+
+```sh
+build/seance decode decoder.ax music.avi -o music.wav
+build/seance decode decoder.ax music.avi -o part.pcm --start 1:00 --duration 5s
+build/seance decode auto clip.avi -o clip.wav --sample-format f32
+build/seance encode encoder.ax music.wav -o music.avi --bitrate 192
+build/seance encode encoder.ax clip.avi -o sound.wav --audio
+```
+
+`decode` and `encode` work on audio when the input is a WAV file (or raw
+PCM, for `encode`), an AVI without video, the output is `.wav` or `.pcm`,
+or `--audio` (the first audio stream) or a `--stream` that is audio is
+given. The codec is a DirectShow filter server: its audio decoder (or
+encoder), judged from its pins (compressed audio in, PCM or float out, or
+the reverse) or its category (`CLSID_AudioCompressorCategory`); `list`
+and `probe` name these roles.
+
+A decoder is offered the stream's format as `FORMAT_WaveFormatEx` and PCM
+at the stream's channels and rate: 16-bit, then 24- and 32-bit, float and
+8-bit, each as a `WAVEFORMATEX` and a `WAVEFORMATEXTENSIBLE` (extensible
+first above two channels), or only `--sample-format` when given (converted
+to it, if the decoder takes none of that kind). Each AVI chunk, or each
+block of a WAV, goes in as a sample stamped with its time. Outputs may
+come in pieces of any size and the last only at the end of the stream. A
+decoder that changes to other PCM of the same channels and rate mid-stream
+is followed, converting back; a change of rate or channels stops with a
+message, since the file can't follow it. `--start` and `--duration` take
+sample counts or times and cut to the sample.
+
+An encoder is given the PCM as it is, else the first other sample format
+it takes, and an output type of only `MEDIATYPE_Audio` and its format
+tag's subtype, which it completes (`probe encoder.ax in.wav` shows what it
+makes). An AVI stream takes its timing from the encoder's first packet
+(variable rate, a packet a chunk, as MP3 in AVI is), or counts blocks when
+packets aren't timed; a WAV gets the packets back to back and a `fact`
+chunk. `--bitrate` and `--quality` reach the encoder through `ICodecAPI`
+(`CODECAPI_AVEncCommonMeanBitRate` and `_Quality`), and `--state`/
+`--save-state` through `IPersistStream`. `decode auto` looks for a
+registered audio decoder of the stream's format tag.
+
+`testfilter.ax` has an audio pair for this: a lossless codec, `TSTA`
+(tag 0x7354), whose decoder can give its PCM in pieces, hold it back to
+the end of the stream, switch to float, or claim another sample rate. A
+WAV encoded and decoded through it comes back byte for byte in each of
+those modes.
 
 ### Real codecs: the samples run
 

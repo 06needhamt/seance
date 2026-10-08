@@ -31,7 +31,7 @@ HRESULT dshow_filter_open(const char *path, const CLSID *selected, int encoder,
 		if (selected && memcmp(selected, &found[i].clsid, sizeof(*selected)))
 			continue;
 		if (dshow_role(&found[i]) !=
-				(encoder ? DSHOW_ENCODER : DSHOW_DECODER))
+				(encoder ? DSHOW_VIDEO_ENCODER : DSHOW_VIDEO_DECODER))
 			continue;
 		clsid = found[i].clsid;
 		matches++;

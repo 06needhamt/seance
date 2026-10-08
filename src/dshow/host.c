@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /* Minimal DirectShow graph: harness source -> transform -> harness sink. */
 #include <errno.h>
+#include <stdint.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -181,8 +182,15 @@ static HRESULT WINAPI pin_id(IPin *p, LPWSTR *out) {
   memcpy(*out, id, (n + 1) * sizeof(WCHAR));
   return S_OK;
 }
+/* A new type for the connection (a dynamic change): of the same major type. */
 static HRESULT WINAPI pin_accept(IPin *p, const AM_MEDIA_TYPE *mt) {
-  return mt && guid_eq(&mt->majortype, &MEDIATYPE_Video) ? S_OK : S_FALSE;
+  struct host_pin *pin = (void *)p;
+  if (!mt)
+    return E_POINTER;
+  if (pin->connected)
+    return guid_eq(&mt->majortype, &pin->type.majortype) ? S_OK : S_FALSE;
+  return guid_eq(&mt->majortype, &MEDIATYPE_Video) ||
+         guid_eq(&mt->majortype, &MEDIATYPE_Audio) ? S_OK : S_FALSE;
 }
 static HRESULT WINAPI pin_enum(IPin *p, IEnumMediaTypes **out) {
   return E_NOTIMPL;
@@ -518,6 +526,30 @@ static HRESULT WINAPI event_notify(IMediaEventSink *p, LONG code, LONG_PTR a,
 static const IMediaEventSinkVtbl event_vtbl = {event_qi, event_addref,
                                                event_release, event_notify};
 
+/*
+ * The buffer each input sample needs. Video says it in lSampleSize (the
+ * largest frame); audio packets vary, so they get room for the larger of
+ * that, two seconds and a megabyte.
+ */
+static ULONG input_buffer(const AM_MEDIA_TYPE *in) {
+  ULONG bytes = in->lSampleSize;
+  if (guid_eq(&in->majortype, &MEDIATYPE_Audio) &&
+      guid_eq(&in->formattype, &FORMAT_WaveFormatEx) && in->pbFormat &&
+      in->cbFormat >= 16) {
+    const WAVEFORMATEX *wf = (const WAVEFORMATEX *)in->pbFormat;
+    uint64_t want = (uint64_t)wf->nAvgBytesPerSec * 2;
+    if (want < (1u << 20))
+      want = 1u << 20;
+    if (want < 4ull * wf->nBlockAlign)
+      want = 4ull * wf->nBlockAlign;
+    if (want > (64u << 20))
+      want = 64u << 20;
+    if (want > bytes)
+      bytes = (ULONG)want;
+  }
+  return bytes;
+}
+
 static HRESULT negotiate_allocator(struct dshow_host *h, ULONG bytes) {
   HRESULT hr = dshow_call_mem_get_allocator(h->mem, &h->allocator);
   if (FAILED(hr)) {
@@ -595,7 +627,7 @@ HRESULT dshow_host_create(IBaseFilter *f, const AM_MEDIA_TYPE *in,
   if (SUCCEEDED(hr))
     hr = dshow_call_pin_connect(h->output, &h->sink.pin, out);
   if (SUCCEEDED(hr))
-    hr = negotiate_allocator(h, in->lSampleSize);
+    hr = negotiate_allocator(h, input_buffer(in));
   if (SUCCEEDED(hr))
     hr = dshow_call_filter_pause(f);
   if (SUCCEEDED(hr))
@@ -718,6 +750,10 @@ HRESULT dshow_host_event(struct dshow_host *h, LONG *c, LONG_PTR *a,
   h->have_event = 0;
   pthread_mutex_unlock(&h->mutex);
   return S_OK;
+}
+
+const AM_MEDIA_TYPE *dshow_host_output_type(const struct dshow_host *h) {
+  return h && h->sink.connected ? &h->sink.type : NULL;
 }
 
 void dshow_host_destroy(struct dshow_host *h) {

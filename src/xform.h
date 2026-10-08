@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * A COM video transform, a DirectShow filter or a DMO, behind one
+ * A COM transform of video or audio, a DirectShow filter or a DMO, behind one
  * interface, so decode, encode and probe drive either the same way: open
  * the one decoder (or encoder) a DLL has, connect it with an input and an
  * output type, push frames, and take what comes out through a callback.
@@ -16,7 +16,8 @@
 struct xform_class {
 	CLSID clsid;
 	int dmo;		/* a DMO, else a DirectShow filter */
-	FOURCC compression;	/* an encoder's output FOURCC, else 0 */
+	/* An encoder's output: a FOURCC for video, a format tag for audio. */
+	DWORD compression;
 };
 
 /* One output, from a filter's sample or a DMO's buffer. */
@@ -34,19 +35,20 @@ typedef HRESULT (*xform_output_fn)(void *opaque, const struct xform_output *o,
 struct xform;
 
 /*
- * The video decoder (or encoder) among the filters and DMOs the server at
- * path registers, or the one with CLSID selected: S_OK and *found, or
- * CLASS_E_CLASSNOTAVAILABLE for none, VFW_E_DUPLICATE_NAME for several.
- * An encoder counts only if it names a FOURCC for its output.
+ * The decoder (or encoder) of video (or audio) among the filters and DMOs
+ * the server at path registers, or the one with CLSID selected: S_OK and
+ * *found, or CLASS_E_CLASSNOTAVAILABLE for none, VFW_E_DUPLICATE_NAME for
+ * several. An encoder counts only if it names its output: a FOURCC for
+ * video, a format tag for audio.
  */
-HRESULT xform_find(const char *path, const CLSID *selected, int encoder,
-		   struct xform_class *found);
+HRESULT xform_find(const char *path, const CLSID *selected, int audio,
+		   int encoder, struct xform_class *found);
 /* Creates the class (found, or known) and holds it. */
 HRESULT xform_create(const char *path, const struct xform_class *c,
 		     struct xform **x);
 /* xform_find, then xform_create. */
-HRESULT xform_open(const char *path, const CLSID *selected, int encoder,
-		   struct xform **x, struct xform_class *found);
+HRESULT xform_open(const char *path, const CLSID *selected, int audio,
+		   int encoder, struct xform **x, struct xform_class *found);
 void xform_close(struct xform *x);
 
 /* "DirectShow filter" or "DMO". */
@@ -57,7 +59,9 @@ void *xform_object(const struct xform *x);
 /*
  * Connects with an input and an output type (or fails, the transform then
  * left unconnected for another try). The callback may be NULL to only see
- * whether the types are taken.
+ * whether the types are taken. A filter may be given a partial output type
+ * (major type and subtype only) to complete; xform_output_type then says
+ * what it chose.
  */
 HRESULT xform_connect(struct xform *x, const AM_MEDIA_TYPE *in,
 		      const AM_MEDIA_TYPE *out, xform_output_fn callback,

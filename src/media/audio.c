@@ -316,7 +316,7 @@ size_t audio_output_preferences(const WAVEFORMATEX *in, size_t size,
 				WAVEFORMATEXTENSIBLE *out, size_t max)
 {
 	static const enum audio_sample usual[] = {
-		AUDIO_S16, AUDIO_S24, AUDIO_S32, AUDIO_F32,
+		AUDIO_S16, AUDIO_S24, AUDIO_S32, AUDIO_F32, AUDIO_U8,
 	};
 	const enum audio_sample *list = want != AUDIO_NONE ? &want : usual;
 	size_t nlist = want != AUDIO_NONE ? 1 : sizeof(usual) / sizeof(usual[0]);

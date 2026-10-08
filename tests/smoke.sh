@@ -146,6 +146,63 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	fails $emu "$harness" decode "$fixtures/testcodec.dll" "$junk" -o /dev/null \
 		--format raw
 
+	# Audio through testfilter.ax's TSTA encoder and decoder: PCM back
+	# exactly, in every mode of the decoder, through AVI and WAV.
+	work=$(mktemp -d)
+	f=$fixtures/testfilter.ax
+	head -c 40000 /dev/urandom >"$work/in.pcm"
+	$emu "$harness" convert --raw s16 --rate 22050 --channels 2 \
+		"$work/in.pcm" -o "$work/in.wav" 2>/dev/null
+	$emu "$harness" encode "$f" "$work/in.wav" -o "$work/t.avi" 2>/dev/null
+	$emu "$harness" avi "$work/t.avi" | grep -q "wave format 0x7354"
+	for mode in "" SPLIT HOLD FLOAT; do
+		env ${mode:+VFW_ENV_TESTFILTER_AUDIO_$mode=1} $emu "$harness" \
+			decode "$f" "$work/t.avi" -o "$work/out.pcm" 2>/dev/null
+		cmp -s "$work/in.pcm" "$work/out.pcm" || {
+			echo "smoke: TSTA decode${mode:+ ($mode)} differs" >&2
+			exit 1
+		}
+	done
+	fails env VFW_ENV_TESTFILTER_AUDIO_RATE=1 $emu "$harness" decode "$f" \
+		"$work/t.avi" -o "$work/x.wav"
+	$emu "$harness" encode "$f" "$work/in.wav" -o "$work/t.wav" \
+		--bitrate 128 2>/dev/null
+	$emu "$harness" decode "$f" "$work/t.wav" -o - --format pcm 2>/dev/null |
+		cmp - "$work/in.pcm"
+	$emu "$harness" encode "$f" --audio - -o "$work/p.avi" \
+		<"$work/in.wav" 2>/dev/null
+	cmp -s "$work/t.avi" "$work/p.avi"
+	# To the sample, and as float and back.
+	$emu "$harness" decode "$f" "$work/t.avi" -o "$work/part.pcm" \
+		--start 1000 --duration 0.1s 2>/dev/null
+	tail -c +4001 "$work/in.pcm" | head -c 8820 | cmp - "$work/part.pcm"
+	$emu "$harness" decode "$f" "$work/t.avi" -o "$work/f.wav" \
+		--sample-format f32 2>/dev/null
+	$emu "$harness" convert "$work/f.wav" -o "$work/f.pcm" \
+		--sample-format s16 2>/dev/null
+	cmp "$work/in.pcm" "$work/f.pcm"
+	$emu "$harness" encode "$f" "$work/in.wav" -o "$work/part.avi" \
+		--start 0.5s --duration 1000 2>/dev/null
+	$emu "$harness" decode "$f" "$work/part.avi" -o "$work/part2.pcm" \
+		2>/dev/null
+	tail -c +44101 "$work/in.pcm" | head -c 4000 | cmp - "$work/part2.pcm"
+	$emu "$harness" probe "$f" "$work/t.avi" |
+		grep -q "outputs accepted for .*t.avi: s16 s16 (extensible)"
+	$emu "$harness" probe "$f" "$work/in.wav" | grep -q "makes of .*0x7354"
+	fails $emu "$harness" decode "$f" "$work/in.wav" -o "$work/x.wav"
+	fails $emu "$harness" encode "$f" "$work/t.avi" -o "$work/x.avi"
+	fails $emu "$harness" decode "$f" "$work/t.avi" -o "$work/x.wav" \
+		--frames 3
+	reg="$work/registry"
+	export VFW_REGISTRY="$reg"
+	$emu "$harness" register "$f" >/dev/null
+	VFW_INI=/nonexistent $emu "$harness" list | grep -q "audio decoder"
+	$emu "$harness" decode auto "$work/t.avi" -o "$work/auto.pcm" 2>/dev/null
+	cmp "$work/in.pcm" "$work/auto.pcm"
+	$emu "$harness" unregister "$f" >/dev/null
+	unset VFW_REGISTRY
+	rm -rf "$work"
+
 	if [ "$lowmem" = 1 ]; then
 		work=$(mktemp -d)
 		trap 'rm -rf "$work"' EXIT

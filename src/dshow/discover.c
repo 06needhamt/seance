@@ -77,47 +77,75 @@ int dshow_uncompressed_video(const GUID *minor)
 	return 0;
 }
 
-/* Whether a pin takes video: compressed (want 1) or not, or any (want 0). */
-static int pin_video(const struct qz_pin *p, int compressed)
+int dshow_uncompressed_audio(const GUID *minor)
 {
+	return guid_eq(minor, &MEDIASUBTYPE_PCM) ||
+	       guid_eq(minor, &MEDIASUBTYPE_IEEE_FLOAT);
+}
+
+/*
+ * Whether a pin takes the major type (video or audio): compressed (want 1)
+ * or not. A pin with no major type counts as either, one with no subtype
+ * as uncompressed.
+ */
+static int pin_takes(const struct qz_pin *p, const GUID *major, int compressed)
+{
+	int audio = guid_eq(major, &MEDIATYPE_Audio);
+
 	for (size_t i = 0; i < p->ntypes; i++) {
 		const struct qz_type *t = &p->types[i];
-		if (!guid_eq(&t->major, &MEDIATYPE_Video) &&
-		    !guid_eq(&t->major, &guid_null))
+		if (!guid_eq(&t->major, major) && !guid_eq(&t->major, &guid_null))
 			continue;
-		int any = guid_eq(&t->minor, &guid_null);
-		if (compressed ? !any && !dshow_uncompressed_video(&t->minor) :
-				 any || dshow_uncompressed_video(&t->minor))
+		int raw = guid_eq(&t->minor, &guid_null) ||
+			  (audio ? dshow_uncompressed_audio(&t->minor) :
+				   dshow_uncompressed_video(&t->minor));
+		if (compressed ? !raw : raw)
 			return 1;
 	}
 	return 0;
 }
 
-/* Whether some input (or output) pin takes compressed (or raw) video. */
-static int has_pin(const struct qz_filter *f, int output, int compressed)
+/* Whether some input (or output) pin takes compressed (or raw) major. */
+static int has_pin(const struct qz_filter *f, const GUID *major, int output,
+		   int compressed)
 {
 	for (size_t i = 0; i < f->npins; i++)
 		if (!!(f->pins[i].flags & REG_PINFLAG_B_OUTPUT) == output &&
-		    pin_video(&f->pins[i], compressed))
+		    pin_takes(&f->pins[i], major, compressed))
 			return 1;
 	return 0;
 }
 
 enum dshow_role dshow_role(const struct qz_filter *f)
 {
-	if (has_pin(f, 0, 1) && has_pin(f, 1, 0))
-		return DSHOW_DECODER;
+	const GUID *v = &MEDIATYPE_Video, *a = &MEDIATYPE_Audio;
+
+	if (has_pin(f, v, 0, 1) && has_pin(f, v, 1, 0))
+		return DSHOW_VIDEO_DECODER;
 	if (guid_eq(&f->category, &CLSID_VideoCompressorCategory) ||
-	    (has_pin(f, 0, 0) && has_pin(f, 1, 1)))
-		return DSHOW_ENCODER;
+	    (has_pin(f, v, 0, 0) && has_pin(f, v, 1, 1)))
+		return DSHOW_VIDEO_ENCODER;
+	if (has_pin(f, a, 0, 1) && has_pin(f, a, 1, 0))
+		return DSHOW_AUDIO_DECODER;
+	if (guid_eq(&f->category, &CLSID_AudioCompressorCategory) ||
+	    (has_pin(f, a, 0, 0) && has_pin(f, a, 1, 1)))
+		return DSHOW_AUDIO_ENCODER;
 	return DSHOW_OTHER;
+}
+
+enum dshow_role dshow_codec_role(int audio, int encoder)
+{
+	return audio ? (encoder ? DSHOW_AUDIO_ENCODER : DSHOW_AUDIO_DECODER) :
+		       (encoder ? DSHOW_VIDEO_ENCODER : DSHOW_VIDEO_DECODER);
 }
 
 const char *dshow_role_name(enum dshow_role role)
 {
 	switch (role) {
-	case DSHOW_DECODER: return "video decoder";
-	case DSHOW_ENCODER: return "video encoder";
+	case DSHOW_VIDEO_DECODER: return "video decoder";
+	case DSHOW_VIDEO_ENCODER: return "video encoder";
+	case DSHOW_AUDIO_DECODER: return "audio decoder";
+	case DSHOW_AUDIO_ENCODER: return "audio encoder";
 	default: return "other";
 	}
 }
@@ -570,17 +598,18 @@ static void read_legacy(struct found *l, const char *root)
 	}
 }
 
-/* The categories to look in: the usual two, and every one declared. */
+/* The categories to look in: the usual three, and every one declared. */
 static size_t categories(GUID **out)
 {
 	char g[OLE_GUID_CHARS], path[512];
-	size_t n = 2;
+	size_t n = 3;
 	GUID *c = malloc(n * sizeof(*c));
 
 	if (!c)
 		return 0;
 	c[0] = CLSID_LegacyAmFilterCategory;
 	c[1] = CLSID_VideoCompressorCategory;
+	c[2] = CLSID_AudioCompressorCategory;
 	ole_guid_format(&CLSID_ActiveMovieCategories, g);
 	for (size_t r = 0; r < NROOTS; r++) {
 		snprintf(path, sizeof(path), "%s\\CLSID\\%s\\Instance",

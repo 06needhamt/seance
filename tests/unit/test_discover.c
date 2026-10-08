@@ -29,7 +29,12 @@ static const GUID clsid_decoder = { 0x5e6c9b31, 0x3a7d, 0x4f0e,
 	{ 0x9c, 0x11, 0x0d, 0x2b, 0x7a, 0x6e, 0x4f, 0x80 } };
 static const GUID clsid_encoder = { 0x5e6c9b32, 0x3a7d, 0x4f0e,
 	{ 0x9c, 0x11, 0x0d, 0x2b, 0x7a, 0x6e, 0x4f, 0x80 } };
+static const GUID clsid_audio_decoder = { 0x5e6c9b33, 0x3a7d, 0x4f0e,
+	{ 0x9c, 0x11, 0x0d, 0x2b, 0x7a, 0x6e, 0x4f, 0x80 } };
+static const GUID clsid_audio_encoder = { 0x5e6c9b34, 0x3a7d, 0x4f0e,
+	{ 0x9c, 0x11, 0x0d, 0x2b, 0x7a, 0x6e, 0x4f, 0x80 } };
 static const GUID st_tst0 = FOURCC_SUBTYPE_INIT(mmioFOURCC('T', 'S', 'T', '0'));
+static const GUID st_tsta = WAVE_FORMAT_SUBTYPE_INIT(0x7354);
 static const GUID guid_null;
 
 static char regfile[300];
@@ -58,22 +63,26 @@ static char *name_of(const struct qz_filter *f)
 	return f->name ? utf16_to_utf8_dup(f->name) : NULL;
 }
 
-/* testfilter.ax's two filters, as registered (in either order). */
+/* testfilter.ax's four filters, as registered (in any order). */
 static void check_filters(struct qz_filter *f, size_t n)
 {
-	CHECK_EQ(n, 2);
+	int seen = 0;
+
+	CHECK_EQ(n, 4);
 	for (size_t i = 0; i < n; i++) {
 		char *name = name_of(&f[i]);
+		const GUID *category = &CLSID_LegacyAmFilterCategory;
 		if (guid_eq(&f[i].clsid, &clsid_decoder)) {
+			seen |= 1;
 			CHECK_STR(name, "seance test decoder");
-			CHECK_EQ(dshow_role(&f[i]), DSHOW_DECODER);
+			CHECK_EQ(dshow_role(&f[i]), DSHOW_VIDEO_DECODER);
 			CHECK_EQ(f[i].merit, MERIT_NORMAL);
 			CHECK(f[i].npins == 2 && f[i].pins[0].ntypes == 1 &&
 			      guid_eq(&f[i].pins[0].types[0].minor, &st_tst0));
-		} else {
-			CHECK(guid_eq(&f[i].clsid, &clsid_encoder));
+		} else if (guid_eq(&f[i].clsid, &clsid_encoder)) {
+			seen |= 2;
 			CHECK_STR(name, "seance test encoder");
-			CHECK_EQ(dshow_role(&f[i]), DSHOW_ENCODER);
+			CHECK_EQ(dshow_role(&f[i]), DSHOW_VIDEO_ENCODER);
 			CHECK_EQ(f[i].merit, MERIT_DO_NOT_USE);
 			CHECK_EQ(f[i].npins, 2);
 			if (f[i].npins == 2) {
@@ -82,10 +91,23 @@ static void check_filters(struct qz_filter *f, size_t n)
 				free(pin);
 				CHECK(f[i].pins[1].flags & REG_PINFLAG_B_OUTPUT);
 			}
+		} else if (guid_eq(&f[i].clsid, &clsid_audio_decoder)) {
+			seen |= 4;
+			CHECK_STR(name, "seance test audio decoder");
+			CHECK_EQ(dshow_role(&f[i]), DSHOW_AUDIO_DECODER);
+			CHECK(f[i].npins == 2 && f[i].pins[0].ntypes == 1 &&
+			      guid_eq(&f[i].pins[0].types[0].minor, &st_tsta));
+		} else {
+			seen |= 8;
+			CHECK(guid_eq(&f[i].clsid, &clsid_audio_encoder));
+			CHECK_STR(name, "seance test audio encoder");
+			CHECK_EQ(dshow_role(&f[i]), DSHOW_AUDIO_ENCODER);
+			category = &CLSID_AudioCompressorCategory;
 		}
-		CHECK(guid_eq(&f[i].category, &CLSID_LegacyAmFilterCategory));
+		CHECK(guid_eq(&f[i].category, category));
 		free(name);
 	}
+	CHECK_EQ(seen, 15);
 }
 
 static void test_is_server(const char *filter)
@@ -135,7 +157,7 @@ static void test_link(const char *filter, const char *dir)
 	CHECK(realpath(filter, real) && !symlink(real, link));
 	CHECK_EQ(dshow_discover(link, &f, &n, &hr), 0);
 	CHECK_EQ(hr, S_OK);
-	CHECK_EQ(n, 2);
+	CHECK_EQ(n, 4);
 	qz_filters_free(f, n);
 	unlink(link);
 }
@@ -156,7 +178,7 @@ static void test_register(const char *filter)
 	/* Read back from the registry, with the server's path. */
 	struct dshow_registered *r = NULL;
 	size_t nr = dshow_registered_filters(&r);
-	CHECK_EQ(nr, 2);
+	CHECK_EQ(nr, 4);
 	char real[PATH_MAX];
 	CHECK(realpath(filter, real) != NULL);
 	for (size_t i = 0; i < nr; i++) {
@@ -266,7 +288,7 @@ static void test_legacy_reg_file(void)
 		CHECK_STR(r[0].path, "C:\\Windows\\System32\\imported.ax");
 		CHECK_EQ(r[0].f.merit, MERIT_PREFERRED);
 		CHECK_EQ(r[0].f.npins, 2);
-		CHECK_EQ(dshow_role(&r[0].f), DSHOW_DECODER);
+		CHECK_EQ(dshow_role(&r[0].f), DSHOW_VIDEO_DECODER);
 	}
 	dshow_registered_free(r, n);
 }
@@ -282,18 +304,45 @@ static void test_roles(void)
 	};
 	struct qz_filter f = { .npins = 2, .pins = pins };
 
-	CHECK_EQ(dshow_role(&f), DSHOW_DECODER);
+	CHECK_EQ(dshow_role(&f), DSHOW_VIDEO_DECODER);
 	pins[0].types = &raw;
 	pins[1].types = &compressed;
-	CHECK_EQ(dshow_role(&f), DSHOW_ENCODER);
+	CHECK_EQ(dshow_role(&f), DSHOW_VIDEO_ENCODER);
 	pins[1].types = &raw;
 	CHECK_EQ(dshow_role(&f), DSHOW_OTHER);
 	f.category = CLSID_VideoCompressorCategory;
-	CHECK_EQ(dshow_role(&f), DSHOW_ENCODER);
+	CHECK_EQ(dshow_role(&f), DSHOW_VIDEO_ENCODER);
 	f.npins = 0;
 	f.category = guid_null;
 	CHECK_EQ(dshow_role(&f), DSHOW_OTHER);
-	CHECK_STR(dshow_role_name(DSHOW_DECODER), "video decoder");
+	CHECK_STR(dshow_role_name(DSHOW_VIDEO_DECODER), "video decoder");
+
+	/* Audio: compressed in and PCM or float out, or the reverse. */
+	struct qz_type tsta = { MEDIATYPE_Audio, st_tsta };
+	struct qz_type pcm = { MEDIATYPE_Audio, MEDIASUBTYPE_PCM };
+	struct qz_type flt = { MEDIATYPE_Audio, MEDIASUBTYPE_IEEE_FLOAT };
+	f.npins = 2;
+	pins[0].types = &tsta;
+	pins[1].types = &flt;
+	CHECK_EQ(dshow_role(&f), DSHOW_AUDIO_DECODER);
+	pins[0].types = &pcm;
+	pins[1].types = &tsta;
+	CHECK_EQ(dshow_role(&f), DSHOW_AUDIO_ENCODER);
+	pins[1].types = &pcm;
+	CHECK_EQ(dshow_role(&f), DSHOW_OTHER);
+	f.category = CLSID_AudioCompressorCategory;
+	CHECK_EQ(dshow_role(&f), DSHOW_AUDIO_ENCODER);
+	f.category = guid_null;
+	/* Video comes first for pins of no major type. */
+	struct qz_type untyped = { { 0 }, st_tst0 };
+	pins[0].types = &untyped;
+	pins[1].types = &any;
+	CHECK_EQ(dshow_role(&f), DSHOW_VIDEO_DECODER);
+	CHECK_STR(dshow_role_name(DSHOW_AUDIO_ENCODER), "audio encoder");
+	CHECK_EQ(dshow_codec_role(1, 0), DSHOW_AUDIO_DECODER);
+	CHECK_EQ(dshow_codec_role(0, 1), DSHOW_VIDEO_ENCODER);
+	CHECK(dshow_uncompressed_audio(&MEDIASUBTYPE_IEEE_FLOAT));
+	CHECK(!dshow_uncompressed_audio(&st_tsta));
 
 	char buf[DSHOW_GUID_NAME_SIZE];
 	CHECK_STR(dshow_guid_name(&MEDIATYPE_Video, buf), "MEDIATYPE_Video");

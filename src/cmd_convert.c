@@ -203,17 +203,6 @@ done:
 	return status;
 }
 
-/* Whether a --format name or an output path names an audio-only kind. */
-static int names_audio(const char *format, const char *out)
-{
-	const char *dot = strrchr(out, '.');
-	const char *name = format ? format :
-			   dot && !strchr(dot, '/') ? dot + 1 : "";
-
-	return !strcasecmp(name, "wav") || !strcasecmp(name, "pcm") ||
-	       !strcasecmp(name, "avi");
-}
-
 int cmd_convert(int argc, char **argv)
 {
 	const char *in = NULL, *out = NULL, *format = NULL;
@@ -272,26 +261,11 @@ int cmd_convert(int argc, char **argv)
 		return usage();
 
 	/* Audio, or video? */
-	int audio = want_audio || raw || job.sample != AUDIO_NONE ||
-		    !strcmp(in, "-") || names_audio(format, out);
-	if (!audio) {
-		enum audio_source_kind k = audio_source_kind_of_path(in);
-		struct avi_file *avi = k == AUDIO_SOURCE_WAV ? NULL :
-				       avi_open(in);
-		if (k == AUDIO_SOURCE_WAV)
-			audio = 1;
-		else if (avi && stream != (unsigned long)-1)
-			audio = stream < avi->nstreams &&
-				avi_stream_wfx(&avi->streams[stream]);
-		else if (avi)
-			audio = avi_video_stream(avi) < 0 &&
-				avi_audio_stream(avi) >= 0;
-		else if (!strstr(vfw_error(), "not an AVI"))
-			audio = 0;	/* reported below */
-		else
-			audio = 1;	/* a WAV, perhaps */
-		avi_close(avi);
-	}
+	static const char *const audio_kinds[] = { "wav", "pcm", "avi", NULL };
+	int audio = raw || job.sample != AUDIO_NONE || !strcmp(in, "-") ||
+		    cli_wants_audio(in, stream == (unsigned long)-1 ? -1 :
+				    stream > 99 ? 99 : (long)stream,
+				    want_audio, format, out, audio_kinds);
 	if (audio) {
 		job.in = in;
 		job.out = out;

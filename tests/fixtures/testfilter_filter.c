@@ -1,9 +1,15 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/* Small CRT-less DirectShow transform used to exercise the Linux host. */
+/*
+ * Small CRT-less DirectShow transforms used to exercise the Linux host: a
+ * TST0 video decoder and encoder, and a TSTA audio decoder and encoder
+ * (tsta.h).
+ */
 #include "fixture.h"
 #include <strmif.h>
 #include <amvideo.h>
 #include <vfwmsgs.h>
+#include <mmreg.h>
+#include "tsta.h"
 
 struct filter;
 struct pin {
@@ -38,6 +44,20 @@ struct filter {
 	LONG workers;
 	HRESULT async_error;
 	CRITICAL_SECTION transform_lock;
+	/*
+	 * Audio (TSTA). The encoder gathers PCM in pcm until a packet is
+	 * full; the decoder in hold mode keeps a decoded packet there until
+	 * the next one comes (or the end of the stream).
+	 */
+	BOOL audio;
+	BYTE *pcm;
+	DWORD pcm_frames;
+	BOOL held, held_timed;
+	REFERENCE_TIME held_start, base;
+	DWORD held_packet;
+	DWORDLONG frames_done;
+	DWORD packets;
+	BOOL split, hold, float_switch, rate_switch, switched;
 };
 struct enum_pins { IEnumPins iface; LONG refs; struct filter *filter; ULONG pos; };
 
@@ -100,9 +120,9 @@ static int rle_decode(const BYTE*s,DWORD len,BYTE*d,DWORD n,BOOL delta)
  */
 static BOOL high(const struct filter*f,const void*p){return f->strict&&(ULONG_PTR)p>=0x80000000UL;}
 #define LOWPTR(f,p) do{if(high((f),(p)))return E_POINTER;}while(0)
-static HRESULT WINAPI filter_qi(IBaseFilter*p,REFIID iid,void**out){if(!out)return E_POINTER;struct filter*f=(void*)p;if(eq(iid,&iid_unknown)||eq(iid,&iid_filter))*out=p;else if(f->encoder&&!f->codec_api_only&&eq(iid,&iid_compression))*out=&f->compression;else if(f->encoder&&f->codec_api_only&&eq(iid,&iid_codec_api))*out=&f->codec_api;else if(f->encoder&&eq(iid,&iid_persist_stream))*out=&f->persist;else{*out=NULL;return E_NOINTERFACE;}p->lpVtbl->AddRef(p);return S_OK;}
+static HRESULT WINAPI filter_qi(IBaseFilter*p,REFIID iid,void**out){if(!out)return E_POINTER;struct filter*f=(void*)p;if(eq(iid,&iid_unknown)||eq(iid,&iid_filter))*out=p;else if(f->encoder&&!f->audio&&!f->codec_api_only&&eq(iid,&iid_compression))*out=&f->compression;else if(f->encoder&&(f->codec_api_only||f->audio)&&eq(iid,&iid_codec_api))*out=&f->codec_api;else if(f->encoder&&eq(iid,&iid_persist_stream))*out=&f->persist;else{*out=NULL;return E_NOINTERFACE;}p->lpVtbl->AddRef(p);return S_OK;}
 static ULONG WINAPI filter_addref(IBaseFilter*p){return InterlockedIncrement(&((struct filter*)p)->refs);}
-static ULONG WINAPI filter_release(IBaseFilter*p){struct filter*f=(void*)p;LONG n=InterlockedDecrement(&f->refs);if(!n){release(f->picture);if(f->clock)f->clock->lpVtbl->Release(f->clock);if(f->graph)f->graph->lpVtbl->Release(f->graph);DeleteCriticalSection(&f->transform_lock);release(f);InterlockedDecrement(&objects);}return n;}
+static ULONG WINAPI filter_release(IBaseFilter*p){struct filter*f=(void*)p;LONG n=InterlockedDecrement(&f->refs);if(!n){release(f->picture);release(f->pcm);if(f->clock)f->clock->lpVtbl->Release(f->clock);if(f->graph)f->graph->lpVtbl->Release(f->graph);DeleteCriticalSection(&f->transform_lock);release(f);InterlockedDecrement(&objects);}return n;}
 static HRESULT WINAPI filter_class(IBaseFilter*p,CLSID*c){if(!c)return E_POINTER;for(int i=0;i<16;i++)((BYTE*)c)[i]=0;return S_OK;}
 static HRESULT WINAPI filter_stop(IBaseFilter*p){((struct filter*)p)->state=State_Stopped;return S_OK;}
 static HRESULT WINAPI filter_pause(IBaseFilter*p){((struct filter*)p)->state=State_Paused;return S_OK;}
@@ -183,6 +203,300 @@ static HRESULT WINAPI persist_save(IPersistStream*p,IStream*s,BOOL clear){if(!s)
 static HRESULT WINAPI persist_size(IPersistStream*p,ULARGE_INTEGER*n){if(!n)return E_POINTER;n->QuadPart=sizeof(struct saved_state);return S_OK;}
 static IPersistStreamVtbl persist_vtbl={persist_qi,persist_addref,persist_release,persist_class,persist_dirty,persist_load,persist_save,persist_size};
 
+/*
+ * Audio: TSTA in and PCM out (the decoder), or the reverse (the encoder).
+ *
+ * Modes, from the environment as the video ones are:
+ *   TESTFILTER_AUDIO_SPLIT  the decoder gives its PCM in pieces of 300
+ *                           sample frames, not a sample per packet
+ *   TESTFILTER_AUDIO_HOLD   the decoder keeps each packet's PCM until the
+ *                           next packet comes, so the last comes out only
+ *                           at the end of the stream
+ *   TESTFILTER_AUDIO_FLOAT  from the second packet on, the decoder gives
+ *                           32-bit float, announcing the new type on the
+ *                           first sample that has it
+ *   TESTFILTER_AUDIO_RATE   from the second packet on, the decoder claims
+ *                           twice the sample rate: a change no file can
+ *                           follow, which the host must refuse cleanly
+ * The encoder always gathers PCM into whole packets and gives the last,
+ * short one at the end of the stream.
+ */
+static const GUID mt_audio={0x73647561,0x0000,0x0010,{0x80,0x00,0x00,0xaa,0x00,0x38,0x9b,0x71}};
+static const GUID st_pcm={0x00000001,0x0000,0x0010,{0x80,0x00,0x00,0xaa,0x00,0x38,0x9b,0x71}};
+static const GUID st_float={0x00000003,0x0000,0x0010,{0x80,0x00,0x00,0xaa,0x00,0x38,0x9b,0x71}};
+static const GUID st_tsta={WAVE_FORMAT_TSTA,0x0000,0x0010,{0x80,0x00,0x00,0xaa,0x00,0x38,0x9b,0x71}};
+static const GUID fmt_wave={0x05589f81,0xc356,0x11ce,{0xbf,0x01,0x00,0xaa,0x00,0x55,0x59,0x5a}};
+
+/* 64-by-32-bit division, which needs no libgcc helper. */
+static DWORDLONG udiv64(DWORDLONG n,DWORD d)
+{
+	DWORD hi=(DWORD)(n>>32),lo=(DWORD)n,qh=hi/d,r=hi%d,ql;
+	__asm__("divl %4":"=a"(ql),"=d"(r):"a"(lo),"d"(r),"rm"(d));
+	return (DWORDLONG)qh<<32|ql;
+}
+static REFERENCE_TIME frames_time(DWORDLONG frames,DWORD rate){return (REFERENCE_TIME)udiv64(frames*10000000u,rate);}
+
+/* A media type's WAVEFORMATEX, or NULL. */
+static WAVEFORMATEX *media_wfx(const AM_MEDIA_TYPE *mt)
+{
+	if(!mt||!eq(&mt->majortype,&mt_audio)||!eq(&mt->formattype,&fmt_wave)||
+	   !mt->pbFormat||mt->cbFormat<sizeof(WAVEFORMATEX))
+		return NULL;
+	return (WAVEFORMATEX*)mt->pbFormat;
+}
+
+/* Integer PCM, plain or extensible: its bits per sample, else 0. */
+static DWORD pcm_bits(const AM_MEDIA_TYPE *mt)
+{
+	WAVEFORMATEX *wf=media_wfx(mt);
+	if(!wf||!eq(&mt->subtype,&st_pcm))return 0;
+	if(wf->wFormatTag==WAVE_FORMAT_EXTENSIBLE){
+		WAVEFORMATEXTENSIBLE *x=(void*)wf;
+		if(mt->cbFormat<sizeof(*x)||wf->cbSize<22||!eq(&x->SubFormat,&st_pcm)||
+		   x->Samples.wValidBitsPerSample!=wf->wBitsPerSample)return 0;
+	}else if(wf->wFormatTag!=WAVE_FORMAT_PCM)return 0;
+	if(!tsta_pcm_block(wf->wBitsPerSample,wf->nChannels)||
+	   wf->nBlockAlign!=tsta_pcm_block(wf->wBitsPerSample,wf->nChannels))return 0;
+	return wf->wBitsPerSample;
+}
+
+static WAVEFORMATEX *tsta_wfx(const AM_MEDIA_TYPE *mt)
+{
+	WAVEFORMATEX *wf=media_wfx(mt);
+	if(!wf||!eq(&mt->subtype,&st_tsta)||wf->wFormatTag!=WAVE_FORMAT_TSTA||
+	   !tsta_pcm_block(wf->wBitsPerSample,wf->nChannels)||!wf->nSamplesPerSec)return NULL;
+	return wf;
+}
+
+/* The input pin's type: TSTA for the decoder, integer PCM for the encoder. */
+static HRESULT audio_check_input(struct filter*f,const AM_MEDIA_TYPE*mt)
+{
+	if(f->encoder)return pcm_bits(mt)&&media_wfx(mt)->nSamplesPerSec?S_OK:VFW_E_TYPE_NOT_ACCEPTED;
+	return tsta_wfx(mt)?S_OK:VFW_E_TYPE_NOT_ACCEPTED;
+}
+
+/*
+ * The output pin's type. The decoder takes integer PCM of the stream's
+ * bits, channels and rate. The encoder makes TSTA from its input; given
+ * only a major type and subtype it fills in the rest, as filters do when
+ * left to choose. *full gets the type to connect with.
+ */
+static HRESULT audio_output_type(struct filter*f,const AM_MEDIA_TYPE*mt,AM_MEDIA_TYPE*full)
+{
+	WAVEFORMATEX *in=media_wfx(&f->input.type);
+	if(!f->input.connected||!in)return VFW_E_NOT_CONNECTED;
+	if(!f->encoder){
+		WAVEFORMATEX *out=media_wfx(mt);
+		if(pcm_bits(mt)!=in->wBitsPerSample||out->nChannels!=in->nChannels||
+		   out->nSamplesPerSec!=in->nSamplesPerSec)return VFW_E_TYPE_NOT_ACCEPTED;
+		return copy_type(full,mt);
+	}
+	if(!eq(&mt->majortype,&mt_audio)||!eq(&mt->subtype,&st_tsta))return VFW_E_TYPE_NOT_ACCEPTED;
+	if(mt->pbFormat){
+		WAVEFORMATEX *out=tsta_wfx(mt);
+		if(!out||out->nChannels!=in->nChannels||out->nSamplesPerSec!=in->nSamplesPerSec||
+		   out->wBitsPerSample!=in->wBitsPerSample)return VFW_E_TYPE_NOT_ACCEPTED;
+		return copy_type(full,mt);
+	}
+	for(DWORD i=0;i<sizeof(*full);i++)((BYTE*)full)[i]=0;
+	full->majortype=mt_audio;
+	full->subtype=st_tsta;
+	full->formattype=fmt_wave;
+	full->cbFormat=sizeof(WAVEFORMATEX)+2;
+	if(!(full->pbFormat=CoTaskMemAlloc(full->cbFormat)))return E_OUTOFMEMORY;
+	tsta_format((WAVEFORMATEX*)full->pbFormat,in->wBitsPerSample,in->nChannels,
+		    in->nSamplesPerSec,(DWORD)f->window);
+	return S_OK;
+}
+
+/* The output buffers: a whole packet, or a packet's PCM as float. */
+static LONG audio_buffer(struct filter*f)
+{
+	WAVEFORMATEX *in=media_wfx(&f->input.type);
+	if(f->encoder)return TSTA_HEADER+TSTA_FRAMES*tsta_pcm_block(in->wBitsPerSample,in->nChannels);
+	return TSTA_FRAMES*4*in->nChannels;
+}
+
+/* Starts again (a flush, or a new connection). */
+static void audio_reset(struct filter*f){f->pcm_frames=0;f->held=FALSE;f->frames_done=0;f->packets=0;f->switched=FALSE;}
+
+/* The encoder: a packet of the PCM gathered. */
+static HRESULT audio_emit_packet(struct filter*f)
+{
+	struct pin*out=&f->output;
+	WAVEFORMATEX *in=media_wfx(&f->input.type);
+	IMediaSample*sample=NULL;
+	BYTE*dst=NULL;
+	REFERENCE_TIME start=f->base+frames_time(f->frames_done,in->nSamplesPerSec);
+	REFERENCE_TIME stop=f->base+frames_time(f->frames_done+f->pcm_frames,in->nSamplesPerSec);
+	HRESULT hr=out->allocator->lpVtbl->GetBuffer(out->allocator,&sample,&start,&stop,0);
+	if(FAILED(hr))return hr;
+	hr=sample->lpVtbl->GetPointer(sample,&dst);
+	if(SUCCEEDED(hr)&&sample->lpVtbl->GetSize(sample)<audio_buffer(f))hr=VFW_E_BUFFER_OVERFLOW;
+	if(SUCCEEDED(hr)){
+		DWORD n=tsta_encode(f->pcm,f->pcm_frames,in->wBitsPerSample,in->nChannels,dst);
+		sample->lpVtbl->SetActualDataLength(sample,(LONG)n);
+		sample->lpVtbl->SetTime(sample,&start,&stop);
+		sample->lpVtbl->SetSyncPoint(sample,TRUE);
+		sample->lpVtbl->SetDiscontinuity(sample,f->frames_done==0);
+		hr=out->peer_mem->lpVtbl->Receive(out->peer_mem,sample);
+	}
+	sample->lpVtbl->Release(sample);
+	f->frames_done+=f->pcm_frames;
+	f->pcm_frames=0;
+	return hr;
+}
+
+static HRESULT audio_encode(struct filter*f,IMediaSample*input)
+{
+	WAVEFORMATEX *in=media_wfx(&f->input.type);
+	DWORD block=tsta_pcm_block(in->wBitsPerSample,in->nChannels);
+	BYTE*src=NULL;
+	LONG len=input->lpVtbl->GetActualDataLength(input);
+	REFERENCE_TIME start,stop;
+	HRESULT hr=S_OK;
+	if(FAILED(input->lpVtbl->GetPointer(input,&src)))return E_FAIL;
+	LOWPTR(f,src);
+	if(len<0||(DWORD)len%block)return VFW_E_INVALID_MEDIA_TYPE;
+	if(!f->pcm&&!(f->pcm=alloc(TSTA_FRAMES*4*in->nChannels)))return E_OUTOFMEMORY;
+	/* Times count from the first sample's. */
+	if(!f->frames_done&&!f->pcm_frames)
+		f->base=SUCCEEDED(input->lpVtbl->GetTime(input,&start,&stop))?start:0;
+	for(DWORD frames=(DWORD)len/block,i=0;i<frames&&SUCCEEDED(hr);i++){
+		BYTE*d=f->pcm+f->pcm_frames*block;
+		for(DWORD k=0;k<block;k++)d[k]=src[i*block+k];
+		if(++f->pcm_frames==TSTA_FRAMES)hr=audio_emit_packet(f);
+	}
+	return hr;
+}
+
+/* The float the decoder switches to, for a stream of these channels and rate. */
+static void float_type(const AM_MEDIA_TYPE*pcm,AM_MEDIA_TYPE*mt)
+{
+	WAVEFORMATEXTENSIBLE *x=(void*)mt->pbFormat;
+	WAVEFORMATEX *wf=media_wfx(pcm);
+	mt->subtype=st_float;
+	x->Format.wFormatTag=WAVE_FORMAT_EXTENSIBLE;
+	x->Format.nChannels=wf->nChannels;
+	x->Format.nSamplesPerSec=wf->nSamplesPerSec;
+	x->Format.wBitsPerSample=32;
+	x->Format.nBlockAlign=(WORD)(4*wf->nChannels);
+	x->Format.nAvgBytesPerSec=wf->nSamplesPerSec*x->Format.nBlockAlign;
+	x->Format.cbSize=22;
+	x->Samples.wValidBitsPerSample=32;
+	x->dwChannelMask=wf->nChannels==2?3:0;
+	x->SubFormat=st_float;
+	mt->lSampleSize=x->Format.nBlockAlign;
+}
+
+/* PCM samples as floats in [-1, 1). */
+static void to_float(const BYTE*pcm,DWORD samples,DWORD bits,float*out)
+{
+	for(DWORD i=0;i<samples;i++,pcm+=bits/8){
+		LONG v;
+		if(bits==8)v=(LONG)pcm[0]-128;
+		else if(bits==16)v=(SHORT)(pcm[0]|pcm[1]<<8);
+		else if(bits==24)v=(LONG)((DWORD)pcm[0]<<8|(DWORD)pcm[1]<<16|(DWORD)pcm[2]<<24)>>8;
+		else v=(LONG)((DWORD)pcm[0]|(DWORD)pcm[1]<<8|(DWORD)pcm[2]<<16|(DWORD)pcm[3]<<24);
+		out[i]=(float)v/(float)(1u<<(bits-1));
+	}
+}
+
+/*
+ * The decoder: frames of PCM from packet number packet, starting at start,
+ * as one sample or (split) several.
+ */
+static HRESULT audio_deliver(struct filter*f,const BYTE*pcm,DWORD frames,BOOL timed,REFERENCE_TIME start,DWORD packet)
+{
+	struct pin*out=&f->output;
+	WAVEFORMATEX *wf=media_wfx(&out->type);
+	DWORD block=wf->nBlockAlign,piece=f->split?300:frames;
+	HRESULT hr=S_OK;
+	for(DWORD off=0;off<frames&&SUCCEEDED(hr);off+=piece){
+		DWORD n=frames-off<piece?frames-off:piece;
+		REFERENCE_TIME a=start+frames_time(off,wf->nSamplesPerSec),b=start+frames_time(off+n,wf->nSamplesPerSec);
+		IMediaSample*sample=NULL;
+		BYTE*dst=NULL;
+		hr=out->allocator->lpVtbl->GetBuffer(out->allocator,&sample,timed?&a:NULL,timed?&b:NULL,0);
+		if(FAILED(hr))return hr;
+		hr=sample->lpVtbl->GetPointer(sample,&dst);
+		BOOL to_float_now=f->float_switch&&packet>=1;
+		DWORD bytes=to_float_now?n*4*wf->nChannels:n*block;
+		if(SUCCEEDED(hr)&&(DWORD)sample->lpVtbl->GetSize(sample)<bytes)hr=VFW_E_BUFFER_OVERFLOW;
+		/* The change, on the first sample that has it. */
+		if(SUCCEEDED(hr)&&(f->float_switch||f->rate_switch)&&packet>=1&&!f->switched){
+			AM_MEDIA_TYPE mt;
+			hr=copy_type(&mt,&out->type);
+			if(SUCCEEDED(hr)&&f->float_switch){
+				BYTE*bigger=CoTaskMemAlloc(sizeof(WAVEFORMATEXTENSIBLE));
+				if(!bigger)hr=E_OUTOFMEMORY;
+				else{CoTaskMemFree(mt.pbFormat);mt.pbFormat=bigger;mt.cbFormat=sizeof(WAVEFORMATEXTENSIBLE);float_type(&out->type,&mt);}
+			}else if(SUCCEEDED(hr)){
+				WAVEFORMATEX*x=(WAVEFORMATEX*)mt.pbFormat;
+				x->nSamplesPerSec*=2;
+				x->nAvgBytesPerSec*=2;
+			}
+			if(SUCCEEDED(hr)){
+				hr=out->peer->lpVtbl->QueryAccept(out->peer,&mt);
+				if(hr==S_OK)hr=sample->lpVtbl->SetMediaType(sample,&mt);
+				else if(SUCCEEDED(hr))hr=VFW_E_TYPE_NOT_ACCEPTED;
+			}
+			free_type(&mt);
+			f->switched=TRUE;
+		}
+		if(SUCCEEDED(hr)){
+			if(to_float_now)to_float(pcm+off*block,n*wf->nChannels,wf->wBitsPerSample,(float*)dst);
+			else for(DWORD i=0;i<n*block;i++)dst[i]=pcm[off*block+i];
+			sample->lpVtbl->SetActualDataLength(sample,(LONG)bytes);
+			sample->lpVtbl->SetSyncPoint(sample,TRUE);
+			hr=out->peer_mem->lpVtbl->Receive(out->peer_mem,sample);
+		}
+		sample->lpVtbl->Release(sample);
+	}
+	return hr;
+}
+
+static HRESULT audio_decode(struct filter*f,IMediaSample*input)
+{
+	WAVEFORMATEX *in=media_wfx(&f->input.type);
+	DWORD block=tsta_pcm_block(in->wBitsPerSample,in->nChannels);
+	BYTE*src=NULL;
+	LONG len=input->lpVtbl->GetActualDataLength(input);
+	REFERENCE_TIME start=0,stop=0;
+	BOOL timed=SUCCEEDED(input->lpVtbl->GetTime(input,&start,&stop));
+	HRESULT hr=S_OK;
+	if(FAILED(input->lpVtbl->GetPointer(input,&src)))return E_FAIL;
+	LOWPTR(f,src);
+	/* Two packets' room: the one held back, and the new one. */
+	if(!f->pcm&&!(f->pcm=alloc(2*TSTA_FRAMES*block)))return E_OUTOFMEMORY;
+	BYTE*decoded=f->pcm+TSTA_FRAMES*block;
+	LONG frames=len<0?-1:tsta_decode(src,(DWORD)len,in->wBitsPerSample,in->nChannels,decoded,TSTA_FRAMES);
+	if(frames<0)return VFW_E_INVALID_FILE_FORMAT;
+	DWORD packet=f->packets++;
+	if(!f->hold)return audio_deliver(f,decoded,(DWORD)frames,timed,start,packet);
+	if(f->held)hr=audio_deliver(f,f->pcm,f->pcm_frames,f->held_timed,f->held_start,f->held_packet);
+	for(DWORD i=0;i<(DWORD)frames*block;i++)f->pcm[i]=decoded[i];
+	f->pcm_frames=(DWORD)frames;
+	f->held=TRUE;
+	f->held_timed=timed;
+	f->held_start=start;
+	f->held_packet=packet;
+	return hr;
+}
+
+/* The end of the stream: the short last packet, or the PCM held back. */
+static HRESULT audio_end(struct filter*f)
+{
+	HRESULT hr=S_OK;
+	if(!f->output.connected||!f->output.allocator)return S_OK;
+	if(f->encoder&&f->pcm_frames)hr=audio_emit_packet(f);
+	else if(!f->encoder&&f->held){
+		f->held=FALSE;
+		hr=audio_deliver(f,f->pcm,f->pcm_frames,f->held_timed,f->held_start,f->held_packet);
+	}
+	return hr;
+}
+
 static HRESULT WINAPI enum_qi(IEnumPins*p,REFIID iid,void**out){if(!out)return E_POINTER;if(eq(iid,&iid_unknown)||eq(iid,&iid_enum_pins))*out=p;else{*out=NULL;return E_NOINTERFACE;}p->lpVtbl->AddRef(p);return S_OK;}
 static ULONG WINAPI enum_addref(IEnumPins*p){return InterlockedIncrement(&((struct enum_pins*)p)->refs);}
 static ULONG WINAPI enum_release(IEnumPins*p){struct enum_pins*e=(void*)p;LONG n=InterlockedDecrement(&e->refs);if(!n){e->filter->iface.lpVtbl->Release(&e->filter->iface);release(e);}return n;}
@@ -225,8 +539,34 @@ static BOOL inspect_peer(IPin*peer){
 	if(pin_name)CoTaskMemFree(pin_name);
 	return ok;
 }
-static HRESULT WINAPI pin_receive_connection(IPin*p,IPin*peer,const AM_MEDIA_TYPE*mt){struct pin*x=(void*)p;if(!peer||!mt)return E_POINTER;LOWPTR(x->filter,peer);LOWPTR(x->filter,mt);LOWPTR(x->filter,mt->pbFormat);if(x->filter->peer_info&&!inspect_peer(peer))return E_UNEXPECTED;if(x->direction!=PINDIR_INPUT)return VFW_E_INVALID_DIRECTION;if(x->connected)return VFW_E_ALREADY_CONNECTED;HRESULT hr=copy_type(&x->type,mt);if(FAILED(hr))return hr;x->peer=peer;peer->lpVtbl->AddRef(peer);x->connected=TRUE;return S_OK;}
-static HRESULT WINAPI pin_connect(IPin*p,IPin*peer,const AM_MEDIA_TYPE*mt){struct pin*x=(void*)p;if(!peer||!mt)return E_POINTER;LOWPTR(x->filter,peer);LOWPTR(x->filter,mt);if(x->filter->peer_info&&!inspect_peer(peer))return E_UNEXPECTED;if(x->direction!=PINDIR_OUTPUT)return VFW_E_INVALID_DIRECTION;if(x->connected)return VFW_E_ALREADY_CONNECTED;HRESULT hr=peer->lpVtbl->ReceiveConnection(peer,p,mt);if(FAILED(hr))return hr;hr=peer->lpVtbl->QueryInterface(peer,&iid_mem_input,(void**)&x->peer_mem);if(FAILED(hr)){peer->lpVtbl->Disconnect(peer);return hr;}hr=x->peer_mem->lpVtbl->GetAllocator(x->peer_mem,&x->allocator);if(FAILED(hr))return hr;ALLOCATOR_PROPERTIES want={2,(LONG)(mt->lSampleSize?mt->lSampleSize:1),1,0},actual;hr=x->allocator->lpVtbl->SetProperties(x->allocator,&want,&actual);if(SUCCEEDED(hr))hr=x->peer_mem->lpVtbl->NotifyAllocator(x->peer_mem,x->allocator,FALSE);if(SUCCEEDED(hr))hr=x->allocator->lpVtbl->Commit(x->allocator);if(FAILED(hr))return hr;copy_type(&x->type,mt);x->peer=peer;peer->lpVtbl->AddRef(peer);x->connected=TRUE;return S_OK;}
+static HRESULT WINAPI pin_receive_connection(IPin*p,IPin*peer,const AM_MEDIA_TYPE*mt){struct pin*x=(void*)p;if(!peer||!mt)return E_POINTER;LOWPTR(x->filter,peer);LOWPTR(x->filter,mt);LOWPTR(x->filter,mt->pbFormat);if(x->filter->peer_info&&!inspect_peer(peer))return E_UNEXPECTED;if(x->direction!=PINDIR_INPUT)return VFW_E_INVALID_DIRECTION;if(x->connected)return VFW_E_ALREADY_CONNECTED;if(x->filter->audio&&FAILED(audio_check_input(x->filter,mt)))return VFW_E_TYPE_NOT_ACCEPTED;HRESULT hr=copy_type(&x->type,mt);if(FAILED(hr))return hr;x->peer=peer;peer->lpVtbl->AddRef(peer);x->connected=TRUE;if(x->filter->audio)audio_reset(x->filter);return S_OK;}
+static HRESULT WINAPI pin_connect(IPin*p,IPin*peer,const AM_MEDIA_TYPE*mt)
+{
+	struct pin*x=(void*)p;
+	struct filter*f=x->filter;
+	AM_MEDIA_TYPE full;
+	if(!peer||!mt)return E_POINTER;
+	LOWPTR(f,peer);LOWPTR(f,mt);
+	if(f->peer_info&&!inspect_peer(peer))return E_UNEXPECTED;
+	if(x->direction!=PINDIR_OUTPUT)return VFW_E_INVALID_DIRECTION;
+	if(x->connected)return VFW_E_ALREADY_CONNECTED;
+	HRESULT hr=f->audio?audio_output_type(f,mt,&full):copy_type(&full,mt);
+	if(FAILED(hr))return hr;
+	hr=peer->lpVtbl->ReceiveConnection(peer,p,&full);
+	if(FAILED(hr)){free_type(&full);return hr;}
+	hr=peer->lpVtbl->QueryInterface(peer,&iid_mem_input,(void**)&x->peer_mem);
+	if(FAILED(hr)){peer->lpVtbl->Disconnect(peer);free_type(&full);return hr;}
+	hr=x->peer_mem->lpVtbl->GetAllocator(x->peer_mem,&x->allocator);
+	if(FAILED(hr)){free_type(&full);return hr;}
+	ALLOCATOR_PROPERTIES want={2,f->audio?audio_buffer(f):(LONG)(full.lSampleSize?full.lSampleSize:1),1,0},actual;
+	hr=x->allocator->lpVtbl->SetProperties(x->allocator,&want,&actual);
+	if(SUCCEEDED(hr))hr=x->peer_mem->lpVtbl->NotifyAllocator(x->peer_mem,x->allocator,FALSE);
+	if(SUCCEEDED(hr))hr=x->allocator->lpVtbl->Commit(x->allocator);
+	if(FAILED(hr)){free_type(&full);return hr;}
+	x->type=full;
+	x->peer=peer;peer->lpVtbl->AddRef(peer);x->connected=TRUE;
+	return S_OK;
+}
 static HRESULT WINAPI pin_disconnect(IPin*p){struct pin*x=(void*)p;if(!x->connected)return S_FALSE;if(x->allocator){x->allocator->lpVtbl->Decommit(x->allocator);x->allocator->lpVtbl->Release(x->allocator);}if(x->peer_mem)x->peer_mem->lpVtbl->Release(x->peer_mem);x->peer->lpVtbl->Release(x->peer);free_type(&x->type);x->allocator=NULL;x->peer_mem=NULL;x->peer=NULL;x->connected=FALSE;return S_OK;}
 static HRESULT WINAPI pin_connected(IPin*p,IPin**out){if(!out)return E_POINTER;struct pin*x=(void*)p;if(!x->connected){*out=NULL;return VFW_E_NOT_CONNECTED;}*out=x->peer;x->peer->lpVtbl->AddRef(x->peer);return S_OK;}
 static HRESULT WINAPI pin_type(IPin*p,AM_MEDIA_TYPE*out){if(!out)return E_POINTER;struct pin*x=(void*)p;return x->connected?copy_type(out,&x->type):VFW_E_NOT_CONNECTED;}
@@ -236,8 +576,8 @@ static HRESULT WINAPI pin_id(IPin*p,LPWSTR*out){return E_NOTIMPL;}
 static HRESULT WINAPI pin_accept(IPin*p,const AM_MEDIA_TYPE*mt){return mt?S_OK:E_POINTER;}
 static HRESULT WINAPI pin_enum_types(IPin*p,IEnumMediaTypes**out){return E_NOTIMPL;}
 static HRESULT WINAPI pin_internal(IPin*p,IPin**out,ULONG*n){return E_NOTIMPL;}
-static HRESULT WINAPI pin_eos(IPin*p){struct pin*x=(void*)p;while(x->filter->workers)Sleep(1);if(FAILED(x->filter->async_error))return x->filter->async_error;if(x->filter->no_eos)return S_OK;return x->filter->output.connected?x->filter->output.peer->lpVtbl->EndOfStream(x->filter->output.peer):S_OK;}
-static HRESULT WINAPI pin_begin_flush(IPin*p){struct pin*x=(void*)p;x->flushing=TRUE;x->filter->valid=FALSE;x->filter->segment=FALSE;x->filter->async_error=S_OK;return x->filter->output.connected?x->filter->output.peer->lpVtbl->BeginFlush(x->filter->output.peer):S_OK;}
+static HRESULT WINAPI pin_eos(IPin*p){struct pin*x=(void*)p;while(x->filter->workers)Sleep(1);if(FAILED(x->filter->async_error))return x->filter->async_error;if(x->filter->no_eos)return S_OK;if(x->filter->audio){HRESULT hr=audio_end(x->filter);if(FAILED(hr))return hr;}return x->filter->output.connected?x->filter->output.peer->lpVtbl->EndOfStream(x->filter->output.peer):S_OK;}
+static HRESULT WINAPI pin_begin_flush(IPin*p){struct pin*x=(void*)p;x->flushing=TRUE;x->filter->valid=FALSE;if(x->filter->audio)audio_reset(x->filter);x->filter->segment=FALSE;x->filter->async_error=S_OK;return x->filter->output.connected?x->filter->output.peer->lpVtbl->BeginFlush(x->filter->output.peer):S_OK;}
 static HRESULT WINAPI pin_end_flush(IPin*p){struct pin*x=(void*)p;x->flushing=FALSE;return x->filter->output.connected?x->filter->output.peer->lpVtbl->EndFlush(x->filter->output.peer):S_OK;}
 static HRESULT WINAPI pin_segment(IPin*p,REFERENCE_TIME a,REFERENCE_TIME b,double r){struct pin*x=(void*)p;x->filter->segment=TRUE;return x->filter->output.connected?x->filter->output.peer->lpVtbl->NewSegment(x->filter->output.peer,a,b,r):S_OK;}
 static IPinVtbl pin_vtbl={pin_qi,pin_addref,pin_release,pin_connect,pin_receive_connection,pin_disconnect,pin_connected,pin_type,pin_info,pin_direction,pin_id,pin_accept,pin_enum_types,pin_internal,pin_eos,pin_begin_flush,pin_end_flush,pin_segment};
@@ -358,6 +698,7 @@ static HRESULT transform(struct filter*f,IMediaSample*input)
 {
 	struct pin*out=&f->output;
 	if(!out->connected||!out->allocator||!out->peer_mem)return VFW_E_NOT_CONNECTED;
+	if(f->audio)return f->encoder?audio_encode(f,input):audio_decode(f,input);
 	BITMAPINFOHEADER*ib=media_bih(&f->input.type),*ob=media_bih(&out->type);
 	if(!ib||!ob)return VFW_E_INVALID_MEDIA_TYPE;
 	DWORD raw=frame_bytes(f->encoder?ib:ob);
@@ -450,5 +791,5 @@ static HRESULT WINAPI filter_vendor(IBaseFilter*p,LPWSTR*out){return E_NOTIMPL;}
 static IBaseFilterVtbl filter_vtbl={filter_qi,filter_addref,filter_release,filter_class,filter_stop,filter_pause,filter_run,filter_state,filter_set_clock,filter_get_clock,filter_enum,filter_find,filter_info,filter_join,filter_vendor};
 
 static BOOL env_on(const char*name){char value[2];return GetEnvironmentVariableA(name,value,sizeof(value))==1&&value[0]=='1';}
-HRESULT testfilter_create(BOOL encoder,REFIID iid,void**out){if(!out)return E_POINTER;*out=NULL;struct filter*f=alloc(sizeof(*f));if(!f)return E_OUTOFMEMORY;f->iface.lpVtbl=&filter_vtbl;f->compression.lpVtbl=&compression_vtbl;f->codec_api.lpVtbl=&codec_api_vtbl;f->codec_api_only=env_on("TESTFILTER_CODECAPI");f->persist.lpVtbl=&persist_vtbl;f->refs=1;f->encoder=encoder;f->quality=0.75;f->async=env_on("TESTFILTER_ASYNC");f->no_eos=env_on("TESTFILTER_NO_EOS");f->require_segment=env_on("TESTFILTER_REQUIRE_SEGMENT");f->peer_info=env_on("TESTFILTER_PEER_INFO");f->dynamic=env_on("TESTFILTER_DYNAMIC");f->dynamic_extra=env_on("TESTFILTER_DYNAMIC_EXTRA");f->no_preroll=env_on("TESTFILTER_NO_PREROLL");f->notify_error=env_on("TESTFILTER_NOTIFY_ERROR");f->strict=env_on("TESTFILTER_STRICT");f->own_allocator=env_on("TESTFILTER_OWN_ALLOCATOR");InitializeCriticalSection(&f->transform_lock);f->input=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_INPUT};f->output=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_OUTPUT};InterlockedIncrement(&objects);HRESULT hr=filter_qi(&f->iface,iid,out);filter_release(&f->iface);return hr;}
+HRESULT testfilter_create(BOOL encoder,BOOL audio,REFIID iid,void**out){if(!out)return E_POINTER;*out=NULL;struct filter*f=alloc(sizeof(*f));if(!f)return E_OUTOFMEMORY;f->audio=audio;f->split=env_on("TESTFILTER_AUDIO_SPLIT");f->hold=env_on("TESTFILTER_AUDIO_HOLD");f->float_switch=env_on("TESTFILTER_AUDIO_FLOAT");f->rate_switch=env_on("TESTFILTER_AUDIO_RATE");f->iface.lpVtbl=&filter_vtbl;f->compression.lpVtbl=&compression_vtbl;f->codec_api.lpVtbl=&codec_api_vtbl;f->codec_api_only=env_on("TESTFILTER_CODECAPI");f->persist.lpVtbl=&persist_vtbl;f->refs=1;f->encoder=encoder;f->quality=0.75;f->async=env_on("TESTFILTER_ASYNC");f->no_eos=env_on("TESTFILTER_NO_EOS");f->require_segment=env_on("TESTFILTER_REQUIRE_SEGMENT");f->peer_info=env_on("TESTFILTER_PEER_INFO");f->dynamic=env_on("TESTFILTER_DYNAMIC");f->dynamic_extra=env_on("TESTFILTER_DYNAMIC_EXTRA");f->no_preroll=env_on("TESTFILTER_NO_PREROLL");f->notify_error=env_on("TESTFILTER_NOTIFY_ERROR");f->strict=env_on("TESTFILTER_STRICT");f->own_allocator=env_on("TESTFILTER_OWN_ALLOCATOR");InitializeCriticalSection(&f->transform_lock);f->input=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_INPUT};f->output=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_OUTPUT};InterlockedIncrement(&objects);HRESULT hr=filter_qi(&f->iface,iid,out);filter_release(&f->iface);return hr;}
 LONG testfilter_objects(void){return objects;}

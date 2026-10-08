@@ -190,7 +190,7 @@ static void test_preferences(void)
 	size_t n;
 
 	n = audio_output_preferences(&mp3, sizeof(mp3), AUDIO_NONE, out, 16);
-	CHECK_EQ(n, 8);
+	CHECK_EQ(n, 10);
 	CHECK_EQ(out[0].Format.wFormatTag, WAVE_FORMAT_PCM);
 	CHECK_EQ(out[0].Format.wBitsPerSample, 16);
 	CHECK_EQ(out[0].Format.nChannels, 2);
@@ -200,6 +200,7 @@ static void test_preferences(void)
 	CHECK_EQ(out[2].Format.wBitsPerSample, 24);
 	CHECK_EQ(out[6].Format.wFormatTag, WAVE_FORMAT_IEEE_FLOAT);
 	CHECK_EQ(out[7].Format.wFormatTag, WAVE_FORMAT_EXTENSIBLE);
+	CHECK_EQ(out[8].Format.wBitsPerSample, 8);
 
 	/* Above two channels, extensible first, with the input's speakers. */
 	audio_pcm_format(AUDIO_F32, 6, 48000, 0x60f, AUDIO_FORM_EXTENSIBLE,

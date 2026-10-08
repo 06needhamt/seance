@@ -20,12 +20,19 @@
 #include "vfw/icm.h"
 #include "win32/codepage.h"
 #include "win32/ole.h"
+#include "in/audio.h"
+#include "media/audio.h"
 #include "xform.h"
 
 static int usage(void)
 {
 	fprintf(stderr,
-		"usage: seance probe <codec.dll | fourcc> [in.avi] [options]\n"
+		"usage: seance probe <codec.dll | fourcc> [in.avi | in.wav] "
+		"[options]\n"
+		"\n"
+		"  With a file, a decoder shows the outputs it takes for it (for an\n"
+		"  audio decoder, of the file's audio), and an audio encoder the\n"
+		"  format it makes of the file's PCM.\n"
 		"\n"
 		"  --fourcc <XXXX>    the handler to open a DLL as (default: from\n"
 		"                     vfw.ini, else 0, then what the codec reports)\n"
@@ -105,6 +112,84 @@ static void probe_connections(const char *path, const struct xform_class *c,
 }
 
 /*
+ * For an audio decoder, the PCM types it takes for a file's audio (a WAV,
+ * or an AVI's audio stream); for an audio encoder, the format it makes of
+ * the file's PCM.
+ */
+static void probe_audio(const char *path, const struct xform_class *c,
+			int encoder, const char *input)
+{
+	struct audio_source *src = audio_source_open(input, NULL);
+	char desc[AUDIO_DESC_SIZE], name[24];
+
+	if (!src) {
+		printf("    connection check: %s\n", vfw_error());
+		return;
+	}
+	size_t size;
+	const WAVEFORMATEX *wf = audio_source_format(src, &size);
+	AM_MEDIA_TYPE in = {0};
+	HRESULT hr = audio_wfx_to_mt(wf, size, &in);
+
+	if (encoder) {
+		struct xform *x = NULL;
+		AM_MEDIA_TYPE out = {0};
+		WAVEFORMATEX *made = NULL;
+		size_t made_size = 0;
+		out.majortype = MEDIATYPE_Audio;
+		out.subtype = (GUID)WAVE_FORMAT_SUBTYPE_INIT(c->compression);
+		if (SUCCEEDED(hr))
+			hr = xform_create(path, c, &x);
+		if (SUCCEEDED(hr))
+			hr = xform_connect(x, &in, &out, NULL, NULL);
+		if (SUCCEEDED(hr))
+			hr = audio_mt_to_wfx(xform_output_type(x), &made,
+					     &made_size);
+		if (SUCCEEDED(hr))
+			printf("    makes of %s: %s\n", input,
+			       audio_format_desc(made, made_size, desc));
+		else
+			printf("    connection check: it takes no %s (%s)\n",
+			       audio_format_desc(wf, size, desc),
+			       dshow_hr_name(hr, name));
+		free(made);
+		xform_close(x);
+	} else if (audio_format_sample(wf, size) != AUDIO_NONE) {
+		printf("    connection check: %s's audio is already %s\n", input,
+		       audio_format_desc(wf, size, desc));
+	} else {
+		WAVEFORMATEXTENSIBLE choices[16];
+		size_t n = audio_output_preferences(wf, size, AUDIO_NONE,
+						    choices, 16);
+		int any = 0;
+		printf("    outputs accepted for %s:", input);
+		for (size_t i = 0; SUCCEEDED(hr) && i < n; i++) {
+			struct xform *x = NULL;
+			AM_MEDIA_TYPE out = {0};
+			size_t csize = choices[i].Format.cbSize ?
+				       sizeof(choices[i]) : sizeof(WAVEFORMATEX);
+			/* A fresh object each time: a refusal may leave it upset. */
+			if (SUCCEEDED(xform_create(path, c, &x)) &&
+			    SUCCEEDED(audio_wfx_to_mt(&choices[i].Format, csize,
+						      &out)) &&
+			    SUCCEEDED(xform_connect(x, &in, &out, NULL, NULL))) {
+				printf(" %s%s", audio_sample_name(
+					audio_format_sample(&choices[i].Format,
+							    csize)),
+				       csize > sizeof(WAVEFORMATEX) ?
+				       " (extensible)" : "");
+				any = 1;
+			}
+			xform_close(x);
+			dshow_free_media_type(&out);
+		}
+		printf("%s\n", any ? "" : " none of the usual PCM ones");
+	}
+	dshow_free_media_type(&in);
+	audio_source_close(src);
+}
+
+/*
  * The optional interfaces a decoder or encoder (filter or DMO) has, as the
  * codec's own probe says what it can do.
  */
@@ -144,6 +229,20 @@ static int probe_dshow(const char *path, const char *selected,
 		return 1;
 	}
 
+	/* What the file given has to check against: video, audio or both. */
+	int video_input = 0, audio_input = 0;
+	if (avi_path) {
+		struct avi_file *avi = avi_open(avi_path);
+		struct audio_source *a = audio_source_open(avi_path, NULL);
+		video_input = avi && avi_video_stream(avi) >= 0;
+		audio_input = a != NULL;
+		avi_close(avi);
+		audio_source_close(a);
+		if (!video_input && !audio_input)
+			printf("(%s has neither video nor audio to check)\n",
+			       avi_path);
+	}
+
 	size_t shown = 0;
 	printf("%s server: %s\n", count || !found.ndmos ? "DirectShow" : "DMO",
 	       path);
@@ -155,8 +254,16 @@ static int probe_dshow(const char *path, const char *selected,
 		dshow_print_filter(&filters[i], NULL, 1);
 		if (role != DSHOW_OTHER)
 			probe_interfaces(path, &c);
-		if (avi_path && role == DSHOW_DECODER)
+		if (video_input && role == DSHOW_VIDEO_DECODER)
 			probe_connections(path, &c, avi_path);
+		if (audio_input && (role == DSHOW_AUDIO_DECODER ||
+				 role == DSHOW_AUDIO_ENCODER)) {
+			struct xform_class ac;
+			int encoder = role == DSHOW_AUDIO_ENCODER;
+			if (SUCCEEDED(xform_find(path, &filters[i].clsid, 1,
+						 encoder, &ac)))
+				probe_audio(path, &ac, encoder, avi_path);
+		}
 		shown++;
 	}
 	for (size_t i = 0; i < found.ndmos; i++) {
@@ -168,8 +275,16 @@ static int probe_dshow(const char *path, const char *selected,
 		dmo_print(&found.dmos[i], NULL, 1);
 		if (dmo_role_is_codec(role))
 			probe_interfaces(path, &c);
-		if (avi_path && role == DMO_ROLE_VIDEO_DECODER)
+		if (video_input && role == DMO_ROLE_VIDEO_DECODER)
 			probe_connections(path, &c, avi_path);
+		if (audio_input && (role == DMO_ROLE_AUDIO_DECODER ||
+				 role == DMO_ROLE_AUDIO_ENCODER)) {
+			struct xform_class ac;
+			int encoder = role == DMO_ROLE_AUDIO_ENCODER;
+			if (SUCCEEDED(xform_find(path, &found.dmos[i].clsid, 1,
+						 encoder, &ac)))
+				probe_audio(path, &ac, encoder, avi_path);
+		}
 		shown++;
 	}
 	dshow_server_found_free(&found);

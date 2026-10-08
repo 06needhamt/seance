@@ -296,6 +296,25 @@ if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libmp3lame; then
 else
 	echo "skip MP3 cases: no libmp3lame in this FFmpeg"
 fi
+# TSTA through testfilter.ax: FFmpeg's PCM back exactly, and FFmpeg reads
+# the AVI the encoder's packets went into.
+filter=$build/fixtures/testfilter.ax
+if [ -f "$filter" ]; then
+	$emu "$harness" encode "$filter" $a/s24le.wav -o $a/tsta.avi 2>/dev/null ||
+		fail "encode TSTA"
+	$emu "$harness" decode "$filter" $a/tsta.avi -o $a/tsta.pcm \
+		--sample-format s24 2>/dev/null || fail "decode TSTA"
+	same "s24 WAV -> TSTA -> s24 identical" $a/tsta.pcm $a/s24le.ref
+	expect "TSTA AVI: FFmpeg sees its packets" \
+		"$(ffprobe -v error -select_streams a:0 -show_entries packet=size \
+		-of csv=p=0 $a/tsta.avi | wc -l | tr -d ' ')" 47
+	expect "TSTA AVI: tag and rate" \
+		"$(audio $a/tsta.avi codec_tag_string,sample_rate,channels)" \
+		"Ts[0][0],48000,2"
+	$emu "$harness" encode "$filter" $a/six.wav -o $a/six.avi 2>/dev/null
+	$emu "$harness" decode "$filter" $a/six.avi -o $a/six-tsta.pcm 2>/dev/null
+	same "6-channel WAV -> TSTA -> PCM identical" $a/six-tsta.pcm $a/six.ref
+fi
 echo
 
 codec=$build/fixtures/testcodec.dll

@@ -4,6 +4,7 @@
  * stream with a VfW codec, a DirectShow filter or a DMO and write the
  * frames as Y4M, BMP files or raw.
  */
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +12,7 @@
 #include <time.h>
 
 #include "avi/avi.h"
+#include "cmd_audio.h"
 #include "cmd_util.h"
 #include "commands.h"
 #include "common/error.h"
@@ -32,9 +34,10 @@
 static int usage(void)
 {
 	fprintf(stderr,
-		"usage: seance decode <codec.dll | fourcc | auto> <in.avi> "
+		"usage: seance decode <codec.dll | fourcc | auto> <input> "
 		"-o <out> [options]\n"
 		"\n"
+		"Video, from an AVI:\n"
 		"  -o <out>             output: .y4m, .yuv (I420), .bgr (BGR24),\n"
 		"                       .raw (the codec's output as is) or \"-\";\n"
 		"                       BMP files with a frame number: out%%05d.bmp\n"
@@ -45,13 +48,26 @@ static int usage(void)
 		"  --output-format <f>  what the codec should decompress to: I420,\n"
 		"                       YV12, YUY2, UYVY, BGR32, BGR24, RGB565,\n"
 		"                       RGB555 or PAL8 (default: negotiated)\n"
-		"  --stream <n>         the video stream (default: the first)\n"
-		"  --start <n>          first frame to write; decoding starts at the\n"
-		"                       keyframe before it (default 0)\n"
+		"  --stream <n>         the stream (default: the first video)\n"
+		"  --start <pos>        first frame to write, or a time (2.5s);\n"
+		"                       decoding starts at the keyframe before it\n"
 		"  --frames <n>         number of frames to write (default: all)\n"
+		"  --duration <len>     how much to write, as frames or a time\n"
 		"  --state <file>       codec state to set first (ICM_SETSTATE)\n"
 		"  --keep-going         on a frame the codec rejects, repeat the last\n"
 		"                       frame and carry on\n"
+		"\n"
+		"Audio, with a DirectShow filter or DMO, from a WAV or an AVI's\n"
+		"audio stream (taken for a .wav input, an AVI without video, a .wav\n"
+		"or .pcm output, or --audio):\n"
+		"  -o <out>             .wav, .pcm (the samples alone), or \"-\"\n"
+		"  --format <fmt>       wav or pcm, instead of the extension\n"
+		"  --audio              the first audio stream of an AVI\n"
+		"  --sample-format <f>  the PCM to write: u8, s16, s24, s32, f32 or\n"
+		"                       f64 (default: what the decoder gives)\n"
+		"  --start <pos>        first sample to write, or a time\n"
+		"  --duration <len>     how much to write, as samples or a time\n"
+		"  --clsid, --stream, --state, --keep-going  as for video\n"
 		"\n"
 		"\"auto\" picks a registered codec that accepts the stream.\n");
 	return 2;
@@ -227,7 +243,7 @@ static char *registered_decoder(const BITMAPINFOHEADER *input, CLSID *clsid)
 
 	for (size_t i = 0; i < count; i++) {
 		const struct qz_filter *f = &filters[i].f;
-		if (!filters[i].path || dshow_role(f) != DSHOW_DECODER)
+		if (!filters[i].path || dshow_role(f) != DSHOW_VIDEO_DECODER)
 			continue;
 		int accepts = 0;
 		for (size_t p = 0; p < f->npins && !accepts; p++) {
@@ -316,7 +332,7 @@ static int decode_com(const char *target, const CLSID *selected,
 		if (avi_chunk_is_frame(&s->chunks[i]) && s->chunks[i].size > largest)
 			largest = s->chunks[i].size;
 	in->biSizeImage = largest;
-	HRESULT hr = xform_open(target, selected, 0, &x, NULL);
+	HRESULT hr = xform_open(target, selected, 0, 0, &x, NULL);
 	if (FAILED(hr)) {
 		fprintf(stderr, "seance: cannot open a unique decoder in %s (%s)\n",
 			target, dshow_hr_name(hr, name));
@@ -534,8 +550,9 @@ int cmd_decode(int argc, char **argv)
 	const char *fourcc = NULL, *clsid_arg = NULL, *forced = NULL;
 	const char *state_path = NULL;
 	unsigned long start = 0, count = (unsigned long)-1, stream = (unsigned long)-1;
-	int keep_going = 0;
+	int keep_going = 0, want_audio = 0;
 	enum output_kind kind;
+	struct audio_codec_job job = { .source.stream = -1, .quality = -1 };
 
 	for (int i = 1; i < argc; i++) {
 		const char *a = argv[i];
@@ -556,8 +573,20 @@ int cmd_decode(int argc, char **argv)
 		else if (!strcmp(a, "--keep-going"))
 			keep_going = 1;
 		else if (!strcmp(a, "--start") && v) {
-			if (cli_parse_count(a, argv[++i], &start))
+			if (cli_parse_position(a, argv[++i], &job.start))
 				return 2;
+			job.has_start = 1;
+		} else if (!strcmp(a, "--duration") && v) {
+			if (cli_parse_position(a, argv[++i], &job.duration))
+				return 2;
+			job.has_duration = 1;
+		} else if (!strcmp(a, "--audio")) {
+			want_audio = 1;
+		} else if (!strcmp(a, "--sample-format") && v) {
+			if (audio_sample_from_name(argv[++i], &job.sample)) {
+				fprintf(stderr, "seance: %s\n", vfw_error());
+				return 2;
+			}
 		} else if (!strcmp(a, "--frames") && v) {
 			if (cli_parse_count(a, argv[++i], &count))
 				return 2;
@@ -573,6 +602,33 @@ int cmd_decode(int argc, char **argv)
 	}
 	if (!target || !path || !out_path)
 		return usage();
+
+	/* Audio: a WAV, an AVI's audio stream, or a .wav or .pcm output. */
+	if (job.sample != AUDIO_NONE || !strcmp(path, "-") ||
+	    cli_wants_audio(path, stream == (unsigned long)-1 ? -1 :
+			    stream > 99 ? 99 : (long)stream, want_audio, format,
+			    out_path, audio_only_kinds)) {
+		if (fourcc || forced || count != (unsigned long)-1) {
+			fprintf(stderr, "seance: --fourcc, --output-format and "
+				"--frames are for video\n");
+			return 2;
+		}
+		if (clsid_arg && parse_clsid(clsid_arg, &job.clsid_value)) {
+			fprintf(stderr, "seance: --clsid wants a GUID, not '%s'\n",
+				clsid_arg);
+			return 2;
+		}
+		job.clsid = clsid_arg ? &job.clsid_value : NULL;
+		job.codec = target;
+		job.in = path;
+		job.out = out_path;
+		job.format = format;
+		if (stream != (unsigned long)-1)
+			job.source.stream = stream > 99 ? 99 : (int)stream;
+		job.state = state_path;
+		job.keep_going = keep_going;
+		return decode_audio(&job);
+	}
 	if (format ? output_kind_from_name(format, &kind) :
 		     output_kind_from_path(out_path, &kind)) {
 		fprintf(stderr, "seance: %s\n", vfw_error());
@@ -603,6 +659,24 @@ int cmd_decode(int argc, char **argv)
 			stream == (unsigned long)-1 ? "no video stream" :
 			"no such video stream");
 		goto done;
+	}
+	/* --start and --duration in frames. */
+	{
+		DWORD r = s->header.dwRate, sc = s->header.dwScale;
+		if (!r || !sc) {
+			r = 1000000;
+			sc = avi->header.dwMicroSecPerFrame ?
+			     avi->header.dwMicroSecPerFrame : 40000;
+		}
+		if (job.has_start) {
+			unsigned long long n = cli_position_units(&job.start, r, sc);
+			start = n > ULONG_MAX ? ULONG_MAX : (unsigned long)n;
+		}
+		if (job.has_duration) {
+			unsigned long long n = cli_position_units(&job.duration, r, sc);
+			if (n < count)
+				count = (unsigned long)n;
+		}
 	}
 	/* The codec gets its own copy, with biSizeImage set per frame. */
 	size_t in_size = s->format_size > sizeof(*bih) ? s->format_size :
