@@ -9,6 +9,7 @@
  */
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "acm/acm.h"
@@ -1031,6 +1032,206 @@ static void test_testacm(void)
 	write_ini("");
 }
 
+/* Fuzzed formats. */
+
+static unsigned fuzz_state = 20260;
+
+static unsigned fuzz(unsigned n)
+{
+	fuzz_state = fuzz_state * 1103515245u + 12345u;
+	return (fuzz_state >> 8) % n;
+}
+
+/* One of the values, or now and then anything. */
+static DWORD fuzz_pick(const DWORD *values, size_t n)
+{
+	return fuzz(8) ? values[fuzz((unsigned)n)] :
+	       fuzz(0x10000) | (DWORD)fuzz(0x10000) << 16;
+}
+#define PICK(...) fuzz_pick((const DWORD[]){ __VA_ARGS__ }, \
+	sizeof((const DWORD[]){ __VA_ARGS__ }) / sizeof(DWORD))
+
+/*
+ * A format of a tag the drivers know or don't: half of them sound, then
+ * now and then one field broken; the rest anything. *size is what the
+ * buffer holds (its cbSize's worth).
+ */
+static WAVEFORMATEX *fuzz_format(size_t *size)
+{
+	int sound = fuzz(2);
+	WORD tag = sound ? (fuzz(2) ? WAVE_FORMAT_PCM : 0x7354) :
+		   (WORD)PICK(WAVE_FORMAT_PCM, 0x7354, WAVE_FORMAT_IEEE_FLOAT,
+			      WAVE_FORMAT_EXTENSIBLE, 0x0055, 0, 0xffff);
+	WORD cb = fuzz(4) ? (tag == 0x7354 ? 2 : 0) : (WORD)fuzz(80);
+	WAVEFORMATEX *wf = calloc(1, sizeof(*wf) + cb);
+
+	*size = sizeof(*wf) + cb;
+	if (!wf)
+		return NULL;
+	wf->wFormatTag = tag;
+	if (sound) {
+		static const DWORD rates[] = { 8000, 11025, 22050, 44100, 48000 };
+		static const WORD channels[] = { 1, 2, 6 }, bits[] = { 8, 16, 24 };
+		wf->nChannels = channels[fuzz(3)];
+		wf->nSamplesPerSec = rates[fuzz(5)];
+		wf->wBitsPerSample = bits[fuzz(3)];
+	} else {
+		wf->nChannels = (WORD)PICK(1, 2, 6, 0, 8, 255, 0xffff);
+		wf->nSamplesPerSec = PICK(8000, 44100, 48000, 0, 1, 0xffffffffu);
+		wf->wBitsPerSample = (WORD)PICK(8, 16, 24, 0, 1, 32, 33, 0xffff);
+	}
+	wf->nBlockAlign = (WORD)(wf->nChannels * (wf->wBitsPerSample / 8));
+	if (tag == 0x7354)
+		wf->nBlockAlign = (WORD)(8 + 1024 * wf->nBlockAlign);
+	wf->nAvgBytesPerSec = wf->nSamplesPerSec * wf->nBlockAlign;
+	wf->cbSize = cb;
+	for (WORD i = 0; i < cb; i++)
+		((BYTE *)(wf + 1))[i] = (BYTE)fuzz(256);
+	if (tag == 0x7354 && cb >= 2 && (sound || fuzz(2))) {
+		((BYTE *)(wf + 1))[0] = 0;
+		((BYTE *)(wf + 1))[1] = 4;	/* TSTA's version */
+	}
+	if (!fuzz(4)) {
+		/* A field broken. */
+		DWORD v = PICK(0, 1, 2, 0xffff, 0xffffffffu);
+		switch (fuzz(5)) {
+		case 0: wf->nChannels = (WORD)v; break;
+		case 1: wf->nSamplesPerSec = v; break;
+		case 2: wf->wBitsPerSample = (WORD)v; break;
+		case 3: wf->nBlockAlign = (WORD)v; break;
+		default: wf->nAvgBytesPerSec = v; break;
+		}
+	}
+	return wf;
+}
+
+/*
+ * Nonsense formats through every call that takes one, and data through
+ * any stream that opens, the testacm driver's and the PCM converter's
+ * (and the backend's): nothing may crash or overrun (the sanitizer build
+ * checks that), or claim more than it was given; errors are fine.
+ */
+static void test_fuzz(void)
+{
+	FN(MMRESULT, acmFormatSuggest, HACMDRIVER, LPWAVEFORMATEX,
+	   LPWAVEFORMATEX, DWORD, DWORD);
+	FN(MMRESULT, acmFormatDetailsW, HACMDRIVER, LPACMFORMATDETAILSW, DWORD);
+	FN(MMRESULT, acmStreamOpen, LPHACMSTREAM, HACMDRIVER, LPWAVEFORMATEX,
+	   LPWAVEFORMATEX, LPWAVEFILTER, DWORD_PTR, DWORD_PTR, DWORD);
+	FN(MMRESULT, acmStreamClose, HACMSTREAM, DWORD);
+	FN(MMRESULT, acmStreamSize, HACMSTREAM, DWORD, LPDWORD, DWORD);
+	FN(MMRESULT, acmStreamPrepareHeader, HACMSTREAM, LPACMSTREAMHEADER, DWORD);
+	FN(MMRESULT, acmStreamUnprepareHeader, HACMSTREAM, LPACMSTREAMHEADER,
+	   DWORD);
+	FN(MMRESULT, acmStreamConvert, HACMSTREAM, LPACMSTREAMHEADER, DWORD);
+	static BYTE src_data[9000], dst_data[20000];
+	HACMDRIVERID id;
+	struct acm_codec *codec = NULL;
+	int suggested = 0, opened = 0, converted = 0, backend = 0;
+
+	if (!have_testacm())
+		return;
+	write_ini("");
+	CHECK_EQ(msacm_add_path(testacm, &id), 0);
+	CHECK_EQ(acm_codec_open(testacm, &codec), S_OK);
+	for (size_t i = 0; i < sizeof(src_data); i++)
+		src_data[i] = (BYTE)fuzz(256);
+
+	for (int iter = 0; iter < 3000; iter++) {
+		size_t size, size2;
+		WAVEFORMATEX *wf = fuzz_format(&size), *wf2 = fuzz_format(&size2);
+		BYTE dst_buf[256];
+		if (!wf || !wf2) {
+			free(wf);
+			free(wf2);
+			continue;
+		}
+
+		/* A suggestion fills no more than its buffer, sensibly. */
+		DWORD room = 18 + fuzz(sizeof(dst_buf) - 18);
+		WAVEFORMATEX *to = wf2;
+		size_t to_size = size2;
+		memset(dst_buf, 0, sizeof(dst_buf));
+		((WAVEFORMATEX *)dst_buf)->wFormatTag = wf2->wFormatTag;
+		if (!acmFormatSuggest(NULL, wf, (WAVEFORMATEX *)dst_buf, room,
+				      fuzz(2) ? ACM_FORMATSUGGESTF_WFORMATTAG :
+				      0)) {
+			suggested++;
+			/* Mostly, where it suggests: streams open then. */
+			if (fuzz(4)) {
+				to = (WAVEFORMATEX *)dst_buf;
+				to_size = room;
+			}
+			CHECK(sizeof(WAVEFORMATEX) +
+			      ((WAVEFORMATEX *)dst_buf)->cbSize <= room ||
+			      ((WAVEFORMATEX *)dst_buf)->wFormatTag ==
+			      WAVE_FORMAT_PCM);
+		}
+
+		ACMFORMATDETAILSW d = { .cbStruct = sizeof(d) };
+		d.dwFormatTag = wf->wFormatTag;
+		d.pwfx = wf;
+		d.cbwfx = (DWORD)size;
+		acmFormatDetailsW(NULL, &d, ACM_FORMATDETAILSF_FORMAT);
+
+		HACMSTREAM has = NULL;
+		DWORD flags = fuzz(2) ? ACM_STREAMOPENF_NONREALTIME : 0;
+		if (!fuzz(4))
+			flags |= ACM_STREAMOPENF_QUERY;
+		MMRESULT r = acmStreamOpen(flags & ACM_STREAMOPENF_QUERY ?
+					   NULL : &has, NULL, wf, to, NULL, 0,
+					   0, flags);
+		if (!r && has) {
+			opened++;
+			DWORD v = 0;
+			acmStreamSize(has, fuzz(10000), &v,
+				      fuzz(2) ? ACM_STREAMSIZEF_SOURCE :
+				      ACM_STREAMSIZEF_DESTINATION);
+			for (int k = 0; k < 3; k++) {
+				ACMSTREAMHEADER h = { .cbStruct = sizeof(h) };
+				h.pbSrc = src_data;
+				h.cbSrcLength = fuzz(sizeof(src_data));
+				h.pbDst = dst_data;
+				h.cbDstLength = fuzz(sizeof(dst_data));
+				if (acmStreamPrepareHeader(has, &h, 0))
+					continue;
+				DWORD cf = (fuzz(2) ? ACM_STREAMCONVERTF_BLOCKALIGN :
+					    0) | (!k ? ACM_STREAMCONVERTF_START :
+					    0) | (k == 2 ? ACM_STREAMCONVERTF_END : 0);
+				if (!acmStreamConvert(has, &h, cf)) {
+					converted++;
+					CHECK(h.cbSrcLengthUsed <= h.cbSrcLength);
+					CHECK(h.cbDstLengthUsed <= h.cbDstLength);
+				}
+				CHECK_EQ(acmStreamUnprepareHeader(has, &h, 0), 0);
+			}
+			CHECK_EQ(acmStreamClose(has, 0), 0);
+		}
+
+		/* The backend, from the format to the other's tag. */
+		struct acm_stream *st = NULL;
+		if (codec && !fuzz(3) &&
+		    acm_stream_open(codec, wf, size, to, fuzz(2) ? to_size : 0,
+				    fuzz(2) ? 0 : fuzz(400000), NULL, NULL,
+				    &st) == S_OK) {
+			backend++;
+			acm_stream_push(st, src_data, fuzz(sizeof(src_data)), 0);
+			acm_stream_end(st);
+			acm_stream_close(st);
+		}
+		free(wf);
+		free(wf2);
+	}
+	acm_codec_close(codec);
+	/* Enough of them made sense to go somewhere. */
+	CHECK(suggested > 20 && opened > 20 && converted > 20 && backend > 5);
+	printf("test_msacm32: fuzz: %d suggested, %d opened, %d converted, "
+	       "%d through the backend\n", suggested, opened, converted,
+	       backend);
+	CHECK_EQ(msacm_stream_count(), 0);
+	CHECK_EQ(driver_count("testacm_stream_count"), 0);
+}
+
 /* The driver's modes, each in a child process with it set. */
 
 static void mode_strict(void)
@@ -1149,18 +1350,29 @@ static void mode_crash(void)
 	CHECK(!"the driver should have crashed");
 }
 
+/* Hangs there, for the timeout's report. */
+static void mode_hang(void)
+{
+	roundtrip(0);
+	CHECK(!"the driver should have hung");
+}
+
+enum ending { PASSES, CRASHES, HANGS };
+
 static const struct {
 	const char *name, *variable;
 	void (*run)(void);
+	enum ending ending;
 } modes[] = {
-	{ "strict", "STRICT", mode_strict },
-	{ "notrealtime", "NOTREALTIME", mode_notrealtime },
-	{ "small", "SMALL", mode_small },
-	{ "prepare", "PREPARE", mode_prepare },
-	{ "config", "CONFIG", mode_config },
-	{ "crash", "CRASH", mode_crash },
-	{ "whole", "WHOLE", mode_whole },
-	{ "noencode", "NOENCODE", mode_noencode },
+	{ "strict", "STRICT", mode_strict, PASSES },
+	{ "notrealtime", "NOTREALTIME", mode_notrealtime, PASSES },
+	{ "small", "SMALL", mode_small, PASSES },
+	{ "prepare", "PREPARE", mode_prepare, PASSES },
+	{ "config", "CONFIG", mode_config, PASSES },
+	{ "crash", "CRASH", mode_crash, CRASHES },
+	{ "hang", "HANG", mode_hang, HANGS },
+	{ "whole", "WHOLE", mode_whole, PASSES },
+	{ "noencode", "NOENCODE", mode_noencode, PASSES },
 };
 #define NMODES (sizeof(modes) / sizeof(*modes))
 
@@ -1182,30 +1394,37 @@ static void test_modes(const char *self)
 	if (!have_testacm())
 		return;
 	for (size_t i = 0; i < NMODES; i++) {
-		snprintf(cmd, sizeof(cmd), "VFW_ENV_TESTACM_%s=1 %s'%s' %s 2>&1",
+		enum ending ending = modes[i].ending;
+		snprintf(cmd, sizeof(cmd), "%sVFW_ENV_TESTACM_%s=1 %s'%s' %s 2>&1",
+			 ending == HANGS ? "VFW_TIMEOUT=1 " : "",
 			 modes[i].variable, test_rerun_prefix(), self,
 			 modes[i].name);
 		FILE *p = popen(cmd, "r");
 		size_t n = p ? fread(out, 1, sizeof(out) - 1, p) : 0;
 		out[n] = 0;
 		int status = p ? pclose(p) : -1;
-		if (strcmp(modes[i].name, "crash")) {
-			CHECK_EQ(status, 0);
-		} else {
+		int ok;
+		if (ending == PASSES) {
+			ok = status == 0;
+		} else if (ending == CRASHES) {
 			/*
 			 * It dies, and the report names the driver's message;
 			 * a sanitizer reports faults itself.
 			 */
-			CHECK(status != 0);
-			CHECK(VFW_SANITIZER_BUILD ||
-			      strstr(out, "ACMDM_STREAM_CONVERT") != NULL);
-			CHECK(VFW_SANITIZER_BUILD ||
-			      strstr(out, "testacm.acm") != NULL);
+			ok = status != 0 && (VFW_SANITIZER_BUILD ||
+			     (strstr(out, "ACMDM_STREAM_CONVERT") &&
+			      strstr(out, "testacm.acm")));
+		} else {
+			/* The watchdog's, in any build: exit 124. */
+			ok = WIFEXITED(status) && WEXITSTATUS(status) == 124 &&
+			     strstr(out, "seance: timeout:") &&
+			     strstr(out, "ACMDM_STREAM_CONVERT") &&
+			     strstr(out, "testacm.acm");
 		}
-		if (strcmp(modes[i].name, "crash") ? status != 0 :
-		    !status)
-			fprintf(stderr, "test_msacm32: mode %s failed:\n%s",
-				modes[i].name, out);
+		CHECK(ok);
+		if (!ok)
+			fprintf(stderr, "test_msacm32: mode %s failed (status "
+				"%d):\n%s", modes[i].name, status, out);
 	}
 }
 
@@ -1262,6 +1481,7 @@ int main(int argc, char **argv)
 	test_choose();
 	test_fixture();
 	test_testacm();
+	test_fuzz();
 	test_modes(argv[0]);
 	test_names();
 

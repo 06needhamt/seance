@@ -284,19 +284,22 @@ static BOOL WINAPI pick_format(HACMDRIVERID id, LPACMFORMATDETAILSW d,
 	return TRUE;
 }
 
-/* The format of tag for in nearest bitrate, into out; 0 or -1. */
-static int by_bitrate(struct acm_codec *c, const WAVEFORMATEX *in, WORD tag,
-		      DWORD bitrate, WAVEFORMATEX *out, size_t room)
+/*
+ * The format of tag for in (in_size bytes, as its cbSize says) nearest
+ * bitrate, into out; 0 or -1.
+ */
+static int by_bitrate(struct acm_codec *c, const WAVEFORMATEX *in,
+		      size_t in_size, WORD tag, DWORD bitrate,
+		      WAVEFORMATEX *out, size_t room)
 {
-	WAVEFORMATEX *wf = calloc(1, room);
+	WAVEFORMATEX *wf = calloc(1, room > in_size ? room : in_size);
 	struct pick p = { tag, bitrate / 8, out, 0, 0 };
 	ACMFORMATDETAILSW d = { .cbStruct = sizeof(d) };
 
 	if (!wf)
 		return -1;
 	/* Formats in converts to: the restriction is in itself. */
-	memcpy(wf, in, in->wFormatTag == WAVE_FORMAT_PCM ?
-	       sizeof(PCMWAVEFORMAT) : sizeof(WAVEFORMATEX) + in->cbSize);
+	memcpy(wf, in, in_size);
 	d.pwfx = wf;
 	d.cbwfx = (DWORD)room;
 	msacm_acmFormatEnumW(c->had, &d, pick_format, (DWORD_PTR)&p,
@@ -331,15 +334,21 @@ HRESULT acm_stream_open(struct acm_codec *c, const WAVEFORMATEX *in,
 		return E_OUTOFMEMORY;
 	}
 	memcpy(src, in, in_size);
+	/* What follows it is what there is, whatever its cbSize says. */
 	if (in_size < sizeof(WAVEFORMATEX))
 		src->cbSize = 0;
+	else if (src->cbSize > in_size - sizeof(WAVEFORMATEX))
+		src->cbSize = (WORD)(in_size - sizeof(WAVEFORMATEX));
+	size_t src_size = in_size < sizeof(WAVEFORMATEX) ?
+			  sizeof(WAVEFORMATEX) : in_size;
 
 	if (out_size) {
 		memcpy(fmt, out, out_size);
 	} else {
 		WORD tag = out->wFormatTag;
 		r = ACMERR_NOTPOSSIBLE;
-		if (bitrate && !by_bitrate(c, src, tag, bitrate, fmt, room))
+		if (bitrate &&
+		    !by_bitrate(c, src, src_size, tag, bitrate, fmt, room))
 			r = MMSYSERR_NOERROR;
 		if (r) {
 			memset(fmt, 0, room);

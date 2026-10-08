@@ -31,6 +31,7 @@
  *   TESTACM_CONFIG       it says it can be configured (DRV_QUERYCONFIGURE)
  *                        and answers DRV_CONFIGURE, with no dialog
  *   TESTACM_CRASH        ACMDM_STREAM_CONVERT writes through a null pointer
+ *   TESTACM_HANG         ACMDM_STREAM_CONVERT never returns
  *   TESTACM_WHOLE        it encodes only whole packets, even at the end
  *                        (as IMA ADPCM drivers do): the caller pads the rest
  *   TESTACM_NOENCODE     it suggests TSTA for PCM but won't open a stream
@@ -61,8 +62,8 @@ static const DWORD rates[NRATES] = { 8000, 11025, 22050, 44100, 48000 };
 static const WORD channel_counts[NCHANNELS] = { 1, 2, 6 };
 static const WORD bit_depths[NBITS] = { 8, 16, 24 };
 
-static int strict, notrealtime, small, prepare, config, crash, whole,
-	   noencode;
+static int strict, notrealtime, small, prepare, config, crash, hang,
+	   whole, noencode;
 static LONG opens, streams;
 
 struct instance {
@@ -486,6 +487,8 @@ static LRESULT stream_convert(ACMDRVSTREAMINSTANCE *si, ACMDRVSTREAMHEADER *h)
 
 	if (crash)
 		*(volatile DWORD *)(DWORD_PTR)si->pwfltr = 1;	/* it is NULL */
+	while (hang)
+		Sleep(1000);
 	if (!s || !h || high(4, si, h, h->pbSrc, h->pbDst))
 		return MMSYSERR_INVALPARAM;
 	if (prepare && h->dwDriver != PREPARED_MAGIC)
@@ -519,6 +522,7 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		prepare = env_on("TESTACM_PREPARE");
 		config = env_on("TESTACM_CONFIG");
 		crash = env_on("TESTACM_CRASH");
+		hang = env_on("TESTACM_HANG");
 		whole = env_on("TESTACM_WHOLE");
 		noencode = env_on("TESTACM_NOENCODE");
 		return 1;

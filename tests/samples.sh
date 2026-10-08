@@ -4,7 +4,8 @@
 # (*.dll, *.drv, *.ax, *.acm, any case), and reports for each whether it
 # parses, which of its imports aren't implemented, and whether it opens and
 # answers ICM_GETINFO. A DirectShow or DMO server is reported with its
-# filters or DMOs and what they are (video or audio decoders and encoders).
+# filters or DMOs and what they are (video or audio decoders and encoders),
+# an ACM driver with its name and what it does with each format tag.
 # Nothing specific to any codec is checked. It fails only if the harness
 # itself crashes or hangs, or a file can't be parsed.
 #
@@ -69,6 +70,13 @@ for f in "$dir"/*; do
 			awk '{ printf "%s%d %s %s%s", (NR > 1 ? ", " : ""), $1,
 			       $2, $3, ($1 > 1 ? "s" : "") }')
 		state="$kind server, $filters filter(s), $dmos DMO(s)${roles:+: $roles}"
+	elif grep -q '^ACM driver:' "$out"; then
+		# "'MPEG Layer-3 Codec': 0x0055 decodes to PCM, 0x0050 ..."
+		acm=$(sed -n 's/^  name *//p' "$out" | head -n 1)
+		tags=$(sed -n 's/^    \(0x[0-9a-f]*\) [^:]*: [^;]*; \([^(]*\).*/\1 \2/p' \
+			"$out" | sed 's/ *$//' |
+			awk '{ printf "%s%s", (NR > 1 ? ", " : ""), $0 }')
+		state="ACM driver '${acm:-?}'${tags:+: $tags}"
 	elif [ $rc -eq 0 ]; then
 		state="opens as '${handler:-?}'"
 	else
