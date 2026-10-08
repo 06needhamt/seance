@@ -39,6 +39,10 @@ and audio decoders and encoders, DirectShow filters and DMOs, run through
 Audio files are read and written without a codec: WAV (and RF64), raw PCM
 and AVI audio streams, through `avi` and `convert`.
 
+ACM audio drivers (`.acm`) are under way ([docs/ACM_PLAN.md](docs/ACM_PLAN.md)):
+the headers and a built-in msacm32.dll with its PCM converter are done; the
+commands don't drive ACM drivers yet.
+
 The real-world check is the LAV Filters 0.83 package (32-bit): LAV Video
 loads, registers, connects and decodes 18 codecs identically to FFmpeg; LAV
 Audio decodes MP3, FLAC, MS ADPCM and A-law identically and AC-3, E-AC-3,
@@ -300,10 +304,20 @@ comdlg32 are built in too, headless:
   pens and fonts. The display is a 1024x768 32-bit device that discards
   what is drawn on it; text is measured but not drawn.
 - **advapi32:** the registry, kept in a `.reg` file (see below), with
-  change notification; `Drivers32` there shows the codecs `vfw.ini`
-  registers. Security answers as for an administrator on XP: tokens,
+  change notification; `Drivers32` there shows the codecs and ACM
+  drivers `vfw.ini` registers. Security answers as for an administrator on XP: tokens,
   privileges, SIDs and account names, ACLs and security descriptors, with
   nothing enforced. `CryptGenRandom` gives random numbers.
+- **msacm32:** the Audio Compression Manager, after Wine's: the drivers
+  `vfw.ini` names (`msacm.imaadpcm=imaadp32.acm`, also shown under
+  `Drivers32`), those added with `acmDriverAdd`, and a PCM converter of
+  its own (8, 16, 24 and 32 bits, mono and stereo, without resampling);
+  their details, metrics and priorities, format and filter tags, formats
+  and their enumeration, `acmFormatSuggest`, and streams
+  (`acmStreamOpen`, `acmStreamConvert` and the rest). `acmFormatChoose`
+  answers as `$VFW_ACM_FORMAT` says, or with the format it starts with, or
+  cancels; `acmFilterChoose` answers with the filter it starts with, or
+  cancels.
 - **version:** `GetFileVersionInfo*` and `VerQueryValue` read a DLL's
   version resource. The built-in DLLs answer with a version block of their
   own, versioned like Windows XP SP3's (5.1.2600.5512), for codecs that
@@ -701,6 +715,7 @@ decodes below 40 dB.
 | `VFW_TRACE=1` | Log calls into the built-in DLLs and every driver message to stderr |
 | `VFW_TIMEOUT=<s>` | Report and stop (exit 124) when one call into a DLL takes longer |
 | `VFW_COMPRESSOR` | What `ICCompressorChoose` answers: a FOURCC (`TST0`), `uncompressed` or `cancel` |
+| `VFW_ACM_FORMAT` | What `acmFormatChoose` answers: a format tag and, optionally, rate, channels and bits (`1,22050,1,8`), or `cancel` |
 | `VFW_OPEN_FILE`, `VFW_SAVE_FILE` | What `GetOpenFileName` and `GetSaveFileName` answer: a file, or `cancel` (the default) |
 | `VFW_ZERO_MEMORY=0` | Don't zero memory from `malloc`, `operator new` and `HeapAlloc` (zeroed by default) |
 | `VFW_LOW_MEMORY=0` | Don't keep DLL-visible memory below 2 GB |

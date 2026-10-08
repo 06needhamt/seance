@@ -10,6 +10,7 @@
  *   [drivers32]
  *   vidc.TST0=/path/to/testcodec.dll
  *   vidc.MSVC=C:\windows\system32\msvidc32.dll
+ *   msacm.imaadpcm=imaadp32.acm
  *
  * and from vfw_register() at run time. Relative paths are taken from the
  * ini file's directory; Windows paths go through the drive mapping.
@@ -62,6 +63,19 @@ unsigned vfw_registry_generation(void);
 
 /* Removes an entry. Returns 0, or -1 if there was none. */
 int vfw_unregister(FOURCC type, FOURCC handler);
+
+/*
+ * ACM drivers, the "msacm.<name>" entries (which aren't type.handler
+ * pairs, so vfw_find and vfw_enum don't see them), kept in the order the
+ * file gives them.
+ */
+int vfw_is_acm_alias(const char *name);
+/* The i-th: 0 and malloc()ed copies, or -1 past the end. */
+int vfw_acm_get(unsigned i, char **alias, char **path);
+/* Adds or replaces one from a value as an ini line gives it. 0 or -1. */
+int vfw_acm_register_value(const char *alias, const char *value);
+/* Removes one. 0, or -1 if there was none. */
+int vfw_acm_unregister(const char *alias);
 
 /* Parses "TST0" or "vidc.TST0" (handler padded with spaces). 0 or -1. */
 int vfw_parse_fourcc(const char *s, FOURCC *type, FOURCC *handler);

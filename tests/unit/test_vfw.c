@@ -109,6 +109,28 @@ static void test_registry(void)
 		n++;
 	CHECK_EQ(n, 4);
 
+	/* The ACM driver is in a table of its own. */
+	char *alias = NULL, *apath = NULL;
+	CHECK_EQ(vfw_acm_get(0, &alias, &apath), 0);
+	CHECK(alias && !strcmp(alias, "msacm.imaadpcm"));
+	CHECK(apath && !strcmp(apath, "imaadp32.acm"));
+	free(alias);
+	free(apath);
+	CHECK_EQ(vfw_acm_get(1, &alias, &apath), -1);
+	CHECK(vfw_is_acm_alias("MSACM.x") && !vfw_is_acm_alias("msacm.") &&
+	      !vfw_is_acm_alias("vidc.TST0"));
+	CHECK_EQ(vfw_acm_register_value("vidc.ABCD", "x.acm"), -1);
+	CHECK_EQ(vfw_acm_register_value("msacm.extra", "/x/extra.acm"), 0);
+	CHECK_EQ(vfw_acm_register_value("MSACM.EXTRA", "/x/again.acm"), 0);
+	CHECK_EQ(vfw_acm_get(1, &alias, &apath), 0);
+	CHECK(alias && !strcmp(alias, "msacm.extra"));
+	CHECK(apath && !strcmp(apath, "/x/again.acm"));	/* replaced */
+	free(alias);
+	free(apath);
+	CHECK_EQ(vfw_acm_unregister("msacm.Extra"), 0);
+	CHECK_EQ(vfw_acm_unregister("msacm.extra"), -1);
+	CHECK_EQ(vfw_acm_get(1, &alias, &apath), -1);
+
 	/* Run-time entries. */
 	CHECK_EQ(vfw_register(ICTYPE_VIDEO, FCC('R', 'U', 'N', '1'), "/x/run.dll"), 0);
 	c = vfw_find(ICTYPE_VIDEO, FCC('r', 'u', 'n', '1'));

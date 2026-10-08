@@ -39,7 +39,7 @@ Proposed decisions (to confirm before Phase 1):
   `acmDriverAdd`, and a path given on the command line. There is no
   `register` for ACM, as there is none for VfW codecs.
 - **The built-in PCM converter** converts between PCM sample formats
-  (8/16/24/32-bit integer, 32-bit float) and between mono and stereo, at
+  (8/16/24/32-bit integer) and between mono and stereo, at
   the same rate. It refuses rate conversion (`ACMERR_NOTPOSSIBLE`).
   `src/media/audio.c` already converts sample formats the way FFmpeg does.
 - **Headless choosers:** `acmFormatChoose` and `acmFilterChoose` answer from
@@ -150,7 +150,7 @@ include/win32/msacm.h  msacm.h and msacmdrv.h definitions
   on Windows.
 - **The PCM converter:** `MS-PCM` with format tag 1. It enumerates the
   standard PCM formats (the rates Wine's converter lists, mono and
-  stereo, 8 and 16 bits), suggests within them, and converts through
+  stereo, 8, 16 and 24 bits), suggests within them, and converts through
   `audio_convert`.
 - **Tracing.** Every driver message is traced under `VFW_TRACE=1`, with
   `ACMDM_*` names added to `drv_msg_name`. Calls are crash-framed, so a
@@ -223,8 +223,9 @@ A CRT-less mingw DLL like `testcodec.dll`, sharing `tsta.h`:
 - **Modes**, from the environment, as the other fixtures have them:
   - `STRICT`: refuses pointers at or above 2 GB.
   - `NOTREALTIME`: refuses an open without `ACM_STREAMOPENF_NONREALTIME`.
-  - `SMALL`: answers `ACMDM_STREAM_SIZE` with less than a block, which
-    msacm32 must not pass on as is.
+  - `SMALL`: answers `ACMDM_STREAM_SIZE` with less than a block. msacm32
+    passes that on, as Windows does; the backend's buffers must still
+    hold a whole block.
   - `PREPARE`: wants its own `ACMDM_STREAM_PREPARE`, and checks that
     the header is prepared.
   - `CONFIG`: answers DRV_QUERYCONFIGURE.
@@ -250,13 +251,45 @@ A CRT-less mingw DLL like `testcodec.dll`, sharing `tsta.h`:
    - `mmsystem.h` gained `MMRESULT`, the full `MMSYSERR_*` list,
      `CALLBACK_*` and `MM_STREAM_*`; `mmreg.h` `WAVEFILTER` and the
      `WAVE_FILTER_*` tags.
-1. **msacm32 and the PCM converter.** The built-in DLL with every export
-   above. The driver list comes from `vfw.ini` (`msacm.*` lines now
+1. **msacm32 and the PCM converter.** (Done.) The built-in DLL with every
+   export above. The driver list comes from `vfw.ini` (`msacm.*` lines now
    parsed; `vfw_parse_fourcc` still refuses them), from the `Drivers32`
    view and from `acmDriverAdd`. `ACMDM_*` names go into
    `drv_msg_name`.
    Milestone: `tests/unit/test_msacm32.c` enumerates and converts with the
    PCM converter alone, and a fixture DLL importing msacm32 loads.
+   - `src/win32/msacm32.c` (drivers, streams, metrics),
+     `msacm_format.c` (tags, formats, filters, suggestions, choosers) and
+     `msacm_pcm.c` (the converter); `msacm32.h` has the API for the
+     harness and `msacm_add_path`, which adds a driver by its DLL's path
+     as `msacm.<name>`.
+   - `vfw.ini`'s `msacm.*` entries are a table of their own in
+     `src/vfw/registry.c` (`vfw_acm_get`, `vfw_acm_register_value`,
+     `vfw_acm_unregister`); the `Drivers32` view lists them and follows
+     changes made there, as for codecs. msacm32 follows the table:
+     entries added join the list, entries removed leave it.
+   - A driver's details and tags are read the first time anything needs
+     them, by opening it once. One that doesn't open, or opens but gives
+     no `ACMDM_DRIVER_DETAILS` with `fccType` `'audc'` (a VfW codec),
+     takes no further part: it isn't enumerated, counted or searched.
+   - Differences from the decisions above: the PCM converter handles 8,
+     16, 24 and 32-bit integers but not float (it is tag 1 only, as
+     Windows' is), and lists the standard formats Wine's does (8000 to
+     96000 Hz, mono and stereo, 8, 16 and 24 bits; 36 in all).
+     `acmStreamMessage` returns `MMSYSERR_NOTSUPPORTED` (no stream
+     messages are defined for applications), `acmStreamReset` only
+     reaches drivers for asynchronous streams, and
+     `ACM_DRIVERADDF_NOTIFYHWND` is refused.
+   - Tests: `test_msacm32` (224 checks) covers the driver list, a broken
+     table entry, a function driver added with `acmDriverAdd` (found by
+     stream searches, disabled, removed, busy while open), priorities,
+     details in both character sets, tags, formats and their filtered
+     enumeration, suggestions, streams (block alignment, buffers moved
+     after preparing, stereo to mono and back, bit depths), the choosers
+     and `pe_acm.dll`, a fixture that runs a conversion through its
+     msacm32 imports and a driver-enumeration callback.
+     `test_vfw` and `test_advapi32` cover the table and its `Drivers32`
+     view.
 2. **Fixture driver.** `testacm.acm` with its modes.
    Milestone:
    - `test_msacm32` adds, enumerates, suggests and converts TSTA through
