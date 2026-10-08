@@ -13,8 +13,9 @@
  * HKLM\Software\Microsoft\Windows NT\CurrentVersion\Drivers32, where
  * msvfw32 on NT finds codecs, is a view of the codec table (vfw.ini's
  * [drivers32] and run-time registrations): it lists each codec as
- * "vidc.TST0" = its DLL, and setting or deleting such a value there
- * registers or removes that codec for the process. The key is never
+ * "vidc.TST0" = its DLL, and each ACM driver as "msacm.<name>" = its DLL,
+ * and setting or deleting such a value there registers or removes that
+ * codec or driver for the process. The key is never
  * saved; vfw.ini is where codecs are kept. Codec entries in a Drivers32
  * key read from the registry file are registered too.
  */
@@ -126,6 +127,19 @@ static char *value_utf8(const BYTE *data, DWORD size)
 	return u;
 }
 
+/* A driver's path as a Drivers32 value: its Windows form. */
+static void set_path_value(struct reg_key *k, const char *name,
+			   const char *path)
+{
+	char *win = path[0] == '/' ? path_to_windows(path) : strdup(path);
+	WCHAR *w = win ? utf8_to_utf16_dup(win) : NULL;
+
+	if (w)
+		reg_set(k, name, REG_SZ, w, (wstrlen(w) + 1) * sizeof(WCHAR));
+	free(w);
+	free(win);
+}
+
 /*
  * Brings the Drivers32 key in step with the codec table, when either has
  * changed. Called with the registry locked.
@@ -144,12 +158,17 @@ static void drivers32_sync(void)
 		/* Read from the file: its codecs join the table. */
 		for (size_t i = 0; i < k->nval; i++) {
 			const struct reg_value *v = &k->val[i];
-			if (!codec_value(v->name, &type, &handler) ||
+			int acm = vfw_is_acm_alias(v->name);
+			if ((!acm && !codec_value(v->name, &type, &handler)) ||
 			    (v->type != REG_SZ && v->type != REG_EXPAND_SZ))
 				continue;
 			char *u = value_utf8(v->data, v->size);
-			if (u && *u)
-				vfw_register_value(type, handler, u);
+			if (u && *u) {
+				if (acm)
+					vfw_acm_register_value(v->name, u);
+				else
+					vfw_register_value(type, handler, u);
+			}
 			free(u);
 		}
 	}
@@ -159,7 +178,8 @@ static void drivers32_sync(void)
 	if ((k = reg_create(DRIVERS32, 1, &created, &err))) {
 		k->is_volatile = 1;
 		for (size_t i = k->nval; i-- > 0;)
-			if (codec_value(k->val[i].name, &type, &handler))
+			if (codec_value(k->val[i].name, &type, &handler) ||
+			    vfw_is_acm_alias(k->val[i].name))
 				reg_unset(k, k->val[i].name);
 		const struct vfw_codec *c;
 		for (unsigned i = 0; (c = vfw_enum(0, i)); i++) {
@@ -172,14 +192,13 @@ static void drivers32_sync(void)
 			snprintf(name, sizeof(name), "%.4s.%.*s",
 				 (const char *)&c->type, n,
 				 (const char *)&c->handler);
-			char *win = c->path[0] == '/' ? path_to_windows(c->path) :
-				    strdup(c->path);
-			WCHAR *w = win ? utf8_to_utf16_dup(win) : NULL;
-			if (w)
-				reg_set(k, name, REG_SZ, w,
-					(wstrlen(w) + 1) * sizeof(WCHAR));
-			free(w);
-			free(win);
+			set_path_value(k, name, c->path);
+		}
+		char *alias, *path;
+		for (unsigned i = 0; !vfw_acm_get(i, &alias, &path); i++) {
+			set_path_value(k, alias, path);
+			free(alias);
+			free(path);
 		}
 	}
 	d32_reg = reg_generation();
@@ -193,14 +212,24 @@ static void drivers32_changed(const char *path, const char *name,
 {
 	FOURCC t, h;
 
-	if (!path || strcasecmp(path, DRIVERS32) || !codec_value(name, &t, &h))
+	int acm = vfw_is_acm_alias(name);
+
+	if (!path || strcasecmp(path, DRIVERS32) ||
+	    (!acm && !codec_value(name, &t, &h)))
 		return;
 	if (!data) {
-		vfw_unregister(t, h);
+		if (acm)
+			vfw_acm_unregister(name);
+		else
+			vfw_unregister(t, h);
 	} else if (type == REG_SZ || type == REG_EXPAND_SZ) {
 		char *u = value_utf8(data, size);
-		if (u && *u)
-			vfw_register_value(t, h, u);
+		if (u && *u) {
+			if (acm)
+				vfw_acm_register_value(name, u);
+			else
+				vfw_register_value(t, h, u);
+		}
 		free(u);
 	}
 }

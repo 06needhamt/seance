@@ -85,7 +85,21 @@
 #define MPEGLAYER3_FLAG_PADDING_ON       0x00000001
 #define MPEGLAYER3_FLAG_PADDING_OFF      0x00000002
 
+/* WAVEFILTER.dwFilterTag. */
+#define WAVE_FILTER_UNKNOWN     0x0000
+#define WAVE_FILTER_VOLUME      0x0001
+#define WAVE_FILTER_ECHO        0x0002
+#define WAVE_FILTER_DEVELOPMENT 0xffff
+
 #pragma pack(push, 1)
+/* An ACM filter (echo, volume): what a WAVEFILTER-specific block extends. */
+typedef struct wavefilter_tag {
+	DWORD cbStruct;
+	DWORD dwFilterTag;
+	DWORD fdwFilter;
+	DWORD dwReserved[5];
+} WAVEFILTER, *PWAVEFILTER, *NPWAVEFILTER, *LPWAVEFILTER;
+
 /*
  * A WAVEFORMATEX with wFormatTag WAVE_FORMAT_EXTENSIBLE and cbSize 22: the
  * real format is SubFormat, and the speakers the channels feed are named.

@@ -810,7 +810,8 @@ static void test_drivers32(void)
 	snprintf(ini, sizeof(ini), "%s/vfw.ini", dir);
 	static const char text[] = "[drivers32]\n"
 		"vidc.ABCD=abcd.dll\n"
-		"vidc.WXYZ=/opt/codecs/wxyz.dll\n";
+		"vidc.WXYZ=/opt/codecs/wxyz.dll\n"
+		"msacm.tsta=/opt/codecs/tsta.acm\n";
 	write_file(ini, text, sizeof(text) - 1);
 	setenv("VFW_INI", ini, 1);
 	vfw_registry_reload();
@@ -825,6 +826,12 @@ static void test_drivers32(void)
 	CHECK_EQ(RegQueryValueExA(k, "VIDC.wxyz", NULL, NULL, (BYTE *)buf, &cb),
 		 0);
 	CHECK_STR(buf, "Z:\\opt\\codecs\\wxyz.dll");
+
+	/* ACM drivers too. */
+	cb = sizeof(buf);
+	CHECK_EQ(RegQueryValueExA(k, "msacm.tsta", NULL, NULL, (BYTE *)buf, &cb),
+		 0);
+	CHECK_STR(buf, "Z:\\opt\\codecs\\tsta.acm");
 
 	/* Registrations at run time show up... */
 	CHECK_EQ(vfw_register(vidc, mmioFOURCC('L', 'I', 'V', 'E'),
@@ -844,6 +851,20 @@ static void test_drivers32(void)
 	cb = sizeof(buf);
 	CHECK_EQ(RegQueryValueExA(k, "vidc.ABCD", NULL, NULL, (BYTE *)buf, &cb),
 		 ERROR_FILE_NOT_FOUND);
+	CHECK_EQ(RegSetValueExA(k, "msacm.new2", 0, REG_SZ,
+				(const BYTE *)"Z:\\x\\new2.acm", 14), 0);
+	char *alias = NULL, *apath = NULL;
+	CHECK_EQ(vfw_acm_get(1, &alias, &apath), 0);
+	CHECK(alias && !strcmp(alias, "msacm.new2"));
+	CHECK(apath && !strcmp(apath, "/x/new2.acm"));
+	free(alias);
+	free(apath);
+	CHECK_EQ(RegDeleteValueA(k, "msacm.tsta"), 0);
+	CHECK_EQ(vfw_acm_get(0, &alias, &apath), 0);
+	CHECK(alias && !strcmp(alias, "msacm.new2"));
+	free(alias);
+	free(apath);
+	CHECK_EQ(vfw_acm_get(1, &alias, &apath), -1);
 	/* Other values stay as they are. */
 	CHECK_EQ(RegSetValueExA(k, "wavemapper", 0, REG_SZ,
 				(const BYTE *)"msacm32.drv", 12), 0);
@@ -854,7 +875,8 @@ static void test_drivers32(void)
 
 	/* Never saved: vfw.ini is where codecs live. */
 	char *saved = read_text(file);
-	CHECK(saved && !strstr(saved, "vidc.") && !strstr(saved, "Drivers32"));
+	CHECK(saved && !strstr(saved, "vidc.") && !strstr(saved, "msacm.") &&
+	      !strstr(saved, "Drivers32"));
 	free(saved);
 
 	/* A Drivers32 key in a registry file registers its codecs. */

@@ -136,6 +136,10 @@ static void test_paths(void)
 	CHECK(!PathRemoveFileSpecW(bare));
 	CHECK(PathCombineA(b, "C:\\Windows", "system32\\x.dll") == b);
 	CHECK_STR(b, "C:\\Windows\\system32\\x.dll");
+	CHECK(PathCombineA(b, "C:\\Windows", "\\x.dll") == b);
+	CHECK_STR(b, "C:\\x.dll");
+	CHECK(PathCombineA(b, "\\\\srv\\share\\dir", "\\x.dll") == b);
+	CHECK_STR(b, "\\\\srv\\share\\x.dll");
 	CHECK(PathIsRelativeA("plugins\\x.dll"));
 	CHECK(!PathIsRelativeA("C:\\x.dll"));
 	CHECK(PathIsURLA("https://example.invalid/a"));
@@ -165,6 +169,48 @@ static void test_wide(void)
 	char *a = utf16_to_utf8_dup(p);
 	CHECK_STR(a, "C:\\codecs\\film.dll");
 	free(a); free(film); free(dll_ext); free(avi); free(p);
+
+	FN(LPWSTR, PathCombineW, LPWSTR, LPCWSTR, LPCWSTR);
+	FN(BOOL, PathIsUNCW, LPCWSTR);
+	FN(BOOL, PathIsUNCA, LPCSTR);
+	WCHAR out[MAX_PATH], *dir = utf8_to_utf16_dup("C:\\Windows\\");
+	WCHAR *rel = utf8_to_utf16_dup("system32\\\u00e9.dll");
+	WCHAR *rooted = utf8_to_utf16_dup("\\x.dll");
+	WCHAR *abs = utf8_to_utf16_dup("D:\\x.acm");
+	CHECK(PathCombineW(out, dir, rel) == out);
+	a = utf16_to_utf8_dup(out);
+	CHECK_STR(a, "C:\\Windows\\system32\\\u00e9.dll");
+	free(a);
+	CHECK(PathCombineW(out, dir, abs) == out);
+	a = utf16_to_utf8_dup(out);
+	CHECK_STR(a, "D:\\x.acm");
+	free(a);
+	CHECK(PathCombineW(out, dir, rooted) == out);
+	a = utf16_to_utf8_dup(out);
+	CHECK_STR(a, "C:\\x.dll");
+	free(a);
+	CHECK(PathCombineW(out, NULL, abs) == out);
+	CHECK(!PathCombineW(out, dir, NULL) && !out[0]);
+	CHECK(PathIsUNCA("\\\\server\\share") && !PathIsUNCA("C:\\x") &&
+	      !PathIsUNCA("\\\\?\\C:\\x") && !PathIsUNCA(NULL));
+	WCHAR *unc = utf8_to_utf16_dup("\\\\s\\x");
+	CHECK(PathIsUNCW(unc) && !PathIsUNCW(dir));
+	free(unc); free(dir); free(rel); free(rooted); free(abs);
+}
+
+/* kernelbase.dll: kernel32's functions and shlwapi's path ones. */
+static void test_kernelbase(void)
+{
+	struct module *kb = mod_load("kernelbase.dll", NULL);
+	CHECK(kb && kb->builtin);
+	if (!kb)
+		return;
+	CHECK(mod_get_proc(kb, "HeapAlloc") != NULL);
+	CHECK(mod_get_proc(kb, "GetProcAddress") != NULL);
+	CHECK(mod_get_proc(kb, "PathCombineW") != NULL);
+	CHECK(mod_get_proc(kb, "PathIsUNCW") != NULL);
+	CHECK(mod_get_proc(kb, "StrStrIW") != NULL);
+	mod_free(kb);
 }
 
 int main(void)
@@ -178,5 +224,6 @@ int main(void)
 		test_wide();
 		mod_free(dll);
 	}
+	test_kernelbase();
 	return test_summary("test_shlwapi");
 }

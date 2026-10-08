@@ -9,6 +9,7 @@
 #include "runtime/builtin.h"
 
 extern const struct builtin_dll builtin_kernel32;
+extern const struct builtin_dll builtin_kernelbase;
 extern const struct builtin_dll builtin_ntdll;
 extern const struct builtin_dll builtin_winmm;
 extern const struct builtin_dll builtin_msvfw32;
@@ -16,13 +17,15 @@ extern const struct builtin_dll builtin_user32, builtin_gdi32, builtin_advapi32,
 	builtin_version, builtin_ole32, builtin_oleaut32, builtin_oleacc,
 	builtin_shell32,
 	builtin_comctl32, builtin_comdlg32, builtin_winspool, builtin_setupapi,
-	builtin_avifil32, builtin_quartz, builtin_msdmo, builtin_msvcrt;
+	builtin_avifil32, builtin_quartz, builtin_msdmo, builtin_msacm32,
+	builtin_msvcrt;
 extern const struct builtin_dll builtin_shlwapi;
 extern const struct builtin_dll builtin_bcrypt, builtin_crypt32, builtin_d3d9,
 	builtin_dxva2, builtin_d3d11, builtin_dxgi, builtin_ncrypt, builtin_ws2_32;
 
 const struct builtin_dll *const builtin_dlls[] = {
 	&builtin_kernel32,
+	&builtin_kernelbase,
 	&builtin_ntdll,
 	&builtin_winmm,
 	&builtin_msvfw32,
@@ -50,11 +53,12 @@ const struct builtin_dll *const builtin_dlls[] = {
 	&builtin_avifil32,
 	&builtin_quartz,
 	&builtin_msdmo,
+	&builtin_msacm32,
 	&builtin_msvcrt,
 	NULL
 };
 
-#define MAX_DLLS 32
+#define MAX_DLLS 48
 
 /* Sorted views of each DLL's named exports, built on first use. */
 struct export_index {

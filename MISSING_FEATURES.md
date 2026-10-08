@@ -196,6 +196,69 @@ No DMOs were tried: Windows' own (the WMA, WMV and MP3 DMOs) aren't
 redistributable, and none were at hand. `testdmo.dll` covers the DMO
 audio paths, and any DMO DLL can be run through `tests/audio_codecs.sh`.
 
+## Wine 9.0's ACM drivers (32-bit)
+
+Tested on 2026-10-08 with the i386 PE builds of Wine 9.0's five ACM
+drivers, from the `wine-9.0-amd64` package of Kron4ek's Wine-Builds
+(`lib/wine/i386-windows/*.acm`): `imaadp32.acm`, `msadp32.acm`,
+`msg711.acm`, `msgsm32.acm` and `l3codeca.acm`. Windows' own drivers
+aren't redistributable and none were at hand; no open-source ones (LAME
+ACM, AC3ACM) were tried either.
+
+### What they needed
+
+At first `l3codeca.acm` didn't load (no `kernelbase.dll`), and all five
+imported functions the harness didn't have. All fixed, with tests:
+
+- **`kernelbase.dll`**: built in, as kernel32's functions and shlwapi's;
+  shlwapi gained `PathCombineW` and `PathIsUNCA`/`W`.
+- **ucrtbase's stdio**: `__acrt_iob_func`, and the `__stdio_common_*`
+  functions its headers build `printf`, `sprintf`, `snprintf`, `sscanf`
+  and their `_s` forms from, with their options (C99's `inf`, `nan` and
+  two-digit exponents unless an option keeps msvcrt's). `sscanf` now
+  reads msvcrt's sizes (`I64`, `I32`, `I`, `L` as double) instead of
+  handing the format to glibc.
+- **ntdll's `_vsnprintf`** (and `_snprintf`, `_snwprintf`, `_vsnwprintf`).
+- **The process heap in the PEB**: Wine's `GetProcessHeap` reads
+  `NtCurrentTeb()->Peb->ProcessHeap` inline, which was NULL until
+  something called `GetProcessHeap`; every stream open then failed with
+  `MMSYSERR_NOMEM`. The heap is now made before any DLL code runs.
+
+The ACM backend changed too:
+
+- `l3codeca.acm` lists no standard formats for MP3 or MPEG audio, so
+  nothing showed it decoding them. A tag with none to try is now taken
+  as decodable; the stream, opened from the real format, decides.
+- `msadp32.acm` suggests an MS ADPCM format for PCM, but won't open a
+  stream to make it ("We don't support encoding yet"). Whether a driver
+  decodes or encodes is now checked with a query stream open as well.
+- An IMA ADPCM encoder makes only whole blocks of 2041 samples, so up to
+  2040 at the end were lost. The last part block is now padded with
+  silence, as Windows applications do.
+- G.711's blocks are one sample frame each, and each became an AVI
+  chunk: 88200 for two seconds of stereo. Blocks under 1 KB now go out
+  together.
+
+### Results
+
+`tests/audio_codecs.sh` with each driver, against FFmpeg 6.1.1's decoding
+of streams FFmpeg made (float; 16-bit):
+
+| Driver | Codec | Decoding | Encoding |
+|---|---|---|---|
+| `l3codeca.acm` | MP3 | 73.7 dB; 72.7 dB (44100 Hz), 69.0 dB; 68.1 dB (48000 Hz) | not offered (decoder only) |
+| `l3codeca.acm` | MP2 | 72.3 dB (44100 Hz), 67.5 dB (48000 Hz) | not offered |
+| `imaadp32.acm` | IMA ADPCM | 45.8 dB (stereo), 35.7 dB (5.1), as for LAV Audio | FFmpeg decodes it at 42 dB from the source; the driver at 45 dB |
+| `msadp32.acm` | MS ADPCM | identical (stereo and 5.1) | not supported by the driver |
+| `msg711.acm` | A-law, mu-law | identical (stereo); 5.1 refused by the driver | FFmpeg reads it; 38-39 dB from the source, as FFmpeg's own encoders (some codes rounded the other way) |
+| `msgsm32.acm` | GSM 6.10 (mono, 8000 Hz) | identical | not supported by the driver |
+
+MP3 and MP2 differ from FFmpeg by its and mpg123's rounding (`l3codeca`
+is mpg123), about a 16-bit step. FFmpeg can't put 5.1 MP3 or MP2 in AVI,
+so their "5.1" runs are stereo at 48000 Hz. `tests/samples.sh` over the
+five reports no unimplemented imports, and each driver's tags with what
+it does with them.
+
 ## In-repository baseline
 
 For comparison, the same command over `build/fixtures` examined 23 fixture

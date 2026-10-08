@@ -3,7 +3,8 @@
 # Runs an audio decoder you supply (a DirectShow filter or DMO server, such
 # as LAV Audio's LAVAudio.ax) over streams FFmpeg makes in AVI files, and
 # compares what it gives with FFmpeg's own decoding of the same streams:
-# stereo at 44100 Hz and 5.1 at 48000 Hz, as float and as 16-bit.
+# stereo at 44100 Hz and 5.1 at 48000 Hz (GSM: mono at 8000 Hz), as float
+# and as 16-bit. An ACM driver (such as Wine's l3codeca.acm) works too.
 #
 # For each it reports the signal-to-distortion ratio against FFmpeg (the
 # lowest of the channels; "inf" when identical) and the lengths. A codec
@@ -53,7 +54,9 @@ make() {
 	shift 4
 	# A different tone in each channel, so a swapped pair shows.
 	m_graph="[0][1]amerge=inputs=2"
-	if [ "$m_ch" = 6 ]; then
+	if [ "$m_ch" = 1 ]; then
+		m_graph="[0]anull"
+	elif [ "$m_ch" = 6 ]; then
 		m_graph="[0][1][2][3][4][5]amerge=inputs=6,aformat=channel_layouts=5.1"
 	fi
 	m_tone=":duration=2:sample_rate=$m_rate"
@@ -141,24 +144,21 @@ for codec in \
 	"wma wmav2 -b:a 192k" \
 	"adpcm_ms adpcm_ms" \
 	"adpcm_ima adpcm_ima_wav" \
-	"alaw pcm_alaw"; do
-	set -- $codec
-	name=$1
-	shift
-	for shape in "2 44100" "6 48000"; do
-		set -- $shape "$@"
-		ch=$1 rate=$2
-		shift 2
-		label=$name-${ch}ch
+	"alaw pcm_alaw" \
+	"mulaw pcm_mulaw" \
+	"gsm libgsm_ms"; do
+	shapes="2:44100 6:48000"
+	case $codec in gsm*) shapes="1:8000" ;; esac
+	for shape in $shapes; do
+		ch=${shape%:*} rate=${shape#*:}
+		set -- $codec
+		label=$1-${ch}ch
+		shift
 		if ! make $label $ch $rate "$@"; then
 			echo "skip $label: FFmpeg can't make it in AVI"
-			set -- $codec
-			shift
 			continue
 		fi
 		check $label $ch $rate
-		set -- $codec
-		shift
 	done
 done
 

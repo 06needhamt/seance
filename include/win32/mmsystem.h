@@ -42,11 +42,49 @@ typedef struct tagDRVCONFIGINFO {
 typedef LRESULT (CALLBACK *DRIVERPROC)(DWORD_PTR dwDriverId, HDRVR hdrvr,
 				       UINT msg, LPARAM lParam1, LPARAM lParam2);
 
-/* Multimedia timers (timeapi.h). */
-#define MMSYSERR_NOERROR    0
-#define MMSYSERR_INVALPARAM 11
-#define MMSYSERR_INVALHANDLE 5
+/* What the multimedia functions return (mmsyscom.h). */
+typedef UINT MMRESULT;
+
+#define MMSYSERR_BASE        0
+#define MMSYSERR_NOERROR     0
+#define MMSYSERR_ERROR       1
+#define MMSYSERR_BADDEVICEID 2
+#define MMSYSERR_NOTENABLED  3
 #define MMSYSERR_ALLOCATED   4
+#define MMSYSERR_INVALHANDLE 5
+#define MMSYSERR_NODRIVER    6
+#define MMSYSERR_NOMEM       7
+#define MMSYSERR_NOTSUPPORTED 8
+#define MMSYSERR_BADERRNUM   9
+#define MMSYSERR_INVALFLAG   10
+#define MMSYSERR_INVALPARAM  11
+#define MMSYSERR_HANDLEBUSY  12
+#define MMSYSERR_INVALIDALIAS 13
+#define MMSYSERR_BADDB       14
+#define MMSYSERR_KEYNOTFOUND 15
+#define MMSYSERR_READERROR   16
+#define MMSYSERR_WRITEERROR  17
+#define MMSYSERR_DELETEERROR 18
+#define MMSYSERR_VALNOTFOUND 19
+#define MMSYSERR_NODRIVERCB  20
+#define MMSYSERR_MOREDATA    21
+#define MMSYSERR_LASTERROR   21
+
+/* How a stream reports to its owner (the fdwOpen of acmStreamOpen). */
+#define CALLBACK_TYPEMASK 0x00070000
+#define CALLBACK_WINDOW   0x00010000
+#define CALLBACK_TASK     0x00020000
+#define CALLBACK_FUNCTION 0x00030000
+#define CALLBACK_THREAD   CALLBACK_TASK
+#define CALLBACK_EVENT    0x00050000
+
+/* The messages a stream's callback gets (MM_ACM_OPEN and so on). */
+#define MM_STREAM_OPEN  0x3D4
+#define MM_STREAM_CLOSE 0x3D5
+#define MM_STREAM_DONE  0x3D6
+#define MM_STREAM_ERROR 0x3D7
+
+/* Multimedia timers (timeapi.h). */
 #define TIMERR_NOERROR      0
 #define TIMERR_NOCANDO      97
 

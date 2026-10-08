@@ -108,8 +108,24 @@ WINFN(BOOL) sl_PathIsDirectoryA(LPCSTR p)
 { char *u=path_to_unix(p); struct stat st; BOOL ok=u && !stat(u,&st) && S_ISDIR(st.st_mode); free(u); return ok; }
 WINFN(BOOL) sl_PathAppendA(LPSTR p, LPCSTR more)
 { while (sep(*more)) more++; if (!sl_PathAddBackslashA(p)) return FALSE; if (strlen(p)+strlen(more)>=MAX_PATH) return FALSE; strcat(p,more); return TRUE; }
+/* "\\x" after a directory is on its drive (or share): C:\\x. */
 WINFN(LPSTR) sl_PathCombineA(LPSTR out, LPCSTR dir, LPCSTR file)
-{ char tmp[MAX_PATH]; if (!out || !file) return NULL; if (!dir || !*dir || !sl_PathIsRelativeA(file)) snprintf(tmp,sizeof(tmp),"%s",file); else { snprintf(tmp,sizeof(tmp),"%s",dir); if (!sl_PathAppendA(tmp,file)) return NULL; } strcpy(out,tmp); return out; }
+{
+	char tmp[MAX_PATH];
+	if (!out || !file) return NULL;
+	if (dir && *dir && sep(file[0]) && !sep(file[1])) {
+		char *r = root_end_a(dir);
+		int n = r ? (int)(r - dir) - (sep(r[-1]) ? 1 : 0) : 0;
+		if (snprintf(tmp, sizeof(tmp), "%.*s%s", n, dir, file) >= (int)sizeof(tmp)) return NULL;
+	} else if (!dir || !*dir || !sl_PathIsRelativeA(file)) {
+		if (snprintf(tmp, sizeof(tmp), "%s", file) >= (int)sizeof(tmp)) return NULL;
+	} else {
+		snprintf(tmp, sizeof(tmp), "%s", dir);
+		if (strlen(dir) >= sizeof(tmp) || !sl_PathAppendA(tmp, file)) return NULL;
+	}
+	strcpy(out, tmp);
+	return out;
+}
 WINFN(BOOL) sl_PathMatchSpecA(LPCSTR p, LPCSTR specs)
 { char *copy=strdup(specs ? specs : ""), *save=NULL; BOOL ok=FALSE; for(char *s=strtok_r(copy,";",&save);s;s=strtok_r(NULL,";",&save)) if(!fnmatch(s,p,FNM_CASEFOLD)){ok=TRUE;break;} free(copy); return ok; }
 WINFN(void) sl_PathQuoteSpacesA(LPSTR p) { if (strchr(p,' ') && *p!='\"') { size_t n=strlen(p); memmove(p+1,p,n+1); p[0]='\"'; p[n+1]='\"'; p[n+2]=0; } }
@@ -127,6 +143,31 @@ WINFN(BOOL) sl_PathFileExistsW(LPCWSTR p) { return wide_pred(p, sl_PathFileExist
 WINFN(BOOL) sl_PathIsDirectoryW(LPCWSTR p) { return wide_pred(p, sl_PathIsDirectoryA); }
 WINFN(BOOL) sl_PathIsRelativeW(LPCWSTR p) { return p && !((p[0]&&p[1]==':')||p[0]=='\\'||p[0]=='/'); }
 WINFN(BOOL) sl_PathIsURLW(LPCWSTR p) { char *a=utf16_to_utf8_dup(p); BOOL r=a&&sl_PathIsURLA(a); free(a); return r; }
+
+/* "\\server\share": UNC, but not "\\?\c:\..." (Windows 7's rule). */
+WINFN(BOOL) sl_PathIsUNCA(LPCSTR p)
+{ return p && p[0]=='\\' && p[1]=='\\' && p[2]!='?'; }
+WINFN(BOOL) sl_PathIsUNCW(LPCWSTR p)
+{ return p && p[0]=='\\' && p[1]=='\\' && p[2]!='?'; }
+/* As PathCombineA, through UTF-8 (so at most MAX_PATH bytes of it). */
+WINFN(LPWSTR) sl_PathCombineW(LPWSTR out, LPCWSTR dir, LPCWSTR file)
+{
+	char *d = dir ? utf16_to_utf8_dup(dir) : NULL;
+	char *f = file ? utf16_to_utf8_dup(file) : NULL;
+	char a[MAX_PATH];
+	WCHAR *w = NULL;
+	LPWSTR r = NULL;
+
+	if (out && f && (!dir || d) && sl_PathCombineA(a, d, f) &&
+	    (w = utf8_to_utf16_dup(a)) && wstrlen(w) < MAX_PATH)
+		r = memcpy(out, w, (wstrlen(w) + 1) * sizeof(WCHAR));
+	else if (out)
+		out[0] = 0;
+	free(w);
+	free(d);
+	free(f);
+	return r;
+}
 
 /* A file name alone: no directory, drive or separator in it. */
 WINFN(BOOL) sl_PathIsFileSpecA(LPCSTR p)
@@ -312,13 +353,14 @@ WINFN(HRESULT) sl_DllGetVersion(DLLVERSIONINFO *v)
 { if(!v || v->cbSize<sizeof(*v)) return E_INVALIDARG; v->dwMajorVersion=6; v->dwMinorVersion=0; v->dwBuildNumber=2900; v->dwPlatformID=2; return S_OK; }
 
 #define E(n) { #n, 0, (void *)sl_##n }
-static const struct builtin_export exports[] = {
+/* kernelbase.dll (kernel32.c) serves these too, as Windows 7's does. */
+const struct builtin_export shlwapi_exports[] = {
 	E(DllGetVersion), E(PathAddBackslashA), E(PathAddBackslashW), E(PathAppendA),
-	E(PathCombineA), E(PathFileExistsA), E(PathFileExistsW), E(PathFindExtensionA),
+	E(PathCombineA), E(PathCombineW), E(PathFileExistsA), E(PathFileExistsW), E(PathFindExtensionA),
 	E(PathFindExtensionW), E(PathFindFileNameA), E(PathFindFileNameW),
 	E(PathIsDirectoryA), E(PathIsDirectoryW), E(PathIsFileSpecA), E(PathIsFileSpecW),
 	E(PathIsRelativeA), E(PathIsRelativeW),
-	E(PathIsRootA), E(PathIsURLA), E(PathIsURLW), E(PathMatchSpecA), E(PathQuoteSpacesA),
+	E(PathIsRootA), E(PathIsUNCA), E(PathIsUNCW), E(PathIsURLA), E(PathIsURLW), E(PathMatchSpecA), E(PathQuoteSpacesA),
 	E(PathRemoveBackslashA), E(PathRemoveExtensionA), E(PathRemoveExtensionW),
 	E(PathRemoveFileSpecA), E(PathRemoveFileSpecW), E(PathRenameExtensionA),
 	E(PathRenameExtensionW),
@@ -328,5 +370,5 @@ static const struct builtin_export exports[] = {
 	E(StrStrIA), E(StrStrIW), E(StrStrW), E(StrToIntA), E(StrToIntExA),
 	E(StrToIntExW), E(StrToIntW), E(UrlGetPartA), E(UrlGetPartW), BUILTIN_END
 };
-static const struct builtin_export *const tables[] = { exports, NULL };
+static const struct builtin_export *const tables[] = { shlwapi_exports, NULL };
 const struct builtin_dll builtin_shlwapi = { "shlwapi.dll", NULL, tables, 0 };

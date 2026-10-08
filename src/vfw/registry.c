@@ -20,6 +20,12 @@
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static struct vfw_codec *codecs;
 static unsigned ncodecs;
+/* The ACM drivers: "msacm.<name>" entries, which aren't type.handler. */
+static struct acm_entry {
+	char *alias, *path;
+	int from_ini;
+} *acms;
+static unsigned nacms;
 static int loaded;
 static unsigned generation;	/* counts changes to the table */
 static char ini_path[PATH_MAX];
@@ -138,6 +144,33 @@ static int add(FOURCC type, FOURCC handler, char *path, DRIVERPROC proc,
 	return 0;
 }
 
+int vfw_is_acm_alias(const char *name)
+{
+	return name && !strncasecmp(name, "msacm.", 6) && name[6];
+}
+
+static int add_acm(const char *alias, char *path, int from_ini)
+{
+	generation++;
+	for (unsigned i = 0; i < nacms; i++)
+		if (!strcasecmp(acms[i].alias, alias)) {
+			free(acms[i].path);
+			acms[i].path = path;
+			acms[i].from_ini = from_ini;
+			return 0;
+		}
+	char *a = strdup(alias);
+	struct acm_entry *e = a ? realloc(acms, (nacms + 1) * sizeof(*e)) : NULL;
+	if (!e) {
+		free(a);
+		free(path);
+		return -1;
+	}
+	acms = e;
+	acms[nacms++] = (struct acm_entry){ a, path, from_ini };
+	return 0;
+}
+
 static void load_ini(void)
 {
 	FILE *f;
@@ -171,6 +204,12 @@ static void load_ini(void)
 			value++;
 		}
 		FOURCC type, handler;
+		if (*value && vfw_is_acm_alias(key)) {
+			char *path = resolve(value);
+			if (path)
+				add_acm(key, path, 1);
+			continue;
+		}
 		if (!*value || vfw_parse_fourcc(key, &type, &handler) ||
 		    !strchr(key, '.')) {
 			TRACE("%s: ignoring [drivers32] entry '%s'", ini_path, key);
@@ -205,6 +244,13 @@ void vfw_registry_reload(void)
 	free(codecs);
 	codecs = NULL;
 	ncodecs = 0;
+	for (unsigned i = 0; i < nacms; i++) {
+		free(acms[i].alias);
+		free(acms[i].path);
+	}
+	free(acms);
+	acms = NULL;
+	nacms = 0;
 	load_ini();
 	pthread_mutex_unlock(&lock);
 }
@@ -329,4 +375,61 @@ unsigned vfw_registry_generation(void)
 	unsigned g = generation;
 	pthread_mutex_unlock(&lock);
 	return g;
+}
+
+int vfw_acm_get(unsigned i, char **alias, char **path)
+{
+	int r = -1;
+
+	pthread_mutex_lock(&lock);
+	ensure_loaded();
+	if (i < nacms) {
+		*alias = strdup(acms[i].alias);
+		*path = strdup(acms[i].path);
+		r = *alias && *path ? 0 : -1;
+		if (r) {
+			free(*alias);
+			free(*path);
+		}
+	}
+	pthread_mutex_unlock(&lock);
+	return r;
+}
+
+int vfw_acm_register_value(const char *alias, const char *value)
+{
+	if (!vfw_is_acm_alias(alias)) {
+		vfw_set_error("'%s' isn't an ACM driver's name (msacm.<name>)",
+			      alias);
+		return -1;
+	}
+	pthread_mutex_lock(&lock);
+	ensure_loaded();
+	char *path = resolve(value);
+	int r = path ? add_acm(alias, path, 0) : -1;
+	pthread_mutex_unlock(&lock);
+	if (r)
+		vfw_set_error("out of memory");
+	return r;
+}
+
+int vfw_acm_unregister(const char *alias)
+{
+	int r = -1;
+
+	pthread_mutex_lock(&lock);
+	ensure_loaded();
+	for (unsigned i = 0; i < nacms; i++)
+		if (!strcasecmp(acms[i].alias, alias)) {
+			free(acms[i].alias);
+			free(acms[i].path);
+			memmove(&acms[i], &acms[i + 1],
+				(nacms - i - 1) * sizeof(*acms));
+			nacms--;
+			generation++;
+			r = 0;
+			break;
+		}
+	pthread_mutex_unlock(&lock);
+	return r;
 }

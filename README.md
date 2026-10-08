@@ -39,6 +39,14 @@ and audio decoders and encoders, DirectShow filters and DMOs, run through
 Audio files are read and written without a codec: WAV (and RF64), raw PCM
 and AVI audio streams, through `avi` and `convert`.
 
+ACM audio drivers (`.acm`) decode and encode through the same commands
+([docs/ACM_PLAN.md](docs/ACM_PLAN.md)), through a built-in msacm32.dll with
+its own PCM converter; `probe`, `list` and `decode auto` know them too.
+Wine 9.0's five drivers run: MP3 and MP2 (`l3codeca.acm`), IMA and MS
+ADPCM, A-law, mu-law and GSM 6.10 decode, MS ADPCM, G.711 and GSM
+identically to FFmpeg, and IMA ADPCM and G.711 encode (results in
+[MISSING_FEATURES.md](MISSING_FEATURES.md)).
+
 The real-world check is the LAV Filters 0.83 package (32-bit): LAV Video
 loads, registers, connects and decodes 18 codecs identically to FFmpeg; LAV
 Audio decodes MP3, FLAC, MS ADPCM and A-law identically and AC-3, E-AC-3,
@@ -277,8 +285,10 @@ one to show its name.
 Codecs usually import more than kernel32, winmm and msvfw32. The msvcrt
 family (msvcrt.dll, msvcr70-140, msvcp*, ucrtbase, api-ms-win-crt-*) is a
 real built-in: math, string/memory, stdio, CRT startup and the 64-bit
-arithmetic helpers a codec calls whatever CRT it links; a native DLL of
-the same name on the search path takes precedence over it.
+arithmetic helpers a codec calls whatever CRT it links, with ucrtbase's
+`__stdio_common_*` functions behind its `printf` and `scanf` families; a
+native DLL of the same name on the search path takes precedence over it.
+kernelbase.dll is kernel32's functions and shlwapi's, as on Windows 7.
 
 user32, gdi32, advapi32, version, ole32, oleaut32, shell32, comctl32 and
 comdlg32 are built in too, headless:
@@ -300,10 +310,20 @@ comdlg32 are built in too, headless:
   pens and fonts. The display is a 1024x768 32-bit device that discards
   what is drawn on it; text is measured but not drawn.
 - **advapi32:** the registry, kept in a `.reg` file (see below), with
-  change notification; `Drivers32` there shows the codecs `vfw.ini`
-  registers. Security answers as for an administrator on XP: tokens,
+  change notification; `Drivers32` there shows the codecs and ACM
+  drivers `vfw.ini` registers. Security answers as for an administrator on XP: tokens,
   privileges, SIDs and account names, ACLs and security descriptors, with
   nothing enforced. `CryptGenRandom` gives random numbers.
+- **msacm32:** the Audio Compression Manager, after Wine's: the drivers
+  `vfw.ini` names (`msacm.imaadpcm=imaadp32.acm`, also shown under
+  `Drivers32`), those added with `acmDriverAdd`, and a PCM converter of
+  its own (8, 16, 24 and 32 bits, mono and stereo, without resampling);
+  their details, metrics and priorities, format and filter tags, formats
+  and their enumeration, `acmFormatSuggest`, and streams
+  (`acmStreamOpen`, `acmStreamConvert` and the rest). `acmFormatChoose`
+  answers as `$VFW_ACM_FORMAT` says, or with the format it starts with, or
+  cancels; `acmFilterChoose` answers with the filter it starts with, or
+  cancels.
 - **version:** `GetFileVersionInfo*` and `VerQueryValue` read a DLL's
   version resource. The built-in DLLs answer with a version block of their
   own, versioned like Windows XP SP3's (5.1.2600.5512), for codecs that
@@ -601,6 +621,8 @@ build/seance decode auto clip.avi -o clip.wav --sample-format f32
 build/seance encode encoder.ax music.wav -o music.avi --bitrate 192
 build/seance encode encoder.ax clip.avi -o sound.wav --audio
 build/seance decode wmadmod.dll music.avi -o music.wav --clsid '{GUID}'
+build/seance encode imaadp32.acm music.wav -o music.avi
+build/seance encode codecs.acm music.wav -o music.avi --format-tag 0x55
 ```
 
 `decode` and `encode` work on audio when the input is a WAV file (or raw
@@ -611,7 +633,10 @@ decoder (or encoder), judged from a filter's pins (compressed audio in,
 PCM or float out, or the reverse) or category
 (`CLSID_AudioCompressorCategory`), or a DMO's category
 (`DMOCATEGORY_AUDIO_DECODER`/`_ENCODER`) or types; `list` and `probe`
-name these roles.
+name these roles. Or it is an ACM driver (a DLL exporting `DriverProc`
+that answers as one): a decoder of a format tag it suggests PCM for, or an
+encoder of one it suggests from PCM. An encoder of several tags is chosen
+from with `--format-tag`.
 
 A decoder is offered the stream's format as `FORMAT_WaveFormatEx` and PCM
 at the stream's channels and rate: 16-bit, then 24- and 32-bit, float and
@@ -625,8 +650,9 @@ is followed, converting back; a change of rate or channels stops with a
 message, since the file can't follow it. `--start` and `--duration` take
 sample counts or times and cut to the sample.
 
-An encoder is given the PCM as it is, else the first other sample format
-it takes, and an output type of only `MEDIATYPE_Audio` and its format
+An encoder is given the PCM as it is, else the same samples in the other
+form (plain `WAVEFORMATEX` or extensible), else the first other sample
+format it takes, and an output type of only `MEDIATYPE_Audio` and its format
 tag's subtype, which it completes: a filter as `IPin::Connect` lets it, a
 DMO with the first of its `GetOutputType` types that fits (`probe
 encoder.ax in.wav` shows what it makes). An AVI stream takes its timing from the encoder's first packet
@@ -635,7 +661,22 @@ packets aren't timed; a WAV gets the packets back to back and a `fact`
 chunk. `--bitrate` and `--quality` reach the encoder through `ICodecAPI`
 (`CODECAPI_AVEncCommonMeanBitRate` and `_Quality`), and `--state`/
 `--save-state` through `IPersistStream`. `decode auto` looks for a
-registered audio decoder of the stream's format tag.
+registered audio decoder of the stream's format tag: a filter, by merit,
+else a DMO, else an ACM driver `vfw.ini` names
+(`msacm.<name>=/path/driver.acm`).
+
+An ACM driver is driven through msacm32 as an application would drive it:
+a stream from the input's format to the output's (the encoder's suggested
+with `acmFormatSuggest`, or with `--bitrate` the one of its formats for the
+input's rate and channels with the nearest data rate), converted a whole
+block at a time with what is left given again, and flushed at the end. Its
+blocks have no times, so an encoder's AVI stream counts blocks of a
+constant size (`dwSampleSize`), as ACM-made AVIs do; a decoder's PCM is
+timed by the samples it makes. ACM drivers keep their settings in the
+registry, so `--quality`, `--state` and `--save-state` are refused. An
+encoder's last part block is padded with silence to a whole one, since
+drivers convert only whole blocks; small blocks (G.711's are a sample) go
+into the AVI a kilobyte at a time.
 
 `testfilter.ax` and `testdmo.dll` each have an audio pair for this: a
 lossless codec, `TSTA` (tag 0x7354), whose decoder can give its PCM in
@@ -643,7 +684,12 @@ pieces, hold it back to the end of the stream, switch to float, or claim
 another sample rate (and the DMOs refuse every other input when asked). A
 WAV encoded and decoded through either comes back byte for byte in each of
 those modes, and the filter and the DMO make the same file and decode each
-other's.
+other's. `testacm.acm` is the same codec as an ACM driver, with modes of
+its own (stream sizes too small to trust, its own header preparation,
+non-realtime streams only, pointers below 2 GB, only whole packets, no
+encoding, a crash or a hang); its packets are the filter's, and each
+decodes the other's AVI. `test_msacm32` also sends it, the PCM converter
+and the backend thousands of fuzzed formats.
 
 ### Real codecs: the samples run
 
@@ -655,7 +701,8 @@ tests/samples.sh build/seance ~/codecs   # or -DVFW_SAMPLES_DIR=~/codecs
 you supply. For each it reports how many of its imports the harness
 doesn't implement yet, how many DLLs it needs from disk, and whether it
 opens and under which FOURCC, or for a DirectShow or DMO server, its
-filters and DMOs and what they are (video or audio decoders and encoders).
+filters and DMOs and what they are (video or audio decoders and encoders),
+or for an ACM driver, its name and what it does with each format tag.
 It asserts nothing about any particular codec; it fails only when the
 harness can't parse a file, or crashes or hangs on one.
 
@@ -663,9 +710,10 @@ harness can't parse a file, or crashes or hangs on one.
 tests/audio_codecs.sh build/seance LAVAudio.ax /tmp/work
 ```
 
-`tests/audio_codecs.sh` runs an audio decoder you supply over streams
-FFmpeg makes in AVI files (MP3, MP2, AC-3, E-AC-3, AAC, FLAC, Vorbis, Opus,
-WMA, ADPCM, A-law; stereo and 5.1), and reports for each how close it comes
+`tests/audio_codecs.sh` runs an audio decoder you supply (a filter, DMO
+server or ACM driver) over streams FFmpeg makes in AVI files (MP3, MP2,
+AC-3, E-AC-3, AAC, FLAC, Vorbis, Opus, WMA, ADPCM, A-law, mu-law; stereo
+and 5.1; GSM, mono), and reports for each how close it comes
 to FFmpeg's own decoding (the signal-to-distortion ratio) and whether the
 lengths agree. It fails when the harness crashes or hangs, or a stream
 decodes below 40 dB.
@@ -701,6 +749,7 @@ decodes below 40 dB.
 | `VFW_TRACE=1` | Log calls into the built-in DLLs and every driver message to stderr |
 | `VFW_TIMEOUT=<s>` | Report and stop (exit 124) when one call into a DLL takes longer |
 | `VFW_COMPRESSOR` | What `ICCompressorChoose` answers: a FOURCC (`TST0`), `uncompressed` or `cancel` |
+| `VFW_ACM_FORMAT` | What `acmFormatChoose` answers: a format tag and, optionally, rate, channels and bits (`1,22050,1,8`), or `cancel` |
 | `VFW_OPEN_FILE`, `VFW_SAVE_FILE` | What `GetOpenFileName` and `GetSaveFileName` answer: a file, or `cancel` (the default) |
 | `VFW_ZERO_MEMORY=0` | Don't zero memory from `malloc`, `operator new` and `HeapAlloc` (zeroed by default) |
 | `VFW_LOW_MEMORY=0` | Don't keep DLL-visible memory below 2 GB |
@@ -713,7 +762,7 @@ decodes below 40 dB.
 | `include/win32/` | Win32 types, PE image structures, GDI, window-manager and registry definitions, driver and ICM definitions, laid out to match 32-bit Windows |
 | `src/loader/` | PE parsing, mapping and relocation (`pe.c`); the module table and dependency loading (`modules.c`) |
 | `src/runtime/` | TEB and `%fs`, implicit TLS, the built-in DLL registry, trap thunks for unimplemented imports, the 2 GB limit (`lowmem.c`), crash and hang reports (`crash.c`) |
-| `src/win32/` | Built-in kernel32 (`k32_*.c`), ntdll, the msvcrt family (`crt_*.c`), user32 (`user32.c`, `u32_*.c`), gdi32 (`gdi32.c`, `gdi_bitmap.c`), advapi32 (`advapi32.c`, `adv_security.c`) and its registry (`reg.c`), version, ole32, oleaut32 (`oleaut32.c`, `oleaut_conv.c`, `oleaut_array.c`, `errinfo.c`), shell32 (`shell32.c`, `shell_file.c`), comctl32 (`comctl32.c`, `comctl_dpa.c`, `comctl_imagelist.c`, `comctl_sheet.c`), comdlg32, winmm, msvfw32 and quartz (`quartz.c`) |
+| `src/win32/` | Built-in kernel32 (`k32_*.c`) and kernelbase, ntdll, the msvcrt family (`crt_*.c`), user32 (`user32.c`, `u32_*.c`), gdi32 (`gdi32.c`, `gdi_bitmap.c`), advapi32 (`advapi32.c`, `adv_security.c`) and its registry (`reg.c`), version, ole32, oleaut32 (`oleaut32.c`, `oleaut_conv.c`, `oleaut_array.c`, `errinfo.c`), shell32 (`shell32.c`, `shell_file.c`), comctl32 (`comctl32.c`, `comctl_dpa.c`, `comctl_imagelist.c`, `comctl_sheet.c`), comdlg32, winmm, msvfw32 and quartz (`quartz.c`) |
 | `src/dshow/` | DirectShow: finding and registering filters (`discover.c`) |
 | `src/vfw/` | Installable drivers (`driver.c`), the codec registry (`registry.c`), the ICM API (`icm.c`), sequence compression (`seq.c`) |
 | `src/avi/` | AVI reader (AVI 1.0 and OpenDML) and writer |

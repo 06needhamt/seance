@@ -5,6 +5,8 @@
  * them, forwarding to the host's libm/libc.
  */
 #include <math.h>
+#include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "loader/modules.h"
@@ -372,6 +374,217 @@ static void test_msvcrt_semantics(void)
 	CHECK_EQ(rand_(), first);
 }
 
+/* ucrtbase's __stdio_common_* functions, called as its headers do. */
+typedef int (*common_sprintf_fn)(unsigned long long, void *, size_t,
+				 const void *, void *, va_list);
+typedef int (*common_snprintf_s_fn)(unsigned long long, void *, size_t,
+				    size_t, const void *, void *, va_list);
+typedef int (*common_sscanf_fn)(unsigned long long, const char *, size_t,
+				const char *, void *, va_list);
+
+static int csp(common_sprintf_fn fn, unsigned long long options, void *buf,
+	       size_t n, const void *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	int r = fn(options, buf, n, fmt, NULL, ap);
+	va_end(ap);
+	return r;
+}
+
+static int csnp_s(common_snprintf_s_fn fn, void *buf, size_t n, size_t count,
+		  const void *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	int r = fn(0, buf, n, count, fmt, NULL, ap);
+	va_end(ap);
+	return r;
+}
+
+static int css(common_sscanf_fn fn, unsigned long long options,
+	       const char *in, size_t len, const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	int r = fn(options, in, len, fmt, NULL, ap);
+	va_end(ap);
+	return r;
+}
+
+#define LEGACY_NULL 0x1ull	/* _CRT_INTERNAL_PRINTF_* */
+#define STANDARD_SNPRINTF 0x2ull
+#define LEGACY_WIDE 0x4ull
+#define LEGACY_MSVCRT 0x8ull
+#define LEGACY_EXPONENT 0x10ull
+#define SECURECRT 0x1ull	/* _CRT_INTERNAL_SCANF_SECURECRT */
+
+static void test_ucrt(void)
+{
+	common_sprintf_fn vsprintf_ = get("__stdio_common_vsprintf");
+	common_sprintf_fn vswprintf_ = get("__stdio_common_vswprintf");
+	common_sprintf_fn vsprintf_s = get("__stdio_common_vsprintf_s");
+	common_snprintf_s_fn vsnprintf_s = get("__stdio_common_vsnprintf_s");
+	int (*vfprintf_)(unsigned long long, void *, const char *, void *,
+			 va_list) = get("__stdio_common_vfprintf");
+	void *(*iob_func)(unsigned) = get("__acrt_iob_func");
+	common_sscanf_fn vsscanf_ = get("__stdio_common_vsscanf");
+	BYTE *iob = get("_iob");
+	char b[64];
+	WCHAR w[32];
+
+	/* The three ways of a buffer too small, and none. */
+	CHECK_EQ(csp(vsprintf_, 0, b, sizeof(b), "%d", 12), 2);
+	CHECK_STR(b, "12");
+	memset(b, 'x', sizeof(b));
+	CHECK_EQ(csp(vsprintf_, 0, b, 4, "abcdef"), -2);
+	CHECK_STR(b, "abc");
+	CHECK_EQ(csp(vsprintf_, 0, b, 0, "abcdef"), -1);
+	CHECK_EQ(csp(vsprintf_, STANDARD_SNPRINTF, b, 4, "abcdef"), 6);
+	CHECK_STR(b, "abc");
+	memset(b, 'x', sizeof(b));
+	CHECK_EQ(csp(vsprintf_, LEGACY_NULL, b, 4, "abcdef"), -1);
+	CHECK(!memcmp(b, "abcdx", 5));
+	memset(b, 'x', sizeof(b));
+	CHECK_EQ(csp(vsprintf_, LEGACY_NULL, b, 3, "abc"), 3);
+	CHECK(!memcmp(b, "abcx", 4));
+	CHECK_EQ(csp(vsprintf_, 0, NULL, 0, "%s!", "four"), 5);
+
+	/* C99's ways, unless an option keeps msvcrt's. */
+	double inf = INFINITY, ind = -NAN;
+	csp(vsprintf_, 0, b, sizeof(b), "%e %g %E", 12345.678, 1e100, 0.00015);
+	CHECK_STR(b, "1.234568e+04 1e+100 1.500000E-04");
+	csp(vsprintf_, LEGACY_EXPONENT, b, sizeof(b), "%e", 12345.678);
+	CHECK_STR(b, "1.234568e+004");
+	csp(vsprintf_, 0, b, sizeof(b), "%f %f %F %+f [%6f] %f %G", inf, -inf,
+	    inf, inf, inf, NAN, ind);
+	CHECK_STR(b, "inf -inf INF +inf [   inf] nan -NAN(IND)");
+	csp(vsprintf_, LEGACY_MSVCRT, b, sizeof(b), "%f", inf);
+	CHECK_STR(b, "1.#INF00");
+	csp(vsprintf_, 0, b, sizeof(b), "%zu %td %jd %.1F", (size_t)7,
+	    (ptrdiff_t)-3, (long long)1 << 40, 2.5);
+	CHECK_STR(b, "7 -3 1099511627776 2.5");
+
+	/* In the wide forms %s is narrow, unless legacy; %S is wide. */
+	CHECK_EQ(csp(vswprintf_, 0, w, 32, w16("%s|%S|%c"), "nar", w16("wid"),
+		     'c'), 9);
+	CHECK(w16_is(w, "nar|wid|c"));
+	CHECK_EQ(csp(vswprintf_, LEGACY_WIDE, w, 32, w16("%s|%S"), w16("wid"),
+		     "nar"), 7);
+	CHECK(w16_is(w, "wid|nar"));
+
+	/* The _s forms: -1 and an empty buffer when it doesn't fit. */
+	CHECK_EQ(csp(vsprintf_s, 0, b, 8, "%d", 1234), 4);
+	CHECK_EQ(csp(vsprintf_s, 0, b, 4, "%d", 1234), -1);
+	CHECK_STR(b, "");
+	CHECK_EQ(csnp_s(vsnprintf_s, b, 4, (size_t)-1, "abcdef"), -1);
+	CHECK_STR(b, "abc");
+	CHECK_EQ(csnp_s(vsnprintf_s, b, 8, 2, "abcdef"), -1);
+	CHECK_STR(b, "ab");
+	CHECK_EQ(csnp_s(vsnprintf_s, b, 4, 10, "abcdef"), -1);
+	CHECK_STR(b, "");
+	CHECK_EQ(csnp_s(vsnprintf_s, b, 8, 10, "abc"), 3);
+	CHECK_STR(b, "abc");
+
+	/* stdin, stdout and stderr are _iob's. */
+	CHECK(iob_func(0) == iob && iob_func(1) == iob + 32 &&
+	      iob_func(2) == iob + 64 && !iob_func(3));
+	va_list none;
+	memset(&none, 0, sizeof(none));
+	CHECK_EQ(vfprintf_(0, iob_func(1), "", NULL, none), 0);
+
+	/* sscanf_s: a size after each string; one too small stops it. */
+	char word[4];
+	int n = 0;
+	CHECK_EQ(css(vsscanf_, SECURECRT, "ab 12", (size_t)-1, "%s %d", word,
+		     (unsigned)sizeof(word), &n), 2);
+	CHECK_STR(word, "ab");
+	CHECK_EQ(n, 12);
+	CHECK_EQ(css(vsscanf_, SECURECRT, "abcd 12", (size_t)-1, "%s %d", word,
+		     (unsigned)sizeof(word), &n), 0);
+	CHECK_STR(word, "");
+	/* A length: no further than it, terminator or not. */
+	CHECK_EQ(css(vsscanf_, 0, "12345", 3, "%d", &n), 1);
+	CHECK_EQ(n, 123);
+}
+
+/* msvcrt's sscanf: its sizes, sets, %n, and EOF. */
+static void test_scanf(void)
+{
+	int (*sscanf_)(const char *, const char *, ...) = get("sscanf");
+	long long big = 0;
+	unsigned long long hex = 0;
+	signed char tiny = 0;
+	short sh = 0;
+	double d = 0, ld = 0;
+	float f = 0;
+	char set[8], three[4] = "zzz";
+	WCHAR wide[8];
+	int n = -1, m = -1;
+
+	CHECK_EQ(sscanf_("-5000000000 ffffffffff 200 -7", "%I64d %I64x %hhd %hd",
+			 &big, &hex, &tiny, &sh), 4);
+	CHECK(big == -5000000000LL && hex == 0xffffffffffULL);
+	CHECK_EQ(tiny, -56);
+	CHECK_EQ(sh, -7);
+	CHECK_EQ(sscanf_("1.5 2.25 3.125", "%f %lf %Lf", &f, &d, &ld), 3);
+	CHECK(f == 1.5f && d == 2.25 && ld == 3.125);
+	CHECK_EQ(sscanf_("abc123", "%[a-z]%n", set, &n), 1);
+	CHECK_STR(set, "abc");
+	CHECK_EQ(n, 3);
+	CHECK_EQ(sscanf_("xyzw", "%3c", three), 1);
+	CHECK(!memcmp(three, "xyz", 3));
+	CHECK_EQ(sscanf_("  42 rest", "%*d %n%S", &m, wide), 1);
+	CHECK_EQ(m, 5);
+	CHECK(w16_is(wide, "rest"));
+	CHECK_EQ(sscanf_("a=5", "a=%d", &n), 1);
+	CHECK_EQ(n, 5);
+	CHECK_EQ(sscanf_("b=5", "a=%d", &n), 0);
+	CHECK_EQ(sscanf_("", "%d", &n), -1);
+	CHECK_EQ(sscanf_("   ", "%d", &n), -1);
+	CHECK_EQ(sscanf_("x", "%d", &n), 0);
+	CHECK_EQ(sscanf_("7", "%d %d", &n, &m), 1);
+	CHECK_EQ(sscanf_("100%", "%d%%", &n), 1);
+}
+
+/* ntdll's own _vsnprintf and friends: msvcrt's. */
+static int nt_vsn(int (*fn)(char *, size_t, const char *, va_list),
+		  char *buf, size_t n, const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	int r = fn(buf, n, fmt, ap);
+	va_end(ap);
+	return r;
+}
+
+static void test_ntdll_printf(void)
+{
+	struct module *nt = mod_load("ntdll.dll", NULL);
+	CHECK(nt != NULL);
+	if (!nt)
+		return;
+	int (*vsn)(char *, size_t, const char *, va_list) =
+		mod_get_proc(nt, "_vsnprintf");
+	int (*sn)(char *, size_t, const char *, ...) =
+		mod_get_proc(nt, "_snprintf");
+	int (*snw)(WCHAR *, size_t, const WCHAR *, ...) =
+		mod_get_proc(nt, "_snwprintf");
+	CHECK(vsn && sn && snw && mod_get_proc(nt, "_vsnwprintf"));
+	if (vsn && sn && snw) {
+		char b[8];
+		WCHAR w[8];
+		memset(b, 'x', sizeof(b));
+		CHECK_EQ(nt_vsn(vsn, b, 4, "%I64d", 123456LL), -1);
+		CHECK(!memcmp(b, "1234x", 5));
+		CHECK_EQ(sn(b, sizeof(b), "%s", "ok"), 2);
+		CHECK_STR(b, "ok");
+		CHECK_EQ(snw(w, 8, w16("%d"), 42), 2);
+		CHECK(w16_is(w, "42"));
+	}
+	mod_free(nt);
+}
+
 int main(void)
 {
 	const char *tmpdir = getenv("TMPDIR");
@@ -390,10 +603,13 @@ int main(void)
 	CHECK(crt != NULL);
 	if (crt) {
 		test_msvcrt_semantics();
-	test_printf();
-	test_intrinsics();
+		test_printf();
+		test_intrinsics();
+		test_ucrt();
+		test_scanf();
 		mod_free(crt);
 	}
+	test_ntdll_printf();
 	/* The fixture, if it was built (the checks above need no mingw). */
 	const char *dir = getenv("VFW_FIXTURES");
 	char dll[4096];

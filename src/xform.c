@@ -1,12 +1,18 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/* Filters and DMOs behind one interface for the commands (see xform.h). */
+/*
+ * Filters, DMOs and ACM drivers behind one interface for the commands (see
+ * xform.h).
+ */
 #include <stdlib.h>
 #include <string.h>
 
+#include "acm/acm.h"
 #include "dmo/discover.h"
 #include "dmo/dmo.h"
 #include "dshow/discover.h"
 #include "dshow/dshow.h"
+#include "loader/pe.h"
+#include "media/audio.h"
 #include "xform.h"
 
 struct xform {
@@ -20,6 +26,10 @@ struct xform {
 	struct dmo_object *object;
 	IMediaObject *mo;
 	struct dmo_host *dmo_host;
+	/* an ACM driver */
+	struct acm_codec *codec;
+	struct acm_stream *stream;
+	DWORD bitrate;		/* bits per second, or 0 */
 	/* the caller's */
 	xform_output_fn callback;
 	void *opaque;
@@ -73,8 +83,32 @@ static enum dmo_role dmo_codec_role(int audio, int encoder)
 		       (encoder ? DMO_ROLE_VIDEO_ENCODER : DMO_ROLE_VIDEO_DECODER);
 }
 
+/*
+ * Whether a DLL is to be tried as an ACM driver: 1 if it exports DriverProc
+ * and no DllGetClassObject, 2 if it can't be read as it is named (a bare
+ * name the loader searches for, as vfw.ini's entries can be), else 0.
+ */
+static int acm_candidate(const char *path)
+{
+	struct pe_image *img = pe_open(path);
+	struct pe_export e;
+
+	if (!img)
+		return strchr(path, '/') ? 0 : 2;
+	int r = pe_find_export(img, "DllGetClassObject", 0, &e) &&
+		!pe_find_export(img, "DriverProc", 0, &e);
+	pe_free(img);
+	return r;
+}
+
 HRESULT xform_find(const char *path, const CLSID *selected, int audio,
 		   int encoder, struct xform_class *found)
+{
+	return xform_find_output(path, selected, audio, encoder, 0, found);
+}
+
+HRESULT xform_find_output(const char *path, const CLSID *selected, int audio,
+			  int encoder, DWORD output, struct xform_class *found)
 {
 	struct dshow_server_found f;
 	HRESULT registration;
@@ -83,6 +117,21 @@ HRESULT xform_find(const char *path, const CLSID *selected, int audio,
 	if (!path || !found)
 		return E_POINTER;
 	memset(found, 0, sizeof(*found));
+	int candidate = acm_candidate(path);
+	if (candidate && audio && !selected && output <= 0xffff) {
+		WORD tag = 0;
+		HRESULT hr = acm_find(path, encoder, (WORD)output, &tag);
+		if (SUCCEEDED(hr)) {
+			found->acm = 1;
+			found->compression = encoder ? tag : 0;
+		}
+		/* A name it couldn't read may still be a COM server's. */
+		if (SUCCEEDED(hr) || hr == VFW_E_DUPLICATE_NAME ||
+		    candidate == 1)
+			return hr;
+	} else if (candidate == 1) {
+		return CLASS_E_CLASSNOTAVAILABLE;
+	}
 	if (dshow_server_discover(path, &f, &registration))
 		return E_FAIL;
 	for (size_t i = 0; i < f.nfilters; i++) {
@@ -91,7 +140,7 @@ HRESULT xform_find(const char *path, const CLSID *selected, int audio,
 		    dshow_role(q) != dshow_codec_role(audio, encoder))
 			continue;
 		DWORD c = encoder ? filter_compression(q, audio) : 0;
-		if (encoder && !c)
+		if (encoder && (!c || (output && c != output)))
 			continue;
 		found->clsid = q->clsid;
 		found->dmo = 0;
@@ -108,7 +157,7 @@ HRESULT xform_find(const char *path, const CLSID *selected, int audio,
 		    !memcmp(&found->clsid, &d->clsid, sizeof(CLSID)))
 			continue;
 		DWORD c = encoder ? dmo_compression(d, audio) : 0;
-		if (encoder && !c)
+		if (encoder && (!c || (output && c != output)))
 			continue;
 		found->clsid = d->clsid;
 		found->dmo = 1;
@@ -133,7 +182,8 @@ HRESULT xform_create(const char *path, const struct xform_class *c,
 	if (!x)
 		return E_OUTOFMEMORY;
 	x->c = *c;
-	hr = c->dmo ? dmo_object_open(path, &c->clsid, &x->object, &x->mo) :
+	hr = c->acm ? acm_codec_open(path, &x->codec) :
+	     c->dmo ? dmo_object_open(path, &c->clsid, &x->object, &x->mo) :
 		      dshow_filter_create(path, &c->clsid, &x->server,
 					  &x->filter);
 	if (FAILED(hr)) {
@@ -164,7 +214,9 @@ void xform_close(struct xform *x)
 	if (!x)
 		return;
 	xform_disconnect(x);
-	if (x->c.dmo)
+	if (x->c.acm)
+		acm_codec_close(x->codec);
+	else if (x->c.dmo)
 		dmo_object_close(x->object, x->mo);
 	else
 		dshow_filter_close(x->server, x->filter);
@@ -173,14 +225,31 @@ void xform_close(struct xform *x)
 
 const char *xform_kind_name(const struct xform *x)
 {
-	return x && x->c.dmo ? "DMO" : "DirectShow filter";
+	return x && x->c.acm ? "ACM driver" : x && x->c.dmo ? "DMO" :
+	       "DirectShow filter";
 }
 
 void *xform_object(const struct xform *x)
 {
-	if (!x)
+	if (!x || x->c.acm)
 		return NULL;
 	return x->c.dmo ? (void *)x->mo : (void *)x->filter;
+}
+
+HRESULT xform_encoder_options(struct xform *x,
+			      const struct dshow_encoder_options *o)
+{
+	if (!x || !o)
+		return E_POINTER;
+	if (!x->c.acm)
+		return dshow_encoder_configure(xform_object(x), o);
+	/* ACM has formats with data rates, and nothing else to set. */
+	if (o->quality >= 0.0 || o->key_interval >= 0)
+		return E_NOTIMPL;
+	if (o->bitrate >= 0)
+		x->bitrate = o->bitrate > 0xffffffff ? 0xffffffff :
+			     (DWORD)o->bitrate;
+	return S_OK;
 }
 
 /* The two hosts' outputs, as one. */
@@ -201,6 +270,64 @@ static HRESULT from_sample(void *opaque, IMediaSample *sample,
 	o.preroll = sample->lpVtbl->IsPreroll(sample) == S_OK;
 	o.timed = SUCCEEDED(sample->lpVtbl->GetTime(sample, &o.start, &o.stop));
 	return x->callback ? x->callback(x->opaque, &o, new_type) : S_OK;
+}
+
+static HRESULT from_acm(void *opaque, const struct acm_output *a)
+{
+	struct xform *x = opaque;
+	struct xform_output o = { 0 };
+
+	o.data = a->data;
+	o.size = a->size;
+	o.sync = 1;
+	o.timed = a->timed;
+	o.start = a->start;
+	o.stop = a->stop;
+	return x->callback ? x->callback(x->opaque, &o, NULL) : S_OK;
+}
+
+/* An ACM stream for the media types: out may be partial (its tag alone). */
+static HRESULT acm_connect(struct xform *x, const AM_MEDIA_TYPE *in,
+			   const AM_MEDIA_TYPE *out)
+{
+	WAVEFORMATEX *wi = NULL, *wo = NULL, partial = { 0 };
+	size_t si = 0, so = 0;
+	HRESULT hr = audio_mt_to_wfx(in, &wi, &si);
+
+	if (FAILED(hr))
+		return VFW_E_TYPE_NOT_ACCEPTED;
+	if (!out->pbFormat || !out->cbFormat) {
+		static const BYTE tail[8] = { 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b,
+					      0x71 };
+		const GUID *g = &out->subtype;
+		if (memcmp(&out->majortype, &MEDIATYPE_Audio, sizeof(GUID)) ||
+		    g->Data2 || g->Data3 != 0x10 ||
+		    memcmp(g->Data4, tail, sizeof(tail)) || !g->Data1 ||
+		    g->Data1 > 0xffff) {
+			free(wi);
+			return VFW_E_TYPE_NOT_ACCEPTED;
+		}
+		partial.wFormatTag = (WORD)g->Data1;
+		hr = acm_stream_open(x->codec, wi, si, &partial, 0, x->bitrate,
+				     from_acm, x, &x->stream);
+	} else if (SUCCEEDED(hr = audio_mt_to_wfx(out, &wo, &so))) {
+		hr = acm_stream_open(x->codec, wi, si, wo, so, 0, from_acm, x,
+				     &x->stream);
+	} else {
+		hr = VFW_E_TYPE_NOT_ACCEPTED;
+	}
+	free(wi);
+	free(wo);
+	if (SUCCEEDED(hr)) {
+		size_t n;
+		const WAVEFORMATEX *f = acm_stream_format(x->stream, &n);
+		hr = audio_wfx_to_mt(f, n, &x->out);
+		if (FAILED(hr)) {
+			acm_stream_close(x->stream);
+			x->stream = NULL;
+		}
+	}
+	return hr;
 }
 
 static HRESULT from_dmo(void *opaque, const struct dmo_output *d,
@@ -231,6 +358,8 @@ HRESULT xform_connect(struct xform *x, const AM_MEDIA_TYPE *in,
 	xform_disconnect(x);
 	x->callback = callback;
 	x->opaque = opaque;
+	if (x->c.acm)
+		return acm_connect(x, in, out);
 	if (x->c.dmo)
 		return dmo_host_create(x->mo, in, out, from_dmo, x, &x->dmo_host);
 	hr = dshow_host_create(x->filter, in, out, callback ? from_sample : NULL,
@@ -253,7 +382,7 @@ const AM_MEDIA_TYPE *xform_output_type(const struct xform *x)
 		return NULL;
 	if (x->c.dmo)
 		return dmo_host_output_type(x->dmo_host);
-	return x->host ? &x->out : NULL;
+	return x->host || x->stream ? &x->out : NULL;
 }
 
 void xform_disconnect(struct xform *x)
@@ -264,6 +393,8 @@ void xform_disconnect(struct xform *x)
 	x->host = NULL;
 	dmo_host_destroy(x->dmo_host);
 	x->dmo_host = NULL;
+	acm_stream_close(x->stream);
+	x->stream = NULL;
 	dshow_free_media_type(&x->out);
 }
 
@@ -272,6 +403,8 @@ HRESULT xform_push(struct xform *x, const void *data, size_t size,
 {
 	if (!x)
 		return E_POINTER;
+	if (x->stream)
+		return acm_stream_push(x->stream, data, size, start);
 	if (x->dmo_host)
 		return dmo_host_push(x->dmo_host, data, size, start, stop, flags);
 	if (x->host)
@@ -283,6 +416,8 @@ HRESULT xform_seek(struct xform *x, REFERENCE_TIME start, REFERENCE_TIME stop)
 {
 	if (!x)
 		return E_POINTER;
+	if (x->stream)
+		return acm_stream_reset(x->stream);
 	if (x->dmo_host)
 		return dmo_host_flush(x->dmo_host);
 	if (x->host)
@@ -294,6 +429,8 @@ HRESULT xform_end(struct xform *x)
 {
 	if (!x)
 		return E_POINTER;
+	if (x->stream)
+		return acm_stream_end(x->stream);
 	if (x->dmo_host)
 		return dmo_host_end(x->dmo_host);
 	if (x->host)

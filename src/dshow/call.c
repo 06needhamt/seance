@@ -1,8 +1,11 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #include <stdio.h>
+
+#include "acm/acm.h"
 #include "common/log.h"
 #include "dshow/dshow.h"
 #include "runtime/crash.h"
+#include "win32/msacm32.h"
 
 const char *dshow_hr_name(HRESULT hr, char buf[24])
 {
@@ -34,7 +37,11 @@ const char *dshow_hr_name(HRESULT hr, char buf[24])
 	case DMO_E_NOTACCEPTING: return "DMO_E_NOTACCEPTING";
 	case DMO_E_TYPE_NOT_ACCEPTED: return "DMO_E_TYPE_NOT_ACCEPTED";
 	case DMO_E_NO_MORE_ITEMS: return "DMO_E_NO_MORE_ITEMS";
-	default: snprintf(buf, 24, "0x%08lx", (unsigned long)hr); return buf;
+	default:
+		if (ACM_IS_HRESULT(hr))	/* an ACM driver's MMRESULT */
+			return msacm_error_name(ACM_MMRESULT(hr), buf);
+		snprintf(buf, 24, "0x%08lx", (unsigned long)hr);
+		return buf;
 	}
 }
 

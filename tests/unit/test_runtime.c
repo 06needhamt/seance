@@ -43,6 +43,8 @@ static void test_teb(void)
 	CHECK_EQ(peb->OSMajorVersion, 5);
 	CHECK_EQ(peb->OSMinorVersion, 1);
 	CHECK(peb->NumberOfProcessors >= 1);
+	/* There before anything asks: DLLs read it there themselves. */
+	CHECK(peb->ProcessHeap != NULL);
 
 	WORD cw;
 	__asm__ volatile("fnstcw %0" : "=m"(cw));

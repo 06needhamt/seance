@@ -1,9 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * A COM transform of video or audio, a DirectShow filter or a DMO, behind one
- * interface, so decode, encode and probe drive either the same way: open
- * the one decoder (or encoder) a DLL has, connect it with an input and an
- * output type, push frames, and take what comes out through a callback.
+ * A transform of video or audio, a DirectShow filter, a DMO or (for audio)
+ * an ACM driver, behind one interface, so decode, encode and probe drive
+ * each the same way: open the one decoder (or encoder) a DLL has, connect
+ * it with an input and an output type, push frames, and take what comes
+ * out through a callback.
  */
 #ifndef VFW_XFORM_H
 #define VFW_XFORM_H
@@ -14,8 +15,9 @@
 
 /* A class in a server: which one, what it is, what an encoder makes. */
 struct xform_class {
-	CLSID clsid;
-	int dmo;		/* a DMO, else a DirectShow filter */
+	CLSID clsid;		/* GUID_NULL for an ACM driver */
+	int dmo;		/* a DMO */
+	int acm;		/* an ACM driver; neither: a DirectShow filter */
 	/* An encoder's output: a FOURCC for video, a format tag for audio. */
 	DWORD compression;
 };
@@ -43,6 +45,13 @@ struct xform;
  */
 HRESULT xform_find(const char *path, const CLSID *selected, int audio,
 		   int encoder, struct xform_class *found);
+/*
+ * The same, with an encoder's output tag (audio) or FOURCC (video) to
+ * choose by when not 0. A DLL that exports DriverProc and no
+ * DllGetClassObject is an ACM driver to this (audio only, no CLSIDs).
+ */
+HRESULT xform_find_output(const char *path, const CLSID *selected, int audio,
+			  int encoder, DWORD output, struct xform_class *found);
 /* Creates the class (found, or known) and holds it. */
 HRESULT xform_create(const char *path, const struct xform_class *c,
 		     struct xform **x);
@@ -51,10 +60,23 @@ HRESULT xform_open(const char *path, const CLSID *selected, int audio,
 		   int encoder, struct xform **x, struct xform_class *found);
 void xform_close(struct xform *x);
 
-/* "DirectShow filter" or "DMO". */
+/* "DirectShow filter", "DMO" or "ACM driver". */
 const char *xform_kind_name(const struct xform *x);
-/* The COM object (IBaseFilter or IMediaObject), for the dshow_* controls. */
+/*
+ * The COM object (IBaseFilter or IMediaObject), for the dshow_* controls;
+ * NULL for an ACM driver, which has none of them.
+ */
 void *xform_object(const struct xform *x);
+
+/*
+ * An encoder's settings, before connecting: the dshow_* controls for a
+ * filter or DMO. An ACM driver takes a bit rate (its format of the output
+ * tag, for the input's rate and channels, with the nearest data rate)
+ * and E_NOTIMPL for a quality or key frame interval.
+ */
+struct dshow_encoder_options;
+HRESULT xform_encoder_options(struct xform *x,
+			      const struct dshow_encoder_options *o);
 
 /*
  * Connects with an input and an output type (or fails, the transform then

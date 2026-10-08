@@ -11,12 +11,33 @@
 /*
  * Formats as msvcrt.dll's printf family does (see crt_printf.c). With
  * wide set, fmt and the result are UTF-16 and %s/%c take UTF-16 (the
- * wprintf family); otherwise they are ANSI. On success returns 0 with a
- * malloc()ed buffer of *len characters plus a terminating NUL in *out.
- * Returns -1 on a bad format or no memory.
+ * wprintf family); otherwise they are ANSI. flags is 0 for msvcrt, or
+ * CRT_UCRT with the options ucrtbase's __stdio_common_* functions take.
+ * On success returns 0 with a malloc()ed buffer of *len characters plus a
+ * terminating NUL in *out. Returns -1 on a bad format or no memory.
  */
-int crt_vformat(int wide, const void *fmt, va_list ap, void **out,
-		size_t *len);
+int crt_vformat(int wide, unsigned flags, const void *fmt, va_list ap,
+		void **out, size_t *len);
+
+/*
+ * _vsnprintf, or with wide _vsnwprintf: at most n characters in buf,
+ * terminated if they fit; the length, or -1 if it was more than n.
+ */
+int crt_vsnprintf(int wide, void *buf, size_t n, const void *fmt, va_list ap);
+
+/* The low bits are ucrtbase's _CRT_INTERNAL_PRINTF_* options. */
+#define CRT_PRINTF_LEGACY_VSPRINTF_NULL_TERMINATION 0x0001
+#define CRT_PRINTF_STANDARD_SNPRINTF_BEHAVIOR 0x0002
+#define CRT_PRINTF_LEGACY_WIDE_SPECIFIERS 0x0004
+#define CRT_PRINTF_LEGACY_MSVCRT_COMPATIBILITY 0x0008
+#define CRT_PRINTF_LEGACY_THREE_DIGIT_EXPONENTS 0x0010
+#define CRT_PRINTF_OPTIONS 0x001f
+/*
+ * ucrtbase's ways, unless an option keeps msvcrt's: inf and nan, two
+ * exponent digits, %s meaning char * in the wide functions; and the
+ * sizes z, t and j and the conversion F.
+ */
+#define CRT_UCRT 0x10000
 
 /*
  * After the CRT's malloc, calloc or realloc failed to get size bytes:

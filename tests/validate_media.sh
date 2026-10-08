@@ -319,6 +319,22 @@ if [ -f "$filter" ]; then
 	same "TSTA DMO's AVI is the filter's" $a/tsta-dmo.avi $a/tsta.avi
 	$emu "$harness" decode "$dmo" $a/six.avi -o $a/six-dmo.pcm 2>/dev/null
 	same "6-channel TSTA -> DMO -> PCM identical" $a/six-dmo.pcm $a/six.ref
+	# The ACM driver's AVI: blocks of a constant size, as ACM's are.
+	acm=$build/fixtures/testacm.acm
+	$emu "$harness" encode "$acm" $a/s24le.wav -o $a/tsta-acm.avi \
+		2>/dev/null || fail "encode TSTA through ACM"
+	expect "TSTA ACM AVI: FFmpeg sees its packets" \
+		"$(ffprobe -v error -select_streams a:0 -show_entries packet=size \
+		-of csv=p=0 $a/tsta-acm.avi | wc -l | tr -d ' ')" 47
+	expect "TSTA ACM AVI: tag and rate" \
+		"$(audio $a/tsta-acm.avi codec_tag_string,sample_rate,channels)" \
+		"Ts[0][0],48000,2"
+	$emu "$harness" decode "$filter" $a/tsta-acm.avi -o $a/tsta-acm.pcm \
+		--sample-format s24 2>/dev/null || fail "decode the ACM AVI"
+	same "s24 WAV -> ACM TSTA -> filter -> s24 identical" $a/tsta-acm.pcm \
+		$a/s24le.ref
+	$emu "$harness" decode "$acm" $a/six.avi -o $a/six-acm.pcm 2>/dev/null
+	same "6-channel TSTA -> ACM -> PCM identical" $a/six-acm.pcm $a/six.ref
 fi
 echo
 
