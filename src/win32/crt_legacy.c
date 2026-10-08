@@ -74,10 +74,6 @@ CRTFN(struct tm *) crt_gmtime(const time_t *t)
 
 CRTFN(size_t) crt_strftime(char *s, size_t n, const char *fmt,
 			    const struct tm *tm) { return strftime(s, n, fmt, tm); }
-CRTFN(int) crt_sscanf(const char *s, const char *fmt, ...)
-{
-	va_list ap; va_start(ap, fmt); int r = vsscanf(s, fmt, ap); va_end(ap); return r;
-}
 CRTFN(int) crt_fscanf(crt_FILE *f, const char *fmt, ...)
 {
 	if (!f) { errno = EINVAL; return EOF; }
@@ -400,7 +396,7 @@ const struct builtin_export crt_legacy_exports[] = {
 	E(_wfullpath), E(_wgetenv), E(wcstombs), E(mbstowcs), E(signal), E(raise),
 	E(_tzset), E(__p__daylight), E(__p__dstbias), E(__p__timezone), E(gmtime),
 	E(clock), E(exit), E(fscanf), E(getenv), E(localeconv), E(setlocale),
-	E(localtime), E(sscanf), E(strftime), E(time),
+	E(localtime), E(strftime), E(time),
 	M("??0Init@ios_base@std@@QAE@XZ", crt_ios_init_ctor),
 	M("??1Init@ios_base@std@@QAE@XZ", crt_ios_init_dtor),
 	M("??0_Lockit@std@@QAE@XZ", crt_lockit_ctor),

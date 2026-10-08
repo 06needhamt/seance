@@ -9,8 +9,8 @@
  * (ACM_STREAMCONVERTF_END). Its output buffers are what the driver asks
  * for (acmStreamSize), but never less than 64 KB or four blocks, since a
  * driver's answer can be too small. Compressed output goes out a block at
- * a time, untimed: ACM gives no times, and a block's length in samples is
- * the format's business. PCM output is timed from the first input given.
+ * a time (blocks under 1 KB as many as make 1 KB), untimed: ACM gives no
+ * times, and a block's length in samples is the format's business. PCM output is timed from the first input given.
  *
  * ACM's errors are carried as HRESULTs of their own (ACM_HRESULT), which
  * dshow_hr_name names ("ACMERR_NOTPOSSIBLE").

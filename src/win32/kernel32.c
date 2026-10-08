@@ -191,3 +191,33 @@ static const struct builtin_export *const tables[] = {
 };
 
 const struct builtin_dll builtin_kernel32 = { "kernel32.dll", NULL, tables, 0 };
+
+/*
+ * kernelbase.dll: since Windows 7, where most of kernel32 is, along with
+ * shlwapi's path and string functions; code built for it (Wine's own
+ * DLLs, for one) imports from it directly. The same functions here.
+ */
+extern const struct builtin_export shlwapi_exports[];
+
+static const struct builtin_export *const kernelbase_tables[] = {
+	core_exports,
+	k32_memory_exports,
+	k32_sync_exports,
+	k32_modern_exports,
+	k32_pool_exports,
+	k32_thread_exports,
+	k32_time_exports,
+	k32_system_exports,
+	k32_string_exports,
+	k32_module_exports,
+	k32_file_exports,
+	k32_profile_exports,
+	k32_seh_exports,
+	k32_legacy_exports,
+	shlwapi_exports,
+	NULL
+};
+
+const struct builtin_dll builtin_kernelbase = {
+	"kernelbase.dll", NULL, kernelbase_tables, 0
+};

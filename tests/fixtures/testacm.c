@@ -31,6 +31,13 @@
  *   TESTACM_CONFIG       it says it can be configured (DRV_QUERYCONFIGURE)
  *                        and answers DRV_CONFIGURE, with no dialog
  *   TESTACM_CRASH        ACMDM_STREAM_CONVERT writes through a null pointer
+ *   TESTACM_WHOLE        it encodes only whole packets, even at the end
+ *                        (as IMA ADPCM drivers do): the caller pads the rest
+ *   TESTACM_NOENCODE     it suggests TSTA for PCM but won't open a stream
+ *                        to make it (as Wine's MS ADPCM driver does)
+ *
+ * It allocates from the process heap as Wine's drivers do, taking it
+ * from the PEB rather than calling GetProcessHeap.
  *
  * Built like old MSVC code, with a 4-byte stack boundary, and without a C
  * runtime.
@@ -54,7 +61,8 @@ static const DWORD rates[NRATES] = { 8000, 11025, 22050, 44100, 48000 };
 static const WORD channel_counts[NCHANNELS] = { 1, 2, 6 };
 static const WORD bit_depths[NBITS] = { 8, 16, 24 };
 
-static int strict, notrealtime, small, prepare, config, crash;
+static int strict, notrealtime, small, prepare, config, crash, whole,
+	   noencode;
 static LONG opens, streams;
 
 struct instance {
@@ -103,6 +111,15 @@ static void wcopy(WCHAR *dst, DWORD n, const char *src)
 	for (; src[i] && i + 1 < n; i++)
 		dst[i] = (BYTE)src[i];
 	dst[i] = 0;
+}
+
+/* NtCurrentTeb()->Peb->ProcessHeap, as Wine's GetProcessHeap is inline. */
+static HANDLE process_heap(void)
+{
+	BYTE *peb;
+
+	__asm__ volatile("movl %%fs:0x30, %0" : "=r"(peb));
+	return *(HANDLE *)(peb + 0x18);
 }
 
 static int env_on(const char *name)
@@ -327,9 +344,11 @@ static LRESULT stream_open(ACMDRVSTREAMINSTANCE *si)
 		return ACMERR_NOTPOSSIBLE;
 	if (si->fdwOpen & ACM_STREAMOPENF_ASYNC)
 		return ACMERR_NOTPOSSIBLE;
+	if (encode && noencode)
+		return MMSYSERR_NOTSUPPORTED;
 	if (si->fdwOpen & ACM_STREAMOPENF_QUERY)
 		return MMSYSERR_NOERROR;	/* nothing allocated */
-	s = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*s));
+	s = HeapAlloc(process_heap(), HEAP_ZERO_MEMORY, sizeof(*s));
 	if (!s)
 		return MMSYSERR_NOMEM;
 	s->magic = STREAM_MAGIC;
@@ -356,7 +375,7 @@ static LRESULT stream_close(ACMDRVSTREAMINSTANCE *si)
 	if (!s)
 		return MMSYSERR_INVALHANDLE;
 	s->magic = 0;
-	HeapFree(GetProcessHeap(), 0, s);
+	HeapFree(process_heap(), 0, s);
 	si->dwDriver = 0;
 	InterlockedDecrement(&streams);
 	return MMSYSERR_NOERROR;
@@ -414,8 +433,8 @@ static LRESULT stream_size(ACMDRVSTREAMINSTANCE *si, ACMDRVSTREAMSIZE *z)
 static LRESULT encode(struct stream *s, ACMDRVSTREAMHEADER *h)
 {
 	DWORD frames = h->cbSrcLength / s->block, used = 0, made = 0;
-	int all = (h->fdwConvert & ACM_STREAMCONVERTF_END) ||
-		  !(h->fdwConvert & ACM_STREAMCONVERTF_BLOCKALIGN);
+	int all = !whole && ((h->fdwConvert & ACM_STREAMCONVERTF_END) ||
+			     !(h->fdwConvert & ACM_STREAMCONVERTF_BLOCKALIGN));
 
 	while (frames) {
 		DWORD n = frames < TSTA_FRAMES ? frames : TSTA_FRAMES;
@@ -500,6 +519,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		prepare = env_on("TESTACM_PREPARE");
 		config = env_on("TESTACM_CONFIG");
 		crash = env_on("TESTACM_CRASH");
+		whole = env_on("TESTACM_WHOLE");
+		noencode = env_on("TESTACM_NOENCODE");
 		return 1;
 	case DRV_FREE:
 	case DRV_ENABLE:
@@ -512,7 +533,7 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		/* Opened as anything but an audio codec, it declines. */
 		if (d && d->fccType != ACMDRIVERDETAILS_FCCTYPE_AUDIOCODEC)
 			return 0;
-		inst = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+		inst = HeapAlloc(process_heap(), HEAP_ZERO_MEMORY,
 				 sizeof(*inst));
 		if (!inst) {
 			if (d)
@@ -528,7 +549,7 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 	case DRV_CLOSE:
 		if (inst && inst->magic == INSTANCE_MAGIC) {
 			inst->magic = 0;
-			HeapFree(GetProcessHeap(), 0, inst);
+			HeapFree(process_heap(), 0, inst);
 			InterlockedDecrement(&opens);
 		}
 		return 1;

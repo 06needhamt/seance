@@ -1,12 +1,15 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * ntdll.dll: the few Rtl functions DLLs import directly.
+ * ntdll.dll: the few Rtl functions DLLs import directly, and the C
+ * library functions it has its own copies of.
  */
+#include <stdarg.h>
 #include <string.h>
 
 #include "runtime/builtin.h"
 #include "runtime/seh.h"
 #include "runtime/teb.h"
+#include "win32/crt.h"
 
 #define NT(ret) static ret STUB_WINAPI
 
@@ -53,10 +56,46 @@ NT(struct win_teb *) nt_NtCurrentTeb(void)
 	return teb_current();
 }
 
+/* msvcrt's, as ntdll's are (crt_printf.c). */
+static int STUB_CDECL nt__vsnprintf(char *buf, SIZE_T n, const char *fmt,
+				    va_list ap)
+{
+	return crt_vsnprintf(0, buf, n, fmt, ap);
+}
+
+static int STUB_CDECL nt__snprintf(char *buf, SIZE_T n, const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	int r = crt_vsnprintf(0, buf, n, fmt, ap);
+	va_end(ap);
+	return r;
+}
+
+static int STUB_CDECL nt__vsnwprintf(WCHAR *buf, SIZE_T n, const WCHAR *fmt,
+				     va_list ap)
+{
+	return crt_vsnprintf(1, buf, n, fmt, ap);
+}
+
+static int STUB_CDECL nt__snwprintf(WCHAR *buf, SIZE_T n, const WCHAR *fmt,
+				    ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	int r = crt_vsnprintf(1, buf, n, fmt, ap);
+	va_end(ap);
+	return r;
+}
+
 #define E(name) { #name, 0, (void *)nt_##name }
 
 static const struct builtin_export exports[] = {
 	E(NtCurrentTeb),
+	E(_snprintf),
+	E(_snwprintf),
+	E(_vsnprintf),
+	E(_vsnwprintf),
 	E(RtlCompareMemory),
 	E(RtlFillMemory),
 	E(RtlGetLastWin32Error),

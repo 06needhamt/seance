@@ -14,6 +14,7 @@
 #define MIN_OUTPUT (64 * 1024)
 #define MAX_OUTPUT (64u << 20)
 #define MAX_ROUNDS 4096		/* flushing calls that take no input */
+#define SMALL_BLOCKS 1024
 
 struct acm_codec {
 	HACMDRIVERID id;
@@ -28,6 +29,7 @@ struct acm_stream {
 	size_t out_size;
 	DWORD in_block, out_block;
 	int pcm_out;		/* decoding: timed, not cut into blocks */
+	int pcm_in;		/* encoding: AUDIO_ sample format of the input */
 	DWORD rate;
 	acm_output_fn callback;
 	void *opaque;
@@ -54,12 +56,32 @@ static size_t format_room(HACMDRIVER had)
 	return n < sizeof(WAVEFORMATEX) + 64 ? sizeof(WAVEFORMATEX) + 64 : n;
 }
 
-/* Whether one of the tag's first formats becomes PCM. */
+/*
+ * Whether it would open a stream between the two: a suggestion is no
+ * promise (Wine's MS ADPCM driver suggests what it can't encode).
+ */
+static int streams(HACMDRIVER had, WAVEFORMATEX *src, WAVEFORMATEX *dst)
+{
+	return !msacm_acmStreamOpen(NULL, had, src, dst, NULL, 0, 0,
+				    ACM_STREAMOPENF_QUERY |
+				    ACM_STREAMOPENF_NONREALTIME);
+}
+
+/*
+ * Whether one of the tag's first formats becomes PCM. A tag with none to
+ * try (Wine's MP3 decoder lists none) is taken at its word: opening a
+ * stream from the real format will say.
+ */
 static int decodes(HACMDRIVER had, DWORD tag, DWORD formats)
 {
 	size_t room = format_room(had);
-	WAVEFORMATEX *wf = calloc(1, room), *pcm = calloc(1, room);
+	WAVEFORMATEX *wf, *pcm;
 	int yes = 0;
+
+	if (!formats)
+		return 1;
+	wf = calloc(1, room);
+	pcm = calloc(1, room);
 
 	for (DWORD i = 0; wf && pcm && !yes && i < formats && i < 16; i++) {
 		ACMFORMATDETAILSW d = { .cbStruct = sizeof(d) };
@@ -73,7 +95,8 @@ static int decodes(HACMDRIVER had, DWORD tag, DWORD formats)
 		memset(pcm, 0, room);
 		pcm->wFormatTag = WAVE_FORMAT_PCM;
 		yes = !msacm_acmFormatSuggest(had, wf, pcm, (DWORD)room,
-					      ACM_FORMATSUGGESTF_WFORMATTAG);
+					      ACM_FORMATSUGGESTF_WFORMATTAG) &&
+		      streams(had, wf, pcm);
 	}
 	free(wf);
 	free(pcm);
@@ -101,7 +124,8 @@ static int encodes(HACMDRIVER had, DWORD tag)
 		memset(dst, 0, room);
 		dst->wFormatTag = (WORD)tag;
 		yes = !msacm_acmFormatSuggest(had, &pcm.Format, dst, (DWORD)room,
-					      ACM_FORMATSUGGESTF_WFORMATTAG);
+					      ACM_FORMATSUGGESTF_WFORMATTAG) &&
+		      streams(had, &pcm.Format, dst);
 	}
 	free(dst);
 	return yes;
@@ -350,6 +374,7 @@ HRESULT acm_stream_open(struct acm_codec *c, const WAVEFORMATEX *in,
 	s->in_block = in->nBlockAlign ? in->nBlockAlign : 1;
 	s->out_block = fmt->nBlockAlign ? fmt->nBlockAlign : 1;
 	s->pcm_out = audio_format_sample(fmt, s->out_size) != AUDIO_NONE;
+	s->pcm_in = audio_format_sample(in, in_size);
 	s->rate = fmt->nSamplesPerSec;
 	s->callback = callback;
 	s->opaque = opaque;
@@ -382,10 +407,17 @@ static int reserve(BYTE **buf, size_t *cap, size_t n)
 	return 0;
 }
 
-/* Hands on what a conversion made: PCM timed, else block by block. */
+/*
+ * Hands on what a conversion made: PCM timed, else block by block, small
+ * blocks (G.711's are a sample) together up to SMALL_BLOCKS bytes, lest an
+ * AVI get a chunk for each.
+ */
 static HRESULT deliver(struct acm_stream *s, const BYTE *data, size_t n)
 {
 	size_t piece = s->pcm_out || s->out_block <= 1 ? n : s->out_block;
+
+	if (!s->pcm_out && s->out_block > 1 && piece < SMALL_BLOCKS)
+		piece *= SMALL_BLOCKS / piece;
 
 	for (size_t at = 0; at < n; at += piece) {
 		struct acm_output o = { data + at, n - at < piece ? n - at : piece,
@@ -405,10 +437,35 @@ static HRESULT deliver(struct acm_stream *s, const BYTE *data, size_t n)
 	return S_OK;
 }
 
+/*
+ * An encoder's last part of a block, padded with silence to a whole one
+ * as Windows applications do, since drivers convert only whole blocks
+ * (IMA ADPCM's of 2041 samples would lose up to 2040). Whether it was.
+ */
+static int pad_tail(struct acm_stream *s)
+{
+	DWORD whole = 0;
+
+	if (s->pcm_in == AUDIO_NONE || !s->held ||
+	    msacm_acmStreamSize(s->has, s->out_block, &whole,
+				ACM_STREAMSIZEF_DESTINATION) ||
+	    whole <= s->held || whole > MAX_OUTPUT ||
+	    reserve(&s->pending, &s->pending_cap, whole))
+		return 0;
+	memset(s->pending + s->held, s->pcm_in == AUDIO_U8 ? 0x80 : 0,
+	       whole - s->held);
+	TRACE("acm: %lu bytes of silence to finish the last block",
+	      (unsigned long)(whole - s->held));
+	s->held = whole;
+	return 1;
+}
+
 static HRESULT convert(struct acm_stream *s, int end)
 {
 	char name[24];
+	int padded = 0;
 
+again:
 	for (int idle = 0; idle < MAX_ROUNDS; ) {
 		DWORD want = 0;
 		if (s->held)
@@ -457,6 +514,10 @@ static HRESULT convert(struct acm_stream *s, int end)
 		if (!s->held && !end)
 			break;
 		idle = h.cbSrcLengthUsed ? 0 : idle + 1;
+	}
+	if (end && !padded && pad_tail(s)) {
+		padded = 1;
+		goto again;
 	}
 	if (end && s->held)
 		TRACE("acm: %lu bytes at the end the driver didn't take",

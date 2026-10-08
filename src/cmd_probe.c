@@ -381,9 +381,11 @@ static int probe_acm(const char *path, const char *input)
 						     &tag));
 			int enc = SUCCEEDED(acm_find(path, 1, (WORD)t.dwFormatTag,
 						     &tag));
-			printf("; %s", dec && enc ? "decodes and encodes" :
+			printf("; %s%s", dec && enc ? "decodes and encodes" :
 			       dec ? "decodes to PCM" : enc ? "encodes from PCM" :
-			       "no PCM either way");
+			       "no PCM either way",
+			       dec && !t.cStandardFormats ?
+			       " (none listed to check decoding with)" : "");
 		}
 		printf("\n");
 	}

@@ -16,9 +16,18 @@
  * - infinities and NaNs are 1.#INF, 1.#QNAN and 1.#IND (see put_special).
  * - an unknown conversion character is printed as itself.
  *
+ * ucrtbase's __stdio_common_* functions format the same way, except in
+ * what its C99 conformance changed (CRT_UCRT, unless an option given keeps
+ * msvcrt's way): infinities and NaNs are inf, nan and -nan(ind); exponents
+ * have two digits or more; %s and %c in a wide function take a narrow
+ * string or character, %S and %C a wide one; z, t and j are sizes; and F
+ * is f in capitals.
+ *
  * Integers and floats are still formatted by the host's snprintf, one
  * conversion at a time; strings, characters and padding are done here.
  */
+#include <ctype.h>
+#include <errno.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -35,6 +44,7 @@
 /* Output of the current kind: bytes, or WCHARs when wide. */
 struct sink {
 	int wide;
+	unsigned flags;		/* crt_vformat's */
 	BYTE *buf;
 	size_t len, cap;	/* in characters */
 	int failed;
@@ -43,6 +53,12 @@ struct sink {
 static size_t unit(const struct sink *s)
 {
 	return s->wide ? sizeof(WCHAR) : 1;
+}
+
+/* ucrtbase's way, the msvcrt one an option names not asked for. */
+static int ucrt_way(const struct sink *s, unsigned legacy)
+{
+	return (s->flags & CRT_UCRT) && !(s->flags & legacy);
 }
 
 static void *reserve(struct sink *s, size_t n)
@@ -288,6 +304,22 @@ static void put_special(struct sink *s, struct spec sp, double v)
 	put_field(s, 0, sfx_len, -1, sp.left, 1, sfx);
 }
 
+/* ucrtbase's: inf, nan, and -nan(ind) for the NaN the FPU makes. */
+static void put_special_ucrt(struct sink *s, struct spec sp, double v)
+{
+	char a[16];
+	int upper = sp.conv == 'E' || sp.conv == 'F' || sp.conv == 'G';
+	char sign = signbit(v) ? '-' : sp.plus ? '+' : sp.space ? ' ' : 0;
+	size_t n = 0;
+
+	if (sign)
+		a[n++] = sign;
+	strcpy(a + n, isinf(v) ? "inf" : sign == '-' ? "nan(ind)" : "nan");
+	for (char *p = a; upper && *p; p++)
+		*p = (char)toupper((unsigned char)*p);
+	put_padded_ascii(s, &sp, a, strlen(a), 0);
+}
+
 static unsigned fmt_at(const void *fmt, int wide, size_t i)
 {
 	return wide ? ((const WCHAR *)fmt)[i] : ((const BYTE *)fmt)[i];
@@ -300,6 +332,12 @@ static size_t wide_len(const WCHAR *w, int max)
 	while ((max < 0 || n < (size_t)max) && w[n])
 		n++;
 	return n;
+}
+
+/* Whether %s and %c take the wide kind: the function's kind, for msvcrt. */
+static int own_kind(const struct sink *s)
+{
+	return s->wide && !ucrt_way(s, CRT_PRINTF_LEGACY_WIDE_SPECIFIERS);
 }
 
 static void format(struct sink *s, const void *fmt, va_list *ap)
@@ -376,6 +414,10 @@ static void format(struct sink *s, const void *fmt, va_list *ap)
 		} else if (c == 'h' && fmt_at(fmt, wide, i + 1) == 'h') {
 			sp.size = SZ_HH;
 			i += 2;
+		} else if ((c == 'z' || c == 't' || c == 'j') &&
+			   ucrt_way(s, 0)) {
+			sp.size = c == 'j' ? SZ_64 : SZ_32;
+			i++;
 		} else if (c == 'h' || c == 'l' || c == 'w' || c == 'L') {
 			sp.size = c == 'h' ? SZ_H : c == 'l' ? SZ_L :
 				  c == 'w' ? SZ_W : SZ_LD;
@@ -410,9 +452,18 @@ static void format(struct sink *s, const void *fmt, va_list *ap)
 			free(a);
 			break;
 		}
+		case 'F':
+			if (!ucrt_way(s, 0))
+				goto other;
+			/* fall through */
 		case 'e': case 'E': case 'f': case 'g': case 'G':
 		case 'a': case 'A': {
 			double v = va_arg(*ap, double);
+			if (!isfinite(v) &&
+			    ucrt_way(s, CRT_PRINTF_LEGACY_MSVCRT_COMPATIBILITY)) {
+				put_special_ucrt(s, sp, v);
+				break;
+			}
 			if (!isfinite(v) && c != 'a' && c != 'A') {
 				put_special(s, sp, v);
 				break;
@@ -422,7 +473,8 @@ static void format(struct sink *s, const void *fmt, va_list *ap)
 				s->failed = 1;
 				return;
 			}
-			if (c != 'f' && c != 'a' && c != 'A')
+			if (c != 'f' && c != 'F' && c != 'a' && c != 'A' &&
+			    !ucrt_way(s, CRT_PRINTF_LEGACY_THREE_DIGIT_EXPONENTS))
 				three_digit_exponent(a);
 			int finite = !strpbrk(a, "iInN");
 			put_padded_ascii(s, &sp, a, strlen(a), finite);
@@ -439,7 +491,7 @@ static void format(struct sink *s, const void *fmt, va_list *ap)
 		}
 		case 'c': case 'C': {
 			int w = sp.size == SZ_L || sp.size == SZ_W ? 1 :
-				sp.size == SZ_H ? 0 : (c == 'C') != wide;
+				sp.size == SZ_H ? 0 : (c == 'C') != own_kind(s);
 			int v = va_arg(*ap, int);
 			BYTE b = (BYTE)v;
 			WCHAR u = (WCHAR)v;
@@ -449,7 +501,7 @@ static void format(struct sink *s, const void *fmt, va_list *ap)
 		}
 		case 's': case 'S': {
 			int w = sp.size == SZ_L || sp.size == SZ_W ? 1 :
-				sp.size == SZ_H ? 0 : (c == 'S') != wide;
+				sp.size == SZ_H ? 0 : (c == 'S') != own_kind(s);
 			const void *str = va_arg(*ap, const void *);
 			static const WCHAR null_w[] = {
 				'(', 'n', 'u', 'l', 'l', ')', 0 };
@@ -493,7 +545,8 @@ static void format(struct sink *s, const void *fmt, va_list *ap)
 				*(int *)p = (int)s->len;
 			break;
 		}
-		default: {
+		default:
+		other: {
 			/* %% and anything unknown: the character itself. */
 			if (wide) {
 				WCHAR u = (WCHAR)c;
@@ -508,10 +561,10 @@ static void format(struct sink *s, const void *fmt, va_list *ap)
 	}
 }
 
-int crt_vformat(int wide, const void *fmt, va_list ap, void **out,
-		size_t *len)
+int crt_vformat(int wide, unsigned flags, const void *fmt, va_list ap,
+		void **out, size_t *len)
 {
-	struct sink s = { .wide = wide };
+	struct sink s = { .wide = wide, .flags = flags };
 	va_list copy;
 
 	if (!fmt)
@@ -542,7 +595,7 @@ static int to_buffer(int wide, void *buf, size_t n, int bounded,
 	void *out;
 	size_t len, u = wide ? sizeof(WCHAR) : 1;
 
-	if (crt_vformat(wide, fmt, ap, &out, &len))
+	if (crt_vformat(wide, 0, fmt, ap, &out, &len))
 		return -1;
 	if (!bounded) {
 		memcpy(buf, out, (len + 1) * u);
@@ -560,7 +613,7 @@ static int count(int wide, const void *fmt, va_list ap)
 	void *out;
 	size_t len;
 
-	if (crt_vformat(wide, fmt, ap, &out, &len))
+	if (crt_vformat(wide, 0, fmt, ap, &out, &len))
 		return -1;
 	free(out);
 	return (int)len;
@@ -651,9 +704,143 @@ CRTFN(int) crt__scwprintf(const WCHAR *fmt, ...)
 	return r;
 }
 
+int crt_vsnprintf(int wide, void *buf, size_t n, const void *fmt, va_list ap)
+{
+	return to_buffer(wide, buf, n, 1, fmt, ap);
+}
+
+/*
+ * ucrtbase's string forms, which its headers make sprintf, snprintf,
+ * _snprintf and the rest from, options saying which. What fits of the
+ * output goes in buf, n characters at most, and then:
+ * - with LEGACY_VSPRINTF_NULL_TERMINATION, as _snprintf (above);
+ * - with STANDARD_SNPRINTF_BEHAVIOR, terminated (cut short if need be),
+ *   returning the whole length, as C99's vsnprintf;
+ * - otherwise terminated, returning -2 if cut short (-1 if n is 0).
+ * With buf NULL, the length it would be.
+ */
+static int common_sprintf(int wide, ULONGLONG options, void *buf, size_t n,
+			  const void *fmt, va_list ap)
+{
+	unsigned flags = CRT_UCRT | (unsigned)(options & CRT_PRINTF_OPTIONS);
+	size_t len, u = wide ? sizeof(WCHAR) : 1;
+	void *out;
+
+	if (crt_vformat(wide, flags, fmt, ap, &out, &len))
+		return -1;
+	int r = (int)len;
+	if (buf) {
+		size_t copy = len < n ? len + 1 : n;
+		if (copy)
+			memcpy(buf, out, copy * u);
+		if (options & CRT_PRINTF_LEGACY_VSPRINTF_NULL_TERMINATION) {
+			r = len > n ? -1 : (int)len;
+		} else if (len >= n) {
+			if (n)
+				memset((BYTE *)buf + (n - 1) * u, 0, u);
+			r = options & CRT_PRINTF_STANDARD_SNPRINTF_BEHAVIOR ?
+			    (int)len : n ? -2 : -1;
+		}
+	}
+	free(out);
+	return r;
+}
+
+/*
+ * The _s forms: count characters at most (_TRUNCATE: what fits), -1 and a
+ * terminated buffer if that cut the output short; -1 and an empty one,
+ * with ERANGE, if it doesn't fit and count allowed more. (Windows calls
+ * the invalid parameter handler then, which ends the process by default.)
+ */
+#define CRT_TRUNCATE ((size_t)-1)
+
+static int common_sprintf_s(int wide, ULONGLONG options, void *buf, size_t n,
+			    size_t count, const void *fmt, va_list ap)
+{
+	unsigned flags = CRT_UCRT | (unsigned)(options & CRT_PRINTF_OPTIONS);
+	size_t len, keep, u = wide ? sizeof(WCHAR) : 1;
+	void *out;
+
+	if (!buf || !n || !fmt) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (crt_vformat(wide, flags, fmt, ap, &out, &len)) {
+		memset(buf, 0, u);
+		return -1;
+	}
+	int r = -1;
+	if (len < n && (count == CRT_TRUNCATE || len <= count)) {
+		keep = len;
+		r = (int)len;
+	} else if (count == CRT_TRUNCATE || count < n) {
+		keep = count < n ? count : n - 1;
+	} else {
+		keep = 0;
+		errno = ERANGE;
+	}
+	memcpy(buf, out, keep * u);
+	memset((BYTE *)buf + keep * u, 0, u);
+	free(out);
+	return r;
+}
+
+CRTFN(int) crt___stdio_common_vsprintf(ULONGLONG options, char *buf, size_t n,
+					const char *fmt, void *locale,
+					va_list ap)
+{
+	(void)locale;
+	return common_sprintf(0, options, buf, n, fmt, ap);
+}
+
+CRTFN(int) crt___stdio_common_vswprintf(ULONGLONG options, WCHAR *buf,
+					 size_t n, const WCHAR *fmt,
+					 void *locale, va_list ap)
+{
+	(void)locale;
+	return common_sprintf(1, options, buf, n, fmt, ap);
+}
+
+CRTFN(int) crt___stdio_common_vsprintf_s(ULONGLONG options, char *buf,
+					  size_t n, const char *fmt,
+					  void *locale, va_list ap)
+{
+	(void)locale;
+	return common_sprintf_s(0, options, buf, n, n, fmt, ap);
+}
+
+CRTFN(int) crt___stdio_common_vswprintf_s(ULONGLONG options, WCHAR *buf,
+					   size_t n, const WCHAR *fmt,
+					   void *locale, va_list ap)
+{
+	(void)locale;
+	return common_sprintf_s(1, options, buf, n, n, fmt, ap);
+}
+
+CRTFN(int) crt___stdio_common_vsnprintf_s(ULONGLONG options, char *buf,
+					   size_t n, size_t count,
+					   const char *fmt, void *locale,
+					   va_list ap)
+{
+	(void)locale;
+	return common_sprintf_s(0, options, buf, n, count, fmt, ap);
+}
+
+CRTFN(int) crt___stdio_common_vsnwprintf_s(ULONGLONG options, WCHAR *buf,
+					    size_t n, size_t count,
+					    const WCHAR *fmt, void *locale,
+					    va_list ap)
+{
+	(void)locale;
+	return common_sprintf_s(1, options, buf, n, count, fmt, ap);
+}
+
 #define E(name) { #name, 0, (void *)crt_##name }
 
 const struct builtin_export crt_printf_exports[] = {
+	E(__stdio_common_vsprintf), E(__stdio_common_vswprintf),
+	E(__stdio_common_vsprintf_s), E(__stdio_common_vswprintf_s),
+	E(__stdio_common_vsnprintf_s), E(__stdio_common_vsnwprintf_s),
 	E(sprintf), E(vsprintf), E(_snprintf), E(_vsnprintf),
 	E(_scprintf), E(_vscprintf),
 	E(swprintf), E(vswprintf), E(_snwprintf), E(_vsnwprintf),

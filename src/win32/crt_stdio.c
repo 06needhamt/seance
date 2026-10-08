@@ -257,12 +257,13 @@ CRTFN(int) crt_setvbuf(crt_FILE *f, char *buf, int mode, size_t size)
 }
 
 /* Formatting is crt_printf.c's; a wide result is written as ANSI. */
-static int print(crt_FILE *f, int wide, const void *fmt, va_list ap)
+static int print_flags(crt_FILE *f, int wide, unsigned flags, const void *fmt,
+		       va_list ap)
 {
 	void *out;
 	size_t len;
 
-	if (crt_vformat(wide, fmt, ap, &out, &len))
+	if (crt_vformat(wide, flags, fmt, ap, &out, &len))
 		return -1;
 	char *text = out;
 	size_t n = len;
@@ -281,6 +282,11 @@ static int print(crt_FILE *f, int wide, const void *fmt, va_list ap)
 		free(text);
 	free(out);
 	return w == n ? (int)len : -1;
+}
+
+static int print(crt_FILE *f, int wide, const void *fmt, va_list ap)
+{
+	return print_flags(f, wide, 0, fmt, ap);
 }
 
 CRTFN(int) crt_vfprintf(crt_FILE *f, const char *fmt, va_list ap)
@@ -345,6 +351,24 @@ CRTFN(int) crt_puts(const char *s)
 }
 
 CRTFN(crt_FILE *) crt___iob_func(void) { return crt_iob; }
+/* ucrtbase's stdin, stdout and stderr: its FILE is opaque, so ours do. */
+CRTFN(crt_FILE *) crt___acrt_iob_func(unsigned i) { return i < 3 ? &crt_iob[i] : NULL; }
+
+/* ucrtbase's fprintf family (see crt_printf.c for its options). */
+CRTFN(int) crt___stdio_common_vfprintf(ULONGLONG options, crt_FILE *f,
+					const char *fmt, void *locale, va_list ap)
+{
+	(void)locale;
+	return print_flags(f, 0, CRT_UCRT | (unsigned)(options & CRT_PRINTF_OPTIONS),
+			   fmt, ap);
+}
+CRTFN(int) crt___stdio_common_vfwprintf(ULONGLONG options, crt_FILE *f,
+					 const WCHAR *fmt, void *locale, va_list ap)
+{
+	(void)locale;
+	return print_flags(f, 1, CRT_UCRT | (unsigned)(options & CRT_PRINTF_OPTIONS),
+			   fmt, ap);
+}
 
 CRTFN(int) crt__fileno(crt_FILE *f) { return f->_file; }
 
@@ -436,7 +460,10 @@ const struct builtin_export crt_stdio_exports[] = {
 	E(ftell), E(fseek), E(rewind), E(setvbuf), E(remove),
 	E(fprintf), E(vfprintf), E(printf), E(vprintf), E(puts),
 	E(fwprintf), E(vfwprintf), E(wprintf), E(vwprintf),
-	E(__iob_func), E(__p__iob), E(__p___mb_cur_max), E(_fileno), E(getc),
+	E(__stdio_common_vfprintf), E(__stdio_common_vfwprintf),
+	{ "__stdio_common_vfprintf_s", 0, (void *)crt___stdio_common_vfprintf },
+	{ "__stdio_common_vfwprintf_s", 0, (void *)crt___stdio_common_vfwprintf },
+	E(__iob_func), E(__acrt_iob_func), E(__p__iob), E(__p___mb_cur_max), E(_fileno), E(getc),
 	E(isalpha), E(isupper), E(islower), E(isdigit), E(isxdigit),
 	E(isspace), E(ispunct), E(iscntrl), E(isalnum), E(isprint),
 	E(isgraph), E(toupper), E(tolower),

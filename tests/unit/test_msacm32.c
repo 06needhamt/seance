@@ -11,6 +11,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "acm/acm.h"
 #include "common/error.h"
 #include "common/sanitizer.h"
 #include "loader/modules.h"
@@ -835,6 +836,76 @@ static void roundtrip(DWORD open_flags)
 	CHECK_EQ(drv_open_count(), before);
 }
 
+/* What a stream through the backend (acm.h) hands on, end to end. */
+struct collected {
+	BYTE data[16384];
+	size_t size, outputs;
+};
+
+static HRESULT collect_output(void *opaque, const struct acm_output *o)
+{
+	struct collected *c = opaque;
+
+	if (c->size + o->size > sizeof(c->data))
+		return E_OUTOFMEMORY;
+	memcpy(c->data + c->size, o->data, o->size);
+	c->size += o->size;
+	c->outputs++;
+	return S_OK;
+}
+
+/*
+ * 1500 sample frames through TSTA and back by the backend: exact, as the
+ * driver makes a short packet at the end; or, when it makes only whole
+ * ones (whole), padded with silence to two packets, none of it lost.
+ */
+static void backend_roundtrip(int whole)
+{
+	struct acm_codec *c = NULL;
+	struct acm_stream *enc = NULL, *dec = NULL;
+	static struct collected packets, back;
+	WAVEFORMATEX in = pcm(1, 8000, 16), tag = { .wFormatTag = 0x7354 };
+	short ramp[1500];
+	size_t size;
+
+	memset(&packets, 0, sizeof(packets));
+	memset(&back, 0, sizeof(back));
+	for (int i = 0; i < 1500; i++)
+		ramp[i] = (short)(i * 7 - 5000);
+	CHECK_EQ(acm_codec_open(testacm, &c), S_OK);
+	if (!c)
+		return;
+	CHECK_EQ(acm_stream_open(c, &in, sizeof(in), &tag, 0, 0, collect_output,
+				 &packets, &enc), S_OK);
+	if (enc) {
+		/* Pushed in two parts, the first not a whole packet. */
+		CHECK_EQ(acm_stream_push(enc, ramp, 1000, 0), S_OK);
+		CHECK_EQ(acm_stream_push(enc, (BYTE *)ramp + 1000, 2000, 0),
+			 S_OK);
+		CHECK_EQ(acm_stream_end(enc), S_OK);
+		CHECK_EQ(packets.outputs, 2);
+		CHECK_EQ(packets.size, 8 + 1024 * 2 +
+			 8 + (whole ? 1024 : 476) * 2);
+		const WAVEFORMATEX *wf = acm_stream_format(enc, &size);
+		CHECK_EQ(acm_stream_open(c, wf, size, &in, sizeof(in), 0,
+					 collect_output, &back, &dec), S_OK);
+		acm_stream_close(enc);
+	}
+	if (dec) {
+		CHECK_EQ(acm_stream_push(dec, packets.data, packets.size, 0),
+			 S_OK);
+		CHECK_EQ(acm_stream_end(dec), S_OK);
+		CHECK_EQ(back.size, (whole ? 2048 : 1500) * 2);
+		CHECK(!memcmp(back.data, ramp, sizeof(ramp)));
+		int silent = 1;
+		for (size_t i = sizeof(ramp); i < back.size; i++)
+			silent &= !back.data[i];
+		CHECK(silent);
+		acm_stream_close(dec);
+	}
+	acm_codec_close(c);
+}
+
 static void test_testacm(void)
 {
 	FN(MMRESULT, acmMetrics, HACMOBJ, UINT, LPVOID);
@@ -951,6 +1022,10 @@ static void test_testacm(void)
 	CHECK_EQ(acmDriverClose(had, 0), 0);
 
 	roundtrip(0);
+	backend_roundtrip(0);
+	WORD tag = 0;
+	CHECK_EQ(acm_find(testacm, 1, 0, &tag), S_OK);
+	CHECK_EQ(tag, 0x7354);
 	CHECK_EQ(driver_count("testacm_open_count"), 0);
 	CHECK_EQ(drv_open_count(), before);
 	write_ini("");
@@ -1041,6 +1116,32 @@ static void mode_config(void)
 	CHECK_EQ(driver_count("testacm_open_count"), 0);
 }
 
+static void mode_whole(void)
+{
+	backend_roundtrip(1);
+}
+
+/* It suggests TSTA for PCM, but the stream decides: it only decodes. */
+static void mode_noencode(void)
+{
+	FN(MMRESULT, acmFormatSuggest, HACMDRIVER, LPWAVEFORMATEX,
+	   LPWAVEFORMATEX, DWORD, DWORD);
+	BYTE tsta_buf[64] = { 0 };
+	WAVEFORMATEX wf = pcm(2, 44100, 16);
+	HACMDRIVERID id;
+	WORD tag = 1;
+
+	CHECK_EQ(msacm_add_path(testacm, &id), 0);
+	((WAVEFORMATEX *)tsta_buf)->wFormatTag = 0x7354;
+	CHECK_EQ(acmFormatSuggest(NULL, &wf, (WAVEFORMATEX *)tsta_buf,
+				  sizeof(tsta_buf),
+				  ACM_FORMATSUGGESTF_WFORMATTAG), 0);
+	CHECK_EQ(acm_find(testacm, 1, 0, &tag), CLASS_E_CLASSNOTAVAILABLE);
+	CHECK_EQ(tag, 0);
+	CHECK_EQ(acm_find(testacm, 0, 0, &tag), S_OK);
+	CHECK_EQ(tag, 0x7354);
+}
+
 /* Crashes in the driver's ACMDM_STREAM_CONVERT, for the report. */
 static void mode_crash(void)
 {
@@ -1058,6 +1159,8 @@ static const struct {
 	{ "prepare", "PREPARE", mode_prepare },
 	{ "config", "CONFIG", mode_config },
 	{ "crash", "CRASH", mode_crash },
+	{ "whole", "WHOLE", mode_whole },
+	{ "noencode", "NOENCODE", mode_noencode },
 };
 #define NMODES (sizeof(modes) / sizeof(*modes))
 
