@@ -29,6 +29,11 @@ static const GUID clsid_decoder = { 0x5e6c9b41, 0x3a7d, 0x4f0e,
 	{ 0x9c, 0x11, 0x0d, 0x2b, 0x7a, 0x6e, 0x4f, 0x80 } };
 static const GUID clsid_encoder = { 0x5e6c9b42, 0x3a7d, 0x4f0e,
 	{ 0x9c, 0x11, 0x0d, 0x2b, 0x7a, 0x6e, 0x4f, 0x80 } };
+static const GUID clsid_audio_decoder = { 0x5e6c9b43, 0x3a7d, 0x4f0e,
+	{ 0x9c, 0x11, 0x0d, 0x2b, 0x7a, 0x6e, 0x4f, 0x80 } };
+static const GUID clsid_audio_encoder = { 0x5e6c9b44, 0x3a7d, 0x4f0e,
+	{ 0x9c, 0x11, 0x0d, 0x2b, 0x7a, 0x6e, 0x4f, 0x80 } };
+static const GUID st_tsta = WAVE_FORMAT_SUBTYPE_INIT(0x7354);
 static const GUID clsid_other = { 0x22222222, 0x3333, 0x4444,
 	{ 0x55, 0x55, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66 } };
 static const GUID st_tst0 = FOURCC_SUBTYPE_INIT(mmioFOURCC('T', 'S', 'T', '0'));
@@ -56,13 +61,16 @@ static int file_exists(const char *path)
 	return stat(path, &st) == 0;
 }
 
-/* testdmo.dll's two DMOs (in either order). */
+/* testdmo.dll's four DMOs (in any order). */
 static void check_dmos(const struct dmo_reg *d, size_t n)
 {
-	CHECK_EQ(n, 2);
+	int seen = 0;
+
+	CHECK_EQ(n, 4);
 	for (size_t i = 0; i < n; i++) {
 		char *name = d[i].name ? utf16_to_utf8_dup(d[i].name) : NULL;
 		if (guid_eq(&d[i].clsid, &clsid_decoder)) {
+			seen |= 1;
 			CHECK_STR(name, "seance test DMO decoder");
 			CHECK(guid_eq(&d[i].category, &DMOCATEGORY_VIDEO_DECODER));
 			CHECK_EQ(dmo_role(&d[i]), DMO_ROLE_VIDEO_DECODER);
@@ -70,18 +78,33 @@ static void check_dmos(const struct dmo_reg *d, size_t n)
 			      guid_eq(&d[i].in[0].subtype, &st_tst0) &&
 			      guid_eq(&d[i].out[4].subtype,
 				      &MEDIASUBTYPE_RGB24));
-		} else {
+		} else if (guid_eq(&d[i].clsid, &clsid_encoder)) {
 			/* Written by the DLL itself, not by DMORegister. */
-			CHECK(guid_eq(&d[i].clsid, &clsid_encoder));
+			seen |= 2;
 			CHECK_STR(name, "seance test DMO encoder");
 			CHECK(guid_eq(&d[i].category, &DMOCATEGORY_VIDEO_ENCODER));
 			CHECK_EQ(dmo_role(&d[i]), DMO_ROLE_VIDEO_ENCODER);
 			CHECK(d[i].nin == 6 && d[i].nout == 1 &&
 			      guid_eq(&d[i].out[0].subtype, &st_tst0));
+		} else if (guid_eq(&d[i].clsid, &clsid_audio_decoder)) {
+			seen |= 4;
+			CHECK_STR(name, "seance test DMO audio decoder");
+			CHECK(guid_eq(&d[i].category, &DMOCATEGORY_AUDIO_DECODER));
+			CHECK_EQ(dmo_role(&d[i]), DMO_ROLE_AUDIO_DECODER);
+			CHECK(d[i].nin == 1 && d[i].nout == 1 &&
+			      guid_eq(&d[i].in[0].subtype, &st_tsta) &&
+			      guid_eq(&d[i].out[0].subtype, &MEDIASUBTYPE_PCM));
+		} else {
+			seen |= 8;
+			CHECK(guid_eq(&d[i].clsid, &clsid_audio_encoder));
+			CHECK_STR(name, "seance test DMO audio encoder");
+			CHECK(guid_eq(&d[i].category, &DMOCATEGORY_AUDIO_ENCODER));
+			CHECK_EQ(dmo_role(&d[i]), DMO_ROLE_AUDIO_ENCODER);
 		}
 		CHECK_EQ(d[i].flags, 0);
 		free(name);
 	}
+	CHECK_EQ(seen, 15);
 }
 
 /* Another server's DMO, and one with no server, already registered. */
@@ -138,7 +161,7 @@ static void test_reg_file(void)
 	dmo_registered_free(r, n);
 }
 
-/* In a sandbox: both DMOs, nobody else's, and nothing left behind. */
+/* In a sandbox: its DMOs, nobody else's, and nothing left behind. */
 static void test_dry_run(const char *server)
 {
 	struct dshow_server_found found;
@@ -179,20 +202,20 @@ static void test_register(const char *server)
 	/* Read back, with the DLL that serves each. */
 	struct dmo_registered *r = NULL;
 	size_t n = dmo_registered(&r), ours = 0;
-	CHECK_EQ(n, 4);
+	CHECK_EQ(n, 6);
 	for (size_t i = 0; i < n; i++) {
-		if (!guid_eq(&r[i].d.clsid, &clsid_decoder) &&
-		    !guid_eq(&r[i].d.clsid, &clsid_encoder))
+		if (guid_eq(&r[i].d.clsid, &clsid_other) ||
+		    !r[i].path)
 			continue;
 		ours++;
-		CHECK(r[i].path && strstr(r[i].path, "testdmo.dll"));
+		CHECK(strstr(r[i].path, "testdmo.dll") != NULL);
 	}
-	CHECK_EQ(ours, 2);
+	CHECK_EQ(ours, 4);
 	dmo_registered_free(r, n);
 
-	/* Registering again finds the same two, once each. */
+	/* Registering again finds the same four, once each. */
 	CHECK_EQ(dshow_server_register(server, 0, &found, &hr), 0);
-	CHECK_EQ(found.ndmos, 2);
+	CHECK_EQ(found.ndmos, 4);
 	dshow_server_found_free(&found);
 
 	/* Unregistering takes it all away again, and only that. */

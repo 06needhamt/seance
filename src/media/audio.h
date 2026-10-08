@@ -105,6 +105,22 @@ HRESULT audio_wfx_to_mt(const WAVEFORMATEX *wf, size_t size,
 			AM_MEDIA_TYPE *mt);
 
 /*
+ * The ways a stream's format can be offered to a decoder, one per variant,
+ * in the order to try them: as audio_wfx_to_mt gives it, then the forms
+ * decoders register some formats by: AC-3 as MEDIASUBTYPE_DOLBY_AC3, DTS
+ * as MEDIASUBTYPE_DTS, MPEG audio as MEDIASUBTYPE_MPEG1Audio and
+ * MPEG2_AUDIO, AAC under its other tags as MEDIASUBTYPE_RAW_AAC1, and
+ * Vorbis (its three headers Xiph-laced after the WAVEFORMATEX, as AVI files
+ * have them) as Vorbis2 with a VORBISFORMAT2. A compressed format wrapped
+ * in a WAVEFORMATEXTENSIBLE (FFmpeg writes more than two channels so) is
+ * offered unwrapped first, a WAVEFORMATEX of its tag with the codec's own
+ * extra bytes, as decoders expect it, then as it is. S_OK with the type,
+ * S_FALSE when there are no more variants.
+ */
+HRESULT audio_input_variant(const WAVEFORMATEX *wf, size_t size,
+			    unsigned variant, AM_MEDIA_TYPE *mt);
+
+/*
  * An audio media type's format, malloc()ed, as at least 18 bytes with
  * cbSize trimmed to what is there. E_INVALIDARG when it isn't audio with
  * FORMAT_WaveFormatEx.

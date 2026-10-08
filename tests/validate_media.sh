@@ -314,6 +314,11 @@ if [ -f "$filter" ]; then
 	$emu "$harness" encode "$filter" $a/six.wav -o $a/six.avi 2>/dev/null
 	$emu "$harness" decode "$filter" $a/six.avi -o $a/six-tsta.pcm 2>/dev/null
 	same "6-channel WAV -> TSTA -> PCM identical" $a/six-tsta.pcm $a/six.ref
+	dmo=$build/fixtures/testdmo.dll
+	$emu "$harness" encode "$dmo" $a/s24le.wav -o $a/tsta-dmo.avi 2>/dev/null
+	same "TSTA DMO's AVI is the filter's" $a/tsta-dmo.avi $a/tsta.avi
+	$emu "$harness" decode "$dmo" $a/six.avi -o $a/six-dmo.pcm 2>/dev/null
+	same "6-channel TSTA -> DMO -> PCM identical" $a/six-dmo.pcm $a/six.ref
 fi
 echo
 

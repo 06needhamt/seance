@@ -23,6 +23,7 @@ const char *dshow_hr_name(HRESULT hr, char buf[24])
 	case VFW_E_DUPLICATE_NAME: return "VFW_E_DUPLICATE_NAME";
 	case VFW_E_WRONG_STATE: return "VFW_E_WRONG_STATE";
 	case VFW_E_NOT_COMMITTED: return "VFW_E_NOT_COMMITTED";
+	case VFW_E_UNSUPPORTED_AUDIO: return "VFW_E_UNSUPPORTED_AUDIO";
 	case E_POINTER: return "E_POINTER";
 	case E_INVALIDARG: return "E_INVALIDARG";
 	case E_OUTOFMEMORY: return "E_OUTOFMEMORY";

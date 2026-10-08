@@ -82,13 +82,23 @@ static int same_type(const DMO_MEDIA_TYPE *a, const DMO_MEDIA_TYPE *b)
 	       (!a->cbFormat || !memcmp(a->pbFormat, b->pbFormat, a->cbFormat));
 }
 
-/* What the output buffer must hold: the DMO's word, or the picture's size. */
+/*
+ * What the output buffer must hold: the DMO's word, or the picture's size,
+ * or for audio a second of it.
+ */
 static DWORD output_size(const DMO_MEDIA_TYPE *mt, DWORD asked)
 {
 	DWORD size = asked;
 
 	if (mt->lSampleSize > size)
 		size = mt->lSampleSize;
+	if (!memcmp(&mt->formattype, &FORMAT_WaveFormatEx, sizeof(GUID)) &&
+	    mt->pbFormat && mt->cbFormat >= 16) {
+		const WAVEFORMATEX *wf = (const WAVEFORMATEX *)mt->pbFormat;
+		if (!asked && wf->nAvgBytesPerSec > size)
+			size = wf->nAvgBytesPerSec;
+		return size >= 4096 ? size : 4096;
+	}
 	BITMAPINFOHEADER *bih = NULL;
 	size_t n = 0;
 	if (SUCCEEDED(dshow_mt_to_bih(mt, &bih, &n))) {
@@ -169,6 +179,34 @@ static HRESULT private_data(struct dmo_host *h, const DMO_MEDIA_TYPE *out)
 	return S_OK;
 }
 
+/*
+ * A partial output type (a major type, perhaps a subtype, no format): the
+ * first of the types the DMO offers for its input that fits it, as a
+ * filter completes one. Others are used as they are.
+ */
+static HRESULT complete_output(struct dmo_host *h, const DMO_MEDIA_TYPE *out,
+			       DMO_MEDIA_TYPE *full)
+{
+	static const GUID none;
+
+	if (out->cbFormat && out->pbFormat)
+		return dshow_copy_media_type(full, out);
+	for (DWORD i = 0;; i++) {
+		memset(full, 0, sizeof(*full));
+		HRESULT hr = MO(h->mo, GetOutputType, 0, i, full);
+		if (hr == DMO_E_NO_MORE_ITEMS)
+			return DMO_E_TYPE_NOT_ACCEPTED;
+		if (FAILED(hr))
+			return hr;
+		if (!memcmp(&full->majortype, &out->majortype, sizeof(GUID)) &&
+		    (!memcmp(&out->subtype, &none, sizeof(GUID)) ||
+		     !memcmp(&full->subtype, &out->subtype, sizeof(GUID))) &&
+		    full->cbFormat && full->pbFormat)
+			return S_OK;
+		dshow_free_media_type(full);
+	}
+}
+
 HRESULT dmo_host_create(IMediaObject *mo, const DMO_MEDIA_TYPE *input,
 			const DMO_MEDIA_TYPE *output, dmo_output_fn callback,
 			void *opaque, struct dmo_host **out)
@@ -198,12 +236,14 @@ HRESULT dmo_host_create(IMediaObject *mo, const DMO_MEDIA_TYPE *input,
 	    FAILED(hr = MO(mo, SetInputType, 0, &h->input,
 			   DMO_SET_TYPEF_TEST_ONLY)) ||
 	    FAILED(hr = MO(mo, SetInputType, 0, &h->input, 0)) ||
-	    FAILED(hr = private_data(h, output)) ||
+	    FAILED(hr = complete_output(h, output, &h->scratch)) ||
+	    FAILED(hr = private_data(h, &h->scratch)) ||
 	    FAILED(hr = MO(mo, SetOutputType, 0, &h->output,
 			   DMO_SET_TYPEF_TEST_ONLY)) ||
 	    FAILED(hr = MO(mo, SetOutputType, 0, &h->output, 0)) ||
 	    FAILED(hr = MO(mo, GetOutputSizeInfo, 0, &h->size, &h->align)))
 		goto fail;
+	dshow_free_media_type(&h->scratch);
 	/* Changes are against what the DMO says it has, not what was set. */
 	if (FAILED(MO(mo, GetOutputCurrentType, 0, &h->current)) &&
 	    FAILED(hr = dshow_copy_media_type(&h->current, &h->output)))
@@ -427,6 +467,7 @@ void dmo_host_destroy(struct dmo_host *h)
 	dshow_free_media_type(&h->input);
 	dshow_free_media_type(&h->output);
 	dshow_free_media_type(&h->current);
+	dshow_free_media_type(&h->scratch);
 	free(h->queue);
 	free(h);
 }

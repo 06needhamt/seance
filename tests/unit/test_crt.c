@@ -315,6 +315,18 @@ static void test_msvcrt_semantics(void)
 	CHECK_EQ(snprintf_(buf, 8, "%d", 12), 2);
 	CHECK_STR(buf, "12");
 
+	/* A null pointer with a length of zero, which codecs pass. */
+	void *(*memcpy_)(void *, const void *, size_t) = get("memcpy");
+	void *(*memmove_)(void *, const void *, size_t) = get("memmove");
+	void *(*memset_)(void *, int, size_t) = get("memset");
+	int (*memcmp_)(const void *, const void *, size_t) = get("memcmp");
+	void *(*memchr_)(const void *, int, size_t) = get("memchr");
+	CHECK(memcpy_(buf, NULL, 0) == buf);
+	CHECK(memmove_(buf, NULL, 0) == buf);
+	CHECK(memset_(NULL, 0, 0) == NULL);
+	CHECK_EQ(memcmp_(NULL, buf, 0), 0);
+	CHECK(memchr_(NULL, 'x', 0) == NULL);
+
 	/* An empty write to stdout through _iob[1]. */
 	CHECK_EQ(fprintf_(iob + 32, "%s", ""), 0);
 

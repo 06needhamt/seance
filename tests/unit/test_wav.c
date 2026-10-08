@@ -522,6 +522,18 @@ static void test_sources(void)
 	}
 	rename(path_of("s16.dat"), path_of("s16.wav"));
 
+	/* A compressed WAV whose block is too small to be a packet (as
+	   FFmpeg writes FLAC): read about 4 KB at a time. */
+	{
+		WAVEFORMATEX flac = { 0xf1ac, 2, 44100, 16000, 4, 16, 0 };
+		CHECK_EQ(write_wav("flac.wav", &flac, sizeof(flac), 10000, NULL), 0);
+		s = audio_source_open(path_of("flac.wav"), NULL);
+		CHECK(s && audio_source_read(s, &data, &len, &time) == 1 &&
+		      len == 4096);
+		audio_source_close(s);
+		cleanup("flac.wav");
+	}
+
 	/* Raw PCM, a part frame at the end. */
 	BYTE raw[1003];
 	fill(raw, 0, sizeof(raw));

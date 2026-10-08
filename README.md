@@ -33,20 +33,21 @@ minimal source/sink graph, and `probe`, `decode` and `encode` for filters,
 including dynamic format changes, `ICodecAPI` and `IAMVideoCompression`
 encoder controls, persisted filter state and MPEG-1/MPEG-2 media types.
 
+DMOs are found, registered and run for video decoding and encoding as well,
+and audio decoders and encoders, DirectShow filters and DMOs, run through
+`decode` and `encode` (see [docs/DMO_AUDIO_PLAN.md](docs/DMO_AUDIO_PLAN.md)).
+Audio files are read and written without a codec: WAV (and RF64), raw PCM
+and AVI audio streams, through `avi` and `convert`.
+
 The real-world check is the LAV Filters 0.83 package (32-bit): LAV Video
-loads, registers, connects and decodes 18 codecs identically to FFmpeg, and
+loads, registers, connects and decodes 18 codecs identically to FFmpeg; LAV
+Audio decodes MP3, FLAC, MS ADPCM and A-law identically and AC-3, E-AC-3,
+AAC, Vorbis, Opus and WMA to within float rounding, in stereo and 5.1; and
 the whole package loads with no unimplemented imports. The results, and what
 is not supported or not yet exercised, are in
-[MISSING_FEATURES.md](MISSING_FEATURES.md). Out of scope: audio, splitter and
-renderer filters, DMOs, capture devices, a real Filter Graph Manager, network
-access and hardware decoding.
-
-DMOs are found, registered and run for video decoding and encoding as well.
-Audio files are read and written without a codec: WAV (and RF64), raw PCM
-and AVI audio streams, through `avi` and `convert`. Audio decoders and
-encoders that are DirectShow filters run through `decode` and `encode`;
-audio DMOs are the next phase of
-[docs/DMO_AUDIO_PLAN.md](docs/DMO_AUDIO_PLAN.md).
+[MISSING_FEATURES.md](MISSING_FEATURES.md). Out of scope: splitter and
+renderer filters, capture devices, a real Filter Graph Manager, Media
+Foundation transforms, network access and hardware decoding.
 
 ## Prerequisites
 
@@ -599,15 +600,18 @@ build/seance decode decoder.ax music.avi -o part.pcm --start 1:00 --duration 5s
 build/seance decode auto clip.avi -o clip.wav --sample-format f32
 build/seance encode encoder.ax music.wav -o music.avi --bitrate 192
 build/seance encode encoder.ax clip.avi -o sound.wav --audio
+build/seance decode wmadmod.dll music.avi -o music.wav --clsid '{GUID}'
 ```
 
 `decode` and `encode` work on audio when the input is a WAV file (or raw
 PCM, for `encode`), an AVI without video, the output is `.wav` or `.pcm`,
 or `--audio` (the first audio stream) or a `--stream` that is audio is
-given. The codec is a DirectShow filter server: its audio decoder (or
-encoder), judged from its pins (compressed audio in, PCM or float out, or
-the reverse) or its category (`CLSID_AudioCompressorCategory`); `list`
-and `probe` name these roles.
+given. The codec is a DirectShow filter server or a DMO server: its audio
+decoder (or encoder), judged from a filter's pins (compressed audio in,
+PCM or float out, or the reverse) or category
+(`CLSID_AudioCompressorCategory`), or a DMO's category
+(`DMOCATEGORY_AUDIO_DECODER`/`_ENCODER`) or types; `list` and `probe`
+name these roles.
 
 A decoder is offered the stream's format as `FORMAT_WaveFormatEx` and PCM
 at the stream's channels and rate: 16-bit, then 24- and 32-bit, float and
@@ -623,8 +627,9 @@ sample counts or times and cut to the sample.
 
 An encoder is given the PCM as it is, else the first other sample format
 it takes, and an output type of only `MEDIATYPE_Audio` and its format
-tag's subtype, which it completes (`probe encoder.ax in.wav` shows what it
-makes). An AVI stream takes its timing from the encoder's first packet
+tag's subtype, which it completes: a filter as `IPin::Connect` lets it, a
+DMO with the first of its `GetOutputType` types that fits (`probe
+encoder.ax in.wav` shows what it makes). An AVI stream takes its timing from the encoder's first packet
 (variable rate, a packet a chunk, as MP3 in AVI is), or counts blocks when
 packets aren't timed; a WAV gets the packets back to back and a `fact`
 chunk. `--bitrate` and `--quality` reach the encoder through `ICodecAPI`
@@ -632,11 +637,13 @@ chunk. `--bitrate` and `--quality` reach the encoder through `ICodecAPI`
 `--save-state` through `IPersistStream`. `decode auto` looks for a
 registered audio decoder of the stream's format tag.
 
-`testfilter.ax` has an audio pair for this: a lossless codec, `TSTA`
-(tag 0x7354), whose decoder can give its PCM in pieces, hold it back to
-the end of the stream, switch to float, or claim another sample rate. A
-WAV encoded and decoded through it comes back byte for byte in each of
-those modes.
+`testfilter.ax` and `testdmo.dll` each have an audio pair for this: a
+lossless codec, `TSTA` (tag 0x7354), whose decoder can give its PCM in
+pieces, hold it back to the end of the stream, switch to float, or claim
+another sample rate (and the DMOs refuse every other input when asked). A
+WAV encoded and decoded through either comes back byte for byte in each of
+those modes, and the filter and the DMO make the same file and decode each
+other's.
 
 ### Real codecs: the samples run
 
@@ -647,9 +654,21 @@ tests/samples.sh build/seance ~/codecs   # or -DVFW_SAMPLES_DIR=~/codecs
 `tests/samples.sh` runs `info` and `probe` over every DLL in a directory
 you supply. For each it reports how many of its imports the harness
 doesn't implement yet, how many DLLs it needs from disk, and whether it
-opens and under which FOURCC. It asserts nothing about any particular
-codec; it fails only when the harness can't parse a file, or crashes or
-hangs on one.
+opens and under which FOURCC, or for a DirectShow or DMO server, its
+filters and DMOs and what they are (video or audio decoders and encoders).
+It asserts nothing about any particular codec; it fails only when the
+harness can't parse a file, or crashes or hangs on one.
+
+```sh
+tests/audio_codecs.sh build/seance LAVAudio.ax /tmp/work
+```
+
+`tests/audio_codecs.sh` runs an audio decoder you supply over streams
+FFmpeg makes in AVI files (MP3, MP2, AC-3, E-AC-3, AAC, FLAC, Vorbis, Opus,
+WMA, ADPCM, A-law; stereo and 5.1), and reports for each how close it comes
+to FFmpeg's own decoding (the signal-to-distortion ratio) and whether the
+lengths agree. It fails when the harness crashes or hangs, or a stream
+decodes below 40 dB.
 
 ### Robustness
 

@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "common/error.h"
+#include "dshow/dshow.h"
 #include "media/audio.h"
 #include "win32/ole.h"
 
@@ -18,6 +19,7 @@
 #define TAG_DTS_AVI	0x2001
 #define TAG_VORBIS1	0x674f
 #define TAG_VORBIS3P	0x6771
+#define TAG_VORBIS_FFMPEG 0x566f	/* 'oV', as FFmpeg writes it in AVI */
 
 static const GUID tag_base = WAVE_FORMAT_SUBTYPE_INIT(0);
 
@@ -201,7 +203,8 @@ const char *audio_tag_name(WORD tag)
 	case WAVE_FORMAT_FLAC:           return "FLAC";
 	case WAVE_FORMAT_EXTENSIBLE:     return "extensible";
 	}
-	if (tag >= TAG_VORBIS1 && tag <= TAG_VORBIS3P)
+	if ((tag >= TAG_VORBIS1 && tag <= TAG_VORBIS3P) ||
+	    tag == TAG_VORBIS_FFMPEG)
 		return "Vorbis";
 	return NULL;
 }
@@ -375,6 +378,155 @@ HRESULT audio_wfx_to_mt(const WAVEFORMATEX *wf, size_t size,
 		mt->lSampleSize = wf->nBlockAlign;
 	}
 	return S_OK;
+}
+
+/* Formats Windows' SDK and mingw-w64 don't name, as the decoders do. */
+static const GUID subtype_dts = { 0xe06d8033, 0xdb46, 0x11cf,
+	{ 0xb4, 0xd1, 0x00, 0x80, 0x5f, 0x6c, 0xbb, 0xea } };
+static const GUID subtype_vorbis2 = { 0x8d2fd10b, 0x5841, 0x4a6b,
+	{ 0x89, 0x05, 0x58, 0x8f, 0xec, 0x1a, 0xde, 0xd9 } };
+static const GUID format_vorbis2 = { 0xb36e107f, 0xa938, 0x4387,
+	{ 0x93, 0xc7, 0x55, 0xe9, 0x66, 0x75, 0x74, 0x73 } };
+
+/* VORBISFORMAT2, then the three headers. */
+struct vorbis_format2 {
+	DWORD channels, rate, bits, header_size[3];
+};
+
+/*
+ * Vorbis's three headers, Xiph-laced (a count less one, then all but the
+ * last size, each in bytes of 255 and a remainder), as VORBISFORMAT2.
+ */
+static HRESULT vorbis2_type(const WAVEFORMATEX *wf, size_t size,
+			    AM_MEDIA_TYPE *mt)
+{
+	size_t extra = extra_size(wf, size), at = 1;
+	const BYTE *x = (const BYTE *)(wf + 1);
+	DWORD sizes[3] = { 0, 0, 0 };
+
+	if (extra < 3 || x[0] != 2)
+		return S_FALSE;
+	for (int i = 0; i < 2; i++) {
+		while (at < extra && x[at] == 255)
+			sizes[i] += x[at++];
+		if (at >= extra)
+			return S_FALSE;
+		sizes[i] += x[at++];
+	}
+	if (sizes[0] + sizes[1] > extra - at)
+		return S_FALSE;
+	sizes[2] = (DWORD)(extra - at - sizes[0] - sizes[1]);
+
+	struct vorbis_format2 v = {
+		wf->nChannels, wf->nSamplesPerSec, wf->wBitsPerSample,
+		{ sizes[0], sizes[1], sizes[2] },
+	};
+	size_t cb = sizeof(v) + extra - at;
+	memset(mt, 0, sizeof(*mt));
+	if (!(mt->pbFormat = ole_taskmem_alloc(cb)))
+		return E_OUTOFMEMORY;
+	memcpy(mt->pbFormat, &v, sizeof(v));
+	memcpy(mt->pbFormat + sizeof(v), x + at, extra - at);
+	mt->cbFormat = (ULONG)cb;
+	mt->majortype = MEDIATYPE_Audio;
+	mt->subtype = subtype_vorbis2;
+	mt->formattype = format_vorbis2;
+	return S_OK;
+}
+
+/* The variants of a format that isn't extensible-wrapped. */
+static HRESULT plain_variant(const WAVEFORMATEX *wf, size_t size,
+			     unsigned variant, AM_MEDIA_TYPE *mt)
+{
+	const GUID *alias[2] = { NULL, NULL };
+	WORD tag;
+
+	if (!variant)
+		return audio_wfx_to_mt(wf, size, mt);
+	tag = audio_format_tag(wf, size);
+	if (tag == TAG_VORBIS_FFMPEG ||
+	    (tag >= TAG_VORBIS1 && tag <= TAG_VORBIS3P))
+		return variant == 1 ? vorbis2_type(wf, size, mt) : S_FALSE;
+
+	static const GUID raw_aac = WAVE_FORMAT_SUBTYPE_INIT(WAVE_FORMAT_RAW_AAC1);
+	switch (tag) {
+	case TAG_AC3:
+		alias[0] = &MEDIASUBTYPE_DOLBY_AC3;
+		break;
+	case TAG_DTS_AVI:
+	case WAVE_FORMAT_DTS:
+		alias[0] = &subtype_dts;
+		break;
+	case WAVE_FORMAT_MPEG:
+		alias[0] = &MEDIASUBTYPE_MPEG1Audio;
+		alias[1] = &MEDIASUBTYPE_MPEG2_AUDIO;
+		break;
+	case WAVE_FORMAT_MPEG_RAW_AAC:
+	case TAG_AAC_FAAD:
+		alias[0] = &raw_aac;
+		break;
+	}
+	if (variant > 2 || !alias[variant - 1])
+		return S_FALSE;
+	HRESULT hr = audio_wfx_to_mt(wf, size, mt);
+	if (SUCCEEDED(hr))
+		mt->subtype = *alias[variant - 1];
+	return hr;
+}
+
+/*
+ * A compressed format in a WAVEFORMATEXTENSIBLE (as FFmpeg writes more
+ * than two channels): a plain WAVEFORMATEX of its tag, with the codec's
+ * own extra bytes, those after the extensible part. malloc()ed.
+ */
+static WAVEFORMATEX *unwrap(const WAVEFORMATEX *wf, size_t size, WORD tag,
+			    size_t *out_size)
+{
+	size_t skip = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+	size_t extra = extra_size(wf, size) - skip;
+	WAVEFORMATEX *plain = malloc(sizeof(*plain) + extra);
+
+	if (!plain)
+		return NULL;
+	*plain = *wf;
+	plain->wFormatTag = tag;
+	plain->cbSize = (WORD)extra;
+	memcpy(plain + 1, (const BYTE *)wf + sizeof(WAVEFORMATEXTENSIBLE),
+	       extra);
+	*out_size = sizeof(*plain) + extra;
+	return plain;
+}
+
+HRESULT audio_input_variant(const WAVEFORMATEX *wf, size_t size,
+			    unsigned variant, AM_MEDIA_TYPE *mt)
+{
+	memset(mt, 0, sizeof(*mt));
+	if (!wf || size < 16)
+		return E_INVALIDARG;
+
+	WORD tag = audio_format_tag(wf, size);
+	if (!is_extensible(wf, size) || tag == WAVE_FORMAT_EXTENSIBLE ||
+	    audio_format_sample(wf, size) != AUDIO_NONE)
+		return plain_variant(wf, size, variant, mt);
+
+	/* Unwrapped first, as decoders expect it; then as it is. */
+	size_t psize;
+	WAVEFORMATEX *plain = unwrap(wf, size, tag, &psize);
+	if (!plain)
+		return E_OUTOFMEMORY;
+	unsigned n = 0;
+	HRESULT hr = S_OK;
+	for (; n <= variant; n++) {
+		dshow_free_media_type(mt);
+		hr = plain_variant(plain, psize, n, mt);
+		if (hr != S_OK)
+			break;
+	}
+	free(plain);
+	if (hr == S_OK || FAILED(hr))
+		return hr;
+	/* After the n unwrapped forms, the format as it came. */
+	return variant == n ? audio_wfx_to_mt(wf, size, mt) : S_FALSE;
 }
 
 HRESULT audio_mt_to_wfx(const AM_MEDIA_TYPE *mt, WAVEFORMATEX **wf,

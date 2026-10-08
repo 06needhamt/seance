@@ -533,15 +533,17 @@ static const IMediaEventSinkVtbl event_vtbl = {event_qi, event_addref,
  */
 static ULONG input_buffer(const AM_MEDIA_TYPE *in) {
   ULONG bytes = in->lSampleSize;
-  if (guid_eq(&in->majortype, &MEDIATYPE_Audio) &&
-      guid_eq(&in->formattype, &FORMAT_WaveFormatEx) && in->pbFormat &&
-      in->cbFormat >= 16) {
-    const WAVEFORMATEX *wf = (const WAVEFORMATEX *)in->pbFormat;
-    uint64_t want = (uint64_t)wf->nAvgBytesPerSec * 2;
-    if (want < (1u << 20))
-      want = 1u << 20;
-    if (want < 4ull * wf->nBlockAlign)
-      want = 4ull * wf->nBlockAlign;
+  if (guid_eq(&in->majortype, &MEDIATYPE_Audio)) {
+    /* Other format types (VORBISFORMAT2, say) get the megabyte. */
+    uint64_t want = 1u << 20;
+    if (guid_eq(&in->formattype, &FORMAT_WaveFormatEx) && in->pbFormat &&
+        in->cbFormat >= 16) {
+      const WAVEFORMATEX *wf = (const WAVEFORMATEX *)in->pbFormat;
+      if (want < (uint64_t)wf->nAvgBytesPerSec * 2)
+        want = (uint64_t)wf->nAvgBytesPerSec * 2;
+      if (want < 4ull * wf->nBlockAlign)
+        want = 4ull * wf->nBlockAlign;
+    }
     if (want > (64u << 20))
       want = 64u << 20;
     if (want > bytes)
