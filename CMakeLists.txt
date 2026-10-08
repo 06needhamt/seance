@@ -139,7 +139,7 @@ if(BUILD_TESTING)
 			RUNTIME_OUTPUT_DIRECTORY ${test_dir})
 		add_test(NAME ${name} COMMAND ${name})
 		set_tests_properties(${name} PROPERTIES
-			ENVIRONMENT VFW_FIXTURES=${VFW_FIXTURE_DIR}
+			ENVIRONMENT "VFW_FIXTURES=${VFW_FIXTURE_DIR};VFW_EMULATOR=${vfw_emulator}"
 			LABELS unit)
 		skippable(${name} ${VFW_REQUIRE_MINGW})
 	endforeach()

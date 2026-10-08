@@ -70,6 +70,22 @@ static inline const char *fixture(const char *name)
 	return p;
 }
 
+/*
+ * What to put before this program's own path to run it again from a shell
+ * (in system()): $VFW_EMULATOR and a space on a cross build, where the
+ * shell is the host's and can't run an i386 program itself, else nothing.
+ */
+static inline const char *test_rerun_prefix(void)
+{
+	static char prefix[4096];
+	const char *emu = getenv("VFW_EMULATOR");
+
+	if (!emu || !*emu)
+		return "";
+	snprintf(prefix, sizeof(prefix), "%s ", emu);
+	return prefix;
+}
+
 static inline int test_summary(const char *name)
 {
 	if (test_failures) {

@@ -524,8 +524,9 @@ int main(int argc, char **argv)
 			char cmd[4400];
 			if (modes[i].dmo_only && !is_dmo)
 				continue;
-			snprintf(cmd, sizeof(cmd), "VFW_ENV_%s%s=1 '%s' %s %s",
-				 servers[k].prefix, modes[i].variable, argv[0],
+			snprintf(cmd, sizeof(cmd), "VFW_ENV_%s%s=1 %s'%s' %s %s",
+				 servers[k].prefix, modes[i].variable,
+				 test_rerun_prefix(), argv[0],
 				 servers[k].kind, modes[i].name);
 			int status = system(cmd);
 			CHECK_EQ(status, 0);
