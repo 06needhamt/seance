@@ -227,14 +227,7 @@ static const GUID st_float={0x00000003,0x0000,0x0010,{0x80,0x00,0x00,0xaa,0x00,0
 static const GUID st_tsta={WAVE_FORMAT_TSTA,0x0000,0x0010,{0x80,0x00,0x00,0xaa,0x00,0x38,0x9b,0x71}};
 static const GUID fmt_wave={0x05589f81,0xc356,0x11ce,{0xbf,0x01,0x00,0xaa,0x00,0x55,0x59,0x5a}};
 
-/* 64-by-32-bit division, which needs no libgcc helper. */
-static DWORDLONG udiv64(DWORDLONG n,DWORD d)
-{
-	DWORD hi=(DWORD)(n>>32),lo=(DWORD)n,qh=hi/d,r=hi%d,ql;
-	__asm__("divl %4":"=a"(ql),"=d"(r):"a"(lo),"d"(r),"rm"(d));
-	return (DWORDLONG)qh<<32|ql;
-}
-static REFERENCE_TIME frames_time(DWORDLONG frames,DWORD rate){return (REFERENCE_TIME)udiv64(frames*10000000u,rate);}
+static REFERENCE_TIME frames_time(DWORDLONG frames,DWORD rate){return (REFERENCE_TIME)tsta_ticks(frames,rate);}
 
 /* A media type's WAVEFORMATEX, or NULL. */
 static WAVEFORMATEX *media_wfx(const AM_MEDIA_TYPE *mt)

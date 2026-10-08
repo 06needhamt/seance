@@ -371,8 +371,29 @@ include/win32/mmreg.h    WAVEFORMATEXTENSIBLE, format tags, KSDATAFORMAT GUIDs
      roles, smoke cases for every mode and option, and `validate_media.sh`
      checks that FFmpeg's s24 and 6-channel PCM come back exactly and that
      FFmpeg reads the TSTA AVI.
-5. **Audio through DMOs.** The same over `testdmo.dll`.
+5. **Audio through DMOs.** (Done.) The same over `testdmo.dll`.
    Milestone: as Phase 4, and the DirectShow and DMO `TSTA` outputs match.
+   - The DMO host needed two things: a partial output type (a major type
+     and perhaps a subtype, no format) becomes the first of the DMO's
+     `GetOutputType` types that fits it, as an encoder filter completes
+     one; and audio output buffers are the DMO's `GetOutputSizeInfo`, at
+     least 4 KB, or a second of audio if it says nothing. Changes of
+     output type already reached the commands, so a DMO that switches to
+     float is converted back and one claiming another rate refused, as
+     for filters.
+   - `testdmo.dll` has a TSTA decoder and encoder (`testdmo_audio.c`,
+     registered with `DMORegister` in the audio categories), sharing
+     `tsta.h` with `testfilter.ax`. The encoder gathers whole packets,
+     one per `ProcessOutput` (`INCOMPLETE` while its input holds another)
+     and the short last one after `Discontinuity`. Modes `AUDIO_SPLIT`
+     (pieces of 300 frames, `INCOMPLETE`), `AUDIO_HOLD`, `AUDIO_FLOAT`
+     and `AUDIO_RATE` match the filter's, and `NOTACCEPTING` and `STRICT`
+     apply to the audio DMOs too.
+   - Tests: `test_xform_audio` (was `test_dshow_audio`) runs every case
+     over both the filter and the DMO, each mode in a child process, and
+     checks that the two give the same packets, times and format and
+     decode each other's. Smoke and `validate_media.sh` check the DMO
+     encoder's AVI is byte for byte the filter's.
 6. **Real codecs and docs.** `tests/samples.sh` reports DMOs and audio
    classes; LAV Audio decoding FFmpeg-made streams (MP3, AAC, AC-3, FLAC,
    Vorbis, Opus) compared with `ffmpeg -f s16le`/`f32le` output; any DMOs the

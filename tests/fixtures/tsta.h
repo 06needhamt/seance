@@ -19,6 +19,21 @@
 #define TSTA_FRAMES 1024
 #define TSTA_HEADER 8
 
+/* 64-by-32-bit division, which needs no libgcc helper. */
+static inline DWORDLONG tsta_udiv64(DWORDLONG n, DWORD d)
+{
+	DWORD hi = (DWORD)(n >> 32), lo = (DWORD)n, qh = hi / d, r = hi % d, ql;
+
+	__asm__("divl %4" : "=a"(ql), "=d"(r) : "a"(lo), "d"(r), "rm"(d));
+	return (DWORDLONG)qh << 32 | ql;
+}
+
+/* The time of frames sample frames at rate, in 100 ns units. */
+static inline DWORDLONG tsta_ticks(DWORDLONG frames, DWORD rate)
+{
+	return tsta_udiv64(frames * 10000000u, rate);
+}
+
 /* The bytes of one PCM sample frame, or 0 if bits isn't 8, 16, 24 or 32. */
 static inline DWORD tsta_pcm_block(DWORD bits, DWORD channels)
 {

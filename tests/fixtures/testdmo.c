@@ -1,12 +1,13 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * A DMO server, the way a codec's DLL is one: a TST0 decoder registered
- * through msdmo's DMORegister, and a TST0 encoder whose
+ * through msdmo's DMORegister, a TST0 encoder whose
  * HKCR\DirectShow\MediaObjects keys DllRegisterServer writes itself (as
- * some DMOs do), each with its HKCR\CLSID\{...}\InprocServer32 key;
+ * some DMOs do), and a TSTA audio decoder and encoder in the audio
+ * categories, each with its HKCR\CLSID\{...}\InprocServer32 key;
  * DllUnregisterServer takes it all away again.
  *
- * The DMOs themselves live in testdmo_dmo.c.
+ * The DMOs themselves live in testdmo_dmo.c (video) and testdmo_audio.c.
  */
 #include "fixture.h"
 #include <dmoreg.h>
@@ -17,12 +18,22 @@ static const GUID clsid_decoder = { 0x5e6c9b41, 0x3a7d, 0x4f0e,
 /* {5E6C9B42-3A7D-4F0E-9C11-0D2B7A6E4F80}: the encoder */
 static const GUID clsid_encoder = { 0x5e6c9b42, 0x3a7d, 0x4f0e,
 	{ 0x9c, 0x11, 0x0d, 0x2b, 0x7a, 0x6e, 0x4f, 0x80 } };
+/* {5E6C9B43-3A7D-4F0E-9C11-0D2B7A6E4F80}: the audio decoder */
+static const GUID clsid_audio_decoder = { 0x5e6c9b43, 0x3a7d, 0x4f0e,
+	{ 0x9c, 0x11, 0x0d, 0x2b, 0x7a, 0x6e, 0x4f, 0x80 } };
+/* {5E6C9B44-3A7D-4F0E-9C11-0D2B7A6E4F80}: the audio encoder */
+static const GUID clsid_audio_encoder = { 0x5e6c9b44, 0x3a7d, 0x4f0e,
+	{ 0x9c, 0x11, 0x0d, 0x2b, 0x7a, 0x6e, 0x4f, 0x80 } };
 
 /* Windows' GUIDs, defined here: the fixture links no uuid library. */
 static const GUID video_decoder = { 0x4a69b442, 0x28be, 0x4991,
 	{ 0x96, 0x9c, 0xb5, 0x00, 0xad, 0xf5, 0xd8, 0xa8 } };
 static const WCHAR video_encoder[] =
 	L"{33D9A760-90C8-11D0-BD43-00A0C911CE86}";
+static const GUID audio_decoder = { 0x57f2db8b, 0xe6bb, 0x4513,
+	{ 0x9d, 0x43, 0xdc, 0xd2, 0xa6, 0x59, 0x31, 0x25 } };
+static const GUID audio_encoder = { 0x33d9a761, 0x90c8, 0x11d0,
+	{ 0xbd, 0x43, 0x00, 0xa0, 0xc9, 0x11, 0xce, 0x86 } };
 
 /* Media types: 'vids', TST0, YUY2 (FOURCC-shaped) and RGB24. */
 #define FOURCC_GUID(a, b, c, d) { \
@@ -46,12 +57,23 @@ static const DMO_PARTIAL_MEDIATYPE raw[] = {
 	{ VIDS, RGB24_GUID }, { VIDS, RGB32_GUID },
 };
 
+/* Audio: 'auds' with PCM, and TSTA (format tag subtypes). */
+#define AUDS FOURCC_GUID('a', 'u', 'd', 's')
+#define TAG_GUID(t) { (t), 0x0000, 0x0010, \
+	{ 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } }
+static const DMO_PARTIAL_MEDIATYPE tsta[] = { { AUDS, TAG_GUID(0x7354) } };
+static const DMO_PARTIAL_MEDIATYPE pcm[] = { { AUDS, TAG_GUID(1) } };
+
 static const WCHAR decoder_name[] = L"seance test DMO decoder";
 static const WCHAR encoder_name[] = L"seance test DMO encoder";
+static const WCHAR audio_decoder_name[] = L"seance test DMO audio decoder";
+static const WCHAR audio_encoder_name[] = L"seance test DMO audio encoder";
 
 static HINSTANCE self;
 HRESULT testdmo_create(BOOL encoder, REFIID riid, void **out);
 LONG testdmo_objects(void);
+HRESULT testdmo_audio_create(BOOL encoder, REFIID riid, void **out);
+LONG testdmo_audio_objects(void);
 
 static const GUID iid_unknown = { 0, 0, 0, { 0xc0, 0, 0, 0, 0, 0, 0, 0x46 } };
 static const GUID iid_factory = { 1, 0, 0, { 0xc0, 0, 0, 0, 0, 0, 0, 0x46 } };
@@ -182,24 +204,37 @@ HRESULT WINAPI DllRegisterServer(void)
 
 	if (SUCCEEDED(hr = register_class(&clsid_decoder, decoder_name)) &&
 	    SUCCEEDED(hr = register_class(&clsid_encoder, encoder_name)) &&
+	    SUCCEEDED(hr = register_class(&clsid_audio_decoder,
+					  audio_decoder_name)) &&
+	    SUCCEEDED(hr = register_class(&clsid_audio_encoder,
+					  audio_encoder_name)) &&
 	    SUCCEEDED(hr = DMORegister(decoder_name, &clsid_decoder,
 				       &video_decoder, 0, 1, tst0,
-				       sizeof(raw) / sizeof(*raw), raw)))
-		hr = register_encoder();
+				       sizeof(raw) / sizeof(*raw), raw)) &&
+	    SUCCEEDED(hr = register_encoder()) &&
+	    SUCCEEDED(hr = DMORegister(audio_decoder_name,
+				       &clsid_audio_decoder, &audio_decoder,
+				       0, 1, tsta, 1, pcm)))
+		hr = DMORegister(audio_encoder_name, &clsid_audio_encoder,
+				 &audio_encoder, 0, 1, pcm, 1, tsta);
 	return hr;
 }
 
 HRESULT WINAPI DllUnregisterServer(void)
 {
 	DMOUnregister(&clsid_decoder, &video_decoder);
+	DMOUnregister(&clsid_audio_decoder, &audio_decoder);
+	DMOUnregister(&clsid_audio_encoder, &audio_encoder);
 	unregister_encoder();
 	unregister_class(&clsid_decoder);
 	unregister_class(&clsid_encoder);
+	unregister_class(&clsid_audio_decoder);
+	unregister_class(&clsid_audio_encoder);
 	return S_OK;
 }
 
 /* Class factories: one per DMO. */
-struct factory { IClassFactory iface; BOOL encoder; };
+struct factory { IClassFactory iface; BOOL encoder, audio; };
 
 static HRESULT WINAPI cf_qi(IClassFactory *cf, REFIID riid, void **ppv)
 {
@@ -219,6 +254,8 @@ static HRESULT WINAPI cf_create(IClassFactory *cf, IUnknown *outer,
 {
 	*ppv = NULL;
 	return outer ? CLASS_E_NOAGGREGATION :
+		((struct factory *)cf)->audio ?
+		testdmo_audio_create(((struct factory *)cf)->encoder, riid, ppv) :
 		testdmo_create(((struct factory *)cf)->encoder, riid, ppv);
 }
 
@@ -233,6 +270,12 @@ static struct factory decoder_factory = {
 static struct factory encoder_factory = {
 	{ (IClassFactoryVtbl *)&cf_vtbl }, TRUE
 };
+static struct factory audio_decoder_factory = {
+	{ (IClassFactoryVtbl *)&cf_vtbl }, FALSE, TRUE
+};
+static struct factory audio_encoder_factory = {
+	{ (IClassFactoryVtbl *)&cf_vtbl }, TRUE, TRUE
+};
 
 HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void **ppv)
 {
@@ -240,13 +283,17 @@ HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void **ppv)
 		return cf_qi(&decoder_factory.iface, riid, ppv);
 	if (guid_eq(clsid, &clsid_encoder))
 		return cf_qi(&encoder_factory.iface, riid, ppv);
+	if (guid_eq(clsid, &clsid_audio_decoder))
+		return cf_qi(&audio_decoder_factory.iface, riid, ppv);
+	if (guid_eq(clsid, &clsid_audio_encoder))
+		return cf_qi(&audio_encoder_factory.iface, riid, ppv);
 	*ppv = NULL;
 	return CLASS_E_CLASSNOTAVAILABLE;
 }
 
 HRESULT WINAPI DllCanUnloadNow(void)
 {
-	return testdmo_objects() ? S_FALSE : S_OK;
+	return testdmo_objects() || testdmo_audio_objects() ? S_FALSE : S_OK;
 }
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)

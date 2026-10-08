@@ -41,7 +41,9 @@ struct dmo_host;
 
 /*
  * Sets the DMO's input and output types (each tried with
- * DMO_SET_TYPEF_TEST_ONLY first) and makes it ready to stream. If the DMO
+ * DMO_SET_TYPEF_TEST_ONLY first) and makes it ready to stream. A partial
+ * output type (a major type and perhaps a subtype, no format) becomes the
+ * first the DMO offers (GetOutputType) that fits it. If the DMO
  * has IWMCodecPrivateData (encoders), the codec data it gives for the
  * output type is appended to that type's format, as for a stream header.
  */

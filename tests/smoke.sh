@@ -200,6 +200,45 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	$emu "$harness" decode auto "$work/t.avi" -o "$work/auto.pcm" 2>/dev/null
 	cmp "$work/in.pcm" "$work/auto.pcm"
 	$emu "$harness" unregister "$f" >/dev/null
+
+	# The same through testdmo.dll's TSTA DMOs: the same AVI as the
+	# filter's, each decoding the other's, in every mode of the DMOs.
+	d=$fixtures/testdmo.dll
+	strict=
+	[ "$lowmem" = 1 ] && strict=STRICT
+	for mode in "" NOTACCEPTING $strict; do
+		env ${mode:+VFW_ENV_TESTDMO_$mode=1} $emu "$harness" encode "$d" \
+			"$work/in.wav" -o "$work/dmo.avi" 2>/dev/null
+		cmp -s "$work/t.avi" "$work/dmo.avi" || {
+			echo "smoke: TSTA DMO encode${mode:+ ($mode)} differs" >&2
+			exit 1
+		}
+	done
+	for mode in "" SPLIT HOLD FLOAT NOTACCEPTING $strict; do
+		var=VFW_ENV_TESTDMO_AUDIO_$mode
+		case $mode in NOTACCEPTING|STRICT) var=VFW_ENV_TESTDMO_$mode ;; esac
+		env ${mode:+$var=1} $emu "$harness" decode "$d" "$work/t.avi" \
+			-o "$work/dmo.pcm" 2>/dev/null
+		cmp -s "$work/in.pcm" "$work/dmo.pcm" || {
+			echo "smoke: TSTA DMO decode${mode:+ ($mode)} differs" >&2
+			exit 1
+		}
+	done
+	fails env VFW_ENV_TESTDMO_AUDIO_RATE=1 $emu "$harness" decode "$d" \
+		"$work/t.avi" -o "$work/x.wav"
+	$emu "$harness" decode "$d" "$work/t.wav" -o - --format pcm 2>/dev/null |
+		cmp - "$work/in.pcm"
+	$emu "$harness" encode "$d" "$work/in.wav" -o "$work/dmo-b.avi" \
+		--bitrate 128 2>/dev/null
+	$emu "$harness" avi "$work/dmo-b.avi" | grep -q "128 kb/s"
+	$emu "$harness" probe "$d" "$work/t.avi" |
+		grep -q "outputs accepted for .*t.avi: s16 s16 (extensible)"
+	$emu "$harness" probe "$d" "$work/in.wav" | grep -q "makes of .*0x7354"
+	$emu "$harness" register "$d" >/dev/null
+	VFW_INI=/nonexistent $emu "$harness" decode auto "$work/t.avi" \
+		-o "$work/dmo-auto.pcm" 2>/dev/null
+	cmp "$work/in.pcm" "$work/dmo-auto.pcm"
+	$emu "$harness" unregister "$d" >/dev/null
 	unset VFW_REGISTRY
 	rm -rf "$work"
 
