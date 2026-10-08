@@ -100,7 +100,10 @@ if(VFW_MINGW_CC)
 			-DVFW_MINGW_PREFIX=${VFW_MINGW_PREFIX}
 			-DVFW_FIXTURE_DIR=${VFW_FIXTURE_DIR}
 		INSTALL_COMMAND ""
-		BUILD_ALWAYS ON)
+		BUILD_ALWAYS ON
+		# Ninja: their output as it comes, not held back to the end.
+		USES_TERMINAL_CONFIGURE ON
+		USES_TERMINAL_BUILD ON)
 elseif(VFW_REQUIRE_MINGW)
 	message(FATAL_ERROR "${VFW_MINGW_PREFIX}gcc not found (install mingw-w64)")
 else()
@@ -224,4 +227,12 @@ if(BUILD_TESTING)
 	set_tests_properties(validate_media PROPERTIES LABELS media
 		ENVIRONMENT "VFW_EMULATOR=${vfw_emulator}")
 	skippable(validate_media ${VFW_REQUIRE_FFMPEG})
+endif()
+
+# The fixtures' configure and build wait for everything else, rather than
+# running alongside the main build with their output interleaved with it.
+if(TARGET fixtures)
+	get_property(vfw_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+	list(REMOVE_ITEM vfw_targets fixtures)
+	add_dependencies(fixtures ${vfw_targets})
 endif()
