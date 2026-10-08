@@ -41,8 +41,11 @@ and AVI audio streams, through `avi` and `convert`.
 
 ACM audio drivers (`.acm`) decode and encode through the same commands
 ([docs/ACM_PLAN.md](docs/ACM_PLAN.md)), through a built-in msacm32.dll with
-its own PCM converter; `probe`, `list` and `decode auto` know them too. Real
-ACM drivers are still to be tried.
+its own PCM converter; `probe`, `list` and `decode auto` know them too.
+Wine 9.0's five drivers run: MP3 and MP2 (`l3codeca.acm`), IMA and MS
+ADPCM, A-law, mu-law and GSM 6.10 decode, MS ADPCM, G.711 and GSM
+identically to FFmpeg, and IMA ADPCM and G.711 encode (results in
+[MISSING_FEATURES.md](MISSING_FEATURES.md)).
 
 The real-world check is the LAV Filters 0.83 package (32-bit): LAV Video
 loads, registers, connects and decodes 18 codecs identically to FFmpeg; LAV
@@ -282,8 +285,10 @@ one to show its name.
 Codecs usually import more than kernel32, winmm and msvfw32. The msvcrt
 family (msvcrt.dll, msvcr70-140, msvcp*, ucrtbase, api-ms-win-crt-*) is a
 real built-in: math, string/memory, stdio, CRT startup and the 64-bit
-arithmetic helpers a codec calls whatever CRT it links; a native DLL of
-the same name on the search path takes precedence over it.
+arithmetic helpers a codec calls whatever CRT it links, with ucrtbase's
+`__stdio_common_*` functions behind its `printf` and `scanf` families; a
+native DLL of the same name on the search path takes precedence over it.
+kernelbase.dll is kernel32's functions and shlwapi's, as on Windows 7.
 
 user32, gdi32, advapi32, version, ole32, oleaut32, shell32, comctl32 and
 comdlg32 are built in too, headless:
@@ -668,7 +673,10 @@ block at a time with what is left given again, and flushed at the end. Its
 blocks have no times, so an encoder's AVI stream counts blocks of a
 constant size (`dwSampleSize`), as ACM-made AVIs do; a decoder's PCM is
 timed by the samples it makes. ACM drivers keep their settings in the
-registry, so `--quality`, `--state` and `--save-state` are refused.
+registry, so `--quality`, `--state` and `--save-state` are refused. An
+encoder's last part block is padded with silence to a whole one, since
+drivers convert only whole blocks; small blocks (G.711's are a sample) go
+into the AVI a kilobyte at a time.
 
 `testfilter.ax` and `testdmo.dll` each have an audio pair for this: a
 lossless codec, `TSTA` (tag 0x7354), whose decoder can give its PCM in
@@ -678,8 +686,10 @@ WAV encoded and decoded through either comes back byte for byte in each of
 those modes, and the filter and the DMO make the same file and decode each
 other's. `testacm.acm` is the same codec as an ACM driver, with modes of
 its own (stream sizes too small to trust, its own header preparation,
-non-realtime streams only, pointers below 2 GB); its packets are the
-filter's, and each decodes the other's AVI.
+non-realtime streams only, pointers below 2 GB, only whole packets, no
+encoding, a crash or a hang); its packets are the filter's, and each
+decodes the other's AVI. `test_msacm32` also sends it, the PCM converter
+and the backend thousands of fuzzed formats.
 
 ### Real codecs: the samples run
 
@@ -691,7 +701,8 @@ tests/samples.sh build/seance ~/codecs   # or -DVFW_SAMPLES_DIR=~/codecs
 you supply. For each it reports how many of its imports the harness
 doesn't implement yet, how many DLLs it needs from disk, and whether it
 opens and under which FOURCC, or for a DirectShow or DMO server, its
-filters and DMOs and what they are (video or audio decoders and encoders).
+filters and DMOs and what they are (video or audio decoders and encoders),
+or for an ACM driver, its name and what it does with each format tag.
 It asserts nothing about any particular codec; it fails only when the
 harness can't parse a file, or crashes or hangs on one.
 
@@ -699,9 +710,10 @@ harness can't parse a file, or crashes or hangs on one.
 tests/audio_codecs.sh build/seance LAVAudio.ax /tmp/work
 ```
 
-`tests/audio_codecs.sh` runs an audio decoder you supply over streams
-FFmpeg makes in AVI files (MP3, MP2, AC-3, E-AC-3, AAC, FLAC, Vorbis, Opus,
-WMA, ADPCM, A-law; stereo and 5.1), and reports for each how close it comes
+`tests/audio_codecs.sh` runs an audio decoder you supply (a filter, DMO
+server or ACM driver) over streams FFmpeg makes in AVI files (MP3, MP2,
+AC-3, E-AC-3, AAC, FLAC, Vorbis, Opus, WMA, ADPCM, A-law, mu-law; stereo
+and 5.1; GSM, mono), and reports for each how close it comes
 to FFmpeg's own decoding (the signal-to-distortion ratio) and whether the
 lengths agree. It fails when the harness crashes or hangs, or a stream
 decodes below 40 dB.
@@ -750,7 +762,7 @@ decodes below 40 dB.
 | `include/win32/` | Win32 types, PE image structures, GDI, window-manager and registry definitions, driver and ICM definitions, laid out to match 32-bit Windows |
 | `src/loader/` | PE parsing, mapping and relocation (`pe.c`); the module table and dependency loading (`modules.c`) |
 | `src/runtime/` | TEB and `%fs`, implicit TLS, the built-in DLL registry, trap thunks for unimplemented imports, the 2 GB limit (`lowmem.c`), crash and hang reports (`crash.c`) |
-| `src/win32/` | Built-in kernel32 (`k32_*.c`), ntdll, the msvcrt family (`crt_*.c`), user32 (`user32.c`, `u32_*.c`), gdi32 (`gdi32.c`, `gdi_bitmap.c`), advapi32 (`advapi32.c`, `adv_security.c`) and its registry (`reg.c`), version, ole32, oleaut32 (`oleaut32.c`, `oleaut_conv.c`, `oleaut_array.c`, `errinfo.c`), shell32 (`shell32.c`, `shell_file.c`), comctl32 (`comctl32.c`, `comctl_dpa.c`, `comctl_imagelist.c`, `comctl_sheet.c`), comdlg32, winmm, msvfw32 and quartz (`quartz.c`) |
+| `src/win32/` | Built-in kernel32 (`k32_*.c`) and kernelbase, ntdll, the msvcrt family (`crt_*.c`), user32 (`user32.c`, `u32_*.c`), gdi32 (`gdi32.c`, `gdi_bitmap.c`), advapi32 (`advapi32.c`, `adv_security.c`) and its registry (`reg.c`), version, ole32, oleaut32 (`oleaut32.c`, `oleaut_conv.c`, `oleaut_array.c`, `errinfo.c`), shell32 (`shell32.c`, `shell_file.c`), comctl32 (`comctl32.c`, `comctl_dpa.c`, `comctl_imagelist.c`, `comctl_sheet.c`), comdlg32, winmm, msvfw32 and quartz (`quartz.c`) |
 | `src/dshow/` | DirectShow: finding and registering filters (`discover.c`) |
 | `src/vfw/` | Installable drivers (`driver.c`), the codec registry (`registry.c`), the ICM API (`icm.c`), sequence compression (`seq.c`) |
 | `src/avi/` | AVI reader (AVI 1.0 and OpenDML) and writer |

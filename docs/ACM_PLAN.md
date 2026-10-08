@@ -370,20 +370,31 @@ A CRT-less mingw DLL like `testcodec.dll`, sharing `tsta.h`:
      2 GB), and checks probe, list, `decode auto` through `vfw.ini` and
      the refusals; `validate_media.sh` checks the AVI against FFmpeg and
      24-bit and 6-channel round trips.
-4. **Hardening, real drivers and docs.**
-   - Fuzzed formats in `test_msacm32`, and crash and timeout reports naming
-     `ACMDM_*` messages.
-   - `samples.sh` reports ACM drivers and their tags, and
-     `audio_codecs.sh` takes a driver path (it already goes through
-     `decode`).
-   - Real drivers:
-     - user-supplied Windows ones (`imaadp32.acm`, `msadp32.acm`,
-       `msg711.acm`, `msgsm32.acm`, `l3codeca.acm`/`l3codecp.acm`), which
-       aren't redistributable and so stay outside the repository;
-     - open-source ones where binaries can be had (LAME ACM, AC3ACM,
-       Vorbis ACM).
-   - Results go in `MISSING_FEATURES.md`. `smoke.sh`, `validate_media.sh`
-     and README sections are updated.
+4. **Hardening, real drivers and docs.** (Done.)
+   - Wine 9.0's i386 drivers (`imaadp32`, `msadp32`, `msg711`, `msgsm32`,
+     `l3codeca`) run; Windows' own and the open-source ones (LAME ACM,
+     AC3ACM) weren't at hand. Results are in `MISSING_FEATURES.md`: every
+     decoder agrees with FFmpeg (MS ADPCM, G.711 and GSM exactly), and
+     IMA ADPCM and G.711 encode.
+   - What they needed: a built-in `kernelbase.dll` (kernel32's and
+     shlwapi's functions; shlwapi gained `PathCombineW` and `PathIsUNC`);
+     ucrtbase's `__acrt_iob_func` and `__stdio_common_*` printf and
+     scanf functions with their options, `sscanf` reading msvcrt's sizes;
+     ntdll's `_vsnprintf` family; and the process heap in the PEB before
+     any DLL runs (Wine's `GetProcessHeap` reads it there, inline).
+   - The backend: a tag listing no standard formats is taken as
+     decodable (`l3codeca` lists none for MP3); decoding and encoding are
+     checked with a query stream open as well as a suggestion (`msadp32`
+     suggests what it won't encode); an encoder's last part block is
+     padded with silence (IMA ADPCM lost up to 2040 samples); blocks
+     under 1 KB go out together (G.711 made an AVI chunk per sample).
+   - `test_msacm32` fuzzes formats through suggest, details, streams and
+     the backend (3000 of them, half sound), which found two overruns in
+     the backend; testacm's `HANG` mode is killed by `VFW_TIMEOUT` with a
+     report naming `ACMDM_STREAM_CONVERT`, and `WHOLE` and `NOENCODE`
+     act as the IMA and MS ADPCM drivers do. `samples.sh` reports an ACM
+     driver's name and what it does with each tag, and `audio_codecs.sh`
+     takes a driver and also makes mu-law and GSM.
 
 ## Critical files
 
