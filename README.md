@@ -39,10 +39,10 @@ and audio decoders and encoders, DirectShow filters and DMOs, run through
 Audio files are read and written without a codec: WAV (and RF64), raw PCM
 and AVI audio streams, through `avi` and `convert`.
 
-ACM audio drivers (`.acm`) are under way ([docs/ACM_PLAN.md](docs/ACM_PLAN.md)):
-the headers, a built-in msacm32.dll with its PCM converter, and a test
-driver (`testacm.acm`, TSTA) are done; the commands don't drive ACM drivers
-yet.
+ACM audio drivers (`.acm`) decode and encode through the same commands
+([docs/ACM_PLAN.md](docs/ACM_PLAN.md)), through a built-in msacm32.dll with
+its own PCM converter; `probe`, `list` and `decode auto` know them too. Real
+ACM drivers are still to be tried.
 
 The real-world check is the LAV Filters 0.83 package (32-bit): LAV Video
 loads, registers, connects and decodes 18 codecs identically to FFmpeg; LAV
@@ -616,6 +616,8 @@ build/seance decode auto clip.avi -o clip.wav --sample-format f32
 build/seance encode encoder.ax music.wav -o music.avi --bitrate 192
 build/seance encode encoder.ax clip.avi -o sound.wav --audio
 build/seance decode wmadmod.dll music.avi -o music.wav --clsid '{GUID}'
+build/seance encode imaadp32.acm music.wav -o music.avi
+build/seance encode codecs.acm music.wav -o music.avi --format-tag 0x55
 ```
 
 `decode` and `encode` work on audio when the input is a WAV file (or raw
@@ -626,7 +628,10 @@ decoder (or encoder), judged from a filter's pins (compressed audio in,
 PCM or float out, or the reverse) or category
 (`CLSID_AudioCompressorCategory`), or a DMO's category
 (`DMOCATEGORY_AUDIO_DECODER`/`_ENCODER`) or types; `list` and `probe`
-name these roles.
+name these roles. Or it is an ACM driver (a DLL exporting `DriverProc`
+that answers as one): a decoder of a format tag it suggests PCM for, or an
+encoder of one it suggests from PCM. An encoder of several tags is chosen
+from with `--format-tag`.
 
 A decoder is offered the stream's format as `FORMAT_WaveFormatEx` and PCM
 at the stream's channels and rate: 16-bit, then 24- and 32-bit, float and
@@ -640,8 +645,9 @@ is followed, converting back; a change of rate or channels stops with a
 message, since the file can't follow it. `--start` and `--duration` take
 sample counts or times and cut to the sample.
 
-An encoder is given the PCM as it is, else the first other sample format
-it takes, and an output type of only `MEDIATYPE_Audio` and its format
+An encoder is given the PCM as it is, else the same samples in the other
+form (plain `WAVEFORMATEX` or extensible), else the first other sample
+format it takes, and an output type of only `MEDIATYPE_Audio` and its format
 tag's subtype, which it completes: a filter as `IPin::Connect` lets it, a
 DMO with the first of its `GetOutputType` types that fits (`probe
 encoder.ax in.wav` shows what it makes). An AVI stream takes its timing from the encoder's first packet
@@ -650,7 +656,19 @@ packets aren't timed; a WAV gets the packets back to back and a `fact`
 chunk. `--bitrate` and `--quality` reach the encoder through `ICodecAPI`
 (`CODECAPI_AVEncCommonMeanBitRate` and `_Quality`), and `--state`/
 `--save-state` through `IPersistStream`. `decode auto` looks for a
-registered audio decoder of the stream's format tag.
+registered audio decoder of the stream's format tag: a filter, by merit,
+else a DMO, else an ACM driver `vfw.ini` names
+(`msacm.<name>=/path/driver.acm`).
+
+An ACM driver is driven through msacm32 as an application would drive it:
+a stream from the input's format to the output's (the encoder's suggested
+with `acmFormatSuggest`, or with `--bitrate` the one of its formats for the
+input's rate and channels with the nearest data rate), converted a whole
+block at a time with what is left given again, and flushed at the end. Its
+blocks have no times, so an encoder's AVI stream counts blocks of a
+constant size (`dwSampleSize`), as ACM-made AVIs do; a decoder's PCM is
+timed by the samples it makes. ACM drivers keep their settings in the
+registry, so `--quality`, `--state` and `--save-state` are refused.
 
 `testfilter.ax` and `testdmo.dll` each have an audio pair for this: a
 lossless codec, `TSTA` (tag 0x7354), whose decoder can give its PCM in
@@ -658,7 +676,10 @@ pieces, hold it back to the end of the stream, switch to float, or claim
 another sample rate (and the DMOs refuse every other input when asked). A
 WAV encoded and decoded through either comes back byte for byte in each of
 those modes, and the filter and the DMO make the same file and decode each
-other's.
+other's. `testacm.acm` is the same codec as an ACM driver, with modes of
+its own (stream sizes too small to trust, its own header preparation,
+non-realtime streams only, pointers below 2 GB); its packets are the
+filter's, and each decodes the other's AVI.
 
 ### Real codecs: the samples run
 

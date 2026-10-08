@@ -239,6 +239,48 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		-o "$work/dmo-auto.pcm" 2>/dev/null
 	cmp "$work/in.pcm" "$work/dmo-auto.pcm"
 	$emu "$harness" unregister "$d" >/dev/null
+
+	# And through testacm.acm, an ACM driver: its AVI (blocks of a constant
+	# size) decoded by itself and by the filter, the filter's by it, in each
+	# of its modes; then found through vfw.ini by list and decode auto.
+	a=$fixtures/testacm.acm
+	for mode in "" SMALL PREPARE NOTREALTIME $strict; do
+		env ${mode:+VFW_ENV_TESTACM_$mode=1} $emu "$harness" encode "$a" \
+			"$work/in.wav" -o "$work/acm.avi" 2>/dev/null
+		for avi in acm.avi t.avi; do
+			for dec in "$a" "$f"; do
+				env ${mode:+VFW_ENV_TESTACM_$mode=1} $emu "$harness" \
+					decode "$dec" "$work/$avi" -o "$work/acm.pcm" \
+					2>/dev/null
+				cmp -s "$work/in.pcm" "$work/acm.pcm" || {
+					echo "smoke: ACM${mode:+ ($mode)}: $avi through" \
+						"${dec##*/} differs" >&2
+					exit 1
+				}
+			done
+		done
+	done
+	$emu "$harness" avi "$work/acm.avi" | grep -q "sample size 4104"
+	$emu "$harness" encode "$a" "$work/in.wav" -o "$work/acm.wav" \
+		--format-tag 0x7354 --bitrate 1000 2>/dev/null
+	$emu "$harness" decode "$a" "$work/acm.wav" -o - --format pcm \
+		2>/dev/null | cmp - "$work/in.pcm"
+	$emu "$harness" probe "$a" | grep -q "0x7354 TSTA: 45 standard formats"
+	$emu "$harness" probe "$a" "$work/t.avi" |
+		grep -q "outputs accepted for .*t.avi: s16"
+	$emu "$harness" probe "$a" "$work/in.wav" | grep -q "makes of .*0x7354"
+	fails $emu "$harness" encode "$a" "$work/in.wav" -o "$work/x.avi" \
+		--quality 5000
+	fails $emu "$harness" encode "$a" "$work/in.wav" -o "$work/x.avi" \
+		--format-tag 0x55
+	fails $emu "$harness" decode "$a" "$work/acm.avi" -o "$work/x.wav" \
+		--state "$work/in.pcm"
+	printf '[drivers32]\nmsacm.tsta=%s\n' "$a" >"$work/vfw.ini"
+	VFW_INI="$work/vfw.ini" $emu "$harness" list |
+		grep -q "TSTA (seance TSTA test codec), codec"
+	VFW_INI="$work/vfw.ini" $emu "$harness" decode auto "$work/acm.avi" \
+		-o "$work/acm-auto.pcm" 2>/dev/null
+	cmp "$work/in.pcm" "$work/acm-auto.pcm"
 	unset VFW_REGISTRY
 	rm -rf "$work"
 

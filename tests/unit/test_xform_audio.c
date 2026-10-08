@@ -1,16 +1,19 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Audio through src/xform.c, over the DirectShow host and the DMO host:
- * the TSTA encoders and decoders of testfilter.ax and testdmo.dll, each
- * test run on both. Finding them by role, types taken and refused, an
+ * Audio through src/xform.c, over the DirectShow host, the DMO host and
+ * ACM streams: the TSTA encoders and decoders of testfilter.ax,
+ * testdmo.dll and testacm.acm, each test run on all three (ACM's encoder
+ * output untimed, as ACM gives no times). Finding them by role, types taken and refused, an
  * encoder left to complete its output type, a round trip that gives back
  * the PCM exactly, times carried through, the bit rate reaching the
  * encoder, flushing, and no references left behind (DllCanUnloadNow); and
  * the two kinds giving the same packets and decoding each other's. Each of
  * the fixtures' audio modes (split outputs, output held to the end, a
- * switch to float, a rate change, and for the DMOs refused input) runs in
- * a child process of its own, since the fixtures read them from the
- * environment as they first see it.
+ * switch to float, a rate change, and for the DMOs refused input; for
+ * the ACM driver, stream sizes too small to trust, headers it prepares
+ * itself and streams it wants non-realtime) runs in a child process of its
+ * own, since the fixtures read them from the environment as they first
+ * see it.
  */
 #include <stdlib.h>
 #include <string.h>
@@ -31,7 +34,7 @@
 
 static BYTE pcm[FRAMES * BLOCK];
 static const char *server, *server_name;	/* path, and file name */
-static int is_dmo;
+static int is_dmo, is_acm;
 
 struct got {
 	int n;
@@ -92,6 +95,15 @@ static void got_free(struct got *g)
 static int unloadable(void)
 {
 	struct module *m = mod_find(server_name);
+
+	/* An ACM driver has no COM objects: its own counts say. */
+	if (is_acm) {
+		LONG (*opens)(void) = m ? mod_get_proc(m, "testacm_open_count") :
+				      NULL;
+		LONG (*streams)(void) = m ? mod_get_proc(m,
+						"testacm_stream_count") : NULL;
+		return opens && streams && !opens() && !streams();
+	}
 	HRESULT (WINAPI *can)(void) = m ? (HRESULT (WINAPI *)(void))
 		mod_get_proc(m, "DllCanUnloadNow") : NULL;
 	return !can || can() == S_OK;
@@ -112,6 +124,7 @@ static struct xform *open_class(int encoder)
 
 	CHECK_EQ(xform_find(server, NULL, 1, encoder, &c), S_OK);
 	CHECK_EQ(c.dmo, is_dmo);
+	CHECK_EQ(c.acm, is_acm);
 	CHECK_EQ(c.compression, encoder ? TAG : 0);
 	CHECK_EQ(xform_create(server, &c, &x), S_OK);
 	return x;
@@ -128,7 +141,7 @@ static void encode(struct got *g, WAVEFORMATEX **fmt, size_t *fmt_size,
 		return;
 	if (bitrate) {
 		struct dshow_encoder_options o = { -1, -1.0, bitrate };
-		CHECK_EQ(dshow_encoder_configure(xform_object(x), &o), S_OK);
+		CHECK_EQ(xform_encoder_options(x, &o), S_OK);
 	}
 	pcm_type(&in, AUDIO_S16, AUDIO_FORM_PLAIN);
 	/* Partial: the encoder fills in the format. */
@@ -193,15 +206,16 @@ static void test_encode_decode(void)
 	CHECK_EQ(fmt->nBlockAlign, 8 + 1024 * BLOCK);
 	CHECK_EQ(((BYTE *)(fmt + 1))[0] | ((BYTE *)(fmt + 1))[1] << 8, 1024);
 
-	/* Whole packets, the last short; each a sync point, timed. */
+	/* Whole packets, the last short; each a sync point, timed (not ACM). */
 	CHECK_EQ(e.n, PACKETS);
 	unsigned bad = 0;
 	for (int i = 0; i < e.n && i < PACKETS; i++) {
 		size_t frames = i < 4 ? 1024 : 904;
 		bad += e.sizes[i] != 8 + frames * BLOCK || !e.sync[i] ||
-		       !e.timed[i] ||
-		       e.start[i] != audio_ticks(1024 * i, 1, RATE) ||
-		       e.stop[i] != audio_ticks(1024 * i + frames, 1, RATE);
+		       (is_acm ? e.timed[i] :
+			!e.timed[i] ||
+			e.start[i] != audio_ticks(1024 * i, 1, RATE) ||
+			e.stop[i] != audio_ticks(1024 * i + frames, 1, RATE));
 	}
 	CHECK_EQ(bad, 0);
 
@@ -211,7 +225,12 @@ static void test_encode_decode(void)
 	CHECK(d.data && !memcmp(d.data, pcm, sizeof(pcm)));
 	CHECK_EQ(d.n, PACKETS);
 	CHECK_EQ(d.changes, 0);
-	CHECK(d.timed[1] && d.start[1] == e.start[1] && d.stop[4] == e.stop[4]);
+	if (is_acm)	/* timed by the PCM made, from the first input */
+		CHECK(d.timed[1] && d.start[1] == audio_ticks(1024, 1, RATE) &&
+		      d.stop[4] == audio_ticks(FRAMES, 1, RATE));
+	else
+		CHECK(d.timed[1] && d.start[1] == e.start[1] &&
+		      d.stop[4] == e.stop[4]);
 	got_free(&d);
 
 	/* The decoder gives the stream's own sample format, no other. */
@@ -225,11 +244,25 @@ static void test_encode_decode(void)
 	free(fmt);
 	fmt = NULL;
 	encode(&e, &fmt, &fmt_size, 256000);
-	CHECK(fmt && fmt->nAvgBytesPerSec == 32000);
+	/* ACM: the nearest of the driver's formats, here its only one. */
+	CHECK(fmt && (is_acm ? fmt->wFormatTag == TAG :
+		      fmt->nAvgBytesPerSec == 32000));
 	CHECK_EQ(e.n, PACKETS);
 	got_free(&e);
 	free(fmt);
 	CHECK(unloadable());
+
+	/* An ACM driver has nothing else to set. */
+	if (is_acm) {
+		struct xform *x = open_class(1);
+		struct dshow_encoder_options q = { -1, 0.5, -1 };
+		struct dshow_encoder_options k = { 10, -1.0, -1 };
+		CHECK_EQ(xform_encoder_options(x, &q), E_NOTIMPL);
+		CHECK_EQ(xform_encoder_options(x, &k), E_NOTIMPL);
+		CHECK(xform_object(x) == NULL);
+		CHECK(!strcmp(xform_kind_name(x), "ACM driver"));
+		xform_close(x);
+	}
 }
 
 static void test_refused(void)
@@ -294,7 +327,7 @@ static void test_flush(void)
 	/* What was kept is gone; times count from the new first sample. */
 	CHECK_EQ(xform_push(x, pcm, 1024 * BLOCK, 5000000, 0, 0), S_OK);
 	CHECK_EQ(g.n, 2);
-	CHECK_EQ(g.start[1], 5000000);
+	CHECK(is_acm || g.start[1] == 5000000);
 	CHECK_EQ(g.sizes[1], 8 + 1024 * BLOCK);
 	CHECK_EQ(xform_end(x), S_OK);
 	CHECK_EQ(g.n, 2);
@@ -420,6 +453,64 @@ static void mode_notaccepting(void)
 	free(fmt);
 }
 
+/* The ACM driver's modes: a round trip, exact, whatever they change. */
+static void mode_acm(void)
+{
+	struct got e = { 0 }, d = { 0 };
+	WAVEFORMATEX *fmt = NULL;
+	size_t size = 0;
+
+	encoded(&e, &fmt, &size);
+	CHECK_EQ(decode(&e, fmt, size, AUDIO_S16, &d), S_OK);
+	CHECK(d.size == sizeof(pcm) && !memcmp(d.data, pcm, sizeof(pcm)));
+	CHECK_EQ(d.n, PACKETS);
+	got_free(&e);
+	got_free(&d);
+	free(fmt);
+}
+
+/* The filter and the ACM driver: the same packets, decoding each other's. */
+static void test_cross_acm(const char *filter, const char *acm)
+{
+	struct got ef = { 0 }, ea = { 0 }, d = { 0 };
+	WAVEFORMATEX *ff = NULL, *fa = NULL;
+	size_t sf = 0, sa = 0;
+
+	server = filter;
+	server_name = "testfilter.ax";
+	is_dmo = is_acm = 0;
+	encode(&ef, &ff, &sf, 0);
+	server = acm;
+	server_name = "testacm.acm";
+	is_acm = 1;
+	encode(&ea, &fa, &sa, 0);
+	CHECK(ff && fa && sf == sa && !memcmp(ff, fa, sf));
+	CHECK(ef.size == ea.size && ef.data && ea.data &&
+	      !memcmp(ef.data, ea.data, ef.size));
+	CHECK_EQ(ef.n, ea.n);
+	unsigned bad = 0;
+	for (int i = 0; i < ef.n && i < 64; i++)
+		bad += ef.sizes[i] != ea.sizes[i];
+	CHECK_EQ(bad, 0);
+	if (fa) {
+		CHECK_EQ(decode(&ef, fa, sa, AUDIO_S16, &d), S_OK);
+		CHECK(d.size == sizeof(pcm) && !memcmp(d.data, pcm, sizeof(pcm)));
+		got_free(&d);
+	}
+	server = filter;
+	server_name = "testfilter.ax";
+	is_acm = 0;
+	if (ff) {
+		CHECK_EQ(decode(&ea, ff, sf, AUDIO_S16, &d), S_OK);
+		CHECK(d.size == sizeof(pcm) && !memcmp(d.data, pcm, sizeof(pcm)));
+		got_free(&d);
+	}
+	got_free(&ef);
+	got_free(&ea);
+	free(ff);
+	free(fa);
+}
+
 /* The filter and the DMO: the same packets, and each decodes the other's. */
 static void test_cross(const char *filter, const char *dmo)
 {
@@ -429,7 +520,7 @@ static void test_cross(const char *filter, const char *dmo)
 
 	server = filter;
 	server_name = "testfilter.ax";
-	is_dmo = 0;
+	is_dmo = is_acm = 0;
 	encode(&ef, &ff, &sf, 0);
 	server = dmo;
 	server_name = "testdmo.dll";
@@ -464,31 +555,42 @@ static void test_cross(const char *filter, const char *dmo)
 	free(fd);
 }
 
+#define FILTER 1
+#define DMO 2
+#define ACM 4
+
 static const struct {
 	const char *name, *variable;	/* the variable's name after the prefix */
 	void (*run)(void);
-	int dmo_only;
+	int kinds;			/* the servers that have it */
 } modes[] = {
-	{ "split", "AUDIO_SPLIT", mode_split, 0 },
-	{ "hold", "AUDIO_HOLD", mode_hold, 0 },
-	{ "float", "AUDIO_FLOAT", mode_float, 0 },
-	{ "rate", "AUDIO_RATE", mode_rate, 0 },
-	{ "notaccepting", "NOTACCEPTING", mode_notaccepting, 1 },
+	{ "split", "AUDIO_SPLIT", mode_split, FILTER | DMO },
+	{ "hold", "AUDIO_HOLD", mode_hold, FILTER | DMO },
+	{ "float", "AUDIO_FLOAT", mode_float, FILTER | DMO },
+	{ "rate", "AUDIO_RATE", mode_rate, FILTER | DMO },
+	{ "notaccepting", "NOTACCEPTING", mode_notaccepting, DMO },
+	{ "small", "SMALL", mode_acm, ACM },
+	{ "prepare", "PREPARE", mode_acm, ACM },
+	{ "notrealtime", "NOTREALTIME", mode_acm, ACM },
 };
 #define NMODES (sizeof(modes) / sizeof(*modes))
 
 static const struct {
 	const char *kind, *file, *prefix;
+	int bit;
 } servers[] = {
-	{ "filter", "testfilter.ax", "TESTFILTER_" },
-	{ "dmo", "testdmo.dll", "TESTDMO_" },
+	{ "filter", "testfilter.ax", "TESTFILTER_", FILTER },
+	{ "dmo", "testdmo.dll", "TESTDMO_", DMO },
+	{ "acm", "testacm.acm", "TESTACM_", ACM },
 };
+#define NSERVERS (sizeof(servers) / sizeof(*servers))
 
 static void use(size_t k)
 {
 	server = fixture(servers[k].file);
 	server_name = servers[k].file;
 	is_dmo = k == 1;
+	is_acm = k == 2;
 	/* Kept loaded, so DllCanUnloadNow can be asked between tests. */
 	CHECK(mod_load(server, NULL) != NULL);
 }
@@ -497,13 +599,14 @@ int main(int argc, char **argv)
 {
 	fixture("testfilter.ax");
 	fixture("testdmo.dll");
+	fixture("testacm.acm");
 	for (size_t i = 0; i < sizeof(pcm); i++)
 		pcm[i] = (BYTE)(i * 13 + (i >> 9) * 5);
 	CHECK_EQ(runtime_enter(), 0);
 
 	/* A mode, in a child: "<kind> <mode>". */
 	if (argc == 3) {
-		for (size_t k = 0; k < 2; k++)
+		for (size_t k = 0; k < NSERVERS; k++)
 			if (!strcmp(argv[1], servers[k].kind))
 				use(k);
 		for (size_t i = 0; i < NMODES; i++)
@@ -513,7 +616,7 @@ int main(int argc, char **argv)
 		return test_summary(argv[2]);
 	}
 
-	for (size_t k = 0; k < 2; k++) {
+	for (size_t k = 0; k < NSERVERS; k++) {
 		use(k);
 		printf("%s:\n", servers[k].kind);
 		fflush(stdout);
@@ -522,7 +625,7 @@ int main(int argc, char **argv)
 		test_flush();
 		for (size_t i = 0; i < NMODES; i++) {
 			char cmd[4400];
-			if (modes[i].dmo_only && !is_dmo)
+			if (!(modes[i].kinds & servers[k].bit))
 				continue;
 			snprintf(cmd, sizeof(cmd), "VFW_ENV_%s%s=1 %s'%s' %s %s",
 				 servers[k].prefix, modes[i].variable,
@@ -537,5 +640,6 @@ int main(int argc, char **argv)
 		}
 	}
 	test_cross(fixture("testfilter.ax"), fixture("testdmo.dll"));
+	test_cross_acm(fixture("testfilter.ax"), fixture("testacm.acm"));
 	return test_summary("test_xform_audio");
 }

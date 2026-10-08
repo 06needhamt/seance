@@ -144,10 +144,11 @@ static int tsta_ok(const WAVEFORMATEX *wf)
 	DWORD block = tsta_pcm_block(wf->wBitsPerSample, wf->nChannels);
 	const BYTE *extra = (const BYTE *)(wf + 1);
 
+	/* Without its two bytes, a whole packet is taken as 1024 frames. */
 	return wf->wFormatTag == WAVE_FORMAT_TSTA && block &&
-	       wf->nSamplesPerSec && wf->cbSize >= 2 &&
+	       wf->nSamplesPerSec &&
 	       wf->nBlockAlign == TSTA_HEADER + TSTA_FRAMES * block &&
-	       (extra[0] | extra[1] << 8) == TSTA_FRAMES;
+	       (wf->cbSize < 2 || (extra[0] | extra[1] << 8) == TSTA_FRAMES);
 }
 
 static void set_pcm(WAVEFORMATEX *wf, DWORD size, WORD channels, DWORD rate,

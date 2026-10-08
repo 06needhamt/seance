@@ -62,14 +62,18 @@ static int usage(void)
 		"  --save-state <file>  write the codec's state afterwards\n"
 		"  --odml               write OpenDML (AVI 2.0) indexes\n"
 		"\n"
-		"Audio, with a DirectShow filter or DMO (taken for a .wav input,\n"
-		"raw PCM, an AVI without video, a .wav or .pcm output, or --audio):\n"
+		"Audio, with a DirectShow filter, DMO or ACM driver (taken for a\n"
+		".wav input, raw PCM, an AVI without video, a .wav or .pcm output,\n"
+		"or --audio):\n"
 		"  input                .wav (\"-\" for stdin), an AVI's PCM stream,\n"
 		"                       or raw PCM with --raw\n"
 		"  -o <out>             .avi, .wav, or .pcm (the packets alone)\n"
 		"  --audio              the first audio stream of an AVI\n"
+		"  --format-tag <tag>   the format to make (0x55), for an encoder\n"
+		"                       of several\n"
 		"  --clsid, --quality, --bitrate, --stream, --state, --save-state\n"
-		"                       as for video\n"
+		"                       as for video (an ACM driver takes only\n"
+		"                       --bitrate)\n"
 		"  --start <pos>        where to begin: a sample number or a time\n"
 		"  --duration <len>     how much: samples or a time\n"
 		"  --raw <f> --sample-rate <hz> --channels <n>\n"
@@ -630,6 +634,16 @@ int cmd_encode(int argc, char **argv)
 			job.has_duration = 1;
 		} else if (!strcmp(a, "--audio")) {
 			want_audio = 1;
+		} else if (!strcmp(a, "--format-tag") && v) {
+			char *end;
+			const char *t = argv[++i];
+			job.format_tag = strtoul(t, &end, 0);
+			if (!*t || *end || !job.format_tag ||
+			    job.format_tag > 0xffff) {
+				fprintf(stderr, "seance: --format-tag wants a "
+					"format tag (85, 0x55), not '%s'\n", t);
+				return 2;
+			}
 		} else if (!strcmp(a, "--raw") && v) {
 			raw = argv[++i];
 		} else if (!strcmp(a, "--channels") && v) {
@@ -699,9 +713,9 @@ int cmd_encode(int argc, char **argv)
 		}
 		return encode_audio(&job);
 	}
-	if (raw || channels || hz) {
-		fprintf(stderr, "seance: --raw, --channels and --sample-rate are "
-			"for audio\n");
+	if (raw || channels || hz || job.format_tag) {
+		fprintf(stderr, "seance: --raw, --channels, --sample-rate and "
+			"--format-tag are for audio\n");
 		return 2;
 	}
 

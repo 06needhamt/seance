@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * decode and encode for audio: a DirectShow filter (or a DMO) between an
- * audio source and an audio sink.
+ * decode and encode for audio: a DirectShow filter, a DMO or an ACM driver
+ * between an audio source and an audio sink.
  */
 #ifndef VFW_CMD_AUDIO_H
 #define VFW_CMD_AUDIO_H
@@ -25,6 +25,7 @@ struct audio_codec_job {
 	int keep_going;			/* decode: past packets that fail */
 	long quality;			/* encode: 0 to 10000, or -1 */
 	unsigned long bitrate;		/* encode: kbit/s, or 0 */
+	unsigned long format_tag;	/* encode: the tag to make, or 0 */
 };
 
 /* Exit statuses: 0, 1 for a failure, 2 for a bad argument. */

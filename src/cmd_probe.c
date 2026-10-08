@@ -3,10 +3,12 @@
  * seance probe <dll|fourcc> [in.avi]: open a codec and report what it
  * says about itself and which formats it accepts.
  */
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "acm/acm.h"
 #include "avi/avi.h"
 #include "cmd_util.h"
 #include "commands.h"
@@ -17,8 +19,10 @@
 #include "dshow/discover.h"
 #include "dshow/dshow.h"
 #include "loader/pe.h"
+#include "runtime/runtime.h"
 #include "vfw/icm.h"
 #include "win32/codepage.h"
+#include "win32/msacm32.h"
 #include "win32/ole.h"
 #include "in/audio.h"
 #include "media/audio.h"
@@ -270,7 +274,7 @@ static int probe_dshow(const char *path, const char *selected,
 	for (size_t i = 0; i < count; i++) {
 		if (selected && memcmp(&filters[i].clsid, &wanted, sizeof(wanted)))
 			continue;
-		struct xform_class c = { filters[i].clsid, 0, 0 };
+		struct xform_class c = { .clsid = filters[i].clsid };
 		enum dshow_role role = dshow_role(&filters[i]);
 		dshow_print_filter(&filters[i], NULL, 1);
 		if (role != DSHOW_OTHER)
@@ -291,7 +295,7 @@ static int probe_dshow(const char *path, const char *selected,
 		if (selected && memcmp(&found.dmos[i].clsid, &wanted,
 				       sizeof(wanted)))
 			continue;
-		struct xform_class c = { found.dmos[i].clsid, 1, 0 };
+		struct xform_class c = { .clsid = found.dmos[i].clsid, .dmo = 1 };
 		enum dmo_role role = dmo_role(&found.dmos[i]);
 		dmo_print(&found.dmos[i], NULL, 1);
 		if (dmo_role_is_codec(role))
@@ -319,6 +323,100 @@ static int probe_dshow(const char *path, const char *selected,
 }
 
 /* A bounded UTF-16 field (ICINFO strings) as UTF-8. */
+/* An ACM driver: its details, tags and roles, and with an input, its use. */
+static int probe_acm(const char *path, const char *input)
+{
+	HACMDRIVERID id;
+	HACMDRIVER had;
+	ACMDRIVERDETAILSW d = { .cbStruct = sizeof(d) };
+	char text[600], flags[100];
+
+	if (msacm_add_path(path, &id) || msacm_acmDriverDetailsW(id, &d, 0) ||
+	    msacm_acmDriverOpen(&had, id, 0))
+		return -1;
+	printf("ACM driver: %s\n", path);
+	static const struct { size_t offset, chars; const char *label; } fields[] = {
+		{ offsetof(ACMDRIVERDETAILSW, szShortName),
+		  ACMDRIVERDETAILS_SHORTNAME_CHARS, "name" },
+		{ offsetof(ACMDRIVERDETAILSW, szLongName),
+		  ACMDRIVERDETAILS_LONGNAME_CHARS, "long name" },
+		{ offsetof(ACMDRIVERDETAILSW, szCopyright),
+		  ACMDRIVERDETAILS_COPYRIGHT_CHARS, "copyright" },
+		{ offsetof(ACMDRIVERDETAILSW, szLicensing),
+		  ACMDRIVERDETAILS_LICENSING_CHARS, "licensing" },
+		{ offsetof(ACMDRIVERDETAILSW, szFeatures),
+		  ACMDRIVERDETAILS_FEATURES_CHARS, "features" },
+	};
+	for (size_t i = 0; i < sizeof(fields) / sizeof(*fields); i++) {
+		WCHAR *w = (WCHAR *)((BYTE *)&d + fields[i].offset);
+		w[fields[i].chars - 1] = 0;
+		utf16_to_utf8(w, (size_t)-1, text, sizeof(text));
+		if (text[0])
+			printf("  %-10s %s\n", fields[i].label, text);
+	}
+	printf("  %-10s %s\n", "support",
+	       acm_support_names(d.fdwSupport, flags, sizeof(flags)));
+	printf("  %-10s %u.%02u.%u (for ACM %u.%02u)\n", "version",
+	       (unsigned)(d.vdwDriver >> 24), (unsigned)(d.vdwDriver >> 16 & 0xff),
+	       (unsigned)(d.vdwDriver & 0xffff), (unsigned)(d.vdwACM >> 24),
+	       (unsigned)(d.vdwACM >> 16 & 0xff));
+
+	printf("  format tags (%u):\n", (unsigned)d.cFormatTags);
+	for (DWORD i = 0; i < d.cFormatTags; i++) {
+		ACMFORMATTAGDETAILSW t = { .cbStruct = sizeof(t) };
+		WORD tag = 0;
+		t.dwFormatTagIndex = i;
+		if (msacm_acmFormatTagDetailsW(had, &t,
+					       ACM_FORMATTAGDETAILSF_INDEX))
+			continue;
+		t.szFormatTag[ACMFORMATTAGDETAILS_FORMATTAG_CHARS - 1] = 0;
+		utf16_to_utf8(t.szFormatTag, (size_t)-1, text, sizeof(text));
+		printf("    0x%04x %s: %u standard format%s, up to %u bytes",
+		       (unsigned)t.dwFormatTag, text,
+		       (unsigned)t.cStandardFormats,
+		       t.cStandardFormats == 1 ? "" : "s",
+		       (unsigned)t.cbFormatSize);
+		if (t.dwFormatTag != WAVE_FORMAT_PCM && t.dwFormatTag <= 0xffff) {
+			int dec = SUCCEEDED(acm_find(path, 0, (WORD)t.dwFormatTag,
+						     &tag));
+			int enc = SUCCEEDED(acm_find(path, 1, (WORD)t.dwFormatTag,
+						     &tag));
+			printf("; %s", dec && enc ? "decodes and encodes" :
+			       dec ? "decodes to PCM" : enc ? "encodes from PCM" :
+			       "no PCM either way");
+		}
+		printf("\n");
+	}
+	if (d.cFilterTags)
+		printf("  filter tags: %u (not used by seance's commands)\n",
+		       (unsigned)d.cFilterTags);
+	msacm_acmDriverClose(had, 0);
+
+	/* PCM goes to an encoder, anything else to a decoder. */
+	struct audio_source *src = input ? audio_source_open(input, NULL) : NULL;
+	if (input && !src)
+		printf("  connection check: %s\n", vfw_error());
+	if (src) {
+		size_t size;
+		const WAVEFORMATEX *wf = audio_source_format(src, &size);
+		int encoder = audio_format_sample(wf, size) != AUDIO_NONE;
+		struct xform_class c = { .acm = 1 };
+		WORD tag;
+		HRESULT hr = acm_find(path, encoder, 0, &tag);
+		audio_source_close(src);
+		if (encoder && hr == VFW_E_DUPLICATE_NAME)
+			printf("  connection check: it encodes to several tags; "
+			       "encode chooses with --format-tag\n");
+		else if (FAILED(hr))
+			printf("  connection check: it has no %s\n",
+			       encoder ? "encoder of PCM" : "decoder to PCM");
+		c.compression = encoder ? tag : 0;
+		if (SUCCEEDED(hr))
+			probe_audio(path, &c, encoder, input);
+	}
+	return 0;
+}
+
 static const char *wide(const WCHAR *s, size_t max, char *buf, size_t size)
 {
 	size_t n = 0;
@@ -458,8 +556,14 @@ int cmd_probe(int argc, char **argv)
 
 	struct pe_image *image = pe_open(target);
 	if (image) {
+		struct pe_export e;
 		int directshow = dshow_is_server(image);
+		int driver = !pe_find_export(image, "DriverProc", 0, &e);
 		pe_free(image);
+		/* A driver that answers as an ACM one is one. */
+		if (driver && !fourcc && !clsid && !runtime_enter() &&
+		    !probe_acm(target, avi_path))
+			return 0;
 		if (directshow) {
 			if (fourcc) {
 				fprintf(stderr, "seance: --fourcc is for VfW codecs; "

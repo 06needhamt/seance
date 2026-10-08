@@ -1,11 +1,15 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * seance list [--no-open] [--all]: the codecs registered in vfw.ini, and
- * the DirectShow filters and DMOs registered in the registry.
+ * seance list [--no-open] [--all]: the codecs and ACM drivers registered
+ * in vfw.ini, and the DirectShow filters and DMOs registered in the
+ * registry.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
+#include "acm/acm.h"
 #include "commands.h"
 #include "common/error.h"
 #include "common/fourcc.h"
@@ -15,6 +19,7 @@
 #include "runtime/runtime.h"
 #include "vfw/icm.h"
 #include "vfw/registry.h"
+#include "win32/msacm32.h"
 #include "win32/reg.h"
 
 /* The DirectShow filters registered, video ones unless all. */
@@ -101,6 +106,63 @@ static void list_codecs(int open)
 	}
 }
 
+#define MAX_ACM 64
+
+static BOOL WINAPI collect_driver(HACMDRIVERID id, DWORD_PTR inst,
+				 DWORD support)
+{
+	HACMDRIVERID *ids = (HACMDRIVERID *)inst;
+
+	(void)support;
+	for (int i = 0; i < MAX_ACM; i++)
+		if (!ids[i]) {
+			ids[i] = id;
+			break;
+		}
+	return TRUE;
+}
+
+/* The ACM drivers vfw.ini names, and with open, what each says it is. */
+static void list_acm(int open)
+{
+	HACMDRIVERID ids[MAX_ACM] = { 0 };
+	char *alias, *path;
+
+	printf("\nACM drivers in %s:\n", vfw_ini_path());
+	if (vfw_acm_get(0, &alias, &path)) {
+		printf("  none. Add lines such as msacm.<name>=/path/to/driver.acm "
+		       "to its [drivers32]\n  section. (The built-in PCM "
+		       "converter is always there.)\n");
+		return;
+	}
+	free(alias);
+	free(path);
+	if (open)
+		msacm_acmDriverEnum(collect_driver, (DWORD_PTR)ids,
+				    ACM_DRIVERENUMF_DISABLED);
+	for (unsigned n = 0; !vfw_acm_get(n, &alias, &path); n++) {
+		printf("  %s  %s\n", alias, path);
+		if (open) {
+			char line[600];
+			int found = 0;
+			for (int i = 0; i < MAX_ACM && ids[i] && !found; i++) {
+				char *a = NULL, *p = msacm_driver_path(ids[i], &a);
+				if (a && !strcasecmp(a, alias)) {
+					found = 1;
+					if (!acm_describe(ids[i], line, sizeof(line)))
+						printf("      %s\n", line);
+				}
+				free(a);
+				free(p);
+			}
+			if (!found)
+				printf("      doesn't open as an ACM driver\n");
+		}
+		free(alias);
+		free(path);
+	}
+}
+
 int cmd_list(int argc, char **argv)
 {
 	int open = 1, all = 0;
@@ -113,8 +175,8 @@ int cmd_list(int argc, char **argv)
 		} else {
 			fprintf(stderr, "usage: seance list [--no-open] [--all]\n"
 				"\n"
-				"  --no-open   don't open the codecs to ask their "
-				"names\n"
+				"  --no-open   don't open the codecs and drivers to "
+				"ask their names\n"
 				"  --all       list every DirectShow filter and "
 				"DMO registered, not just codecs\n");
 			return 2;
@@ -125,6 +187,7 @@ int cmd_list(int argc, char **argv)
 		return 1;
 	}
 	list_codecs(open);
+	list_acm(open);
 	list_filters(all);
 	list_dmos(all);
 	return 0;

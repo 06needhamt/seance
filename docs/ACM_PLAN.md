@@ -321,12 +321,55 @@ A CRT-less mingw DLL like `testcodec.dll`, sharing `tsta.h`:
      it refuses, configuration messages, and a host loop
      (`run_stream`: pieces of a few kilobytes, whole blocks, leftovers
      given again, the end flushed) that Phase 3's backend will follow.
-3. **Backend and commands.** `src/acm/`, the third `xform` kind, decode,
-   encode, `auto`, probe, list and info.
+3. **Backend and commands.** (Done.) `src/acm/`, the third `xform` kind,
+   decode, encode, `auto`, probe, list and info.
    Milestone: `test_xform_audio` runs its cases against the ACM driver too.
    The TSTA packets from the filter, the DMO and the ACM driver decode with
    each other, and `seance encode testacm.acm in.wav -o a.avi && seance
    decode testfilter.ax a.avi -o out.wav` is byte-exact.
+   - `src/acm/acm.c`: `acm_find` (a decoder of a tag if one of its first
+     standard formats suggests PCM; an encoder if common PCM suggests the
+     tag), `acm_codec_open`, and streams: the output format given, or
+     completed by `acmFormatSuggest`, or with a bit rate the convertible
+     format of the tag with the nearest data rate. A push appends to what
+     was kept and converts with BLOCKALIGN (START the first time) until
+     the driver takes nothing more; the end converts with END until it
+     makes nothing more. Output buffers are `acmStreamSize`'s answer but
+     at least 64 KB and four blocks, so `TESTACM_SMALL` doesn't stall it.
+     Compressed output goes out a block (`nBlockAlign`) at a time,
+     untimed and each a sync point; PCM is timed from the first push.
+     ACM's errors travel as HRESULTs of their own (`ACM_HRESULT`), which
+     `dshow_hr_name` names.
+   - `xform.c`: a DLL exporting `DriverProc` and no `DllGetClassObject`
+     (or a bare name, as `vfw.ini` gives) is tried as an ACM driver, for
+     audio only. `xform_find_output` chooses an encoder by its output tag
+     (also among filters and DMOs); `xform_encoder_options` takes the
+     place of `dshow_encoder_configure` for all three kinds, and an ACM
+     driver takes a bit rate only.
+   - Commands: `encode --format-tag`; `decode auto` tries ACM drivers
+     after filters and DMOs, for each form of the input format; `probe`
+     prints a driver's details, tags and what each does, and with an
+     input the check that fits it (PCM to the encoder, anything else to
+     the decoder); `list` shows `vfw.ini`'s ACM drivers and what they
+     say they are; `info` calls a `DriverProc` DLL a VfW codec, ACM
+     driver or other driver. `--quality`, `--state` and `--save-state`
+     are refused for ACM drivers, with a message saying why.
+   - `encode` now tries the input's own sample format in its other form
+     (plain or extensible) before other sample formats: ACM drivers take
+     only plain PCM, and FFmpeg writes 24-bit stereo as extensible, which
+     had been encoded as 16-bit.
+   - The AVI an ACM encoder makes is constant-rate (`dwSampleSize` the
+     block), so a short last block shows as a fraction of one in its
+     length; FFmpeg reads its 47 packets, and the filter, the DMO and
+     the driver decode it exactly.
+   - Tests: `test_xform_audio` runs every case on the ACM driver too
+     (463 checks), its modes `SMALL`, `PREPARE` and `NOTREALTIME` in
+     children, and checks that its packets and format are the filter's
+     and that each decodes the other's. `smoke.sh` crosses the driver
+     with the filter through the CLI in each mode (and `STRICT` below
+     2 GB), and checks probe, list, `decode auto` through `vfw.ini` and
+     the refusals; `validate_media.sh` checks the AVI against FFmpeg and
+     24-bit and 6-channel round trips.
 4. **Hardening, real drivers and docs.**
    - Fuzzed formats in `test_msacm32`, and crash and timeout reports naming
      `ACMDM_*` messages.

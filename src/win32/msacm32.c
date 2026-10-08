@@ -479,6 +479,23 @@ done:
 	return r;
 }
 
+char *msacm_driver_path(HACMDRIVERID h, char **alias)
+{
+	char *path = NULL;
+
+	if (alias)
+		*alias = NULL;
+	acm_lock();
+	struct acm_id *id = acm_find_id(h);
+	if (id && id->path) {
+		path = strdup(id->path);
+		if (alias)
+			*alias = strdup(id->name);
+	}
+	acm_unlock();
+	return path;
+}
+
 unsigned msacm_stream_count(void)
 {
 	unsigned n = 0;

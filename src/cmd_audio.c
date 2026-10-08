@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Audio through a DirectShow filter or a DMO: packets from an audio source
- * pushed into a decoder (or encoder), and what comes out written to an
- * audio sink.
+ * Audio through a DirectShow filter, a DMO or an ACM driver: packets from
+ * an audio source pushed into a decoder (or encoder), and what comes out
+ * written to an audio sink.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,6 +16,7 @@
 #include "dshow/dshow.h"
 #include "out/audio.h"
 #include "runtime/runtime.h"
+#include "win32/msacm32.h"
 #include "win32/ole.h"
 #include "win32/path.h"
 #include "xform.h"
@@ -75,9 +76,72 @@ static int takes(const GUID *major, const GUID *minor, const GUID *subtypes,
 	return 0;
 }
 
+#define MAX_ACM 64
+
+static BOOL WINAPI collect_driver(HACMDRIVERID id, DWORD_PTR inst,
+				 DWORD support)
+{
+	HACMDRIVERID *ids = (HACMDRIVERID *)inst;
+
+	if (support & ACMDRIVERDETAILS_SUPPORTF_CODEC)
+		for (int i = 0; i < MAX_ACM; i++)
+			if (!ids[i]) {
+				ids[i] = id;
+				break;
+			}
+	return TRUE;
+}
+
+/* Whether an ACM driver suggests PCM for any form of the format. */
+static int acm_decodes(HACMDRIVERID id, const WAVEFORMATEX *wf, size_t size)
+{
+	HACMDRIVER had;
+	int yes = 0;
+
+	if (msacm_acmDriverOpen(&had, id, 0))
+		return 0;
+	for (unsigned v = 0; !yes; v++) {
+		AM_MEDIA_TYPE mt;
+		WAVEFORMATEX *in = NULL;
+		size_t n = 0;
+		HRESULT hr = audio_input_variant(wf, size, v, &mt);
+		if (hr == S_FALSE)
+			break;
+		if (SUCCEEDED(hr) && SUCCEEDED(audio_mt_to_wfx(&mt, &in, &n))) {
+			BYTE pcm[64] = { 0 };
+			((WAVEFORMATEX *)pcm)->wFormatTag = WAVE_FORMAT_PCM;
+			yes = !msacm_acmFormatSuggest(had, in, (WAVEFORMATEX *)pcm,
+						      sizeof(pcm),
+						      ACM_FORMATSUGGESTF_WFORMATTAG);
+		}
+		free(in);
+		dshow_free_media_type(&mt);
+	}
+	msacm_acmDriverClose(had, 0);
+	return yes;
+}
+
+/* A registered ACM driver (vfw.ini's msacm.* entries) that decodes it. */
+static char *acm_decoder(const WAVEFORMATEX *wf, size_t size)
+{
+	HACMDRIVERID ids[MAX_ACM] = { 0 };
+	char *path = NULL;
+
+	msacm_acmDriverEnum(collect_driver, (DWORD_PTR)ids, 0);
+	for (int i = 0; i < MAX_ACM && ids[i] && !path; i++) {
+		char *p = msacm_driver_path(ids[i], NULL);
+		if (p && acm_decodes(ids[i], wf, size))
+			path = p;
+		else
+			free(p);
+	}
+	return path;
+}
+
 /*
- * A registered audio decoder (a filter, by merit, else a DMO) of the
- * format, under any of the subtypes it may be offered as.
+ * A registered audio decoder (a filter, by merit, else a DMO, else an ACM
+ * driver) of the format, under any of the subtypes it may be offered as;
+ * *clsid is GUID_NULL for an ACM driver.
  */
 static char *registered_decoder(const WAVEFORMATEX *wf, size_t size,
 				CLSID *clsid)
@@ -127,6 +191,10 @@ static char *registered_decoder(const WAVEFORMATEX *wf, size_t size,
 			}
 	}
 	dmo_registered_free(dmos, count);
+	if (!path) {
+		memset(clsid, 0, sizeof(*clsid));
+		path = acm_decoder(wf, size);
+	}
 	return path;
 }
 
@@ -136,6 +204,11 @@ static int load_state(struct xform *x, const char *path)
 	size_t n;
 	char name[24];
 
+	if (!xform_object(x)) {
+		fprintf(stderr, "seance: an %s keeps no state to set; its "
+			"settings are in the registry\n", xform_kind_name(x));
+		return -1;
+	}
 	if (vfw_read_file(path, &data, &n)) {
 		fprintf(stderr, "seance: %s\n", vfw_error());
 		return -1;
@@ -155,6 +228,12 @@ static int save_state(struct xform *x, const char *path)
 	void *data = NULL;
 	size_t n = 0;
 	char name[24];
+
+	if (!xform_object(x)) {
+		fprintf(stderr, "seance: an %s keeps no state to save; its "
+			"settings are in the registry\n", xform_kind_name(x));
+		return -1;
+	}
 	HRESULT hr = dshow_filter_save_state(xform_object(x), &data, &n);
 	int r = FAILED(hr) ? -1 : write_bytes(path, data, n);
 
@@ -381,13 +460,15 @@ int decode_audio(const struct audio_codec_job *j)
 				in_desc);
 			goto done;
 		}
+		static const CLSID none;
 		codec = found_path;
-		clsid = &found_clsid;
+		clsid = memcmp(&found_clsid, &none, sizeof(none)) ?
+			&found_clsid : NULL;
 	}
 	hr = xform_open(codec, clsid, 1, 0, &x, NULL);
 	if (FAILED(hr)) {
-		fprintf(stderr, "seance: %s has no %s audio decoder (%s)\n",
-			codec, hr == VFW_E_DUPLICATE_NAME ? "single" : "",
+		fprintf(stderr, "seance: %s has no %saudio decoder (%s)\n",
+			codec, hr == VFW_E_DUPLICATE_NAME ? "single " : "",
 			dshow_hr_name(hr, name));
 		goto done;
 	}
@@ -654,11 +735,17 @@ int encode_audio(const struct audio_codec_job *j)
 	}
 	sink.rate = wf->nSamplesPerSec;
 
-	hr = xform_find(j->codec, j->clsid, 1, 1, &found);
+	hr = xform_find_output(j->codec, j->clsid, 1, 1, j->format_tag, &found);
 	if (FAILED(hr)) {
-		fprintf(stderr, "seance: %s: no %s DirectShow or DMO audio "
-			"encoder\n", j->codec,
-			hr == VFW_E_DUPLICATE_NAME ? "single" : "");
+		char tag[32] = "";
+		if (j->format_tag)
+			snprintf(tag, sizeof(tag), " of format tag 0x%04lx",
+				 j->format_tag);
+		fprintf(stderr, "seance: %s: no %sDirectShow, DMO or ACM audio "
+			"encoder%s%s\n", j->codec,
+			hr == VFW_E_DUPLICATE_NAME ? "single " : "", tag,
+			hr == VFW_E_DUPLICATE_NAME && !j->format_tag ?
+			" (choose one with --format-tag)" : "");
 		goto done;
 	}
 	if (FAILED(hr = xform_create(j->codec, &found, &x))) {
@@ -674,23 +761,33 @@ int encode_audio(const struct audio_codec_job *j)
 		.bitrate = j->bitrate ? (LONGLONG)j->bitrate * 1000 : -1,
 	};
 	if (options.quality >= 0.0 || options.bitrate >= 0) {
-		hr = dshow_encoder_configure(xform_object(x), &options);
+		hr = xform_encoder_options(x, &options);
 		if (FAILED(hr)) {
 			fprintf(stderr, "seance: encoder options were refused "
-				"(%s)\n", dshow_hr_name(hr, name));
+				"(%s)%s\n", dshow_hr_name(hr, name),
+				found.acm ? ": an ACM driver takes a bit rate "
+				"only" : "");
 			goto done;
 		}
 	}
 
-	/* The PCM as it is, else converted to a sample format it takes. */
-	static const enum audio_sample others[] = {
+	/*
+	 * The PCM as it is, else its samples in the other form (plain or
+	 * extensible: ACM drivers take only plain), else converted to a
+	 * sample format it takes.
+	 */
+	static const enum audio_sample usual[] = {
 		AUDIO_S16, AUDIO_S24, AUDIO_S32, AUDIO_F32, AUDIO_U8,
 	};
+	enum audio_sample others[6] = { native };
+	size_t nothers = 1;
+	for (size_t i = 0; i < sizeof(usual) / sizeof(*usual); i++)
+		if (usual[i] != native)
+			others[nothers++] = usual[i];
 	enum audio_sample feed = native;
 	int connected = !encode_connect(x, wf, size, (WORD)found.compression,
 					&sink);
-	for (size_t i = 0; !connected && i < sizeof(others) / sizeof(*others);
-	     i++) {
+	for (size_t i = 0; !connected && i < nothers; i++) {
 		DWORD mask = wf->wFormatTag == WAVE_FORMAT_EXTENSIBLE ?
 			     ((const WAVEFORMATEXTENSIBLE *)wf)->dwChannelMask : 0;
 		for (int form = AUDIO_FORM_PLAIN; !connected &&

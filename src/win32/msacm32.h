@@ -96,6 +96,13 @@ MMRESULT STUB_WINAPI msacm_acmStreamReset(HACMSTREAM has, DWORD flags);
  */
 MMRESULT msacm_add_path(const char *path, HACMDRIVERID *out);
 
+/*
+ * A driver's DLL as its entry names it (malloc()ed), and its alias; NULL
+ * for a procedure (the PCM converter, acmDriverAdd's functions) or a bad
+ * handle.
+ */
+char *msacm_driver_path(HACMDRIVERID id, char **alias);
+
 /* "ACMERR_NOTPOSSIBLE", "MMSYSERR_INVALPARAM", ... or the number. */
 const char *msacm_error_name(MMRESULT r, char buf[24]);
 

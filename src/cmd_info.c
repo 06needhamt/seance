@@ -100,7 +100,8 @@ static void print_header(const char *path, const struct pe_image *img)
 	       fh->Characteristics & IMAGE_FILE_DLL ? "DLL" : "executable");
 	struct pe_export e;
 	if (!pe_find_export(img, "DriverProc", 0, &e))
-		printf("kind:            VfW codec or driver (DriverProc)\n");
+		printf("kind:            VfW codec, ACM driver or other driver "
+		       "(DriverProc)\n");
 	else if (dshow_is_server(img))
 		printf("kind:            COM server, perhaps DirectShow filters "
 		       "or DMOs (seance register --dry-run lists them)\n");
