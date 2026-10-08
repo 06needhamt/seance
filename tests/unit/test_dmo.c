@@ -451,8 +451,9 @@ int main(int argc, char **argv)
 	test_state();
 	for (size_t i = 0; i < NMODES; i++) {
 		char cmd[4400];
-		snprintf(cmd, sizeof(cmd), "VFW_ENV_%s=1 '%s' %s",
-			 modes[i].variable, argv[0], modes[i].name);
+		snprintf(cmd, sizeof(cmd), "VFW_ENV_%s=1 %s'%s' %s",
+			 modes[i].variable, test_rerun_prefix(), argv[0],
+			 modes[i].name);
 		int status = system(cmd);
 		CHECK_EQ(status, 0);
 		if (status)
