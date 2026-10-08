@@ -6,6 +6,9 @@
 #     the Y4M and BMP files the output writers produced;
 #   - `seance convert` on AVIs FFmpeg wrote in each uncompressed format
 #     gives the same pictures FFmpeg's own decoding does;
+#   - FFmpeg reads the WAVs and audio streams our writers produced, and
+#     `seance convert` gives the same samples as FFmpeg from WAVs and AVIs
+#     FFmpeg wrote, in every PCM format, with MP3 audio copied as it is;
 #   - with the fixture DLLs built, `encode` with testcodec.dll takes what
 #     FFmpeg writes (Y4M, BMP files, AVI) and writes AVIs FFmpeg reads, and
 #     `decode` gives back FFmpeg's pictures exactly.
@@ -75,6 +78,7 @@ at_least() {
 echo "== Files written by the unit tests"
 VFW_KEEP_TEST_FILES=$work/unit $emu "$build/tests/test_avi" >/dev/null
 VFW_KEEP_TEST_FILES=$work/unit $emu "$build/tests/test_image" >/dev/null
+VFW_KEEP_TEST_FILES=$work/unit $emu "$build/tests/test_wav" >/dev/null
 u=$work/unit
 # test_avi: frames, keyframes and bytes as written.
 expect "plain.avi" "$(packets $u/plain.avi)" "20 20 30720"
@@ -183,6 +187,116 @@ if grep -q "Index: OpenDML" $f/odml.txt && grep -q "150 frames" $f/odml.txt; the
 else
 	fail "seance avi odml.avi"
 fi
+
+# audio <file> <entries>: the first audio stream's fields, comma-separated
+audio() {
+	ffprobe -v error -select_streams a:0 -show_entries stream=$2 \
+		-of csv=p=0 "$1"
+}
+
+# bytes <file> <format>: the size of the first audio stream decoded
+bytes() {
+	ffmpeg -v error -i "$1" -map 0:a:0 -f "$2" - | wc -c | tr -d ' '
+}
+
+# same <what> <a> <b>
+same() {
+	if cmp -s "$2" "$3"; then pass "$1"; else fail "$1"; fi
+}
+
+echo "== Audio our writers made, read by FFmpeg"
+expect "av.avi audio" "$(audio $u/av.avi codec_name,sample_rate,channels)" \
+	"pcm_s16le,44100,2"
+expect "av.avi samples" "$(bytes $u/av.avi s16le)" $((17640 * 4))
+expect "av.avi video still" "$(packets $u/av.avi | cut -d' ' -f1)" 10
+expect "av_odml.avi (OpenDML) samples" "$(bytes $u/av_odml.avi s16le)" \
+	$((105840 * 4))
+expect "av_odml.avi video" "$(packets $u/av_odml.avi | cut -d' ' -f1)" 60
+expect "audio.avi (ADPCM blocks)" "$(audio $u/audio.avi codec_name,channels)" \
+	"adpcm_ima_wav,1"
+expect "s16.wav" "$(audio $u/s16.wav codec_name,sample_rate,channels)" \
+	"pcm_s16le,44100,2"
+expect "s16.wav samples" "$(bytes $u/s16.wav s16le)" 40000
+expect "rf64.wav (RF64)" "$(audio $u/rf64.wav codec_name,channels)" \
+	"pcm_f32le,6"
+expect "rf64.wav samples" "$(bytes $u/rf64.wav f32le)" 12000
+
+echo "== Converting audio FFmpeg wrote"
+a=$work/audio
+mkdir -p $a
+tone="sine=frequency=440:duration=1:sample_rate=48000"
+for fmt in u8 s16le s24le s32le f32le f64le; do
+	ffmpeg -v error -y -f lavfi -i "$tone" -ac 2 -c:a pcm_$fmt $a/$fmt.wav
+	ffmpeg -v error -y -i $a/$fmt.wav -f $fmt $a/$fmt.ref
+	$emu "$harness" convert $a/$fmt.wav -o $a/$fmt.pcm 2>/dev/null
+	same "$fmt WAV -> raw PCM identical" $a/$fmt.pcm $a/$fmt.ref
+done
+ffmpeg -v error -y -f lavfi -i "$tone" -ac 6 -c:a pcm_s16le $a/six.wav
+ffmpeg -v error -y -i $a/six.wav -f s16le $a/six.ref
+$emu "$harness" convert $a/six.wav -o $a/six.pcm 2>/dev/null
+same "6-channel (extensible) WAV -> raw PCM identical" $a/six.pcm $a/six.ref
+ffmpeg -v error -y -f lavfi -i "$tone" -c:a pcm_s16le -rf64 always $a/rf64.wav
+$emu "$harness" convert $a/rf64.wav -o $a/rf64.pcm 2>/dev/null
+ffmpeg -v error -y -i $a/rf64.wav -f s16le $a/rf64.ref
+same "FFmpeg's RF64 WAV -> raw PCM identical" $a/rf64.pcm $a/rf64.ref
+
+# Sample formats, converted as FFmpeg converts them.
+for to in u8 s24le f32le; do
+	$emu "$harness" convert $a/s16le.wav -o $a/to_$to.pcm \
+		--sample-format ${to%le} 2>/dev/null
+	ffmpeg -v error -y -i $a/s16le.wav -f $to $a/to_$to.ref
+	same "s16 -> $to as FFmpeg converts" $a/to_$to.pcm $a/to_$to.ref
+done
+$emu "$harness" convert $a/f32le.wav -o $a/f2s.pcm --sample-format s16 \
+	2>/dev/null
+ffmpeg -v error -y -i $a/f32le.wav -f s16le $a/f2s.ref
+same "f32 -> s16 as FFmpeg converts" $a/f2s.pcm $a/f2s.ref
+
+# An AVI with video and PCM audio: either stream, and trimmed audio.
+ffmpeg -v error -y -f lavfi -i "$src" -f lavfi -i "$tone" -c:v rawvideo \
+	-pix_fmt bgr24 -c:a pcm_s16le -ac 2 $a/av.avi
+$emu "$harness" avi $a/av.avi >$a/av.txt
+if grep -q "PCM s16, 2 channels, 48000 Hz" $a/av.txt; then
+	pass "seance avi shows the PCM stream"
+else
+	fail "seance avi doesn't show the PCM stream"
+fi
+$emu "$harness" convert $a/av.avi -o $a/av.wav 2>/dev/null
+ffmpeg -v error -y -i $a/av.avi -map 0:a -f s16le $a/av.ref
+ffmpeg -v error -y -i $a/av.wav -f s16le $a/av.wav.pcm
+same "AVI PCM -> WAV" $a/av.wav.pcm $a/av.ref
+$emu "$harness" convert $a/av.avi -o $a/av.y4m 2>/dev/null
+expect "the same AVI to Y4M is its video" "$(frames $a/av.y4m)" 10
+$emu "$harness" convert $a/av.avi -o $a/trim.pcm --audio --start 0.25s \
+	--duration 12000 2>/dev/null
+ffmpeg -v error -y -i $a/av.avi -map 0:a -af atrim=start_sample=12000:end_sample=24000 \
+	-f s16le $a/trim.ref
+same "--start 0.25s --duration 12000 trims to the sample" $a/trim.pcm $a/trim.ref
+$emu "$harness" convert $a/av.wav -o $a/av2.avi 2>/dev/null
+ffmpeg -v error -y -i $a/av2.avi -f s16le $a/av2.pcm
+same "WAV -> our AVI, as FFmpeg reads it" $a/av2.pcm $a/av.ref
+
+# MP3 in AVI, copied without decoding: FFmpeg decodes the same audio.
+if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libmp3lame; then
+	ffmpeg -v error -y -f lavfi -i "$src" -f lavfi -i "$tone" -c:v rawvideo \
+		-pix_fmt bgr24 -c:a libmp3lame -b:a 128k $a/mp3.avi
+	$emu "$harness" avi $a/mp3.avi >$a/mp3.txt
+	if grep -q "MP3 (0x0055)" $a/mp3.txt; then
+		pass "seance avi names MP3"
+	else
+		fail "seance avi doesn't name MP3"
+	fi
+	ffmpeg -v error -y -i $a/mp3.avi -map 0:a -f s16le $a/mp3.ref
+	$emu "$harness" convert $a/mp3.avi -o $a/mp3copy.avi 2>/dev/null
+	$emu "$harness" convert $a/mp3.avi -o $a/mp3.wav 2>/dev/null
+	ffmpeg -v error -y -i $a/mp3copy.avi -f s16le $a/mp3copy.pcm
+	ffmpeg -v error -y -i $a/mp3.wav -f s16le $a/mp3wav.pcm
+	same "MP3 AVI -> AVI, decoded the same" $a/mp3copy.pcm $a/mp3.ref
+	same "MP3 AVI -> WAV, decoded the same" $a/mp3wav.pcm $a/mp3.ref
+else
+	echo "skip MP3 cases: no libmp3lame in this FFmpeg"
+fi
+echo
 
 codec=$build/fixtures/testcodec.dll
 if [ -f "$codec" ]; then

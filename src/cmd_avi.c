@@ -10,6 +10,7 @@
 #include "commands.h"
 #include "common/error.h"
 #include "common/fourcc.h"
+#include "media/audio.h"
 
 #define FCC(a, b, c, d) mmioFOURCC(a, b, c, d)
 
@@ -49,20 +50,6 @@ static void print_flags(DWORD value, const struct flag_name *names)
 	printf("\n");
 }
 
-static WORD rd16(const BYTE *p)
-{
-	WORD v;
-	memcpy(&v, p, 2);
-	return v;
-}
-
-static DWORD rd32(const BYTE *p)
-{
-	DWORD v;
-	memcpy(&v, p, 4);
-	return v;
-}
-
 static void print_video_format(const struct avi_stream *s)
 {
 	const BITMAPINFOHEADER *bih = avi_stream_bih(s);
@@ -94,16 +81,27 @@ static void print_video_format(const struct avi_stream *s)
 
 static void print_audio_format(const struct avi_stream *s)
 {
-	const BYTE *w = s->format;
+	const WAVEFORMATEX *wf = avi_stream_wfx(s);
+	char desc[AUDIO_DESC_SIZE];
 
-	if (s->format_size < 16) {
+	if (!wf) {
 		printf("    format: %lu bytes\n", (unsigned long)s->format_size);
 		return;
 	}
-	printf("    format: tag 0x%04x, %u channels, %lu Hz, %u bits, "
-	       "block %u, %lu bytes/s\n", rd16(w), rd16(w + 2),
-	       (unsigned long)rd32(w + 4), rd16(w + 14), rd16(w + 12),
-	       (unsigned long)rd32(w + 8));
+	printf("    format: %s\n", audio_format_desc(wf, s->format_size, desc));
+	printf("            tag 0x%04x, %u bits, block %u, %lu bytes/s",
+	       wf->wFormatTag, wf->wBitsPerSample, wf->nBlockAlign,
+	       (unsigned long)wf->nAvgBytesPerSec);
+	if (wf->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+	    wf->cbSize >= sizeof(WAVEFORMATEXTENSIBLE) - sizeof(*wf)) {
+		const WAVEFORMATEXTENSIBLE *x = (const void *)wf;
+		printf(", speakers 0x%lx", (unsigned long)x->dwChannelMask);
+	} else if (wf->cbSize) {
+		printf(", %u bytes after the header", wf->cbSize);
+	}
+	printf("\n");
+	if (audio_format_check(wf, s->format_size))
+		printf("    warning: %s\n", vfw_error());
 }
 
 static void print_stream(const struct avi_file *avi, unsigned i, int chunks)
@@ -158,14 +156,22 @@ static void print_stream(const struct avi_file *avi, unsigned i, int chunks)
 		       "changes)", s->frames, keys, zero, s->nchunks - s->frames);
 	printf(", %llu bytes, largest %lu\n", (unsigned long long)bytes,
 	       (unsigned long)max);
+	if (h->dwRate && h->dwScale)
+		printf("    duration: %.3f s (%llu %s)\n",
+		       (double)(avi_stream_time(s, s->length) -
+				avi_stream_time(s, 0)) / 1e7,
+		       (unsigned long long)s->length,
+		       h->fccType == FCC('v', 'i', 'd', 's') ? "frames" :
+		       h->dwSampleSize ? "blocks" : "chunks");
 
 	if (!chunks)
 		return;
 	for (size_t c = 0; c < s->nchunks; c++) {
 		const struct avi_chunk *k = &s->chunks[c];
-		printf("      %6zu  %s  offset %12llu  size %9lu%s\n", c,
-		       fourcc_str(k->id, a), (unsigned long long)k->offset,
+		printf("      %6zu  %s  offset %12llu  size %9lu  at %10.4f s%s\n",
+		       c, fourcc_str(k->id, a), (unsigned long long)k->offset,
 		       (unsigned long)k->size,
+		       (double)avi_stream_time(s, k->start) / 1e7,
 		       k->flags & AVIIF_KEYFRAME ? "  key" : "");
 	}
 }

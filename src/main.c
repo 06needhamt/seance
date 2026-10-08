@@ -26,8 +26,9 @@ static const struct command commands[] = {
 	  cmd_info },
 	{ "avi", "<in.avi> [--chunks]",
 	  "show an AVI file's headers, streams and index", cmd_avi },
-	{ "convert", "<in.avi> -o <out>",
-	  "write uncompressed video as Y4M, BMP or raw frames", cmd_convert },
+	{ "convert", "<in.avi|wav> -o <out>",
+	  "write uncompressed video as Y4M, BMP or raw frames, or audio as "
+	  "WAV, PCM or AVI", cmd_convert },
 	{ "list", "[--no-open] [--all]",
 	  "list the codecs and DirectShow filters registered", cmd_list },
 	{ "probe", "<dll|fourcc> [in.avi]",

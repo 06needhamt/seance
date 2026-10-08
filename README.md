@@ -41,8 +41,10 @@ is not supported or not yet exercised, are in
 renderer filters, DMOs, capture devices, a real Filter Graph Manager, network
 access and hardware decoding.
 
-DMOs are found, registered and run for video decoding and encoding as well;
-audio decoders and encoders (filters and DMOs) are planned in
+DMOs are found, registered and run for video decoding and encoding as well.
+Audio files are read and written without a codec: WAV (and RF64), raw PCM
+and AVI audio streams, through `avi` and `convert`. Audio decoders and
+encoders (filters and DMOs) are the next phases of
 [docs/DMO_AUDIO_PLAN.md](docs/DMO_AUDIO_PLAN.md).
 
 ## Prerequisites
@@ -188,6 +190,42 @@ It accepts these inputs:
 
 YUV is BT.601 limited range, and empty (dropped) frames repeat the previous one.
 Compressed streams need a codec: see `decode`.
+
+`--start` takes a frame number or a time (`2.5s`, `1500ms`, `1:02.5`), and
+`--duration`, like `--frames`, limits the output, as frames or a time.
+
+#### Audio
+
+```sh
+build/seance convert clip.avi -o clip.wav            # its audio stream
+build/seance convert clip.avi -o part.pcm --start 1:30 --duration 10s
+build/seance convert music.wav -o music.avi --sample-format s24
+build/seance convert --raw s16 --rate 48000 --channels 2 in.pcm -o in.wav
+build/seance convert music.wav -o - | ffplay -
+```
+
+`convert` copies audio when the input has no video (a WAV, raw PCM, or an
+AVI with only audio), the output is `.wav`, `.pcm` or `.avi`, or `--audio`
+or a `--stream` that is audio is given:
+
+| Output | Contents |
+|---|---|
+| `.wav` | a WAV file, becoming RF64 past 4 GB; on stdout (`-`) a WAV whose sizes say "to the end" |
+| `.pcm` | the audio data alone |
+| `.avi` | an AVI file with the one audio stream |
+
+The input is a WAV file (RIFF, RF64 or BW64; from stdin with `-`), an AVI
+file's audio stream, or raw PCM described by `--raw <sample format>`,
+`--rate` and `--channels`. PCM is any of `u8`, `s16`, `s24`, `s32`, `f32`
+and `f64`, plain or `WAVE_FORMAT_EXTENSIBLE`, and `--sample-format` converts
+it (as FFmpeg does). Compressed audio (MP3, AC-3, ADPCM, ...) is copied as
+it is, with its format, and an AVI keeps its stream's timing. `--start` and
+`--duration` take a sample count or a time, and cut PCM to the sample and
+compressed audio to the chunk.
+
+`avi` describes an audio stream's format ("PCM s16, 2 channels, 44100 Hz",
+"MP3 (0x0055), 2 channels, 44100 Hz, 128 kb/s"), its speaker mask, and
+every stream's duration; with `--chunks`, each chunk's time.
 
 ### Codecs: `probe` and `list`
 

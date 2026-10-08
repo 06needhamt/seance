@@ -41,6 +41,42 @@ fails $emu "$harness" register
 fails $emu "$harness" register --dry-run "$junk"
 fails $emu "$harness" unregister
 
+# Audio without a codec: raw PCM to WAV, to AVI and back, exactly.
+work=$(mktemp -d)
+head -c 9600 /dev/urandom >"$work/in.pcm"
+$emu "$harness" convert --raw s16 --rate 8000 --channels 2 "$work/in.pcm" \
+	-o "$work/a.wav" 2>/dev/null
+$emu "$harness" convert "$work/a.wav" -o "$work/a.avi" 2>/dev/null
+$emu "$harness" avi "$work/a.avi" | grep -q "PCM s16, 2 channels, 8000 Hz"
+$emu "$harness" avi "$work/a.avi" | grep -q "duration: 0.300 s (2400 blocks)"
+$emu "$harness" convert "$work/a.avi" -o "$work/b.wav" 2>/dev/null
+cmp "$work/a.wav" "$work/b.wav"
+$emu "$harness" convert "$work/b.wav" -o "$work/b.pcm" 2>/dev/null
+cmp "$work/in.pcm" "$work/b.pcm"
+# Through pipes, and to the sample: 0.1 s from sample 100.
+$emu "$harness" convert - -o - --format pcm <"$work/a.wav" 2>/dev/null |
+	cmp - "$work/in.pcm"
+$emu "$harness" convert "$work/a.wav" -o - 2>/dev/null |
+	$emu "$harness" convert - -o "$work/c.pcm" 2>/dev/null
+cmp "$work/in.pcm" "$work/c.pcm"
+$emu "$harness" convert "$work/a.wav" -o "$work/d.pcm" --start 100 \
+	--duration 0.1s 2>/dev/null
+tail -c +401 "$work/in.pcm" | head -c 3200 | cmp - "$work/d.pcm"
+# s16 to f32 and back loses nothing.
+$emu "$harness" convert "$work/a.wav" -o "$work/f.wav" --sample-format f32 \
+	2>/dev/null
+$emu "$harness" convert "$work/f.wav" -o "$work/g.pcm" --sample-format s16 \
+	2>/dev/null
+cmp "$work/in.pcm" "$work/g.pcm"
+fails $emu "$harness" convert --raw s16 "$work/in.pcm" -o "$work/x.wav"
+fails $emu "$harness" convert --raw s17 --rate 1 --channels 1 "$work/in.pcm" \
+	-o "$work/x.wav"
+fails $emu "$harness" convert "$work/a.wav" -o "$work/x.wav" --frames 3
+fails $emu "$harness" convert "$work/a.wav" -o "$work/x.wav" --start 1.5x
+fails $emu "$harness" convert "$work/a.wav" -o "$work/x.mp3"
+fails $emu "$harness" convert "$work/a.avi" -o "$work/x.y4m"
+rm -rf "$work"
+
 if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	$emu "$harness" info "$fixtures/pe_dep.dll" >/dev/null
 	$emu "$harness" probe "$fixtures/testcodec.dll" | grep -q "handler 'TST0'"

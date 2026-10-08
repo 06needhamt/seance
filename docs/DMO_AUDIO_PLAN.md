@@ -291,11 +291,50 @@ include/win32/mmreg.h    WAVEFORMATEXTENSIBLE, format tags, KSDATAFORMAT GUIDs
      (`IWMCodecPrivateData`) and `STRICT`. Its encoder has `ICodecAPI` (GOP
      size) and `IPersistStream`. `test_dmo` runs each mode in a child
      process, since the fixture reads them as it first sees the environment.
-3. **Audio media and I/O.** Shared media-type layer, WAV reader and writer,
-   AVI audio streams in the reader and writer, `convert` and `avi` showing
-   audio streams. Milestone: `test_wav`, `test_avi` audio cases (including
-   truncated and corrupt files, as for video); a WAV round-trips through
-   `convert`, and `seance avi` lists an FFmpeg-made AVI's audio stream.
+3. **Audio media and I/O.** (Done.) Shared media-type layer, WAV reader and
+   writer, AVI audio streams in the reader and writer, `convert` and `avi`
+   showing audio streams. Milestone: `test_wav`, `test_avi` audio cases
+   (including truncated and corrupt files, as for video); a WAV round-trips
+   through `convert`, and `seance avi` lists an FFmpeg-made AVI's audio
+   stream.
+   - `src/media/audio.c`: format tags (extensible ones by `SubFormat`),
+     checks, descriptions, PCM formats in their plain and extensible forms,
+     the preference list decoders will be offered, `AM_MEDIA_TYPE`
+     conversion both ways, PCM sample conversion (as FFmpeg converts) and
+     overflow-free time arithmetic. The video media types stayed in
+     `dshow/mediatype.c`, which both backends already share.
+   - `src/in/wav.c` reads RIFF, RF64 and BW64 front to back, so standard
+     input works, and takes the sizes streaming writers leave (0 and
+     0xffffffff) as "to the end". `src/out/wav.c` writes a 16-byte `fmt`
+     for plain PCM, a `fact` chunk for everything else, and reserves a
+     `JUNK` chunk that becomes `ds64` if the file passes 4 GB.
+   - Audio has its own sources and sinks (`src/in/audio.c`,
+     `src/out/audio.c`) beside the video ones, since a source's format is a
+     `WAVEFORMATEX` rather than a `BITMAPINFOHEADER`: WAV, an AVI's audio
+     stream and raw PCM in; WAV, raw PCM and AVI out, converting PCM
+     sample formats on the way.
+   - The AVI writer takes several streams (`avi_writer_create`,
+     `avi_writer_add_video`, `avi_writer_add_audio`, `avi_writer_write`),
+     each with its own `ix##` and super index; `avi_writer_open` and
+     `avi_writer_add` remain for one video stream. PCM is counted in
+     sample frames (`dwScale` 1, `dwRate` the sample rate), as FFmpeg
+     writes it, other constant-rate audio in blocks, and variable-rate
+     audio a frame a chunk.
+   - The reader gives each chunk its place in the stream (`start`, in the
+     stream's units) and each stream its length, `avi_stream_time` turns
+     them into time, and an audio `strf` comes out as at least 18 bytes
+     with a `cbSize` that fits.
+   - `convert` handles audio: `--audio`, `--sample-format`, `--raw` with
+     `--rate` and `--channels`, and `--start`/`--duration` as sample counts
+     or times (`2.5s`, `1500ms`, `1:02.5`), also for video. `avi` prints
+     audio formats, speaker masks, durations and chunk times.
+   - Tests: `test_audio`, `test_wav` (round trips, RF64, pipes, files
+     other writers make, damaged files, sources and sinks), `test_avi`
+     (video with interleaved audio by every index kind and over several
+     RIFFs, audio alone at constant and variable rates, odd formats, and
+     the damage run over a file with audio), `test_cli`, smoke cases, and
+     `validate_media.sh` comparing every PCM format, sample conversion,
+     trimming and MP3 copying with FFmpeg.
 4. **Audio through DirectShow.** The host's per-major-type table, audio
    roles, `decode`/`encode` with `--audio`/`--stream`/`--duration`.
    Milestone: `TSTA` encode → decode through `testfilter.ax` round-trips a
