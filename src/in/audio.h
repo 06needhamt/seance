@@ -10,8 +10,9 @@
  * WAV and raw data come in whole blocks (nBlockAlign), so a packet never
  * splits a PCM sample frame or a block of a compressed format: PCM in runs
  * of many frames, a compressed format a block (its packet) at a time, or
- * for one with blocks of a byte, 4 KB at a time. Only the last packet of
- * compressed audio may end in part of a block.
+ * for one whose block is under 64 bytes (a byte for an MP3 stream), about
+ * 4 KB at a time. Only the last packet of compressed audio may end in part
+ * of a block.
  */
 #ifndef VFW_IN_AUDIO_H
 #define VFW_IN_AUDIO_H

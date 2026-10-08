@@ -20,12 +20,14 @@
 
 #define CRTFN(ret) static ret STUB_CDECL
 
-/* <string.h>, straight to glibc: same signature, same semantics. */
-CRTFN(void *) crt_memcpy(void *dst, const void *src, size_t n) { return memcpy(dst, src, n); }
-CRTFN(void *) crt_memmove(void *dst, const void *src, size_t n) { return memmove(dst, src, n); }
-CRTFN(void *) crt_memset(void *dst, int c, size_t n) { return memset(dst, c, n); }
-CRTFN(int) crt_memcmp(const void *a, const void *b, size_t n) { return memcmp(a, b, n); }
-CRTFN(void *) crt_memchr(const void *s, int c, size_t n) { return memchr(s, c, n); }
+/* <string.h>, straight to glibc: same signature, same semantics, except
+ * that msvcrt takes a null pointer with a length of zero (codecs pass
+ * one), which C leaves undefined. */
+CRTFN(void *) crt_memcpy(void *dst, const void *src, size_t n) { return n ? memcpy(dst, src, n) : dst; }
+CRTFN(void *) crt_memmove(void *dst, const void *src, size_t n) { return n ? memmove(dst, src, n) : dst; }
+CRTFN(void *) crt_memset(void *dst, int c, size_t n) { return n ? memset(dst, c, n) : dst; }
+CRTFN(int) crt_memcmp(const void *a, const void *b, size_t n) { return n ? memcmp(a, b, n) : 0; }
+CRTFN(void *) crt_memchr(const void *s, int c, size_t n) { return n ? memchr(s, c, n) : NULL; }
 
 CRTFN(size_t) crt_strlen(const char *s) { return strlen(s); }
 CRTFN(char *) crt_strcpy(char *d, const char *s) { return strcpy(d, s); }

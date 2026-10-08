@@ -3,8 +3,10 @@
 # Runs `info` and `probe` over every DLL in a directory of codecs you supply
 # (*.dll, *.drv, *.ax, *.acm, any case), and reports for each whether it
 # parses, which of its imports aren't implemented, and whether it opens and
-# answers ICM_GETINFO (a DirectShow server is reported with its filters). Nothing specific to any codec is checked. It fails
-# only if the harness itself crashes or hangs, or a file can't be parsed.
+# answers ICM_GETINFO. A DirectShow or DMO server is reported with its
+# filters or DMOs and what they are (video or audio decoders and encoders).
+# Nothing specific to any codec is checked. It fails only if the harness
+# itself crashes or hangs, or a file can't be parsed.
 #
 # usage: tests/samples.sh <seance> <dir> [<timeout in seconds>]
 set -u
@@ -57,8 +59,16 @@ for f in "$dir"/*; do
 		continue
 	fi
 	handler=$(sed -n "s/.*handler '\\(.*\\)'.*/\\1/p" "$out" | head -n 1)
-	if grep -q '^DirectShow server:' "$out"; then
-		state="DirectShow server, $(grep -c '^  {' "$out") filter(s)"
+	if grep -q '^DirectShow server:\|^DMO server:' "$out"; then
+		kind=$(sed -n 's/^\(.*\) server:.*/\1/p' "$out" | head -n 1)
+		dmos=$(grep -c '^      DMO, ' "$out")
+		filters=$(($(grep -c '^  {' "$out") - dmos))
+		# The roles, counted: "1 video decoder, 2 audio encoders".
+		roles=$(grep -o '^      \(DMO, \)\?\(video\|audio\) \(decoder\|encoder\)' \
+			"$out" | sed 's/^ *\(DMO, \)\?//' | sort | uniq -c |
+			awk '{ printf "%s%d %s %s%s", (NR > 1 ? ", " : ""), $1,
+			       $2, $3, ($1 > 1 ? "s" : "") }')
+		state="$kind server, $filters filter(s), $dmos DMO(s)${roles:+: $roles}"
 	elif [ $rc -eq 0 ]; then
 		state="opens as '${handler:-?}'"
 	else

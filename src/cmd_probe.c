@@ -163,6 +163,27 @@ static void probe_audio(const char *path, const struct xform_class *c,
 						    choices, 16);
 		int any = 0;
 		printf("    outputs accepted for %s:", input);
+		/* The first way of naming the input that it takes. */
+		for (unsigned v = 1; SUCCEEDED(hr); v++) {
+			struct xform *x = NULL;
+			AM_MEDIA_TYPE out = {0};
+			size_t csize = choices[0].Format.cbSize ?
+				       sizeof(choices[0]) : sizeof(WAVEFORMATEX);
+			int taken = SUCCEEDED(xform_create(path, c, &x)) &&
+				    SUCCEEDED(audio_wfx_to_mt(&choices[0].Format,
+							      csize, &out)) &&
+				    SUCCEEDED(xform_connect(x, &in, &out, NULL,
+							    NULL));
+			xform_close(x);
+			dshow_free_media_type(&out);
+			if (taken)
+				break;
+			AM_MEDIA_TYPE next;
+			if (audio_input_variant(wf, size, v, &next) != S_OK)
+				break;
+			dshow_free_media_type(&in);
+			in = next;
+		}
 		for (size_t i = 0; SUCCEEDED(hr) && i < n; i++) {
 			struct xform *x = NULL;
 			AM_MEDIA_TYPE out = {0};

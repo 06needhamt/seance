@@ -4,7 +4,8 @@
 This file records compatibility gaps found by running `tests/samples.sh`
 against third-party codec and DirectShow binaries. It is an observation log,
 not a promise to support every component in a tested package: seance's
-DirectShow scope remains video transform decoders and encoders.
+DirectShow and DMO scope is transform decoders and encoders, of video and
+(since the DMO/audio plan) of audio.
 
 ## LAVFilters 0.83 (32-bit)
 
@@ -124,7 +125,7 @@ wrong layout in `_fstat` and is now MSVCRT's.
 
 | Component | Limit |
 |---|---|
-| `LAVAudio.ax`, `LAVSplitter.ax` | They load and register, but audio decoders and splitters are outside the DirectShow scope (video transform decoders and encoders), so nothing drives them. |
+| `LAVSplitter.ax` | It loads and registers, but splitters are outside the scope (transform decoders and encoders), so nothing drives it. `LAVAudio.ax` now decodes: see below. |
 | Network | Winsock starts and resolves numeric addresses, but no socket can be created: `socket` fails as if the network were down, so FFmpeg's protocols find nothing reachable. |
 | CryptoAPI hashes, keys; NCrypt | There is no hashing algorithm to create and no key storage provider to open. |
 | Hardware decoding | Every route (DXVA2, D3D11, Quick Sync, CUDA) reports no hardware and LAV decodes in software. |
@@ -133,6 +134,67 @@ Not yet exercised: VC-1 / WMV3 (no encoder to make a stream with here),
 interlaced and field-coded streams, 10-bit and 4:4:4 sources (the standard
 output list is 8-bit), more than one video stream, and LAV Video's other
 settings (format selection, deinterlacing, dithering).
+
+### LAV Audio (DMO/audio plan, Phase 6)
+
+Tested on 2026-10-08 with the same package, `tests/audio_codecs.sh`
+comparing LAV Audio with FFmpeg 6.1.1's own decoding of streams FFmpeg made
+in AVI files: stereo at 44100 Hz and 5.1 at 48000 Hz (a different tone in
+each channel), decoded to float and to 16-bit:
+
+```sh
+printf 'Windows Registry Editor Version 5.00\n\n[HKEY_CURRENT_USER\\Software\\LAV\\Audio\\Formats]\n"wma"=dword:00000001\n' >lav.reg
+VFW_REGISTRY=$PWD/lav.reg \
+  sh tests/audio_codecs.sh build/seance /tmp/lavfilters/LAVAudio.ax /tmp/ac
+```
+
+| Codec | Against FFmpeg (float; 16-bit) | Notes |
+|---|---|---|
+| MP3 | identical; identical | |
+| FLAC | identical; identical | LAV gives 16-bit, its own format, whatever is asked; converted back exactly |
+| MS ADPCM, A-law | identical; identical | |
+| AC-3, E-AC-3 | 142-143 dB; 107-114 dB | float rounding; 16-bit by rounding LAV's float |
+| AAC | 141 dB; 106-108 dB | |
+| Vorbis | 141 dB; 106-108 dB | once offered as `Vorbis2` with a `VORBISFORMAT2` (see below) |
+| Opus | 146-148 dB; 109-111 dB | 648 more samples: the end padding Matroska tells FFmpeg to trim, which AVI can't carry |
+| WMA (v2) | 141 dB; 107 dB | needs LAV's `wma` format setting (off by default: `VFW_E_UNSUPPORTED_AUDIO`); 2048 fewer samples, the frame FFmpeg's decoder gives when flushed at the end |
+| MP2 | 72-77 dB; 70-75 dB | LAV's MPEG audio decoder rounds differently from FFmpeg 6.1's, by about a 16-bit step |
+| IMA ADPCM | 46 dB (stereo), 36 dB (5.1) | a few 16-bit steps, growing through each block and reset at the next: the two libavcodec versions expand IMA nibbles differently; block and sample counts agree |
+
+Every 5.1 stream comes out with its channels in order. What the run found,
+all fixed with tests:
+
+- **Vorbis** in AVI (FFmpeg's tag `0x566f`, its three headers Xiph-laced
+  after the `WAVEFORMATEX`) wasn't taken: LAV registers Vorbis as
+  `Vorbis2` with `FORMAT_VorbisFormat2`. Decoders are now offered a
+  stream's format in each form decoders know it by
+  (`audio_input_variant`): as it is, then AC-3 as `MEDIASUBTYPE_DOLBY_AC3`,
+  DTS as `MEDIASUBTYPE_DTS`, MPEG audio as `MPEG1Audio`/`MPEG2_AUDIO`,
+  AAC's other tags as `RAW_AAC1`, Vorbis as `VORBISFORMAT2`. `decode auto`
+  matches registered decoders on any of these subtypes.
+- **More than two channels** of a compressed format: FFmpeg writes them as
+  `WAVE_FORMAT_EXTENSIBLE`, the codec's extra data after the extensible
+  part. LAV took 5.1 AAC that way and decoded nothing, and refused 5.1 FLAC,
+  Vorbis and Opus. Such formats are now offered unwrapped first (a
+  `WAVEFORMATEX` of the real tag with the codec's own extra data), as
+  splitters give them, then as they are.
+- **Buffers for other format types**: the host sized audio input buffers
+  only for `FORMAT_WaveFormatEx`, so a `VORBISFORMAT2` connection got a
+  one-byte buffer (`VFW_E_BUFFER_OVERFLOW`). Any audio input now gets at
+  least a megabyte.
+- **Format changes counted**: LAV attaches its output type to sample after
+  sample, unchanged; `decode` counted each as a change. Only a type that
+  differs counts now (FLAC's switch to 16-bit, say).
+
+Not working: FLAC in a WAV file (as FFmpeg writes it, with a block of 4
+bytes, so no frame boundaries) decodes only its first frames, since LAV
+Audio needs whole frames and only a splitter would find them; FLAC in AVI
+decodes exactly. `tests/samples.sh` over the package reports LAV Audio as
+one audio decoder and LAV Video as one video decoder.
+
+No DMOs were tried: Windows' own (the WMA, WMV and MP3 DMOs) aren't
+redistributable, and none were at hand. `testdmo.dll` covers the DMO
+audio paths, and any DMO DLL can be run through `tests/audio_codecs.sh`.
 
 ## In-repository baseline
 

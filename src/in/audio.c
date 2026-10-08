@@ -341,11 +341,11 @@ int audio_source_read(struct audio_source *s, const BYTE **data,
 
 	/*
 	 * PCM in runs of whole sample frames; a compressed format a block
-	 * (its packet) at a time, or for a byte stream (a block of 1), a few
-	 * kilobytes.
+	 * (its packet) at a time, or where the block is too small to be one
+	 * (1 for an MP3 stream, 4 as FFmpeg gives FLAC), a few kilobytes.
 	 */
 	size_t want = s->pcm ? PACKET_BYTES / s->block * s->block :
-		      s->block > 1 ? s->block : 4096;
+		      s->block >= 64 ? s->block : 4096 / s->block * s->block;
 	long r;
 
 	if (!want)

@@ -33,20 +33,21 @@ minimal source/sink graph, and `probe`, `decode` and `encode` for filters,
 including dynamic format changes, `ICodecAPI` and `IAMVideoCompression`
 encoder controls, persisted filter state and MPEG-1/MPEG-2 media types.
 
+DMOs are found, registered and run for video decoding and encoding as well,
+and audio decoders and encoders, DirectShow filters and DMOs, run through
+`decode` and `encode` (see [docs/DMO_AUDIO_PLAN.md](docs/DMO_AUDIO_PLAN.md)).
+Audio files are read and written without a codec: WAV (and RF64), raw PCM
+and AVI audio streams, through `avi` and `convert`.
+
 The real-world check is the LAV Filters 0.83 package (32-bit): LAV Video
-loads, registers, connects and decodes 18 codecs identically to FFmpeg, and
+loads, registers, connects and decodes 18 codecs identically to FFmpeg; LAV
+Audio decodes MP3, FLAC, MS ADPCM and A-law identically and AC-3, E-AC-3,
+AAC, Vorbis, Opus and WMA to within float rounding, in stereo and 5.1; and
 the whole package loads with no unimplemented imports. The results, and what
 is not supported or not yet exercised, are in
-[MISSING_FEATURES.md](MISSING_FEATURES.md). Out of scope: audio, splitter and
-renderer filters, DMOs, capture devices, a real Filter Graph Manager, network
-access and hardware decoding.
-
-DMOs are found, registered and run for video decoding and encoding as well.
-Audio files are read and written without a codec: WAV (and RF64), raw PCM
-and AVI audio streams, through `avi` and `convert`. Audio decoders and
-encoders, DirectShow filters and DMOs, run through `decode` and `encode`.
-Trying real codecs is the last phase of
-[docs/DMO_AUDIO_PLAN.md](docs/DMO_AUDIO_PLAN.md).
+[MISSING_FEATURES.md](MISSING_FEATURES.md). Out of scope: splitter and
+renderer filters, capture devices, a real Filter Graph Manager, Media
+Foundation transforms, network access and hardware decoding.
 
 ## Prerequisites
 
@@ -653,9 +654,21 @@ tests/samples.sh build/seance ~/codecs   # or -DVFW_SAMPLES_DIR=~/codecs
 `tests/samples.sh` runs `info` and `probe` over every DLL in a directory
 you supply. For each it reports how many of its imports the harness
 doesn't implement yet, how many DLLs it needs from disk, and whether it
-opens and under which FOURCC. It asserts nothing about any particular
-codec; it fails only when the harness can't parse a file, or crashes or
-hangs on one.
+opens and under which FOURCC, or for a DirectShow or DMO server, its
+filters and DMOs and what they are (video or audio decoders and encoders).
+It asserts nothing about any particular codec; it fails only when the
+harness can't parse a file, or crashes or hangs on one.
+
+```sh
+tests/audio_codecs.sh build/seance LAVAudio.ax /tmp/work
+```
+
+`tests/audio_codecs.sh` runs an audio decoder you supply over streams
+FFmpeg makes in AVI files (MP3, MP2, AC-3, E-AC-3, AAC, FLAC, Vorbis, Opus,
+WMA, ADPCM, A-law; stereo and 5.1), and reports for each how close it comes
+to FFmpeg's own decoding (the signal-to-distortion ratio) and whether the
+lengths agree. It fails when the harness crashes or hangs, or a stream
+decodes below 40 dB.
 
 ### Robustness
 

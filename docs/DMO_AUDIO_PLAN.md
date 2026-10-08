@@ -394,13 +394,33 @@ include/win32/mmreg.h    WAVEFORMATEXTENSIBLE, format tags, KSDATAFORMAT GUIDs
      checks that the two give the same packets, times and format and
      decode each other's. Smoke and `validate_media.sh` check the DMO
      encoder's AVI is byte for byte the filter's.
-6. **Real codecs and docs.** `tests/samples.sh` reports DMOs and audio
-   classes; LAV Audio decoding FFmpeg-made streams (MP3, AAC, AC-3, FLAC,
-   Vorbis, Opus) compared with `ffmpeg -f s16le`/`f32le` output; any DMOs the
-   user supplies (Windows' own are not redistributable, so never in the
-   repository), which is also where VC-1/WMV3 decoding would first be
+6. **Real codecs and docs.** (Done.) `tests/samples.sh` reports DMOs and
+   audio classes; LAV Audio decoding FFmpeg-made streams (MP3, AAC, AC-3,
+   FLAC, Vorbis, Opus) compared with `ffmpeg -f s16le`/`f32le` output; any
+   DMOs the user supplies (Windows' own are not redistributable, so never in
+   the repository), which is also where VC-1/WMV3 decoding would first be
    exercised. Results recorded in `MISSING_FEATURES.md`; README sections and
    status rows.
+   - `tests/audio_codecs.sh` makes the comparison repeatable for any
+     decoder: FFmpeg makes stereo and 5.1 streams of eleven codecs in AVI
+     files, and FFmpeg's `asdr` filter measures the decoder's float and
+     16-bit output against FFmpeg's own decoding. LAV Audio passes:
+     MP3, FLAC, MS ADPCM and A-law identical, AC-3, E-AC-3, AAC, Vorbis,
+     Opus and WMA within float rounding, MP2 and IMA ADPCM within a few
+     16-bit steps (libavcodec versions differ); details in
+     `MISSING_FEATURES.md`.
+   - The run found four things, all fixed: decoders want some formats
+     under other names (`audio_input_variant`: AC-3, DTS, MPEG audio, AAC
+     aliases, and Vorbis as `Vorbis2` with a `VORBISFORMAT2` built from
+     the Xiph-laced headers); compressed formats with more than two
+     channels, which FFmpeg wraps in `WAVE_FORMAT_EXTENSIBLE`, have to be
+     offered unwrapped; audio inputs of other format types needed buffers
+     too; and a type attached unchanged to every sample isn't a change.
+     A compressed WAV whose block is too small to be a packet (FFmpeg's
+     FLAC) is read 4 KB at a time, which still doesn't give LAV whole
+     FLAC frames: that needs a splitter.
+   - No DMOs were at hand to try; Windows' WMA, WMV and MP3 DMOs would be
+     the obvious ones, through `tests/audio_codecs.sh` and `probe`.
 
 ## Possible follow-on (not in this plan)
 

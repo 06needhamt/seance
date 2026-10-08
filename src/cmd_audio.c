@@ -41,10 +41,49 @@ static int write_bytes(const char *path, const void *data, size_t size)
 	return failed ? -1 : 0;
 }
 
-/* A registered audio decoder (a filter, else a DMO) of this format tag. */
-static char *registered_decoder(WORD tag, CLSID *clsid)
+/* The subtypes a format may be offered as (audio_input_variant). */
+static size_t variant_subtypes(const WAVEFORMATEX *wf, size_t size,
+			       GUID *out, size_t max)
 {
-	GUID subtype = WAVE_FORMAT_SUBTYPE_INIT(tag), null_guid = { 0 };
+	size_t n = 0;
+
+	for (unsigned v = 0; n < max; v++) {
+		AM_MEDIA_TYPE mt;
+		HRESULT hr = audio_input_variant(wf, size, v, &mt);
+		if (hr == S_FALSE)
+			break;
+		if (SUCCEEDED(hr))
+			out[n++] = mt.subtype;
+		dshow_free_media_type(&mt);
+	}
+	return n;
+}
+
+static int takes(const GUID *major, const GUID *minor, const GUID *subtypes,
+		 size_t n)
+{
+	static const GUID null_guid;
+
+	if (memcmp(major, &MEDIATYPE_Audio, sizeof(GUID)) &&
+	    memcmp(major, &null_guid, sizeof(GUID)))
+		return 0;
+	if (!memcmp(minor, &null_guid, sizeof(GUID)))
+		return 1;
+	for (size_t i = 0; i < n; i++)
+		if (!memcmp(minor, &subtypes[i], sizeof(GUID)))
+			return 1;
+	return 0;
+}
+
+/*
+ * A registered audio decoder (a filter, by merit, else a DMO) of the
+ * format, under any of the subtypes it may be offered as.
+ */
+static char *registered_decoder(const WAVEFORMATEX *wf, size_t size,
+				CLSID *clsid)
+{
+	GUID subtypes[8];
+	size_t nsub = variant_subtypes(wf, size, subtypes, 8);
 	struct dshow_registered *filters = NULL;
 	size_t count = dshow_registered_filters(&filters);
 	const struct dshow_registered *best = NULL;
@@ -58,14 +97,10 @@ static char *registered_decoder(WORD tag, CLSID *clsid)
 		for (size_t p = 0; p < f->npins && !accepts; p++) {
 			if (f->pins[p].flags & REG_PINFLAG_B_OUTPUT)
 				continue;
-			for (size_t t = 0; t < f->pins[p].ntypes; t++) {
-				const struct qz_type *type = &f->pins[p].types[t];
-				if ((!memcmp(&type->major, &MEDIATYPE_Audio, sizeof(GUID)) ||
-				     !memcmp(&type->major, &null_guid, sizeof(GUID))) &&
-				    (!memcmp(&type->minor, &subtype, sizeof(GUID)) ||
-				     !memcmp(&type->minor, &null_guid, sizeof(GUID))))
-					accepts = 1;
-			}
+			for (size_t t = 0; t < f->pins[p].ntypes && !accepts; t++)
+				accepts = takes(&f->pins[p].types[t].major,
+						&f->pins[p].types[t].minor,
+						subtypes, nsub);
 		}
 		if (accepts && (!best || f->merit > best->f.merit))
 			best = &filters[i];
@@ -85,8 +120,8 @@ static char *registered_decoder(WORD tag, CLSID *clsid)
 		if (!dmos[i].path || dmo_role(d) != DMO_ROLE_AUDIO_DECODER)
 			continue;
 		for (size_t t = 0; t < d->nin && !path; t++)
-			if (!memcmp(&d->in[t].subtype, &subtype, sizeof(GUID)) ||
-			    !memcmp(&d->in[t].subtype, &null_guid, sizeof(GUID))) {
+			if (takes(&d->in[t].type, &d->in[t].subtype, subtypes,
+				  nsub)) {
 				path = path_to_unix(dmos[i].path);
 				*clsid = d->clsid;
 			}
@@ -174,6 +209,8 @@ struct decode_sink {
 	enum audio_sample from;		/* the PCM the decoder gives now */
 	WORD channels, block;		/* block: of what it gives now */
 	DWORD rate;
+	WAVEFORMATEX *now;		/* what it gives now */
+	size_t now_size;
 	BYTE *buf;
 	size_t cap;
 	uint64_t at, first, last;	/* sample frames */
@@ -184,6 +221,8 @@ struct decode_sink {
 /*
  * A new output type: more PCM of the same channels and rate can be
  * converted to what the file holds; anything else a file can't follow.
+ * Some decoders (LAV Audio) attach their type to sample after sample;
+ * only a type that differs counts as a change.
  */
 static HRESULT decode_change(struct decode_sink *d, const AM_MEDIA_TYPE *mt)
 {
@@ -193,6 +232,11 @@ static HRESULT decode_change(struct decode_sink *d, const AM_MEDIA_TYPE *mt)
 	HRESULT hr = audio_mt_to_wfx(mt, &wf, &size);
 	enum audio_sample s = SUCCEEDED(hr) ? audio_format_sample(wf, size) :
 			      AUDIO_NONE;
+
+	if (SUCCEEDED(hr) && size == d->now_size && !memcmp(wf, d->now, size)) {
+		free(wf);
+		return S_OK;
+	}
 
 	if (s == AUDIO_NONE || wf->nChannels != d->channels ||
 	    wf->nSamplesPerSec != d->rate) {
@@ -206,7 +250,9 @@ static HRESULT decode_change(struct decode_sink *d, const AM_MEDIA_TYPE *mt)
 	d->from = s;
 	d->block = wf->nBlockAlign;
 	d->changes++;
-	free(wf);
+	free(d->now);
+	d->now = wf;
+	d->now_size = size;
 	return S_OK;
 }
 
@@ -257,27 +303,36 @@ static HRESULT decode_connect(struct xform *x, const WAVEFORMATEX *wf,
 			      size_t *out_size)
 {
 	WAVEFORMATEXTENSIBLE choices[16];
-	AM_MEDIA_TYPE in = { 0 };
-	HRESULT hr = audio_wfx_to_mt(wf, size, &in);
 	size_t n = audio_output_preferences(wf, size, want, choices, 16);
+	HRESULT hr = VFW_E_NO_ACCEPTABLE_TYPES, variant_hr;
+	int connected = 0;
 
-	if (FAILED(hr))
-		return hr;
-	hr = VFW_E_NO_ACCEPTABLE_TYPES;
-	for (size_t i = 0; i < n; i++) {
-		AM_MEDIA_TYPE mt;
-		size_t csize = choices[i].Format.cbSize ? sizeof(choices[i]) :
-			       sizeof(WAVEFORMATEX);
-		if (FAILED(audio_wfx_to_mt(&choices[i].Format, csize, &mt)))
-			continue;
-		hr = xform_connect(x, &in, &mt, decode_output, sink);
-		dshow_free_media_type(&mt);
-		if (SUCCEEDED(hr)) {
-			hr = audio_mt_to_wfx(xform_output_type(x), out, out_size);
+	/* Each way of naming the input, with each PCM output. */
+	for (unsigned v = 0; !connected; v++) {
+		AM_MEDIA_TYPE in;
+		variant_hr = audio_input_variant(wf, size, v, &in);
+		if (variant_hr == S_FALSE)
 			break;
+		if (FAILED(variant_hr)) {
+			if (!v)
+				return variant_hr;
+			continue;
 		}
+		for (size_t i = 0; i < n && !connected; i++) {
+			AM_MEDIA_TYPE mt;
+			size_t csize = choices[i].Format.cbSize ?
+				       sizeof(choices[i]) : sizeof(WAVEFORMATEX);
+			if (FAILED(audio_wfx_to_mt(&choices[i].Format, csize,
+						   &mt)))
+				continue;
+			hr = xform_connect(x, &in, &mt, decode_output, sink);
+			dshow_free_media_type(&mt);
+			connected = SUCCEEDED(hr);
+		}
+		dshow_free_media_type(&in);
 	}
-	dshow_free_media_type(&in);
+	if (connected)
+		hr = audio_mt_to_wfx(xform_output_type(x), out, out_size);
 	return hr;
 }
 
@@ -321,8 +376,7 @@ int decode_audio(const struct audio_codec_job *j)
 			fprintf(stderr, "seance: %s\n", vfw_error());
 			goto done;
 		}
-		WORD tag = audio_format_tag(wf, size);
-		if (!(found_path = registered_decoder(tag, &found_clsid))) {
+		if (!(found_path = registered_decoder(wf, size, &found_clsid))) {
 			fprintf(stderr, "seance: no registered decoder of %s\n",
 				in_desc);
 			goto done;
@@ -359,6 +413,12 @@ int decode_audio(const struct audio_codec_job *j)
 	}
 	sink.want = sink.from = audio_format_sample(connected, connected_size);
 	sink.block = connected->nBlockAlign;
+	if (!(sink.now = malloc(connected_size))) {
+		fprintf(stderr, "seance: out of memory\n");
+		goto done;
+	}
+	memcpy(sink.now, connected, connected_size);
+	sink.now_size = connected_size;
 	if (sink.want == AUDIO_NONE || !sink.block) {
 		fprintf(stderr, "seance: the %s's output (%s) isn't PCM seance "
 			"can write\n", xform_kind_name(x),
@@ -447,6 +507,7 @@ done:
 	xform_close(x);
 	audio_source_close(src);
 	free(connected);
+	free(sink.now);
 	free(sink.buf);
 	free(found_path);
 	return status;

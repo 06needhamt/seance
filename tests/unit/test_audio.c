@@ -292,6 +292,101 @@ static void test_media_types(void)
 	CHECK_EQ(audio_wfx_to_mt(wf, 10, &mt), E_INVALIDARG);
 }
 
+static void test_input_variants(void)
+{
+	AM_MEDIA_TYPE mt;
+	WAVEFORMATEX ac3 = { 0x2000, 2, 48000, 24000, 768, 0, 0 };
+	GUID ac3_tag = WAVE_FORMAT_SUBTYPE_INIT(0x2000);
+
+	/* AC-3: as its tag, then as MEDIASUBTYPE_DOLBY_AC3; then no more. */
+	CHECK_EQ(audio_input_variant(&ac3, sizeof(ac3), 0, &mt), S_OK);
+	CHECK(!memcmp(&mt.subtype, &ac3_tag, sizeof(GUID)));
+	ole_taskmem_free(mt.pbFormat);
+	CHECK_EQ(audio_input_variant(&ac3, sizeof(ac3), 1, &mt), S_OK);
+	CHECK(!memcmp(&mt.subtype, &MEDIASUBTYPE_DOLBY_AC3, sizeof(GUID)));
+	CHECK(!memcmp(&mt.formattype, &FORMAT_WaveFormatEx, sizeof(GUID)));
+	ole_taskmem_free(mt.pbFormat);
+	CHECK_EQ(audio_input_variant(&ac3, sizeof(ac3), 2, &mt), S_FALSE);
+	/* MPEG audio has two more; PCM none. */
+	ac3.wFormatTag = WAVE_FORMAT_MPEG;
+	CHECK_EQ(audio_input_variant(&ac3, sizeof(ac3), 2, &mt), S_OK);
+	CHECK(!memcmp(&mt.subtype, &MEDIASUBTYPE_MPEG2_AUDIO, sizeof(GUID)));
+	ole_taskmem_free(mt.pbFormat);
+	WAVEFORMATEXTENSIBLE x;
+	size_t xs = audio_pcm_format(AUDIO_S16, 2, 8000, 0, AUDIO_FORM_PLAIN, &x);
+	CHECK_EQ(audio_input_variant(&x.Format, xs, 1, &mt), S_FALSE);
+	CHECK_EQ(audio_input_variant(&x.Format, 10, 0, &mt), E_INVALIDARG);
+
+	/* Vorbis: its Xiph-laced headers (sizes 3, 260 and the rest) as
+	   VORBISFORMAT2. */
+	BYTE v[18 + 4 + 3 + 260 + 5];
+	WAVEFORMATEX *wf = (WAVEFORMATEX *)v;
+	memset(v, 0, sizeof(v));
+	wf->wFormatTag = 0x566f;
+	wf->nChannels = 2;
+	wf->nSamplesPerSec = 44100;
+	wf->cbSize = sizeof(v) - 18;
+	BYTE *e = v + 18;
+	e[0] = 2;
+	e[1] = 3;
+	e[2] = 255;
+	e[3] = 5;
+	for (int i = 0; i < 268; i++)
+		e[4 + i] = (BYTE)i;
+	CHECK_EQ(audio_input_variant(wf, sizeof(v), 1, &mt), S_OK);
+	static const GUID vorbis2 = { 0x8d2fd10b, 0x5841, 0x4a6b,
+		{ 0x89, 0x05, 0x58, 0x8f, 0xec, 0x1a, 0xde, 0xd9 } };
+	CHECK(!memcmp(&mt.subtype, &vorbis2, sizeof(GUID)));
+	CHECK_EQ(mt.cbFormat, 24 + 268);
+	if (mt.cbFormat == 24 + 268) {
+		DWORD h[6];
+		memcpy(h, mt.pbFormat, sizeof(h));
+		CHECK(h[0] == 2 && h[1] == 44100 && h[3] == 3 && h[4] == 260 &&
+		      h[5] == 5);
+		CHECK(!memcmp(mt.pbFormat + 24, e + 4, 268));
+	}
+	ole_taskmem_free(mt.pbFormat);
+	CHECK_EQ(audio_input_variant(wf, sizeof(v), 2, &mt), S_FALSE);
+	/* Lacing that doesn't fit isn't offered. */
+	e[3] = 250;
+	e[2] = 255;
+	e[1] = 255;
+	CHECK_EQ(audio_input_variant(wf, 18 + 6, 1, &mt), S_FALSE);
+
+	/* A compressed format in a WAVEFORMATEXTENSIBLE: unwrapped first. */
+	BYTE w[sizeof(WAVEFORMATEXTENSIBLE) + 3];
+	WAVEFORMATEXTENSIBLE *ext = (WAVEFORMATEXTENSIBLE *)w;
+	memset(w, 0, sizeof(w));
+	ext->Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+	ext->Format.nChannels = 6;
+	ext->Format.nSamplesPerSec = 48000;
+	ext->Format.cbSize = 22 + 3;
+	ext->dwChannelMask = 0x3f;
+	ext->SubFormat = (GUID)WAVE_FORMAT_SUBTYPE_INIT(0x2000);
+	w[sizeof(*ext)] = 7;
+	CHECK_EQ(audio_input_variant(&ext->Format, sizeof(w), 0, &mt), S_OK);
+	CHECK(!memcmp(&mt.subtype, &ac3_tag, sizeof(GUID)));
+	CHECK_EQ(mt.cbFormat, 18 + 3);
+	CHECK(mt.cbFormat == 21 && ((WAVEFORMATEX *)mt.pbFormat)->wFormatTag ==
+	      0x2000 && ((WAVEFORMATEX *)mt.pbFormat)->cbSize == 3 &&
+	      mt.pbFormat[18] == 7);
+	ole_taskmem_free(mt.pbFormat);
+	CHECK_EQ(audio_input_variant(&ext->Format, sizeof(w), 1, &mt), S_OK);
+	CHECK(!memcmp(&mt.subtype, &MEDIASUBTYPE_DOLBY_AC3, sizeof(GUID)));
+	CHECK_EQ(mt.cbFormat, 21);
+	ole_taskmem_free(mt.pbFormat);
+	CHECK_EQ(audio_input_variant(&ext->Format, sizeof(w), 2, &mt), S_OK);
+	CHECK_EQ(mt.cbFormat, sizeof(w));
+	ole_taskmem_free(mt.pbFormat);
+	CHECK_EQ(audio_input_variant(&ext->Format, sizeof(w), 3, &mt), S_FALSE);
+	/* PCM in one is left as it is. */
+	xs = audio_pcm_format(AUDIO_S24, 6, 48000, 0, AUDIO_FORM_USUAL, &x);
+	CHECK_EQ(audio_input_variant(&x.Format, xs, 0, &mt), S_OK);
+	CHECK_EQ(mt.cbFormat, 40);
+	ole_taskmem_free(mt.pbFormat);
+	CHECK_STR(audio_tag_name(0x566f), "Vorbis");
+}
+
 static void test_convert(void)
 {
 	int16_t s16[] = { 0, 1, -1, 32767, -32768, 12345, -12345, 256 };
@@ -381,6 +476,7 @@ int main(void)
 	test_desc();
 	test_preferences();
 	test_media_types();
+	test_input_variants();
 	test_convert();
 	test_ticks();
 	return test_summary("test_audio");
