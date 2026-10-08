@@ -1,0 +1,7 @@
+; SPDX-License-Identifier: GPL-2.0-only
+; DriverProc is exported undecorated, as installable drivers do.
+LIBRARY testacm.acm
+EXPORTS
+	DriverProc=DriverProc@20
+	testacm_open_count
+	testacm_stream_count

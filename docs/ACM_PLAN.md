@@ -290,12 +290,37 @@ A CRT-less mingw DLL like `testcodec.dll`, sharing `tsta.h`:
      msacm32 imports and a driver-enumeration callback.
      `test_vfw` and `test_advapi32` cover the table and its `Drivers32`
      view.
-2. **Fixture driver.** `testacm.acm` with its modes.
+2. **Fixture driver.** (Done.) `testacm.acm` with its modes.
    Milestone:
    - `test_msacm32` adds, enumerates, suggests and converts TSTA through
      msacm32, round trip byte-exact, in every mode, each in a child
      process (`test_rerun_prefix`).
    - Afterwards the open driver count is back to zero.
+   - `tests/fixtures/testacm.c`: PCM and TSTA tags with 45 standard
+     formats each (8000 to 48000 Hz; 1, 2 and 6 channels; 8, 16 and 24
+     bits), suggestions each way, and conversion with no state kept
+     between calls. Encoding makes a packet per 1024 frames; with
+     `ACM_STREAMCONVERTF_BLOCKALIGN` only whole packets, the rest left
+     for the caller, and with `ACM_STREAMCONVERTF_END` (or without
+     BLOCKALIGN) the short last one. Decoding takes whole packets and
+     leaves a cut one. `ACMDM_STREAM_SIZE` answers both ways: a source
+     size gets the most it could make, a destination size what fits in
+     whole packets.
+   - `tests/fixtures/acmdrv.h` has the driver-side definitions for the
+     fixture, since mingw-w64 has no `msacmdrv.h`; the round trips are
+     what check they agree with `include/win32/msacm.h`.
+   - Modes `TESTACM_STRICT`, `_NOTREALTIME`, `_SMALL`, `_PREPARE`,
+     `_CONFIG` and `_CRASH`, as described above. The strict driver also
+     checks its own stack, so the mode children run below 2 GB
+     (`lowmem_run`), as the commands do; the crash child must die with a
+     report naming `DriverProc(ACMDM_STREAM_CONVERT) of testacm.acm` (in
+     a sanitizer build, the sanitizer reports it).
+   - `test_msacm32` (294 checks with the modes) also covers the driver
+     named in `vfw.ini` and found again by `msacm_add_path`, its tags and
+     formats enumerated and filtered, stream sizes each way, conversions
+     it refuses, configuration messages, and a host loop
+     (`run_stream`: pieces of a few kilobytes, whole blocks, leftovers
+     given again, the end flushed) that Phase 3's backend will follow.
 3. **Backend and commands.** `src/acm/`, the third `xform` kind, decode,
    encode, `auto`, probe, list and info.
    Milestone: `test_xform_audio` runs its cases against the ACM driver too.

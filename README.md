@@ -40,8 +40,9 @@ Audio files are read and written without a codec: WAV (and RF64), raw PCM
 and AVI audio streams, through `avi` and `convert`.
 
 ACM audio drivers (`.acm`) are under way ([docs/ACM_PLAN.md](docs/ACM_PLAN.md)):
-the headers and a built-in msacm32.dll with its PCM converter are done; the
-commands don't drive ACM drivers yet.
+the headers, a built-in msacm32.dll with its PCM converter, and a test
+driver (`testacm.acm`, TSTA) are done; the commands don't drive ACM drivers
+yet.
 
 The real-world check is the LAV Filters 0.83 package (32-bit): LAV Video
 loads, registers, connects and decodes 18 codecs identically to FFmpeg; LAV

@@ -12,7 +12,9 @@
 #include <unistd.h>
 
 #include "common/error.h"
+#include "common/sanitizer.h"
 #include "loader/modules.h"
+#include "runtime/crash.h"
 #include "runtime/lowmem.h"
 #include "runtime/runtime.h"
 #include "vfw/driver.h"
@@ -705,6 +707,405 @@ static void test_fixture(void)
 	CHECK_EQ(msacm_add_path("/nonexistent/x.acm", &id), MMSYSERR_ERROR);
 }
 
+/* testacm.acm, the fixtures' TSTA driver. */
+
+#define FRAMES 2500		/* two whole packets and a short one */
+#define PCM_BYTES (FRAMES * 4)
+#define TSTA_BYTES (PCM_BYTES + 3 * 8)
+
+static char testacm[4200];
+
+static int have_testacm(void)
+{
+	const char *dir = getenv("VFW_FIXTURES");
+
+	snprintf(testacm, sizeof(testacm), "%s/testacm.acm", dir ? dir : ".");
+	return !access(testacm, R_OK);
+}
+
+/* A count the driver keeps (testacm_open_count, testacm_stream_count). */
+static LONG driver_count(const char *name)
+{
+	struct module *m = mod_load(testacm, NULL);
+	LONG (*fn)(void) = m ? mod_get_proc(m, name) : NULL;
+	LONG n = fn ? fn() : -1;
+
+	if (m)
+		mod_free(m);
+	return n;
+}
+
+/*
+ * Converts all of in through has as a host must: in pieces of chunk
+ * bytes, whole blocks at a time, what is left given again with the next
+ * piece, and the end flushed. Appends to out; returns the bytes made, or
+ * -1 if a call failed or the end left something unconverted.
+ */
+static long run_stream(HACMSTREAM has, const BYTE *in, size_t n, size_t chunk,
+		       BYTE *out, size_t cap)
+{
+	FN(MMRESULT, acmStreamPrepareHeader, HACMSTREAM, LPACMSTREAMHEADER, DWORD);
+	FN(MMRESULT, acmStreamUnprepareHeader, HACMSTREAM, LPACMSTREAMHEADER,
+	   DWORD);
+	FN(MMRESULT, acmStreamConvert, HACMSTREAM, LPACMSTREAMHEADER, DWORD);
+	static BYTE pending[1 << 16], dst[1 << 17];
+	size_t pos = 0, held = 0, made = 0;
+	int first = 1;
+
+	for (;;) {
+		size_t take = n - pos < chunk ? n - pos : chunk;
+		memcpy(pending + held, in + pos, take);
+		held += take;
+		pos += take;
+		int end = pos == n;
+		ACMSTREAMHEADER h = { .cbStruct = sizeof(h) };
+		h.pbSrc = pending;
+		h.cbSrcLength = (DWORD)held;
+		h.pbDst = dst;
+		h.cbDstLength = sizeof(dst);
+		if (acmStreamPrepareHeader(has, &h, 0))
+			return -1;
+		MMRESULT r = acmStreamConvert(has, &h,
+			ACM_STREAMCONVERTF_BLOCKALIGN |
+			(first ? ACM_STREAMCONVERTF_START : 0) |
+			(end ? ACM_STREAMCONVERTF_END : 0));
+		if (acmStreamUnprepareHeader(has, &h, 0) || r ||
+		    made + h.cbDstLengthUsed > cap)
+			return -1;
+		first = 0;
+		memcpy(out + made, dst, h.cbDstLengthUsed);
+		made += h.cbDstLengthUsed;
+		memmove(pending, pending + h.cbSrcLengthUsed,
+			held - h.cbSrcLengthUsed);
+		held -= h.cbSrcLengthUsed;
+		if (end)
+			return held ? -1 : (long)made;
+	}
+}
+
+/* PCM through testacm to TSTA and back, byte for byte. */
+static void roundtrip(DWORD open_flags)
+{
+	FN(MMRESULT, acmFormatSuggest, HACMDRIVER, LPWAVEFORMATEX,
+	   LPWAVEFORMATEX, DWORD, DWORD);
+	FN(MMRESULT, acmStreamOpen, LPHACMSTREAM, HACMDRIVER, LPWAVEFORMATEX,
+	   LPWAVEFORMATEX, LPWAVEFILTER, DWORD_PTR, DWORD_PTR, DWORD);
+	FN(MMRESULT, acmStreamClose, HACMSTREAM, DWORD);
+	static BYTE in[PCM_BYTES], packets[TSTA_BYTES + 64], back[PCM_BYTES + 64];
+	BYTE tsta_buf[64] = { 0 };
+	WAVEFORMATEX *tsta = (WAVEFORMATEX *)tsta_buf;
+	WAVEFORMATEX wf = pcm(2, 44100, 16);
+	HACMDRIVERID id;
+	HACMSTREAM has = NULL;
+	unsigned before = drv_open_count();
+
+	for (size_t i = 0; i < sizeof(in); i++)
+		in[i] = (BYTE)(i * 7 + i / 13);
+	CHECK_EQ(msacm_add_path(testacm, &id), 0);
+
+	/* Its format for this PCM, as it suggests it. */
+	tsta->wFormatTag = 0x7354;
+	CHECK_EQ(acmFormatSuggest(NULL, &wf, tsta, sizeof(tsta_buf),
+				  ACM_FORMATSUGGESTF_WFORMATTAG), 0);
+	CHECK(tsta->nBlockAlign == 8 + 1024 * 4 && tsta->cbSize == 2 &&
+	      tsta_buf[18] == 0x00 && tsta_buf[19] == 0x04 &&
+	      tsta->nChannels == 2 && tsta->nSamplesPerSec == 44100);
+
+	CHECK_EQ(acmStreamOpen(&has, NULL, &wf, tsta, NULL, 0, 0, open_flags), 0);
+	long n = run_stream(has, in, sizeof(in), 2800, packets, sizeof(packets));
+	CHECK_EQ(n, TSTA_BYTES);
+	CHECK_EQ(acmStreamClose(has, 0), 0);
+	/* Three packets: 1024, 1024 and 452 frames. */
+	if (n == TSTA_BYTES) {
+		CHECK(packets[0] == 'T' && packets[1] == 'A' && packets[2] == 16 &&
+		      packets[3] == 2 && packets[4] == 0 && packets[5] == 4);
+		CHECK(packets[4104] == 'T' && packets[4104 + 5] == 4);
+		CHECK(packets[8208] == 'T' && packets[8208 + 4] == (452 & 0xff) &&
+		      packets[8208 + 5] == 452 >> 8);
+	}
+
+	CHECK_EQ(acmStreamOpen(&has, NULL, tsta, &wf, NULL, 0, 0, open_flags), 0);
+	n = run_stream(has, packets, TSTA_BYTES, 3001, back, sizeof(back));
+	CHECK_EQ(n, PCM_BYTES);
+	CHECK(n == PCM_BYTES && !memcmp(in, back, PCM_BYTES));
+	CHECK_EQ(acmStreamClose(has, 0), 0);
+
+	CHECK_EQ(msacm_stream_count(), 0);
+	CHECK_EQ(driver_count("testacm_stream_count"), 0);
+	CHECK_EQ(drv_open_count(), before);
+}
+
+static void test_testacm(void)
+{
+	FN(MMRESULT, acmMetrics, HACMOBJ, UINT, LPVOID);
+	FN(MMRESULT, acmDriverDetailsW, HACMDRIVERID, LPACMDRIVERDETAILSW, DWORD);
+	FN(MMRESULT, acmDriverOpen, LPHACMDRIVER, HACMDRIVERID, DWORD);
+	FN(MMRESULT, acmDriverClose, HACMDRIVER, DWORD);
+	FN(LRESULT, acmDriverMessage, HACMDRIVER, UINT, LPARAM, LPARAM);
+	FN(MMRESULT, acmFormatTagEnumW, HACMDRIVER, LPACMFORMATTAGDETAILSW,
+	   ACMFORMATTAGENUMCBW, DWORD_PTR, DWORD);
+	FN(MMRESULT, acmFormatEnumW, HACMDRIVER, LPACMFORMATDETAILSW,
+	   ACMFORMATENUMCBW, DWORD_PTR, DWORD);
+	FN(MMRESULT, acmFormatDetailsW, HACMDRIVER, LPACMFORMATDETAILSW, DWORD);
+	FN(MMRESULT, acmStreamOpen, LPHACMSTREAM, HACMDRIVER, LPWAVEFORMATEX,
+	   LPWAVEFORMATEX, LPWAVEFILTER, DWORD_PTR, DWORD_PTR, DWORD);
+	FN(MMRESULT, acmStreamClose, HACMSTREAM, DWORD);
+	FN(MMRESULT, acmStreamSize, HACMSTREAM, DWORD, LPDWORD, DWORD);
+	char line[4400];
+	DWORD v;
+
+	if (!have_testacm()) {
+		printf("test_msacm32: testacm.acm not built, skipping it\n");
+		return;
+	}
+	unsigned before = drv_open_count();
+
+	/* Named in vfw.ini, it is one of the drivers. */
+	snprintf(line, sizeof(line), "[drivers32]\nmsacm.tsta=%s\n", testacm);
+	write_ini(line);
+	CHECK_EQ(acmMetrics(NULL, ACM_METRIC_COUNT_CODECS, &v), 0);
+	CHECK_EQ(v, 1);
+	HACMDRIVERID id = NULL, again = NULL;
+	CHECK_EQ(msacm_add_path(testacm, &id), 0);	/* that one */
+	CHECK_EQ(acmMetrics(NULL, ACM_METRIC_COUNT_LOCAL_CODECS, &v), 0);
+	CHECK_EQ(v, 0);
+	CHECK_EQ(msacm_add_path(testacm, &again), 0);
+	CHECK(id && again == id);
+	ACMDRIVERDETAILSW d = { .cbStruct = sizeof(d) };
+	CHECK_EQ(acmDriverDetailsW(id, &d, 0), 0);
+	CHECK(wis(d.szShortName, "TSTA") && d.cFormatTags == 2 &&
+	      d.fdwSupport == ACMDRIVERDETAILS_SUPPORTF_CODEC);
+	CHECK_EQ(acmMetrics(NULL, ACM_METRIC_MAX_SIZE_FORMAT, &v), 0);
+	CHECK_EQ(v, sizeof(WAVEFORMATEX) + 2);
+
+	/* Its tags and formats. */
+	HACMDRIVER had;
+	CHECK_EQ(acmDriverOpen(&had, id, 0), 0);
+	int tags = 0;
+	ACMFORMATTAGDETAILSW t = { .cbStruct = sizeof(t) };
+	CHECK_EQ(acmFormatTagEnumW(had, &t, count_tags, (DWORD_PTR)&tags, 0), 0);
+	CHECK_EQ(tags, 2);
+	BYTE buf[64];
+	WAVEFORMATEX *wf = (WAVEFORMATEX *)buf;
+	ACMFORMATDETAILSW f = { .cbStruct = sizeof(f) };
+	f.pwfx = wf;
+	f.cbwfx = sizeof(buf);
+	memset(buf, 0, sizeof(buf));
+	wf->wFormatTag = 0x7354;
+	struct counted c = { 0 };
+	CHECK_EQ(acmFormatEnumW(had, &f, count_formats, (DWORD_PTR)&c,
+				ACM_FORMATENUMF_WFORMATTAG), 0);
+	CHECK(c.n == 45 && c.mono == 15 && c.at_44100 == 9);
+	CHECK_STR(c.first, "8.000 kHz, 8 Bit, Mono");
+	/* What 16-bit stereo at 44100 Hz becomes: its one TSTA format. */
+	memset(&c, 0, sizeof(c));
+	*wf = pcm(2, 44100, 16);
+	CHECK_EQ(acmFormatEnumW(had, &f, count_formats, (DWORD_PTR)&c,
+				ACM_FORMATENUMF_CONVERT), 0);
+	CHECK_EQ(c.n, 1);
+	/* pwfx holds the last format tried, not that one: ask for it. */
+	BYTE suggested[64] = { 0 };
+	((WAVEFORMATEX *)suggested)->wFormatTag = 0x7354;
+	WAVEFORMATEX s16 = pcm(2, 44100, 16), s8 = pcm(2, 44100, 8);
+	CHECK_EQ(msacm_acmFormatSuggest(had, &s16, (WAVEFORMATEX *)suggested,
+					sizeof(suggested),
+					ACM_FORMATSUGGESTF_WFORMATTAG), 0);
+	memcpy(buf, suggested, sizeof(buf));
+	f.dwFormatTag = 0x7354;
+	CHECK_EQ(acmFormatDetailsW(NULL, &f, ACM_FORMATDETAILSF_FORMAT), 0);
+	CHECK(wis(f.szFormat, "44.100 kHz, 16 Bit, Stereo"));
+	/* Not configurable, in this mode. */
+	CHECK_EQ(acmDriverMessage(had, DRV_QUERYCONFIGURE, 0, 0), 0);
+	CHECK_EQ(acmDriverMessage(had, ACMDM_DRIVER_ABOUT, -1, 0),
+		 MMSYSERR_NOTSUPPORTED);
+	CHECK_EQ(acmDriverMessage(had, ACMDM_STREAM_OPEN, 0, 0),
+		 MMSYSERR_INVALPARAM);	/* not for applications */
+
+	/* What its streams need for a given size, each way. */
+	BYTE tsta_buf[64] = { 0 };
+	memcpy(tsta_buf, suggested, sizeof(WAVEFORMATEX) + 2);
+	HACMSTREAM has;
+	CHECK_EQ(acmStreamOpen(&has, had, &s16, (WAVEFORMATEX *)tsta_buf, NULL,
+			       0, 0, 0), 0);
+	CHECK_EQ(acmStreamSize(has, PCM_BYTES, &v, ACM_STREAMSIZEF_SOURCE), 0);
+	CHECK_EQ(v, TSTA_BYTES);
+	CHECK_EQ(acmStreamSize(has, TSTA_BYTES, &v, ACM_STREAMSIZEF_DESTINATION),
+		 0);
+	CHECK_EQ(v, 2 * 4096);	/* whole packets */
+	CHECK_EQ(acmStreamClose(has, 0), 0);
+	CHECK_EQ(acmStreamOpen(&has, had, (WAVEFORMATEX *)tsta_buf, &s16, NULL,
+			       0, 0, 0), 0);
+	CHECK_EQ(acmStreamSize(has, TSTA_BYTES, &v, ACM_STREAMSIZEF_SOURCE), 0);
+	CHECK_EQ(v, 3 * 4096);
+	CHECK_EQ(acmStreamSize(has, PCM_BYTES, &v, ACM_STREAMSIZEF_DESTINATION),
+		 0);
+	CHECK_EQ(v, 2 * 4104);
+	CHECK_EQ(acmStreamSize(has, 4, &v, ACM_STREAMSIZEF_SOURCE),
+		 ACMERR_NOTPOSSIBLE);
+	CHECK_EQ(acmStreamClose(has, 0), 0);
+	/* It doesn't change bits, rate or channels. */
+	CHECK_EQ(acmStreamOpen(NULL, had, (WAVEFORMATEX *)tsta_buf, &s8, NULL,
+			       0, 0, ACM_STREAMOPENF_QUERY), ACMERR_NOTPOSSIBLE);
+	CHECK_EQ(acmStreamOpen(NULL, had, &s16, &s8, NULL, 0, 0,
+			       ACM_STREAMOPENF_QUERY), ACMERR_NOTPOSSIBLE);
+	CHECK_EQ(acmDriverClose(had, 0), 0);
+
+	roundtrip(0);
+	CHECK_EQ(driver_count("testacm_open_count"), 0);
+	CHECK_EQ(drv_open_count(), before);
+	write_ini("");
+}
+
+/* The driver's modes, each in a child process with it set. */
+
+static void mode_strict(void)
+{
+	/* Sanitizer builds don't keep memory below 2 GB (lowmem.c). */
+	if (!lowmem_active()) {
+		printf("test_msacm32: no low-memory reservation, skipping "
+		       "strict\n");
+		return;
+	}
+	roundtrip(0);
+}
+
+static void mode_notrealtime(void)
+{
+	FN(MMRESULT, acmStreamOpen, LPHACMSTREAM, HACMDRIVER, LPWAVEFORMATEX,
+	   LPWAVEFORMATEX, LPWAVEFILTER, DWORD_PTR, DWORD_PTR, DWORD);
+	BYTE tsta_buf[20] = { 0 };
+	WAVEFORMATEX wf = pcm(1, 8000, 8);
+	HACMDRIVERID id;
+
+	CHECK_EQ(msacm_add_path(testacm, &id), 0);
+	memcpy(tsta_buf, &wf, sizeof(wf));
+	WAVEFORMATEX *tsta = (WAVEFORMATEX *)tsta_buf;
+	tsta->wFormatTag = 0x7354;
+	tsta->nBlockAlign = 8 + 1024;
+	tsta->cbSize = 2;
+	tsta_buf[19] = 4;
+	CHECK_EQ(acmStreamOpen(NULL, NULL, &wf, tsta, NULL, 0, 0,
+			       ACM_STREAMOPENF_QUERY), ACMERR_NOTPOSSIBLE);
+	CHECK_EQ(acmStreamOpen(NULL, NULL, &wf, tsta, NULL, 0, 0,
+			       ACM_STREAMOPENF_QUERY |
+			       ACM_STREAMOPENF_NONREALTIME), 0);
+	roundtrip(ACM_STREAMOPENF_NONREALTIME);
+}
+
+static void mode_small(void)
+{
+	FN(MMRESULT, acmStreamOpen, LPHACMSTREAM, HACMDRIVER, LPWAVEFORMATEX,
+	   LPWAVEFORMATEX, LPWAVEFILTER, DWORD_PTR, DWORD_PTR, DWORD);
+	FN(MMRESULT, acmStreamSize, HACMSTREAM, DWORD, LPDWORD, DWORD);
+	FN(MMRESULT, acmStreamClose, HACMSTREAM, DWORD);
+	FN(MMRESULT, acmFormatSuggest, HACMDRIVER, LPWAVEFORMATEX,
+	   LPWAVEFORMATEX, DWORD, DWORD);
+	BYTE tsta_buf[64] = { 0 };
+	WAVEFORMATEX wf = pcm(2, 44100, 16);
+	HACMDRIVERID id;
+	HACMSTREAM has;
+	DWORD v = 0;
+
+	CHECK_EQ(msacm_add_path(testacm, &id), 0);
+	((WAVEFORMATEX *)tsta_buf)->wFormatTag = 0x7354;
+	CHECK_EQ(acmFormatSuggest(NULL, &wf, (WAVEFORMATEX *)tsta_buf,
+				  sizeof(tsta_buf),
+				  ACM_FORMATSUGGESTF_WFORMATTAG), 0);
+	CHECK_EQ(acmStreamOpen(&has, NULL, (WAVEFORMATEX *)tsta_buf, &wf, NULL,
+			       0, 0, 0), 0);
+	/* Passed on as the driver says, too small as it is. */
+	CHECK_EQ(acmStreamSize(has, 4104, &v, ACM_STREAMSIZEF_SOURCE), 0);
+	CHECK_EQ(v, 1);
+	CHECK_EQ(acmStreamClose(has, 0), 0);
+	roundtrip(0);
+}
+
+static void mode_prepare(void)
+{
+	roundtrip(0);
+}
+
+static void mode_config(void)
+{
+	FN(MMRESULT, acmDriverOpen, LPHACMDRIVER, HACMDRIVERID, DWORD);
+	FN(MMRESULT, acmDriverClose, HACMDRIVER, DWORD);
+	FN(LRESULT, acmDriverMessage, HACMDRIVER, UINT, LPARAM, LPARAM);
+	HACMDRIVERID id;
+	HACMDRIVER had;
+
+	CHECK_EQ(msacm_add_path(testacm, &id), 0);
+	CHECK_EQ(acmDriverOpen(&had, id, 0), 0);
+	CHECK_EQ(acmDriverMessage(had, DRV_QUERYCONFIGURE, 0, 0), 1);
+	CHECK_EQ(acmDriverMessage(had, DRV_CONFIGURE, 0, 0), DRVCNF_OK);
+	CHECK_EQ(acmDriverClose(had, 0), 0);
+	CHECK_EQ(driver_count("testacm_open_count"), 0);
+}
+
+/* Crashes in the driver's ACMDM_STREAM_CONVERT, for the report. */
+static void mode_crash(void)
+{
+	roundtrip(0);
+	CHECK(!"the driver should have crashed");
+}
+
+static const struct {
+	const char *name, *variable;
+	void (*run)(void);
+} modes[] = {
+	{ "strict", "STRICT", mode_strict },
+	{ "notrealtime", "NOTREALTIME", mode_notrealtime },
+	{ "small", "SMALL", mode_small },
+	{ "prepare", "PREPARE", mode_prepare },
+	{ "config", "CONFIG", mode_config },
+	{ "crash", "CRASH", mode_crash },
+};
+#define NMODES (sizeof(modes) / sizeof(*modes))
+
+/* A mode, run by main below 2 GB, as the commands run. */
+static int run_mode(int argc, char **argv)
+{
+	CHECK_EQ(runtime_enter(), 0);
+	CHECK(argc == 2 && have_testacm());
+	for (size_t i = 0; argc == 2 && i < NMODES; i++)
+		if (!strcmp(argv[1], modes[i].name))
+			modes[i].run();
+	return 0;
+}
+
+static void test_modes(const char *self)
+{
+	char cmd[4400], out[8192];
+
+	if (!have_testacm())
+		return;
+	for (size_t i = 0; i < NMODES; i++) {
+		snprintf(cmd, sizeof(cmd), "VFW_ENV_TESTACM_%s=1 %s'%s' %s 2>&1",
+			 modes[i].variable, test_rerun_prefix(), self,
+			 modes[i].name);
+		FILE *p = popen(cmd, "r");
+		size_t n = p ? fread(out, 1, sizeof(out) - 1, p) : 0;
+		out[n] = 0;
+		int status = p ? pclose(p) : -1;
+		if (strcmp(modes[i].name, "crash")) {
+			CHECK_EQ(status, 0);
+		} else {
+			/*
+			 * It dies, and the report names the driver's message;
+			 * a sanitizer reports faults itself.
+			 */
+			CHECK(status != 0);
+			CHECK(VFW_SANITIZER_BUILD ||
+			      strstr(out, "ACMDM_STREAM_CONVERT") != NULL);
+			CHECK(VFW_SANITIZER_BUILD ||
+			      strstr(out, "testacm.acm") != NULL);
+		}
+		if (strcmp(modes[i].name, "crash") ? status != 0 :
+		    !status)
+			fprintf(stderr, "test_msacm32: mode %s failed:\n%s",
+				modes[i].name, out);
+	}
+}
+
 static void test_names(void)
 {
 	char buf[24];
@@ -720,7 +1121,7 @@ static void test_names(void)
 		  "ACMDM_STREAM_CONVERT");
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
 	const char *t = getenv("TMPDIR");
 
@@ -739,12 +1140,26 @@ int main(void)
 	if (!acm)
 		return test_summary("test_msacm32");
 
+	if (argc == 2) {
+		/* A mode of testacm's, run by test_modes. */
+		CHECK_EQ(crash_install(), 0);
+		lowmem_run(run_mode, argc, argv);
+		int r = test_summary(argv[1]);
+		char cmd[4200];
+		snprintf(cmd, sizeof(cmd), "rm -rf '%s'", root);
+		if (system(cmd))
+			fprintf(stderr, "test_msacm32: can't remove %s\n", root);
+		return r;
+	}
+
 	test_drivers();
 	test_function_driver();
 	test_formats();
 	test_streams();
 	test_choose();
 	test_fixture();
+	test_testacm();
+	test_modes(argv[0]);
 	test_names();
 
 	mod_free(acm);
