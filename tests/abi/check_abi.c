@@ -21,6 +21,7 @@
 #include <aviriff.h>
 #include <dvdmedia.h>
 #include <mmreg.h>
+#include <msacm.h>
 #include <ocidl.h>
 #include <dmo.h>
 
