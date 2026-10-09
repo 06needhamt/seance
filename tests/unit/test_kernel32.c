@@ -13,6 +13,7 @@
 #include "runtime/runtime.h"
 #include "runtime/teb.h"
 #include "test.h"
+#include "win32/k32.h"
 
 static struct module *k32;
 
@@ -597,6 +598,31 @@ static void test_time(void)
 	FileTimeToSystemTime(&ft, &back);
 	CHECK(back.wYear >= 2024);
 	GetLocalTime(&back);
+	CHECK(back.wYear >= 2024);
+
+	/* VFW_DATE's setting: that date from now on, still running. */
+	FN(void, GetSystemTime, LPSYSTEMTIME);
+	CHECK_EQ(win_clock_set("2007-06-01T12:30"), 0);
+	GetSystemTime(&back);
+	CHECK(back.wYear == 2007 && back.wMonth == 6 && back.wDay == 1 &&
+	      back.wHour == 12 && back.wMinute == 30 && back.wSecond <= 1);
+	GetLocalTime(&back);
+	CHECK(back.wYear == 2007 && back.wMonth == 6 && back.wHour == 12);
+	GetSystemTimeAsFileTime(&ft);
+	FileTimeToSystemTime(&ft, &back);
+	CHECK(back.wYear == 2007 && back.wDay == 1);
+	CHECK_EQ(win_unix_now() / 86400, 13665);	/* 2007-06-01 */
+	CHECK_EQ(win_clock_set("2007-06-01T23:59:58"), 0);
+	Sleep(2100);
+	GetSystemTime(&back);
+	CHECK(back.wMonth == 6 && back.wDay == 2 && back.wHour == 0);
+	CHECK_EQ(win_clock_set("2007-02-29"), -1);
+	CHECK_EQ(win_clock_set("2007-6-1x"), -1);
+	CHECK_EQ(win_clock_set("2007-06-01T24:00"), -1);
+	CHECK_EQ(win_clock_set("1600-01-01"), -1);
+	CHECK_EQ(win_clock_set("yesterday"), -1);
+	CHECK_EQ(win_clock_set(NULL), 0);
+	GetSystemTime(&back);
 	CHECK(back.wYear >= 2024);
 
 	LARGE_INTEGER f, a, b;

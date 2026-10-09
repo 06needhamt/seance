@@ -11,6 +11,7 @@
 #include "common/log.h"
 #include "win32/codepage.h"
 #include "win32/internal.h"
+#include "win32/k32.h"
 #include "win32/path.h"
 #include "win32/reg.h"
 
@@ -54,7 +55,7 @@ static const struct {
 static FILETIME now(void)
 {
 	FILETIME ft;
-	ULONGLONG t = ((ULONGLONG)time(NULL) + 11644473600ULL) * 10000000ULL;
+	ULONGLONG t = win_filetime_now();
 
 	ft.dwLowDateTime = (DWORD)t;
 	ft.dwHighDateTime = (DWORD)(t >> 32);

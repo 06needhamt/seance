@@ -21,6 +21,15 @@ HANDLE thread_handle_current(void);
 
 /* The process heap (GetProcessHeap) and allocation from it. */
 HANDLE heap_process(void);
+
+/*
+ * The clock DLLs see: set to date ("YYYY-MM-DD", optionally with
+ * "THH:MM[:SS]", UTC) from now on, or the host's for NULL or "". -1 if
+ * date isn't one. win_filetime_now() and win_unix_now() read it.
+ */
+int win_clock_set(const char *date);
+ULONGLONG win_filetime_now(void);
+long long win_unix_now(void);
 void *heap_alloc(HANDLE heap, DWORD flags, SIZE_T size);
 BOOL heap_free(HANDLE heap, DWORD flags, void *p);
 SIZE_T heap_size(HANDLE heap, DWORD flags, const void *p);

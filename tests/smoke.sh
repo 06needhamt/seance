@@ -281,6 +281,10 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		printf 'YUV4MPEG2 W16 H16 F25:1 Ip A1:1 C420jpeg\nFRAME\n'
 		head -c 384 /dev/zero
 	} >"$work/v.y4m"
+	# VFW_DATE has to be a date.
+	VFW_DATE=2007-02-29 $emu "$harness" list 2>&1 |
+		grep -q "VFW_DATE wants a date"
+	VFW_DATE=2007-06-01T12:00 $emu "$harness" list >/dev/null
 	# A codec that only decompresses is said to, not to refuse the formats.
 	VFW_ENV_TESTCODEC_NOCOMPRESS=1 $emu "$harness" encode \
 		"$fixtures/testcodec.dll" "$work/v.y4m" -o "$work/x.avi" 2>&1 |

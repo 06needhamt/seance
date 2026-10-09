@@ -745,6 +745,11 @@ decodes below 40 dB.
   heap memory or on the stack and run it there (`pvwv220.dll` has its own PE
   loader for the DLLs it carries). As in Wine, when that faults, the page is
   made executable and the code continues; `VFW_TRACE=1` logs each page.
+- **The date.** Some DLLs behave differently depending on the date (time
+  limited evaluation builds stop working after a date). `VFW_DATE` sets the
+  date DLLs see through `GetSystemTime`, `GetLocalTime`,
+  `GetSystemTimeAsFileTime` and the CRT's `time`; tick counts, the
+  performance counter and file times stay the host's.
 
 ### Environment variables
 
@@ -757,6 +762,7 @@ decodes below 40 dB.
 | `VFW_REGISTRY` | The Windows registry file (default `$VFW_ROOT/registry.reg`); empty keeps it in memory only |
 | `VFW_TRACE=1` | Log calls into the built-in DLLs and every driver message to stderr |
 | `VFW_TIMEOUT=<s>` | Report and stop (exit 124) when one call into a DLL takes longer |
+| `VFW_DATE` | The date and time (UTC) DLLs see at startup, `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM[:SS]`; the clock runs on from there (default: the host's) |
 | `VFW_COMPRESSOR` | What `ICCompressorChoose` answers: a FOURCC (`TST0`), `uncompressed` or `cancel` |
 | `VFW_ACM_FORMAT` | What `acmFormatChoose` answers: a format tag and, optionally, rate, channels and bits (`1,22050,1,8`), or `cancel` |
 | `VFW_OPEN_FILE`, `VFW_SAVE_FILE` | What `GetOpenFileName` and `GetSaveFileName` answer: a file, or `cancel` (the default) |

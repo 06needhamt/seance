@@ -96,13 +96,11 @@ static int ft_deadline(const FILETIME *ft, struct timespec *out)
 	if (v < 0) {
 		ts_add_ns(out, (-v) * 100);
 	} else {
-		struct timespec real;
-		long long unix_ns = (v - 116444736000000000LL) * 100;
+		/* From the clock DLLs see, which VFW_DATE may set. */
+		long long ns = (v - (long long)win_filetime_now()) * 100;
 
-		clock_gettime(CLOCK_REALTIME, &real);
-		unix_ns -= (long long)real.tv_sec * 1000000000LL + real.tv_nsec;
-		if (unix_ns > 0)
-			ts_add_ns(out, unix_ns);
+		if (ns > 0)
+			ts_add_ns(out, ns);
 	}
 	return 1;
 }

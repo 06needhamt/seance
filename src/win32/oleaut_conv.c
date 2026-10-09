@@ -452,7 +452,7 @@ static HRESULT parse_date(const WCHAR *s, ULONG flags, double *out)
 		nd = 0;
 	}
 	long y = 1899, m = 12, d = 30;
-	time_t now = time(NULL);
+	time_t now = (time_t)win_unix_now();
 	struct tm tm;
 	localtime_r(&now, &tm);
 	if (month) {

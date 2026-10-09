@@ -4,7 +4,12 @@
  *
  * The harness runs in UTC: local time is system time, and the time zone
  * has no bias. That keeps codec behaviour independent of the host's zone.
+ *
+ * VFW_DATE sets the date (and time) the clock reads at startup, for DLLs
+ * whose behaviour depends on it; it runs on from there. Tick counts and
+ * the performance counter are unaffected, as are file times.
  */
+#include <stdio.h>
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -16,13 +21,31 @@
 #define TICKS_PER_S  10000000ull	/* FILETIME units: 100 ns */
 #define QPC_FREQ     10000000ull
 
-static ULONGLONG filetime_now(void)
+/* How far the clock is set from the host's (VFW_DATE), in FILETIME units. */
+static LONGLONG clock_shift;
+
+static ULONGLONG host_filetime_now(void)
 {
 	struct timespec ts;
 
 	clock_gettime(CLOCK_REALTIME, &ts);
 	return ((ULONGLONG)ts.tv_sec + EPOCH_DIFF) * TICKS_PER_S +
 	       ts.tv_nsec / 100;
+}
+
+static ULONGLONG filetime_now(void)
+{
+	return host_filetime_now() + (ULONGLONG)clock_shift;
+}
+
+ULONGLONG win_filetime_now(void)
+{
+	return filetime_now();
+}
+
+long long win_unix_now(void)
+{
+	return (long long)(filetime_now() / TICKS_PER_S) - (long long)EPOCH_DIFF;
 }
 
 static void to_filetime(ULONGLONG v, LPFILETIME ft)
@@ -58,6 +81,46 @@ static void civil_from_days(LONGLONG z, int *y, unsigned *m, unsigned *d)
 	*d = doy - (153 * mp + 2) / 5 + 1;
 	*m = mp < 10 ? mp + 3 : mp - 9;
 	*y = (int)(yoe + era * 400) + (*m <= 2);
+}
+
+int win_clock_set(const char *date)
+{
+	int y, n = 0;
+	unsigned mo, d, h = 0, mi = 0, sec = 0;
+
+	if (!date || !*date) {
+		clock_shift = 0;
+		return 0;
+	}
+	if (sscanf(date, "%4d-%2u-%2u%n", &y, &mo, &d, &n) != 3)
+		return -1;
+	date += n;
+	if (*date == 'T' || *date == ' ') {
+		n = 0;
+		if (sscanf(date + 1, "%2u:%2u%n", &h, &mi, &n) != 2)
+			return -1;
+		date += 1 + n;
+		if (*date == ':') {
+			n = 0;
+			if (sscanf(date + 1, "%2u%n", &sec, &n) != 1)
+				return -1;
+			date += 1 + n;
+		}
+	}
+	if (*date || y < 1601 || mo < 1 || mo > 12 || d < 1 || h > 23 ||
+	    mi > 59 || sec > 59)
+		return -1;
+	/* The day must exist in that month. */
+	int ny;
+	unsigned nm, nd;
+	civil_from_days(days_from_civil(y, mo, d), &ny, &nm, &nd);
+	if (nm != mo || nd != d)
+		return -1;
+	LONGLONG secs = days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 +
+			sec + (LONGLONG)EPOCH_DIFF;
+	clock_shift = secs * (LONGLONG)TICKS_PER_S -
+		      (LONGLONG)host_filetime_now();
+	return 0;
 }
 
 static void filetime_to_systemtime(ULONGLONG v, LPSYSTEMTIME st)
@@ -251,7 +314,7 @@ static void start_time(LPFILETIME ft)
 		return;
 	}
 	to_filetime(((ULONGLONG)st.st_ctim.tv_sec + EPOCH_DIFF) * TICKS_PER_S +
-		    st.st_ctim.tv_nsec / 100, ft);
+		    st.st_ctim.tv_nsec / 100 + (ULONGLONG)clock_shift, ft);
 }
 
 WINFN(BOOL) k32_GetProcessTimes(HANDLE process, LPFILETIME creation,
