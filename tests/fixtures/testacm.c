@@ -31,6 +31,9 @@
  *   TESTACM_CONFIG       it says it can be configured (DRV_QUERYCONFIGURE)
  *                        and answers DRV_CONFIGURE, with no dialog
  *   TESTACM_CRASH        ACMDM_STREAM_CONVERT writes through a null pointer
+ *   TESTACM_OPENCRASH    opened as anything but an audio codec, it declines
+ *                        and then writes through the null instance anyway
+ *                        (as vdowave.acm does)
  *   TESTACM_HANG         ACMDM_STREAM_CONVERT never returns
  *   TESTACM_WHOLE        it encodes only whole packets, even at the end
  *                        (as IMA ADPCM drivers do): the caller pads the rest
@@ -62,8 +65,8 @@ static const DWORD rates[NRATES] = { 8000, 11025, 22050, 44100, 48000 };
 static const WORD channel_counts[NCHANNELS] = { 1, 2, 6 };
 static const WORD bit_depths[NBITS] = { 8, 16, 24 };
 
-static int strict, notrealtime, small, prepare, config, crash, hang,
-	   whole, noencode;
+static int strict, notrealtime, small, prepare, config, crash, opencrash,
+	   hang, whole, noencode;
 static LONG opens, streams;
 
 struct instance {
@@ -522,6 +525,7 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		prepare = env_on("TESTACM_PREPARE");
 		config = env_on("TESTACM_CONFIG");
 		crash = env_on("TESTACM_CRASH");
+		opencrash = env_on("TESTACM_OPENCRASH");
 		hang = env_on("TESTACM_HANG");
 		whole = env_on("TESTACM_WHOLE");
 		noencode = env_on("TESTACM_NOENCODE");
@@ -535,8 +539,11 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		if (high(1, d))
 			return 0;
 		/* Opened as anything but an audio codec, it declines. */
-		if (d && d->fccType != ACMDRIVERDETAILS_FCCTYPE_AUDIOCODEC)
+		if (d && d->fccType != ACMDRIVERDETAILS_FCCTYPE_AUDIOCODEC) {
+			if (opencrash)
+				*(volatile DWORD *)(DWORD_PTR)inst = 0;
 			return 0;
+		}
 		inst = HeapAlloc(process_heap(), HEAP_ZERO_MEMORY,
 				 sizeof(*inst));
 		if (!inst) {

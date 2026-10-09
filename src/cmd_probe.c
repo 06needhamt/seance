@@ -497,13 +497,16 @@ static void probe_compress(HIC hic, LONG w, LONG h)
 	struct vfw_format f;
 	const char *name;
 	char buf[160], err[24];
-	int any = 0;
+	int any = 0, unsupported = 1;
 
 	printf("\nCompression (%ldx%ld inputs):\n", (long)w, (long)h);
 	for (unsigned i = 0; (name = vfw_std_format(i, w, h, &f)); i++) {
 		LRESULT r = ic_send(hic, ICM_COMPRESS_QUERY, (DWORD_PTR)&f.bih, 0);
-		if (r != ICERR_OK)
+		if (r != ICERR_OK) {
+			if (r != ICERR_UNSUPPORTED)
+				unsupported = 0;
 			continue;
+		}
 		any = 1;
 		printf("  %s input: accepted\n", name);
 		BITMAPINFOHEADER *out = ic_compress_get_format(hic, &f.bih, &r);
@@ -522,7 +525,10 @@ static void probe_compress(HIC hic, LONG w, LONG h)
 		probe_decompress(hic, out);
 		free(out);
 	}
-	if (!any)
+	if (!any && unsupported)
+		printf("  none: every query answered ICERR_UNSUPPORTED (it only "
+		       "decompresses)\n");
+	else if (!any)
 		printf("  no standard input format accepted\n");
 }
 

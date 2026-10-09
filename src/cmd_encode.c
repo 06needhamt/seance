@@ -167,22 +167,32 @@ static int choose_input(HIC hic, const struct source *src, const char *forced,
 	struct vfw_format t;
 	const char *name;
 	char err[24];
+	/* Whether every query was ICERR_UNSUPPORTED: a decompressor only. */
+	int unsupported = 1;
+	LRESULT r;
 
-	if (!forced && ic_send(hic, ICM_COMPRESS_QUERY, (DWORD_PTR)native, 0) ==
-	    ICERR_OK) {
-		memcpy(&f->fmt, native, n);
-		f->fmt_size = n;
-		f->name = source_format_name(src);
-		return 0;
+	if (!forced) {
+		r = ic_send(hic, ICM_COMPRESS_QUERY, (DWORD_PTR)native, 0);
+		if (r == ICERR_OK) {
+			memcpy(&f->fmt, native, n);
+			f->fmt_size = n;
+			f->name = source_format_name(src);
+			return 0;
+		}
+		unsupported = r == ICERR_UNSUPPORTED;
 	}
 	for (unsigned i = 0; (name = vfw_std_format(i, w, h, &t)); i++) {
 		if (t.bih.biBitCount == 8)
 			continue;	/* no palettes */
 		if (forced ? strcasecmp(name, forced) != 0 :
-		    ic_send(hic, ICM_COMPRESS_QUERY, (DWORD_PTR)&t.bih, 0) != ICERR_OK)
+		    (r = ic_send(hic, ICM_COMPRESS_QUERY, (DWORD_PTR)&t.bih,
+				 0)) != ICERR_OK) {
+			if (!forced && r != ICERR_UNSUPPORTED)
+				unsupported = 0;
 			continue;
+		}
 		if (forced) {
-			LRESULT r = ic_send(hic, ICM_COMPRESS_QUERY, (DWORD_PTR)&t.bih, 0);
+			r = ic_send(hic, ICM_COMPRESS_QUERY, (DWORD_PTR)&t.bih, 0);
 			if (r != ICERR_OK) {
 				vfw_set_error("the codec won't compress %s (%s)", name,
 					      icerr_name(r, err));
@@ -206,6 +216,11 @@ static int choose_input(HIC hic, const struct source *src, const char *forced,
 	}
 	if (forced)
 		vfw_set_error("unknown codec input format '%s'", forced);
+	else if (unsupported)
+		vfw_set_error("the codec doesn't compress: it answers ICM_COMPRESS_QUERY "
+			      "with ICERR_UNSUPPORTED for %s and every standard "
+			      "format, so it only decompresses",
+			      source_format_name(src));
 	else
 		vfw_set_error("the codec takes neither %s nor any standard format "
 			      "at %ldx%ld", source_format_name(src), (long)w, (long)h);
