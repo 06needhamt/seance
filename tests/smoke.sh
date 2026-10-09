@@ -281,6 +281,12 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		printf 'YUV4MPEG2 W16 H16 F25:1 Ip A1:1 C420jpeg\nFRAME\n'
 		head -c 384 /dev/zero
 	} >"$work/v.y4m"
+	# A codec that only decompresses is said to, not to refuse the formats.
+	VFW_ENV_TESTCODEC_NOCOMPRESS=1 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/v.y4m" -o "$work/x.avi" 2>&1 |
+		grep -q "doesn't compress: .*ICERR_UNSUPPORTED"
+	VFW_ENV_TESTCODEC_NOCOMPRESS=1 $emu "$harness" probe \
+		"$fixtures/testcodec.dll" | grep -q "it only decompresses"
 	VFW_ENV_TESTACM_OPENCRASH=1 $emu "$harness" encode "$a" "$work/v.y4m" \
 		-o "$work/x.avi" 2>&1 | grep -q "is an ACM audio driver"
 	VFW_ENV_TESTACM_OPENCRASH=1 $emu "$harness" probe "$a" --fourcc TSTA \

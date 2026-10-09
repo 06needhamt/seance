@@ -22,6 +22,9 @@
  * aware can go wrong with one: its instance, the ICOPEN, the (de)compress
  * structures, the formats, the frames and its own stack.
  *
+ * With TESTCODEC_NOCOMPRESS=1 it only decompresses, answering every
+ * ICM_COMPRESS_QUERY with ICERR_UNSUPPORTED, as Sunplus's webcam codecs do.
+ *
  * Two private messages misbehave on purpose, for the harness's crash and
  * hang reports: TESTCODEC_CRASH writes through a null pointer and
  * TESTCODEC_HANG never returns.
@@ -64,6 +67,7 @@ struct instance {
 
 static HINSTANCE self;
 static int strict;	/* TESTCODEC_STRICT */
+static int nocompress;	/* TESTCODEC_NOCOMPRESS */
 static DWORD last_quality = 0xffffffff;	/* of the last ICM_COMPRESS */
 static DWORD msg_log[MAX_LOG];
 static int nlog;
@@ -503,6 +507,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		char v[8];
 		strict = GetEnvironmentVariableA("TESTCODEC_STRICT", v, sizeof(v)) == 1 &&
 			 v[0] == '1';
+		nocompress = GetEnvironmentVariableA("TESTCODEC_NOCOMPRESS", v,
+						     sizeof(v)) == 1 && v[0] == '1';
 		log_msg(msg);
 		return DefDriverProc(id, hdrvr, msg, l1, l2);
 	}
@@ -595,6 +601,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		return ICERR_UNSUPPORTED;
 
 	case ICM_COMPRESS_QUERY:
+		if (nocompress)
+			return ICERR_UNSUPPORTED;
 		return compress_query((BITMAPINFOHEADER *)l1, (BITMAPINFOHEADER *)l2);
 	case ICM_COMPRESS_GET_FORMAT:
 		return compress_get_format((BITMAPINFOHEADER *)l1,
