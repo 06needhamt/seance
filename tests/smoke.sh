@@ -275,6 +275,16 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		--format-tag 0x55
 	fails $emu "$harness" decode "$a" "$work/acm.avi" -o "$work/x.wav" \
 		--state "$work/in.pcm"
+	# Given video, it isn't opened as a video codec: one that crashes when
+	# it is (as vdowave.acm does) is told it is an audio driver instead.
+	{
+		printf 'YUV4MPEG2 W16 H16 F25:1 Ip A1:1 C420jpeg\nFRAME\n'
+		head -c 384 /dev/zero
+	} >"$work/v.y4m"
+	VFW_ENV_TESTACM_OPENCRASH=1 $emu "$harness" encode "$a" "$work/v.y4m" \
+		-o "$work/x.avi" 2>&1 | grep -q "is an ACM audio driver"
+	VFW_ENV_TESTACM_OPENCRASH=1 $emu "$harness" probe "$a" --fourcc TSTA \
+		2>&1 | grep -q "is an ACM audio driver"
 	printf '[drivers32]\nmsacm.tsta=%s\n' "$a" >"$work/vfw.ini"
 	VFW_INI="$work/vfw.ini" $emu "$harness" list |
 		grep -q "TSTA (seance TSTA test codec), codec"

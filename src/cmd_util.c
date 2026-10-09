@@ -19,6 +19,7 @@
 #include "runtime/runtime.h"
 #include "vfw/icm.h"
 #include "vfw/registry.h"
+#include "win32/msacm32.h"
 
 int cli_parse_count(const char *opt, const char *s, unsigned long *out)
 {
@@ -255,6 +256,18 @@ int cli_open_codec(const char *arg, const char *fourcc, FOURCC guess,
 		fprintf(stderr, "seance: '%s' is neither a DLL nor a FOURCC\n",
 			c->target);
 		return 2;
+	}
+	/*
+	 * An ACM driver isn't opened as a video codec: some (vdowave.acm)
+	 * refuse DRV_OPEN for any type but 'audc' and then use the instance
+	 * they didn't make, so asking is a crash.
+	 */
+	HACMDRIVERID acm;
+	if (c->is_dll && !msacm_add_path(c->target, &acm)) {
+		fprintf(stderr, "seance: %s is an ACM audio driver, not a video "
+			"codec; give it audio (WAV, raw PCM or an AVI's audio)\n",
+			c->target);
+		return 1;
 	}
 	if (c->is_dll && !named) {
 		const struct vfw_codec *r = vfw_find_path(c->target);
