@@ -4,6 +4,8 @@
  * child process, and the report has to say where and in which call.
  */
 #include <signal.h>
+#include <stdlib.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 
 #include "common/sanitizer.h"
@@ -57,6 +59,53 @@ static int run_child(const char *codec, UINT msg, const char *timeout,
 	return status;
 }
 
+/* mov eax, 42; ret */
+static const unsigned char ret42[] = { 0xb8, 42, 0, 0, 0, 0xc3 };
+
+/*
+ * Code run from where it was put: the heap, the stack or a page the
+ * caller maps. Exits 42 when it ran and returned.
+ */
+static int run_from(int where, char *err, size_t size)
+{
+	int fds[2];
+	if (pipe(fds))
+		return -1;
+	pid_t pid = fork();
+	if (pid < 0)
+		return -1;
+	if (!pid) {
+		dup2(fds[1], STDERR_FILENO);
+		close(fds[0]);
+		close(fds[1]);
+		if (crash_install() || runtime_enter())
+			_exit(90);
+		unsigned char on_stack[64], *code = on_stack;
+		if (where == 0)
+			code = malloc(64);
+		else if (where == 2)
+			code = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+				    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		memcpy(code, ret42, sizeof(ret42));
+		/* Running it reads it, which the compiler can't see. */
+		__asm__ volatile("" : : "r"(code) : "memory");
+		if (where == 2)
+			mprotect(code, 4096, PROT_NONE);
+		int (*fn)(void) = (int (*)(void))(void *)code;
+		_exit(fn());
+	}
+	close(fds[1]);
+	size_t n = 0;
+	ssize_t r;
+	while (n + 1 < size && (r = read(fds[0], err + n, size - 1 - n)) > 0)
+		n += (size_t)r;
+	err[n] = 0;
+	close(fds[0]);
+	int status = 0;
+	waitpid(pid, &status, 0);
+	return status;
+}
+
 int main(void)
 {
 	const char *codec = fixture("testcodec.dll");
@@ -73,6 +122,18 @@ int main(void)
 		CHECK(strstr(err, "in DriverProc(DRV_USER+0x") &&
 		      strstr(err, ") of testcodec.dll"));
 		printf("crash report:\n%s", err);
+
+		/*
+		 * Code in the heap or on the stack runs, as on Windows without
+		 * DEP; a page that can't be read is still a crash.
+		 */
+		st = run_from(0, err, sizeof(err));
+		CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 42);
+		st = run_from(1, err, sizeof(err));
+		CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 42);
+		st = run_from(2, err, sizeof(err));
+		CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV);
+		CHECK(strstr(err, "seance: crash: SIGSEGV"));
 	}
 
 	int st = run_child(codec, TESTCODEC_HANG, "1", err, sizeof(err));

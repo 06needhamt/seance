@@ -10,8 +10,16 @@
  * The reports are made in signal context, from a crash: they format with
  * snprintf and look up the module without waiting for the loader lock,
  * which is as careful as a crash report can usefully be.
+ *
+ * One fault isn't a crash: running code from memory that is readable but
+ * not executable, such as the heap or the stack. Windows ran programs
+ * without DEP (data execution prevention) unless they asked for it, and
+ * codecs relied on that, building code at run time (pvwv220.dll loads
+ * the DLLs it carries into heap memory with a PE loader of its own). As
+ * Wine does, the pages are made executable and the code carries on.
  */
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -22,6 +30,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "common/log.h"
 #include "common/sanitizer.h"
 #include "loader/modules.h"
 #include "runtime/crash.h"
@@ -118,10 +127,86 @@ void crash_report_and_die(int sig, const void *pc, const void *fault_addr)
 	_exit(128 + sig);	/* raise() should not return */
 }
 
+/* x86 page fault error code bits, in the context's REG_ERR. */
+#define PF_PROTECTION 0x01		/* the page was present */
+#define PF_FETCH      0x10		/* an instruction fetch */
+
+/*
+ * The protection of the mapping holding addr, from /proc/self/maps, read
+ * without stdio as this is signal context: PROT_* bits, or -1 if no
+ * mapping holds it.
+ */
+static int mapping_prot(uintptr_t addr)
+{
+	char buf[4096], line[256];
+	size_t len = 0;
+	ssize_t n;
+	int fd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC), prot = -1;
+
+	if (fd < 0)
+		return -1;
+	while (prot < 0 && (n = read(fd, buf, sizeof(buf))) > 0) {
+		for (ssize_t i = 0; i < n && prot < 0; i++) {
+			if (buf[i] != '\n') {
+				if (len + 1 < sizeof(line))
+					line[len++] = buf[i];
+				continue;
+			}
+			line[len] = 0;
+			len = 0;
+			/* "08048000-08056000 r-xp ..." */
+			char *end;
+			unsigned long lo = strtoul(line, &end, 16), hi;
+			if (*end != '-')
+				continue;
+			hi = strtoul(end + 1, &end, 16);
+			if (*end != ' ' || addr < lo || addr >= hi)
+				continue;
+			prot = (end[1] == 'r' ? PROT_READ : 0) |
+			       (end[2] == 'w' ? PROT_WRITE : 0) |
+			       (end[3] == 'x' ? PROT_EXEC : 0);
+		}
+	}
+	close(fd);
+	return prot;
+}
+
+/*
+ * An instruction fetch from a readable page that isn't executable: the
+ * page is made executable, as Windows without DEP would have it, and 1
+ * returned for the code to go on. 0 for any other fault.
+ */
+static int run_data(int sig, const siginfo_t *si, const ucontext_t *uc)
+{
+	unsigned long err = (unsigned long)uc->uc_mcontext.gregs[REG_ERR];
+	uintptr_t page = (uintptr_t)si->si_addr & ~(uintptr_t)(getpagesize() - 1);
+
+	if (sig != SIGSEGV || si->si_code != SEGV_ACCERR ||
+	    (err & (PF_PROTECTION | PF_FETCH)) != (PF_PROTECTION | PF_FETCH))
+		return 0;
+	int prot = mapping_prot(page);
+	if (prot < 0 || !(prot & PROT_READ) || (prot & PROT_EXEC) ||
+	    mprotect((void *)page, (size_t)getpagesize(), prot | PROT_EXEC))
+		return 0;
+	if (vfw_trace_enabled) {
+		char where[160], line[256];
+		describe((const void *)uc->uc_mcontext.gregs[REG_EIP], where,
+			 sizeof(where));
+		snprintf(line, sizeof(line), "trace[%d] running code at %s from "
+			 "data: page %#lx made executable (no DEP)\n",
+			 (int)getpid(), where, (unsigned long)page);
+		put(line);
+	}
+	return 1;
+}
+
 static void on_fault(int sig, siginfo_t *si, void *ctx)
 {
 	ucontext_t *uc = ctx;
 	const void *pc = (const void *)uc->uc_mcontext.gregs[REG_EIP];
+
+	if (run_data(sig, si, uc))
+		return;
 
 	/*
 	 * Give seh.c first chance at it: a thread running DLL code may have

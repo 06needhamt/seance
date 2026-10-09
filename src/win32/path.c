@@ -121,11 +121,8 @@ char *path_to_unix(const char *win)
 		/* "C:x" (relative to that drive's cwd) is taken from its root. */
 		p += 2;
 	} else if (*p == '\\' || *p == '/') {
-		/* Rooted without a drive: the current drive. */
-		char *cwd = path_getcwd();
-		char drive = cwd ? (cwd[0] | 0x20) : 'z';
-		free(cwd);
-		snprintf(out, sizeof(out), "%s", drive == 'c' ? path_drive_c() : "/");
+		snprintf(out, sizeof(out), "%s",
+			 path_rooted_drive(p) == 'c' ? path_drive_c() : "/");
 	} else {
 		if (!getcwd(out, sizeof(out)))
 			return NULL;
@@ -161,6 +158,40 @@ char *path_to_unix(const char *win)
 			return NULL;
 	}
 	return strdup(out);
+}
+
+/* Whether directory dir has an entry named the n bytes at name, in any case. */
+static int has_entry(const char *dir, const char *name, size_t n)
+{
+	DIR *d = opendir(dir);
+	struct dirent *e;
+	int found = 0;
+
+	while (d && !found && (e = readdir(d)))
+		found = strlen(e->d_name) == n && !strncasecmp(e->d_name, name, n);
+	if (d)
+		closedir(d);
+	return found;
+}
+
+char path_rooted_drive(const char *rooted)
+{
+	char *cwd = path_getcwd();
+	char drive = cwd ? (cwd[0] | 0x20) : 'z';
+
+	free(cwd);
+	if (drive == 'c')
+		return 'c';
+	/* Its first component, looked for on C: and in /. */
+	const char *p = rooted;
+	while (*p == '\\' || *p == '/')
+		p++;
+	size_t n = strcspn(p, "\\/");
+	if (!n || n > NAME_MAX || (p[0] == '.' && (n == 1 || (n == 2 && p[1] == '.'))))
+		return 'z';
+	if (has_entry(path_drive_c(), p, n) || !has_entry("/", p, n))
+		return 'c';
+	return 'z';
 }
 
 char *path_to_windows(const char *unix_path)

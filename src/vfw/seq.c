@@ -141,6 +141,9 @@ BOOL ic_seq_start_ex(COMPVARS *pc, const BITMAPINFO *in, DWORD rate,
 	else
 		/* No answer: allow twice the input, as some drivers expect. */
 		s->max_frame = s->in_frame * 2 + 65536;
+	/* Nor less than the output format says a frame takes. */
+	if (out->biSizeImage > s->max_frame)
+		s->max_frame = out->biSizeImage;
 	pc->lpBitsOut = calloc(1, s->max_frame);
 	if (!pc->lpBitsOut)
 		goto nomem;
@@ -198,6 +201,23 @@ BOOL ic_seq_start_ex(COMPVARS *pc, const BITMAPINFO *in, DWORD rate,
 	if (r != ICERR_OK) {
 		vfw_set_error("ICM_COMPRESS_BEGIN: %s", icerr_name(r, err));
 		goto fail;
+	}
+	/*
+	 * Asked again, now that it has begun: some codecs work the size out
+	 * from what ICM_COMPRESS_BEGIN sets up (wtvc.dll answers 380 bytes
+	 * before it, for any frame).
+	 */
+	r = ic_send(pc->hic, ICM_COMPRESS_GET_SIZE, (DWORD_PTR)pc->lpbiIn,
+		    (DWORD_PTR)out);
+	if (r > 0 && (DWORD)r > s->max_frame) {
+		void *bigger = calloc(1, (size_t)r);
+		if (!bigger) {
+			ic_send(pc->hic, ICM_COMPRESS_END, 0, 0);
+			goto nomem;
+		}
+		free(pc->lpBitsOut);
+		pc->lpBitsOut = bigger;
+		s->max_frame = (DWORD)r;
 	}
 	pc->lFrame = 0;
 	pc->lKeyCount = 0;

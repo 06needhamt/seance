@@ -280,7 +280,11 @@ The file is `$VFW_INI`, else `$VFW_ROOT/vfw.ini` (default
 `~/.seance/vfw.ini`). Relative paths are taken from the file's
 directory, and Windows paths go through the drive mapping (`C:` is
 `$VFW_ROOT/drive_c`, `Z:` is `/`). `list` shows the entries and opens each
-one to show its name.
+one to show its name. A path rooted without a drive, such as the
+`\Windows\codec.ini` some codecs write, is on the current drive in
+Windows, which is the system drive there. The harness's current directory is
+on `Z:`, so such a path goes to `C:` instead unless only `/` has its first
+folder. A codec's settings and logs therefore land in `drive_c`, not in `/`.
 
 Codecs usually import more than kernel32, winmm and msvfw32. The msvcrt
 family (msvcrt.dll, msvcr70-140, msvcp*, ucrtbase, api-ms-win-crt-*) is a
@@ -736,6 +740,11 @@ decodes below 40 dB.
   ```
 - **Hangs.** With `VFW_TIMEOUT=<seconds>`, a single call into a DLL that
   takes longer is reported the same way, and the harness exits with 124.
+- **Code in data.** Windows ran programs without DEP (data execution
+  prevention) unless they opted in, and some codecs build or unpack code in
+  heap memory or on the stack and run it there (`pvwv220.dll` has its own PE
+  loader for the DLLs it carries). As in Wine, when that faults, the page is
+  made executable and the code continues; `VFW_TRACE=1` logs each page.
 
 ### Environment variables
 

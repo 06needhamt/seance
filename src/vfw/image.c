@@ -106,22 +106,25 @@ HANDLE STUB_WINAPI ic_image_compress(HIC hic, UINT flags, BITMAPINFO *in,
 		goto done;
 	}
 
-	LRESULT max = ic_send(hic, ICM_COMPRESS_GET_SIZE, (DWORD_PTR)in,
-			      (DWORD_PTR)out);
-	if (max <= 0)
-		max = in->bmiHeader.biSizeImage ? in->bmiHeader.biSizeImage :
-		      image_size(&in->bmiHeader);
-	if (max <= 0 || !(buf = malloc((size_t)max))) {
-		vfw_set_error("ICImageCompress: no room for the output");
-		goto done;
-	}
-
 	if ((err = ic_send(hic, ICM_COMPRESS_BEGIN, (DWORD_PTR)in,
 			   (DWORD_PTR)out)) != ICERR_OK) {
 		vfw_set_error("ICImageCompress: ICM_COMPRESS_BEGIN failed");
 		goto done;
 	}
 	begun = 1;
+
+	/* Asked once begun, as some codecs only know it then (see seq.c). */
+	LRESULT max = ic_send(hic, ICM_COMPRESS_GET_SIZE, (DWORD_PTR)in,
+			      (DWORD_PTR)out);
+	if (max <= 0)
+		max = in->bmiHeader.biSizeImage ? in->bmiHeader.biSizeImage :
+		      image_size(&in->bmiHeader);
+	if (max > 0 && out->biSizeImage > (DWORD)max)
+		max = out->biSizeImage;
+	if (max <= 0 || !(buf = malloc((size_t)max))) {
+		vfw_set_error("ICImageCompress: no room for the output");
+		goto done;
+	}
 
 	DWORD ckid = 0, out_flags = 0;
 	DWORD target = size && *size > 0 ? (DWORD)*size : 0;

@@ -24,6 +24,9 @@
  *
  * With TESTCODEC_NOCOMPRESS=1 it only decompresses, answering every
  * ICM_COMPRESS_QUERY with ICERR_UNSUPPORTED, as Sunplus's webcam codecs do.
+ * With TESTCODEC_LATESIZE=1 it only knows how big a frame can get once
+ * ICM_COMPRESS_BEGIN has been sent, and says 16 bytes before (in
+ * ICM_COMPRESS_GET_SIZE and the output format), as wtvc.dll does.
  *
  * Two private messages misbehave on purpose, for the harness's crash and
  * hang reports: TESTCODEC_CRASH writes through a null pointer and
@@ -68,6 +71,8 @@ struct instance {
 static HINSTANCE self;
 static int strict;	/* TESTCODEC_STRICT */
 static int nocompress;	/* TESTCODEC_NOCOMPRESS */
+static int latesize;	/* TESTCODEC_LATESIZE */
+#define EARLY_SIZE 16	/* what it says before ICM_COMPRESS_BEGIN */
 static DWORD last_quality = 0xffffffff;	/* of the last ICM_COMPRESS */
 static DWORD msg_log[MAX_LOG];
 static int nlog;
@@ -304,7 +309,7 @@ static LRESULT compress_get_format(const BITMAPINFOHEADER *in,
 	*out = *in;
 	out->biSize = sizeof(*out);
 	out->biCompression = TST0;
-	out->biSizeImage = max_size(in);
+	out->biSizeImage = latesize ? EARLY_SIZE : max_size(in);
 	out->biClrUsed = out->biClrImportant = 0;
 	return ICERR_OK;
 }
@@ -509,6 +514,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 			 v[0] == '1';
 		nocompress = GetEnvironmentVariableA("TESTCODEC_NOCOMPRESS", v,
 						     sizeof(v)) == 1 && v[0] == '1';
+		latesize = GetEnvironmentVariableA("TESTCODEC_LATESIZE", v,
+						   sizeof(v)) == 1 && v[0] == '1';
 		log_msg(msg);
 		return DefDriverProc(id, hdrvr, msg, l1, l2);
 	}
@@ -610,6 +617,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 	case ICM_COMPRESS_GET_SIZE:
 		if (!ok_input((BITMAPINFOHEADER *)l1))
 			return ICERR_BADFORMAT;
+		if (latesize && !inst->cprev)
+			return EARLY_SIZE;
 		return max_size((BITMAPINFOHEADER *)l1);
 	case ICM_COMPRESS_FRAMES_INFO: {
 		ICCOMPRESSFRAMES *f = (ICCOMPRESSFRAMES *)l1;

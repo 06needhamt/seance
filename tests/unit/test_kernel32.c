@@ -829,6 +829,34 @@ static void test_files(void)
 	CHECK_EQ(GetFullPathNameA("C:\\x\\..\\..\\y", sizeof(buf), buf, NULL), 4);
 	CHECK_STR(buf, "C:\\y");
 
+	/*
+	 * Rooted without a drive, from a current directory on Z: (the build
+	 * tree): on C: when C: has the first component or / doesn't, as a
+	 * codec writing "\Windows\codec.ini" or "\codec.log" means; on Z:
+	 * when only / has it.
+	 */
+	GetFullPathNameA("x", sizeof(buf), buf, NULL);
+	if (buf[0] == 'Z') {
+		CHECK_EQ(GetFullPathNameA("\\Windows\\codec.ini", sizeof(buf), buf,
+					  NULL), 20);
+		CHECK_STR(buf, "C:\\Windows\\codec.ini");
+		CHECK(GetFullPathNameA("\\nowhere\\x", sizeof(buf), buf, NULL));
+		CHECK_STR(buf, "C:\\nowhere\\x");
+		CHECK(GetFullPathNameA("\\TMP\\x", sizeof(buf), buf, NULL));
+		CHECK_STR(buf, "Z:\\TMP\\x");
+		h = CreateFileA("\\Windows\\rooted.ini", GENERIC_WRITE, 0, NULL,
+				CREATE_ALWAYS, 0, NULL);
+		CHECK(h != INVALID_HANDLE_VALUE);
+		CloseHandle(h);
+		snprintf(unix_name, sizeof(unix_name),
+			 "%s/drive_c/windows/rooted.ini", root);
+		CHECK(stat(unix_name, &st) == 0);
+		CHECK(DeleteFileA("C:\\WINDOWS\\rooted.ini"));
+	} else {
+		printf("current directory on %c:, not checking rooted paths\n",
+		       buf[0]);
+	}
+
 	/* Standard handles. */
 	HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
 	CHECK(out != INVALID_HANDLE_VALUE && out != NULL);
