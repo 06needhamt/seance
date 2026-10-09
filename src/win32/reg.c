@@ -547,6 +547,25 @@ LONG reg_delete(struct reg_key *k)
 	return ERROR_SUCCESS;
 }
 
+LONG reg_delete_tree(struct reg_key *k, int keep)
+{
+	while (k->nsub) {
+		LONG err = reg_delete_tree(k->sub[k->nsub - 1], 0);
+		if (err)
+			return err;
+	}
+	if (!keep)
+		return reg_delete(k);
+	while (k->nval) {
+		char *name = strdup(k->val[k->nval - 1].name);
+		LONG err = name ? reg_unset(k, name) : ERROR_NOT_ENOUGH_MEMORY;
+		free(name);
+		if (err)
+			return err;
+	}
+	return ERROR_SUCCESS;
+}
+
 struct reg_value *reg_get(struct reg_key *k, const char *name)
 {
 	if (!name)

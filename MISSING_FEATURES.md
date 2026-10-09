@@ -259,6 +259,24 @@ so their "5.1" runs are stereo at 48000 Hz. `tests/samples.sh` over the
 five reports no unimplemented imports, and each driver's tags with what
 it does with them.
 
+## Other codecs (32-bit), October 2026
+
+Single codecs tried one at a time, with what each needed:
+
+| Codec | Kind | Result | What it needed |
+|---|---|---|---|
+| Sunplus `sp4x_32.dll`, `sp6x_32.dll` (SP41-SP47, SP60-SP62) | VfW | decoders only: every compress message is a stub; 12-bit input at 160x120 to 640x480 only | `encode` and `probe` now say a codec only decompresses |
+| Pegasus `pvwv220.dll` (PVW2) | VfW | encodes and decodes, 38 dB | runs DLLs it carries from heap memory with its own PE loader: data pages are made executable on the fault, as Windows without DEP and Wine do |
+| `wtvc.dll` (WTVC) | VfW | encodes and decodes, 47 dB | answers `ICM_COMPRESS_GET_SIZE` only after `ICM_COMPRESS_BEGIN`: asked again then |
+| `WavCWAIP.dll` (wavc) | VfW | encodes and decodes with `VFW_DATE` before 2008 and BGR24 input | an evaluation build that stops in 2008; writes `\Windows\WavCWAIP.ini`, now on `C:` |
+| LEAD MCMW 2.0 (`LCODCCMW2E.dll` and `LCMW2.dll`, LCW2) | DirectShow | encodes and decodes, 37.5-45 dB outside a 16-row band | `SHDeleteKeyA`; one filter in two categories; an output type of its own; samples full until told otherwise; `IMediaSample2` properties in part |
+
+The LEAD encoder is an evaluation build ("LEAD MCMW 2.0 Eval Encoder") that
+draws a banner into the bottom 16 rows of every frame with GDI text, which
+the headless GDI leaves blank. It sets no sync points of its own, so only
+the frames asked to be keyframes are (the first); it has no
+`IAMVideoCompression`, so `--keyint` is refused.
+
 ## In-repository baseline
 
 For comparison, the same command over `build/fixtures` examined 23 fixture

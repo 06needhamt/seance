@@ -33,6 +33,9 @@ HRESULT dshow_filter_open(const char *path, const CLSID *selected, int encoder,
 		if (dshow_role(&found[i]) !=
 				(encoder ? DSHOW_VIDEO_ENCODER : DSHOW_VIDEO_DECODER))
 			continue;
+		/* One filter in several categories is still one. */
+		if (matches && !memcmp(&clsid, &found[i].clsid, sizeof(clsid)))
+			continue;
 		clsid = found[i].clsid;
 		matches++;
 	}

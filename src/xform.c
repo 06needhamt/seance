@@ -139,6 +139,12 @@ HRESULT xform_find_output(const char *path, const CLSID *selected, int audio,
 		if ((selected && memcmp(selected, &q->clsid, sizeof(*selected))) ||
 		    dshow_role(q) != dshow_codec_role(audio, encoder))
 			continue;
+		/*
+		 * One filter in several categories is still one (LEAD's encoders
+		 * register in the legacy and the video compressor categories).
+		 */
+		if (matches && !memcmp(&found->clsid, &q->clsid, sizeof(CLSID)))
+			continue;
 		DWORD c = encoder ? filter_compression(q, audio) : 0;
 		if (encoder && (!c || (output && c != output)))
 			continue;

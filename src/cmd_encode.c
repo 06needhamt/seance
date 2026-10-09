@@ -339,6 +339,17 @@ static int com_try_input(struct xform *x, const BITMAPINFOHEADER *input,
 				     &out_mt);
 	if (SUCCEEDED(hr))
 		hr = xform_connect(x, &in_mt, &out_mt, com_write_encoded, sink);
+	/*
+	 * Some encoders connect only with the output type they propose
+	 * themselves (LEAD's want their own format block, with its codec
+	 * data): given just the subtype, the encoder completes it.
+	 */
+	if (hr == VFW_E_TYPE_NOT_ACCEPTED) {
+		AM_MEDIA_TYPE partial = {
+			.majortype = out_mt.majortype, .subtype = out_mt.subtype,
+		};
+		hr = xform_connect(x, &in_mt, &partial, com_write_encoded, sink);
+	}
 	if (SUCCEEDED(hr))
 		hr = dshow_mt_to_bih(xform_output_type(x), output, output_size);
 	if (SUCCEEDED(hr)) {

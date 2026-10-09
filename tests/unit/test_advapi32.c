@@ -395,6 +395,63 @@ static void test_enum_delete(void)
 		 ERROR_INVALID_HANDLE);
 }
 
+/* RegDeleteTree, and shlwapi's SHDeleteKey (a filter's unregistration). */
+static void test_delete_tree(void)
+{
+	FN(LONG, RegCreateKeyA, HKEY, LPCSTR, HKEY *);
+	FN(LONG, RegOpenKeyA, HKEY, LPCSTR, HKEY *);
+	FN(LONG, RegSetValueA, HKEY, LPCSTR, DWORD, LPCSTR, DWORD);
+	FN(LONG, RegSetValueExA, HKEY, LPCSTR, DWORD, DWORD, const BYTE *, DWORD);
+	FN(LONG, RegQueryInfoKeyA, HKEY, LPSTR, LPDWORD, LPDWORD, LPDWORD,
+	   LPDWORD, LPDWORD, LPDWORD, LPDWORD, LPDWORD, LPDWORD, PFILETIME);
+	FN(LONG, RegDeleteTreeA, HKEY, LPCSTR);
+	FN(LONG, RegCloseKey, HKEY);
+	struct module *sl = mod_load("shlwapi.dll", NULL);
+	CHECK(sl != NULL);
+	if (!sl)
+		return;
+	DWORD (WINAPI *SHDeleteKeyA)(HKEY, LPCSTR) =
+		(DWORD (WINAPI *)(HKEY, LPCSTR))mod_get_proc(sl, "SHDeleteKeyA");
+	DWORD (WINAPI *SHDeleteKeyW)(HKEY, LPCWSTR) =
+		(DWORD (WINAPI *)(HKEY, LPCWSTR))mod_get_proc(sl, "SHDeleteKeyW");
+	CHECK(SHDeleteKeyA && SHDeleteKeyW);
+
+	HKEY k, sub;
+	DWORD nsub, nval;
+	CHECK_EQ(RegCreateKeyA(HKEY_CURRENT_USER, "Software\\Tree\\a\\b\\c", &k), 0);
+	RegCloseKey(k);
+	CHECK_EQ(RegSetValueA(HKEY_CURRENT_USER, "Software\\Tree\\a\\d", REG_SZ,
+			      "x", 0), 0);
+	CHECK_EQ(RegOpenKeyA(HKEY_CURRENT_USER, "Software\\Tree", &k), 0);
+	CHECK_EQ(RegSetValueExA(k, "v", 0, REG_SZ, (BYTE *)"1", 2), 0);
+	/* SHDeleteKey: the key and all under it. */
+	if (SHDeleteKeyA) {
+		CHECK_EQ(SHDeleteKeyA(k, "a"), 0);
+		CHECK_EQ(RegOpenKeyA(k, "a", &sub), ERROR_FILE_NOT_FOUND);
+		CHECK_EQ(SHDeleteKeyA(k, "a"), ERROR_FILE_NOT_FOUND);
+	}
+	if (SHDeleteKeyW) {
+		CHECK_EQ(RegCreateKeyA(k, "w\\x", &sub), 0);
+		RegCloseKey(sub);
+		static const WCHAR w[] = { 'W', 0 };
+		CHECK_EQ(SHDeleteKeyW(k, w), 0);
+		CHECK_EQ(RegOpenKeyA(k, "w", &sub), ERROR_FILE_NOT_FOUND);
+	}
+	/* RegDeleteTree of the key itself: its subkeys and values go. */
+	CHECK_EQ(RegCreateKeyA(k, "e\\f", &sub), 0);
+	RegCloseKey(sub);
+	CHECK_EQ(RegDeleteTreeA(k, NULL), 0);
+	CHECK_EQ(RegQueryInfoKeyA(k, NULL, NULL, NULL, &nsub, NULL, NULL, &nval,
+				  NULL, NULL, NULL, NULL), 0);
+	CHECK_EQ(nsub, 0);
+	CHECK_EQ(nval, 0);
+	CHECK_EQ(RegCloseKey(k), 0);
+	CHECK_EQ(RegDeleteTreeA(HKEY_CURRENT_USER, "Software\\Tree"), 0);
+	CHECK_EQ(RegOpenKeyA(HKEY_CURRENT_USER, "Software\\Tree", &k),
+		 ERROR_FILE_NOT_FOUND);
+	mod_free(sl);
+}
+
 static void test_user_name(void)
 {
 	FN(BOOL, GetUserNameA, LPSTR, LPDWORD);
@@ -956,6 +1013,7 @@ int main(void)
 	test_seed();
 	test_round_trip();
 	test_enum_delete();
+	test_delete_tree();
 	test_user_name();
 	test_get_value();
 	test_notify();
