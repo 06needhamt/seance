@@ -40,7 +40,7 @@ struct filter {
 	LONG key_interval, pframes;
 	double quality;
 	DWORDLONG window;
-	BOOL async, no_eos, require_segment, segment, peer_info, dynamic, dynamic_extra, no_preroll, codec_api_only, notify_error, strict, own_allocator, own_output, no_proposal, intra;
+	BOOL async, no_eos, require_segment, segment, peer_info, dynamic, dynamic_extra, no_preroll, codec_api_only, notify_error, strict, own_allocator, own_output, no_proposal, intra, own_layout;
 	LONG workers;
 	HRESULT async_error;
 	CRITICAL_SECTION transform_lock;
@@ -593,6 +593,50 @@ static HRESULT encoder_output_type(struct filter*f,const AM_MEDIA_TYPE*mt,AM_MED
 	return copy_type(full,mt);
 }
 
+/*
+ * TESTFILTER_OWN_LAYOUT: the video decoder proposes its own output type
+ * for RGB streams, top-down, and writes that layout whatever type it is
+ * connected with, as LEAD's decoder writes 24 bits into its "RGB8" type.
+ */
+static const GUID st_rgb24={0xe436eb7d,0x524f,0x11ce,{0x9f,0x53,0x00,0x20,0xaf,0x0b,0xa7,0x70}};
+static const GUID st_rgb32={0xe436eb7e,0x524f,0x11ce,{0x9f,0x53,0x00,0x20,0xaf,0x0b,0xa7,0x70}};
+static HRESULT decoder_type(struct filter*f,AM_MEDIA_TYPE*full)
+{
+	const AM_MEDIA_TYPE*in=&f->input.type;
+	if(!f->input.connected||!eq(&in->formattype,&fmt_video)||
+	   in->cbFormat<sizeof(VIDEOINFOHEADER))
+		return VFW_E_NOT_CONNECTED;
+	const BITMAPINFOHEADER*ib=&((const VIDEOINFOHEADER*)in->pbFormat)->bmiHeader;
+	if(ib->biBitCount!=24&&ib->biBitCount!=32)return VFW_E_TYPE_NOT_ACCEPTED;
+	*full=*in;
+	full->pUnk=NULL;
+	full->subtype=ib->biBitCount==24?st_rgb24:st_rgb32;
+	full->bFixedSizeSamples=TRUE;
+	full->bTemporalCompression=FALSE;
+	full->cbFormat=sizeof(VIDEOINFOHEADER);
+	if(!(full->pbFormat=CoTaskMemAlloc(full->cbFormat)))return E_OUTOFMEMORY;
+	for(ULONG i=0;i<sizeof(VIDEOINFOHEADER);i++)full->pbFormat[i]=in->pbFormat[i];
+	BITMAPINFOHEADER*b=media_bih(full);
+	b->biSize=sizeof(*b);
+	b->biCompression=BI_RGB;
+	b->biHeight=-abs_long(b->biHeight);
+	b->biSizeImage=frame_bytes(b);
+	full->lSampleSize=b->biSizeImage;
+	return S_OK;
+}
+static HRESULT decoder_output_type(struct filter*f,const AM_MEDIA_TYPE*mt,AM_MEDIA_TYPE*full)
+{
+	if(f->own_layout&&eq(&mt->formattype,&guid_null)&&!mt->cbFormat){
+		HRESULT hr=decoder_type(f,full);
+		if(SUCCEEDED(hr)&&!eq(&mt->subtype,&guid_null)&&!eq(&mt->subtype,&full->subtype)){
+			free_type(full);
+			hr=VFW_E_TYPE_NOT_ACCEPTED;
+		}
+		return hr;
+	}
+	return copy_type(full,mt);
+}
+
 /* The output pin's types: the video encoder's own, once its input is connected. */
 struct enum_types { IEnumMediaTypes iface; LONG refs; AM_MEDIA_TYPE type; ULONG count, pos; };
 static HRESULT WINAPI types_qi(IEnumMediaTypes*p,REFIID iid,void**out){if(!out)return E_POINTER;if(eq(iid,&iid_unknown)||eq(iid,&iid_enum_types)){*out=p;p->lpVtbl->AddRef(p);return S_OK;}*out=NULL;return E_NOINTERFACE;}
@@ -641,7 +685,7 @@ static HRESULT WINAPI pin_connect(IPin*p,IPin*peer,const AM_MEDIA_TYPE*mt)
 	if(x->direction!=PINDIR_OUTPUT)return VFW_E_INVALID_DIRECTION;
 	if(x->connected)return VFW_E_ALREADY_CONNECTED;
 	HRESULT hr=f->audio?audio_output_type(f,mt,&full):
-		f->encoder?encoder_output_type(f,mt,&full):copy_type(&full,mt);
+		f->encoder?encoder_output_type(f,mt,&full):decoder_output_type(f,mt,&full);
 	if(FAILED(hr))return hr;
 	hr=peer->lpVtbl->ReceiveConnection(peer,p,&full);
 	if(FAILED(hr)){free_type(&full);return hr;}
@@ -672,6 +716,12 @@ static HRESULT WINAPI pin_enum_types(IPin*p,IEnumMediaTypes**out)
 	AM_MEDIA_TYPE own;
 	if(!out)return E_POINTER;
 	*out=NULL;
+	if(x->direction==PINDIR_OUTPUT&&!f->encoder&&!f->audio&&f->own_layout){
+		if(FAILED(decoder_type(f,&own)))return make_types(NULL,0,0,out);
+		HRESULT hr=make_types(&own,1,0,out);
+		free_type(&own);
+		return hr;
+	}
 	if(x->direction!=PINDIR_OUTPUT||!f->encoder||f->audio||f->no_proposal)
 		return E_NOTIMPL;
 	/* Nothing to propose until the input says what the picture is. */
@@ -832,7 +882,13 @@ static HRESULT transform(struct filter*f,IMediaSample*input)
 		else if(src[0]=='D'&&!f->valid)hr=VFW_E_SAMPLE_REJECTED;
 		else if(rle_decode(src+4,input_len-4,f->picture,raw,src[0]=='D'))hr=VFW_E_INVALID_FILE_FORMAT;
 		else if((DWORD)sample->lpVtbl->GetSize(sample)<raw)hr=VFW_E_BUFFER_OVERFLOW;
-		else{for(DWORD i=0;i<raw;i++)dst[i]=f->picture[i];f->valid=TRUE;sample->lpVtbl->SetActualDataLength(sample,raw);sample->lpVtbl->SetSyncPoint(sample,input->lpVtbl->IsSyncPoint(input)==S_OK);}
+		else{
+			if(f->own_layout&&ib->biBitCount!=12){
+				/* Top-down, the picture's rows the other way round. */
+				LONG h=abs_long(ib->biHeight);DWORD row=raw/(DWORD)h;
+				for(LONG y=0;y<h;y++)for(DWORD i=0;i<row;i++)dst[(DWORD)y*row+i]=f->picture[(DWORD)(h-1-y)*row+i];
+			}else for(DWORD i=0;i<raw;i++)dst[i]=f->picture[i];
+			f->valid=TRUE;sample->lpVtbl->SetActualDataLength(sample,raw);sample->lpVtbl->SetSyncPoint(sample,input->lpVtbl->IsSyncPoint(input)==S_OK);}
 	}
 	/*
 	 * TESTFILTER_NOTIFY_ERROR: a frame that can't be decoded is reported to the
@@ -903,5 +959,5 @@ static HRESULT WINAPI filter_vendor(IBaseFilter*p,LPWSTR*out){return E_NOTIMPL;}
 static IBaseFilterVtbl filter_vtbl={filter_qi,filter_addref,filter_release,filter_class,filter_stop,filter_pause,filter_run,filter_state,filter_set_clock,filter_get_clock,filter_enum,filter_find,filter_info,filter_join,filter_vendor};
 
 static BOOL env_on(const char*name){char value[2];return GetEnvironmentVariableA(name,value,sizeof(value))==1&&value[0]=='1';}
-HRESULT testfilter_create(BOOL encoder,BOOL audio,REFIID iid,void**out){if(!out)return E_POINTER;*out=NULL;struct filter*f=alloc(sizeof(*f));if(!f)return E_OUTOFMEMORY;f->audio=audio;f->split=env_on("TESTFILTER_AUDIO_SPLIT");f->hold=env_on("TESTFILTER_AUDIO_HOLD");f->float_switch=env_on("TESTFILTER_AUDIO_FLOAT");f->rate_switch=env_on("TESTFILTER_AUDIO_RATE");f->iface.lpVtbl=&filter_vtbl;f->compression.lpVtbl=&compression_vtbl;f->codec_api.lpVtbl=&codec_api_vtbl;f->codec_api_only=env_on("TESTFILTER_CODECAPI");f->persist.lpVtbl=&persist_vtbl;f->refs=1;f->encoder=encoder;f->quality=0.75;f->async=env_on("TESTFILTER_ASYNC");f->no_eos=env_on("TESTFILTER_NO_EOS");f->require_segment=env_on("TESTFILTER_REQUIRE_SEGMENT");f->peer_info=env_on("TESTFILTER_PEER_INFO");f->dynamic=env_on("TESTFILTER_DYNAMIC");f->dynamic_extra=env_on("TESTFILTER_DYNAMIC_EXTRA");f->no_preroll=env_on("TESTFILTER_NO_PREROLL");f->notify_error=env_on("TESTFILTER_NOTIFY_ERROR");f->strict=env_on("TESTFILTER_STRICT");f->own_allocator=env_on("TESTFILTER_OWN_ALLOCATOR");f->own_output=env_on("TESTFILTER_OWN_OUTPUT");f->no_proposal=env_on("TESTFILTER_NO_PROPOSAL");f->intra=env_on("TESTFILTER_INTRA");InitializeCriticalSection(&f->transform_lock);f->input=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_INPUT};f->output=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_OUTPUT};InterlockedIncrement(&objects);HRESULT hr=filter_qi(&f->iface,iid,out);filter_release(&f->iface);return hr;}
+HRESULT testfilter_create(BOOL encoder,BOOL audio,REFIID iid,void**out){if(!out)return E_POINTER;*out=NULL;struct filter*f=alloc(sizeof(*f));if(!f)return E_OUTOFMEMORY;f->audio=audio;f->split=env_on("TESTFILTER_AUDIO_SPLIT");f->hold=env_on("TESTFILTER_AUDIO_HOLD");f->float_switch=env_on("TESTFILTER_AUDIO_FLOAT");f->rate_switch=env_on("TESTFILTER_AUDIO_RATE");f->iface.lpVtbl=&filter_vtbl;f->compression.lpVtbl=&compression_vtbl;f->codec_api.lpVtbl=&codec_api_vtbl;f->codec_api_only=env_on("TESTFILTER_CODECAPI");f->persist.lpVtbl=&persist_vtbl;f->refs=1;f->encoder=encoder;f->quality=0.75;f->async=env_on("TESTFILTER_ASYNC");f->no_eos=env_on("TESTFILTER_NO_EOS");f->require_segment=env_on("TESTFILTER_REQUIRE_SEGMENT");f->peer_info=env_on("TESTFILTER_PEER_INFO");f->dynamic=env_on("TESTFILTER_DYNAMIC");f->dynamic_extra=env_on("TESTFILTER_DYNAMIC_EXTRA");f->no_preroll=env_on("TESTFILTER_NO_PREROLL");f->notify_error=env_on("TESTFILTER_NOTIFY_ERROR");f->strict=env_on("TESTFILTER_STRICT");f->own_allocator=env_on("TESTFILTER_OWN_ALLOCATOR");f->own_output=env_on("TESTFILTER_OWN_OUTPUT");f->no_proposal=env_on("TESTFILTER_NO_PROPOSAL");f->intra=env_on("TESTFILTER_INTRA");f->own_layout=env_on("TESTFILTER_OWN_LAYOUT");InitializeCriticalSection(&f->transform_lock);f->input=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_INPUT};f->output=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_OUTPUT};InterlockedIncrement(&objects);HRESULT hr=filter_qi(&f->iface,iid,out);filter_release(&f->iface);return hr;}
 LONG testfilter_objects(void){return objects;}

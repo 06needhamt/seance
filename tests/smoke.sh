@@ -465,6 +465,19 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 			echo "smoke: asynchronous seek decode differs" >&2
 			exit 1
 		}
+		# A decoder that writes the layout of the type it proposes (top-down
+		# RGB here), whatever it was given, is read in that layout.
+		$emu "$harness" encode "$fixtures/testcodec.dll" "$work/in.y4m" \
+			-o "$work/rgb.avi" --codec-input BGR24 2>/dev/null
+		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/rgb.avi" \
+			-o "$work/rgb.ref.y4m" 2>/dev/null
+		VFW_ENV_TESTFILTER_OWN_LAYOUT=1 \
+			$emu "$harness" decode "$fixtures/testfilter.ax" "$work/rgb.avi" \
+			-o "$work/rgb.y4m" --output-format BGR24 2>/dev/null
+		cmp -s "$work/rgb.ref.y4m" "$work/rgb.y4m" || {
+			echo "smoke: decoder's own output layout differs" >&2
+			exit 1
+		}
 		# A filter that announces a new output format mid-stream (here YV12,
 		# with its chroma swapped) must be followed, not rejected; and one that
 		# doesn't flag its preroll frames must not leak them into the output.

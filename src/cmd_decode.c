@@ -17,6 +17,7 @@
 #include "cmd_util.h"
 #include "commands.h"
 #include "common/error.h"
+#include "common/log.h"
 #include "common/fourcc.h"
 #include "common/unicode.h"
 #include "dmo/discover.h"
@@ -252,6 +253,35 @@ static HRESULT com_write_output(void *opaque, const struct xform_output *o,
 	return S_OK;
 }
 
+/*
+ * The format frames come in when the filter or DMO completed the type:
+ * the one it connected with (which carries its palette, which way up it
+ * is, and may differ from what was asked in more than that), if it
+ * describes the picture offered. malloc()ed, at least a struct
+ * vfw_format; NULL if it doesn't.
+ */
+static BITMAPINFOHEADER *connected_format(struct xform *x,
+					  const struct vfw_format *offered)
+{
+	const AM_MEDIA_TYPE *mt = xform_output_type(x);
+	BITMAPINFOHEADER *bih = NULL, *out = NULL;
+	size_t size = 0;
+	char desc[160];
+
+	if (!mt || FAILED(dshow_mt_to_bih(mt, &bih, &size)))
+		return NULL;
+	int same = bih->biWidth == offered->bih.biWidth &&
+		   labs(bih->biHeight) == labs(offered->bih.biHeight);
+	TRACE("decode: the decoder's own type: %s%s",
+	      cli_format_desc(bih, desc, sizeof(desc)),
+	      same ? "" : ", a different picture");
+	if (same &&
+	    (out = calloc(1, size > sizeof(*offered) ? size : sizeof(*offered))))
+		memcpy(out, bih, size);
+	free(bih);
+	return out;
+}
+
 static char *registered_decoder(const BITMAPINFOHEADER *input, CLSID *clsid)
 {
 	struct dshow_registered *filters = NULL;
@@ -403,6 +433,25 @@ static int decode_com(const char *target, const CLSID *selected,
 				if (FAILED(dshow_bih_to_mt(&fmt.bih, sizeof(fmt), rate,
 							   scale, 0, &out_mt)))
 					continue;
+				/*
+				 * The decoder's own type of that subtype first, as a
+				 * renderer takes it in a graph: it carries the
+				 * decoder's palette (LEAD's) and the layout it
+				 * writes. Failing that, the type made here.
+				 */
+				AM_MEDIA_TYPE partial = {
+					.majortype = out_mt.majortype,
+					.subtype = out_mt.subtype,
+				};
+				connect_hr = xform_connect(x, &in_mt, &partial,
+							   com_write_output, &sink);
+				if (SUCCEEDED(connect_hr) &&
+				    (out = connected_format(x, &fmt))) {
+					connected = 1;
+					break;
+				}
+				if (SUCCEEDED(connect_hr))
+					xform_disconnect(x);
 				connect_hr = xform_connect(x, &in_mt, &out_mt,
 							   com_write_output, &sink);
 				if (SUCCEEDED(connect_hr)) {
