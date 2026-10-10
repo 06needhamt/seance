@@ -72,6 +72,8 @@ struct cli_codec {
 int cli_open_codec(const char *arg, const char *fourcc, FOURCC guess,
 		   const UINT *modes, size_t nmodes, struct cli_codec *c);
 
+/* Another instance of the codec, opened in mode under its handler; NULL if refused. */
+HIC cli_reopen_codec(const struct cli_codec *c, UINT mode);
 /* The name to show for an open codec: its DLL path, or its driver's. */
 const char *cli_codec_name(const struct cli_codec *c);
 

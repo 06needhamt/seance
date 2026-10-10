@@ -145,8 +145,13 @@ HRESULT xform_find_output(const char *path, const CLSID *selected, int audio,
 		 */
 		if (matches && !memcmp(&found->clsid, &q->clsid, sizeof(CLSID)))
 			continue;
+		/*
+		 * An encoder whose registration names no compression (its output
+		 * pin's subtype GUID_NULL, as aslcodec_dshow.dll's) says it when
+		 * connected: compression 0 for now.
+		 */
 		DWORD c = encoder ? filter_compression(q, audio) : 0;
-		if (encoder && (!c || (output && c != output)))
+		if (encoder && c && output && c != output)
 			continue;
 		found->clsid = q->clsid;
 		found->dmo = 0;

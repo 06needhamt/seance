@@ -35,6 +35,11 @@
  *                         ICM_DECOMPRESS_BEGIN (wv32vfw.dll)
  *   TESTCODEC_PICKY       it refuses ICM_COMPRESS_QUERY with an output
  *                         format, its own included (vsslight.dll)
+ *   TESTCODEC_NAMED_ONLY  it answers ICM_GETINFO only when opened as 'TST0'
+ *                         (wnvwinx.dll, as 'WINX')
+ *   TESTCODEC_DECODE_ONLY it refuses DRV_OPEN to compress, though it answers
+ *                         ICM_COMPRESS_QUERY when opened otherwise
+ *                         (vgpix32d.dll)
  * With TESTCODEC_LATESIZE=1 it only knows how big a frame can get once
  * ICM_COMPRESS_BEGIN has been sent, and says 16 bytes before (in
  * ICM_COMPRESS_GET_SIZE and the output format), as wtvc.dll does.
@@ -69,6 +74,8 @@ struct instance {
 	/* Decompression: the current picture, in the compressed layout. */
 	BYTE *dcur;
 	int dvalid;
+	/* Opened as 'TST0' (TESTCODEC_NAMED_ONLY answers only then). */
+	int named;
 	/* TESTCODEC_ASK_FORMAT: asked for its format since the last BEGIN; ready. */
 	int asked, ready;
 	/* ICM_SET_STATUS_PROC's callback. */
@@ -88,7 +95,8 @@ static HINSTANCE self;
 static int strict;	/* TESTCODEC_STRICT */
 static int nocompress;	/* TESTCODEC_NOCOMPRESS */
 static int latesize;	/* TESTCODEC_LATESIZE */
-static int needs_status, needs_padding, ask_format, picky;
+static int needs_status, needs_padding, ask_format, picky, decode_only;
+static int named_only;
 #define EARLY_SIZE 16	/* what it says before ICM_COMPRESS_BEGIN */
 static DWORD last_quality = 0xffffffff;	/* of the last ICM_COMPRESS */
 static DWORD msg_log[MAX_LOG];
@@ -549,6 +557,10 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 						     sizeof(v)) == 1 && v[0] == '1';
 		picky = GetEnvironmentVariableA("TESTCODEC_PICKY", v,
 						sizeof(v)) == 1 && v[0] == '1';
+		decode_only = GetEnvironmentVariableA("TESTCODEC_DECODE_ONLY", v,
+						      sizeof(v)) == 1 && v[0] == '1';
+		named_only = GetEnvironmentVariableA("TESTCODEC_NAMED_ONLY", v,
+						     sizeof(v)) == 1 && v[0] == '1';
 		log_msg(msg);
 		return DefDriverProc(id, hdrvr, msg, l1, l2);
 	}
@@ -567,7 +579,9 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 			DWORD t = op->fccType | 0x20202020;
 			DWORD hnd = op->fccHandler & ~0x20202020;
 			if ((op->fccType && t != VIDC) ||
-			    (op->fccHandler && hnd != (TST0 & ~0x20202020))) {
+			    (op->fccHandler && hnd != (TST0 & ~0x20202020)) ||
+			    (decode_only && (op->dwFlags == ICMODE_COMPRESS ||
+					     op->dwFlags == ICMODE_FASTCOMPRESS))) {
 				op->dwError = ICERR_UNSUPPORTED;
 				return 0;
 			}
@@ -577,6 +591,7 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		if (!inst)
 			return 0;
 		inst->magic = MAGIC;
+		inst->named = op && op->fccHandler == TST0;
 		inst->st.quality = 7500;
 		inst->st.keyrate = 15;
 		InterlockedIncrement(&opens);
@@ -606,6 +621,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		for (;;)
 			*(volatile DWORD *)&inst->magic;
 	case ICM_GETINFO:
+		if (named_only && !inst->named)
+			return 0;
 		return get_info((ICINFO *)l1, (DWORD)l2);
 	case ICM_GETSTATE:
 		if (!l1)

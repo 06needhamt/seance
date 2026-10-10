@@ -291,6 +291,15 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		grep -q "doesn't compress: .*ICERR_UNSUPPORTED"
 	VFW_ENV_TESTCODEC_NOCOMPRESS=1 $emu "$harness" probe \
 		"$fixtures/testcodec.dll" | grep -q "it only decompresses"
+	# One that answers only under its FOURCC, named only as a DLL: the
+	# FOURCC is found in it.
+	VFW_INI=/dev/null VFW_ENV_TESTCODEC_NAMED_ONLY=1 $emu "$harness" probe \
+		"$fixtures/testcodec.dll" 2>&1 | grep -q "opened as 'TST0', found"
+	# One that won't open to compress is probed as encode would use it.
+	VFW_ENV_TESTCODEC_DECODE_ONLY=1 $emu "$harness" probe \
+		"$fixtures/testcodec.dll" | grep -q "won't open to compress"
+	VFW_ENV_TESTCODEC_PICKY=1 $emu "$harness" probe \
+		"$fixtures/testcodec.dll" | grep -q "refuses its own format"
 	# One that only knows how big a frame gets once it has begun is asked
 	# again then, and given room for it.
 	{
@@ -391,6 +400,12 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 			echo "smoke: own output type round trip differs" >&2
 			exit 1
 		}
+		# An encoder registered as making any video still encodes: the
+		# FOURCC comes from the type it connects with.
+		VFW_ENV_TESTFILTER_NO_SUBTYPE=1 \
+			$emu "$harness" encode "$fixtures/testfilter.ax" \
+			"$work/in.y4m" -o "$work/any.avi" 2>&1 |
+			grep -q "'TST0'"
 		VFW_ENV_TESTFILTER_OWN_ALLOCATOR=1 \
 			$emu "$harness" decode "$fixtures/testfilter.ax" "$work/t.avi" \
 			-o "$work/dshow-own.y4m" 2>/dev/null

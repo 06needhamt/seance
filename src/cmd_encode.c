@@ -313,9 +313,10 @@ static int write_file(const char *path, const void *data, size_t size)
 }
 
 /*
- * Connects the encoder with this input format and its compression; the
- * output format the stream header gets (with any codec data the encoder
- * adds) in *output. 0, or -1 if the encoder won't take it.
+ * Connects the encoder with this input format and its compression (0 if
+ * the encoder hasn't said: whatever it gives); the output format the
+ * stream header gets (with any codec data the encoder adds) in *output.
+ * 0, or -1 if the encoder won't take it.
  */
 static int com_try_input(struct xform *x, const BITMAPINFOHEADER *input,
 			 size_t input_size, FOURCC compression, DWORD rate,
@@ -334,9 +335,11 @@ static int com_try_input(struct xform *x, const BITMAPINFOHEADER *input,
 	encoded.biSizeImage = raw > (UINT32_MAX - 4096) / 2 ? UINT32_MAX :
 			      raw * 2 + 4096;
 	HRESULT hr = dshow_bih_to_mt(input, input_size, rate, scale, 0, &in_mt);
-	if (SUCCEEDED(hr))
+	if (SUCCEEDED(hr) && compression)
 		hr = dshow_bih_to_mt(&encoded, sizeof(encoded), rate, scale, 0,
 				     &out_mt);
+	else if (SUCCEEDED(hr))
+		out_mt.majortype = in_mt.majortype;	/* any subtype */
 	/*
 	 * The encoder's own output type of that compression first, as a
 	 * graph builder connects it to a file writer that takes anything: it
@@ -352,7 +355,7 @@ static int com_try_input(struct xform *x, const BITMAPINFOHEADER *input,
 		if (SUCCEEDED(hr))
 			hr = dshow_mt_to_bih(xform_output_type(x), output,
 					     output_size);
-		if (FAILED(hr)) {
+		if (FAILED(hr) && compression) {
 			xform_disconnect(x);
 			hr = xform_connect(x, &in_mt, &out_mt, com_write_encoded,
 					   sink);
@@ -497,6 +500,13 @@ static int encode_com(const char *target, const CLSID *selected,
 		fprintf(stderr, "seance: encoder takes neither %s nor %s standard "
 			"input format\n", source_format_name(src),
 			forced ? "the requested" : "any");
+		goto done;
+	}
+	/* An encoder that registered no compression says it now. */
+	if (!compression)
+		compression = output_format->biCompression;
+	if (!compression || compression == BI_BITFIELDS) {
+		fprintf(stderr, "seance: the encoder's output isn't compressed\n");
 		goto done;
 	}
 

@@ -116,6 +116,61 @@ static int has_pin(const struct qz_filter *f, const GUID *major, int output,
 	return 0;
 }
 
+/*
+ * Whether every type the filter's output pins name is the major type with
+ * no subtype: output known only once connected.
+ */
+static int output_unnamed(const struct qz_filter *f, const GUID *major)
+{
+	int any = 0;
+
+	for (size_t i = 0; i < f->npins; i++) {
+		const struct qz_pin *p = &f->pins[i];
+		if (!(p->flags & REG_PINFLAG_B_OUTPUT))
+			continue;
+		for (size_t j = 0; j < p->ntypes; j++) {
+			if (!guid_eq(&p->types[j].major, major) ||
+			    !guid_eq(&p->types[j].minor, &guid_null))
+				return 0;
+			any = 1;
+		}
+	}
+	return any;
+}
+
+/* Whether an input pin names an uncompressed subtype of major. */
+static int input_names_raw(const struct qz_filter *f, const GUID *major)
+{
+	int audio = guid_eq(major, &MEDIATYPE_Audio);
+
+	for (size_t i = 0; i < f->npins; i++) {
+		const struct qz_pin *p = &f->pins[i];
+		if (p->flags & REG_PINFLAG_B_OUTPUT)
+			continue;
+		for (size_t j = 0; j < p->ntypes; j++) {
+			const GUID *minor = &p->types[j].minor;
+			if (guid_eq(&p->types[j].major, major) &&
+			    (audio ? dshow_uncompressed_audio(minor) :
+				     dshow_uncompressed_video(minor)))
+				return 1;
+		}
+	}
+	return 0;
+}
+
+/*
+ * Raw in and compressed out is an encoder, and so is an input naming only
+ * raw types with an output that names no subtype. Any type in and any out
+ * (PICVideo's decompressors) says nothing either way.
+ */
+static int encodes(const struct qz_filter *f, const GUID *major)
+{
+	return has_pin(f, major, 0, 0) &&
+	       (has_pin(f, major, 1, 1) ||
+		(output_unnamed(f, major) && input_names_raw(f, major) &&
+		 !has_pin(f, major, 0, 1)));
+}
+
 enum dshow_role dshow_role(const struct qz_filter *f)
 {
 	const GUID *v = &MEDIATYPE_Video, *a = &MEDIATYPE_Audio;
@@ -123,12 +178,12 @@ enum dshow_role dshow_role(const struct qz_filter *f)
 	if (has_pin(f, v, 0, 1) && has_pin(f, v, 1, 0))
 		return DSHOW_VIDEO_DECODER;
 	if (guid_eq(&f->category, &CLSID_VideoCompressorCategory) ||
-	    (has_pin(f, v, 0, 0) && has_pin(f, v, 1, 1)))
+	    encodes(f, v))
 		return DSHOW_VIDEO_ENCODER;
 	if (has_pin(f, a, 0, 1) && has_pin(f, a, 1, 0))
 		return DSHOW_AUDIO_DECODER;
 	if (guid_eq(&f->category, &CLSID_AudioCompressorCategory) ||
-	    (has_pin(f, a, 0, 0) && has_pin(f, a, 1, 1)))
+	    encodes(f, a))
 		return DSHOW_AUDIO_ENCODER;
 	return DSHOW_OTHER;
 }

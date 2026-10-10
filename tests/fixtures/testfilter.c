@@ -175,6 +175,18 @@ static HRESULT register_decoder(void)
 }
 
 /* The encoder, the old way: YUY2 or RGB24 in, TST0 out. */
+/*
+ * With TESTFILTER_NO_SUBTYPE=1, the encoder registers its output as any
+ * video, as some encoders do: what it makes is known only once connected.
+ */
+static BOOL no_subtype(void)
+{
+	char value[2];
+
+	return GetEnvironmentVariableA("TESTFILTER_NO_SUBTYPE", value,
+				       sizeof(value)) == 1 && value[0] == '1';
+}
+
 static HRESULT register_encoder(void)
 {
 	IFilterMapper *fm;
@@ -200,7 +212,8 @@ static HRESULT register_encoder(void)
 						   FALSE, FALSE, guid_null,
 						   NULL)))
 		hr = fm->lpVtbl->RegisterPinType(fm, clsid_encoder, L"Output",
-						 mt_video, st_tst0);
+						 mt_video, no_subtype() ?
+						 guid_null : st_tst0);
 	fm->lpVtbl->Release(fm);
 	return hr;
 }

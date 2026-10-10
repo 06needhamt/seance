@@ -514,7 +514,13 @@ static void probe_compress(HIC hic, LONG w, LONG h)
 			printf("    output format: none (%s)\n", icerr_name(r, err));
 			continue;
 		}
-		printf("    output format: %s\n", cli_format_desc(out, buf, sizeof(buf)));
+		printf("    output format: %s%s\n", cli_format_desc(out, buf, sizeof(buf)),
+		       out->biCompression == BI_RGB ? " (not compressed)" : "");
+		/* What encode asks next, with the output; it goes on regardless. */
+		r = ic_send(hic, ICM_COMPRESS_QUERY, (DWORD_PTR)&f.bih, (DWORD_PTR)out);
+		if (r != ICERR_OK)
+			printf("    with that output: %s (the codec refuses its own "
+			       "format; encode tries anyway)\n", icerr_name(r, err));
 		LRESULT size = ic_send(hic, ICM_COMPRESS_GET_SIZE, (DWORD_PTR)&f.bih,
 				       (DWORD_PTR)out);
 		if (size > 0)
@@ -670,11 +676,19 @@ int cmd_probe(int argc, char **argv)
 		       (long)h);
 		probe_decompress(hic, &guess);
 	}
-	if (!in || have_size)
-		probe_compress(hic, w, h);
-	else
-		probe_compress(hic, in->biWidth,
-			       in->biHeight < 0 ? -in->biHeight : in->biHeight);
+	/* Compression as encode does it: in an instance opened to compress. */
+	HIC chic = cli_reopen_codec(&codec, ICMODE_COMPRESS);
+	if (!chic) {
+		printf("\nCompression: the codec won't open to compress "
+		       "(ICMODE_COMPRESS refused): it only decompresses\n");
+	} else {
+		if (!in || have_size)
+			probe_compress(chic, w, h);
+		else
+			probe_compress(chic, in->biWidth,
+				       in->biHeight < 0 ? -in->biHeight : in->biHeight);
+		ic_close(chic);
+	}
 
 	ic_close(hic);
 	avi_close(avi);
