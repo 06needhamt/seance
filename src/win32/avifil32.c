@@ -64,6 +64,22 @@ WINFN(HRESULT) avifil_AVIStreamRead(void *stream, LONG start, LONG samples,
 	return AVIERR_UNSUPPORTED;
 }
 
+/* No stream ever opens, so there are no frames to get. */
+WINFN(void *) avifil_AVIStreamGetFrameOpen(void *stream, const void *want)
+{
+	return NULL;
+}
+
+WINFN(void *) avifil_AVIStreamGetFrame(void *getframe, LONG position)
+{
+	return NULL;
+}
+
+WINFN(HRESULT) avifil_AVIStreamGetFrameClose(void *getframe)
+{
+	return getframe ? AVIERR_UNSUPPORTED : 0;
+}
+
 #define E(name) { #name, 0, (void *)avifil_##name }
 
 static const struct builtin_export exports[] = {
@@ -73,6 +89,9 @@ static const struct builtin_export exports[] = {
 	E(AVIFileOpenA),
 	E(AVIFileOpenW),
 	E(AVIFileRelease),
+	E(AVIStreamGetFrame),
+	E(AVIStreamGetFrameClose),
+	E(AVIStreamGetFrameOpen),
 	E(AVIStreamLength),
 	E(AVIStreamRead),
 	E(AVIStreamReadFormat),

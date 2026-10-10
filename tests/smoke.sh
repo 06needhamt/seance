@@ -295,6 +295,9 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	# FOURCC is found in it.
 	VFW_INI=/dev/null VFW_ENV_TESTCODEC_NAMED_ONLY=1 $emu "$harness" probe \
 		"$fixtures/testcodec.dll" 2>&1 | grep -q "opened as 'TST0', found"
+	# Its FOURCC kept as an upper and lower case pair in data.
+	VFW_INI=/dev/null VFW_ENV_TESTCODEC_NAMED_ONLY=2 $emu "$harness" probe \
+		"$fixtures/testcodec.dll" 2>&1 | grep -q "opened as 'TSTP', found"
 	# One that won't open to compress is probed as encode would use it.
 	VFW_ENV_TESTCODEC_DECODE_ONLY=1 $emu "$harness" probe \
 		"$fixtures/testcodec.dll" | grep -q "won't open to compress"

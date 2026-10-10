@@ -166,6 +166,93 @@ typedef struct tagTEXTMETRICW {
 	BYTE tmCharSet;
 } TEXTMETRICW, *PTEXTMETRICW, *LPTEXTMETRICW;
 
+#define LF_FULLFACESIZE 64
+
+typedef struct tagFONTSIGNATURE {
+	DWORD fsUsb[4];
+	DWORD fsCsb[2];
+} FONTSIGNATURE, *PFONTSIGNATURE, *LPFONTSIGNATURE;
+
+/* TEXTMETRIC's fields, then the font's design metrics. */
+typedef struct tagNEWTEXTMETRICA {
+	LONG tmHeight;
+	LONG tmAscent;
+	LONG tmDescent;
+	LONG tmInternalLeading;
+	LONG tmExternalLeading;
+	LONG tmAveCharWidth;
+	LONG tmMaxCharWidth;
+	LONG tmWeight;
+	LONG tmOverhang;
+	LONG tmDigitizedAspectX;
+	LONG tmDigitizedAspectY;
+	BYTE tmFirstChar;
+	BYTE tmLastChar;
+	BYTE tmDefaultChar;
+	BYTE tmBreakChar;
+	BYTE tmItalic;
+	BYTE tmUnderlined;
+	BYTE tmStruckOut;
+	BYTE tmPitchAndFamily;
+	BYTE tmCharSet;
+	DWORD ntmFlags;
+	UINT ntmSizeEM;
+	UINT ntmCellHeight;
+	UINT ntmAvgWidth;
+} NEWTEXTMETRICA, *PNEWTEXTMETRICA, *LPNEWTEXTMETRICA;
+
+typedef struct tagNEWTEXTMETRICW {
+	LONG tmHeight;
+	LONG tmAscent;
+	LONG tmDescent;
+	LONG tmInternalLeading;
+	LONG tmExternalLeading;
+	LONG tmAveCharWidth;
+	LONG tmMaxCharWidth;
+	LONG tmWeight;
+	LONG tmOverhang;
+	LONG tmDigitizedAspectX;
+	LONG tmDigitizedAspectY;
+	WCHAR tmFirstChar;
+	WCHAR tmLastChar;
+	WCHAR tmDefaultChar;
+	WCHAR tmBreakChar;
+	BYTE tmItalic;
+	BYTE tmUnderlined;
+	BYTE tmStruckOut;
+	BYTE tmPitchAndFamily;
+	BYTE tmCharSet;
+	DWORD ntmFlags;
+	UINT ntmSizeEM;
+	UINT ntmCellHeight;
+	UINT ntmAvgWidth;
+} NEWTEXTMETRICW, *PNEWTEXTMETRICW, *LPNEWTEXTMETRICW;
+
+typedef struct tagNEWTEXTMETRICEXA {
+	NEWTEXTMETRICA ntmTm;
+	FONTSIGNATURE ntmFontSig;
+} NEWTEXTMETRICEXA;
+
+typedef struct tagNEWTEXTMETRICEXW {
+	NEWTEXTMETRICW ntmTm;
+	FONTSIGNATURE ntmFontSig;
+} NEWTEXTMETRICEXW;
+
+/* What EnumFontFamilies(Ex) passes; ENUMLOGFONT is the first two fields. */
+typedef struct tagENUMLOGFONTEXA {
+	LOGFONTA elfLogFont;
+	BYTE elfFullName[LF_FULLFACESIZE];
+	BYTE elfStyle[LF_FACESIZE];
+	BYTE elfScript[LF_FACESIZE];
+} ENUMLOGFONTEXA, *LPENUMLOGFONTEXA;
+
+typedef struct tagENUMLOGFONTEXW {
+	LOGFONTW elfLogFont;
+	WCHAR elfFullName[LF_FULLFACESIZE];
+	WCHAR elfStyle[LF_FACESIZE];
+	WCHAR elfScript[LF_FACESIZE];
+} ENUMLOGFONTEXW, *LPENUMLOGFONTEXW;
+
 #define RGB(r, g, b) \
 	((COLORREF)(((BYTE)(r)) | ((WORD)((BYTE)(g)) << 8) | \
 		    ((DWORD)((BYTE)(b)) << 16)))
@@ -323,8 +410,27 @@ typedef struct tagTEXTMETRICW {
 #define OUT_DEFAULT_PRECIS  0
 #define CLIP_DEFAULT_PRECIS 0
 #define DEFAULT_QUALITY     0
+#define SYMBOL_CHARSET  2
+#define OEM_CHARSET     255
+#define OUT_STROKE_PRECIS   3
+#define CLIP_STROKE_PRECIS  2
+#define DRAFT_QUALITY       1
+#define DEFAULT_PITCH       0
+#define FIXED_PITCH         1
 #define VARIABLE_PITCH      2
+#define FF_DONTCARE         0x00
+#define FF_ROMAN            0x10
 #define FF_SWISS            0x20
+#define FF_MODERN           0x30
+/* TEXTMETRIC's tmPitchAndFamily: TMPF_FIXED_PITCH set means variable. */
+#define TMPF_FIXED_PITCH    0x01
+#define TMPF_VECTOR         0x02
+#define TMPF_TRUETYPE       0x04
+#define TMPF_DEVICE         0x08
+#define RASTER_FONTTYPE     0x0001
+#define DEVICE_FONTTYPE     0x0002
+#define TRUETYPE_FONTTYPE   0x0004
+#define NTM_REGULAR         0x00000040
 
 /* BITMAPFILEHEADER is 2-byte packed on Windows (14 bytes). */
 #pragma pack(push, 2)

@@ -36,7 +36,9 @@
  *   TESTCODEC_PICKY       it refuses ICM_COMPRESS_QUERY with an output
  *                         format, its own included (vsslight.dll)
  *   TESTCODEC_NAMED_ONLY  it answers ICM_GETINFO only when opened as 'TST0'
- *                         (wnvwinx.dll, as 'WINX')
+ *                         (wnvwinx.dll, as 'WINX'); set to 2, only when
+ *                         opened as 'TSTP' or 'tstp', a pair it keeps in
+ *                         its data (VFCodec.dll, as 'VIFP' or 'vifp')
  *   TESTCODEC_DECODE_ONLY it refuses DRV_OPEN to compress, though it answers
  *                         ICM_COMPRESS_QUERY when opened otherwise
  *                         (vgpix32d.dll)
@@ -101,7 +103,17 @@ static int strict;	/* TESTCODEC_STRICT */
 static int nocompress;	/* TESTCODEC_NOCOMPRESS */
 static int latesize;	/* TESTCODEC_LATESIZE */
 static int needs_status, needs_padding, ask_format, picky, decode_only;
-static int named_only;
+static int named_only;	/* 1: as 'TST0'; 2: as its pair */
+/* NAMED_ONLY=2's handlers, read from data rather than compared as
+ * immediates, and standing alone in it. */
+static volatile const DWORD pair_name[4] __attribute__((aligned(16))) = {
+	mmioFOURCC('T', 'S', 'T', 'P'), mmioFOURCC('t', 's', 't', 'p'),
+};
+
+static int pair_named(DWORD h)
+{
+	return h && (h == pair_name[0] || h == pair_name[1]);
+}
 static int end_crash;
 static int overrun;
 static volatile int zero;
@@ -585,7 +597,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		decode_only = GetEnvironmentVariableA("TESTCODEC_DECODE_ONLY", v,
 						      sizeof(v)) == 1 && v[0] == '1';
 		named_only = GetEnvironmentVariableA("TESTCODEC_NAMED_ONLY", v,
-						     sizeof(v)) == 1 && v[0] == '1';
+						     sizeof(v)) == 1 &&
+			     (v[0] == '1' || v[0] == '2') ? v[0] - '0' : 0;
 		end_crash = GetEnvironmentVariableA("TESTCODEC_END_CRASH", v,
 						    sizeof(v)) == 1 && v[0] == '1';
 		overrun = GetEnvironmentVariableA("TESTCODEC_OVERRUN", v,
@@ -610,7 +623,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 			DWORD t = op->fccType | 0x20202020;
 			DWORD hnd = op->fccHandler & ~0x20202020;
 			if ((op->fccType && t != VIDC) ||
-			    (op->fccHandler && hnd != (TST0 & ~0x20202020)) ||
+			    (op->fccHandler && hnd != (TST0 & ~0x20202020) &&
+			     !pair_named(op->fccHandler)) ||
 			    (decode_only && (op->dwFlags == ICMODE_COMPRESS ||
 					     op->dwFlags == ICMODE_FASTCOMPRESS))) {
 				op->dwError = ICERR_UNSUPPORTED;
@@ -622,7 +636,9 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		if (!inst)
 			return 0;
 		inst->magic = MAGIC;
-		inst->named = op && op->fccHandler == TST0;
+		inst->named = op && (named_only == 2 ?
+				     pair_named(op->fccHandler) :
+				     op->fccHandler == TST0);
 		inst->st.quality = 7500;
 		inst->st.keyrate = 15;
 		InterlockedIncrement(&opens);
