@@ -856,32 +856,52 @@ static void test_files(void)
 	CHECK_STR(buf, "C:\\y");
 
 	/*
-	 * Rooted without a drive, from a current directory on Z: (the build
-	 * tree): on C: when C: has the first component or / doesn't, as a
-	 * codec writing "\Windows\codec.ini" or "\codec.log" means; on Z:
-	 * when only / has it.
+	 * The current directory DLLs see is the Windows side's own, on C: to
+	 * begin with: drive-less rooted paths ("\\Windows\\codec.ini", as
+	 * codecs write) and relative ones are taken from it, and changing it
+	 * leaves the harness's where it was.
 	 */
-	GetFullPathNameA("x", sizeof(buf), buf, NULL);
-	if (buf[0] == 'Z') {
-		CHECK_EQ(GetFullPathNameA("\\Windows\\codec.ini", sizeof(buf), buf,
-					  NULL), 20);
-		CHECK_STR(buf, "C:\\Windows\\codec.ini");
-		CHECK(GetFullPathNameA("\\nowhere\\x", sizeof(buf), buf, NULL));
-		CHECK_STR(buf, "C:\\nowhere\\x");
-		CHECK(GetFullPathNameA("\\TMP\\x", sizeof(buf), buf, NULL));
-		CHECK_STR(buf, "Z:\\TMP\\x");
-		h = CreateFileA("\\Windows\\rooted.ini", GENERIC_WRITE, 0, NULL,
-				CREATE_ALWAYS, 0, NULL);
-		CHECK(h != INVALID_HANDLE_VALUE);
-		CloseHandle(h);
-		snprintf(unix_name, sizeof(unix_name),
-			 "%s/drive_c/windows/rooted.ini", root);
-		CHECK(stat(unix_name, &st) == 0);
-		CHECK(DeleteFileA("C:\\WINDOWS\\rooted.ini"));
-	} else {
-		printf("current directory on %c:, not checking rooted paths\n",
-		       buf[0]);
-	}
+	FN(DWORD, GetCurrentDirectoryA, DWORD, LPSTR);
+	FN(BOOL, SetCurrentDirectoryA, LPCSTR);
+	char host_before[512], host_after[512];
+	CHECK(getcwd(host_before, sizeof(host_before)) != NULL);
+	CHECK_EQ(GetCurrentDirectoryA(sizeof(buf), buf), 3);
+	CHECK_STR(buf, "C:\\");
+	CHECK_EQ(GetFullPathNameA("\\Windows\\codec.ini", sizeof(buf), buf,
+				  NULL), 20);
+	CHECK_STR(buf, "C:\\Windows\\codec.ini");
+	CHECK(GetFullPathNameA("codec.log", sizeof(buf), buf, NULL));
+	CHECK_STR(buf, "C:\\codec.log");
+	h = CreateFileA("\\Windows\\rooted.ini", GENERIC_WRITE, 0, NULL,
+			CREATE_ALWAYS, 0, NULL);
+	CHECK(h != INVALID_HANDLE_VALUE);
+	CloseHandle(h);
+	snprintf(unix_name, sizeof(unix_name), "%s/drive_c/windows/rooted.ini",
+		 root);
+	CHECK(stat(unix_name, &st) == 0);
+	CHECK(DeleteFileA("C:\\WINDOWS\\rooted.ini"));
+
+	CHECK(SetCurrentDirectoryA("windows\\temp"));
+	CHECK_EQ(GetCurrentDirectoryA(sizeof(buf), buf), 15);
+	CHECK_STR(buf, "C:\\windows\\temp");
+	h = CreateFileA("relative.txt", GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0,
+			NULL);
+	CHECK(h != INVALID_HANDLE_VALUE);
+	CloseHandle(h);
+	snprintf(unix_name, sizeof(unix_name),
+		 "%s/drive_c/windows/temp/relative.txt", root);
+	CHECK(stat(unix_name, &st) == 0);
+	CHECK(DeleteFileA("C:relative.txt"));	/* that drive's directory */
+	CHECK(!SetCurrentDirectoryA("C:\\nowhere"));
+	CHECK(!SetCurrentDirectoryA("C:\\WINDOWS\\TEMP\\Test File.txt"));
+	CHECK(SetCurrentDirectoryA("Z:\\tmp"));
+	CHECK(GetFullPathNameA("\\x", sizeof(buf), buf, NULL));
+	CHECK_STR(buf, "Z:\\x");
+	CHECK(GetFullPathNameA("y", sizeof(buf), buf, NULL));
+	CHECK_STR(buf, "Z:\\tmp\\y");
+	CHECK(getcwd(host_after, sizeof(host_after)) != NULL);
+	CHECK_STR(host_after, host_before);
+	CHECK(SetCurrentDirectoryA("C:\\"));
 
 	/* Standard handles. */
 	HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);

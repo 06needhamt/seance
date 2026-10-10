@@ -280,11 +280,15 @@ The file is `$VFW_INI`, else `$VFW_ROOT/vfw.ini` (default
 `~/.seance/vfw.ini`). Relative paths are taken from the file's
 directory, and Windows paths go through the drive mapping (`C:` is
 `$VFW_ROOT/drive_c`, `Z:` is `/`). `list` shows the entries and opens each
-one to show its name. A path rooted without a drive, such as the
-`\Windows\codec.ini` some codecs write, is on the current drive in
-Windows, which is the system drive there. The harness's current directory is
-on `Z:`, so such a path goes to `C:` instead unless only `/` has its first
-folder. A codec's settings and logs therefore land in `drive_c`, not in `/`.
+one to show its name.
+
+DLLs have a current directory of their own, as a Windows program does:
+`C:\` to begin with (`VFW_CWD` sets another, a Windows or Unix directory),
+changed by `SetCurrentDirectory` without moving the harness. Relative paths a
+DLL uses, and rooted ones without a drive such as the `\Windows\codec.ini`
+some codecs write, are taken from it, so a codec's settings, logs and scratch
+files land in `drive_c` rather than in `/` or the directory you run from. The
+files named on the command line are the harness's, relative to where you are.
 
 Codecs usually import more than kernel32, winmm and msvfw32. The msvcrt
 family (msvcrt.dll, msvcr70-140, msvcp*, ucrtbase, api-ms-win-crt-*) is a
@@ -762,6 +766,7 @@ decodes below 40 dB.
 | `VFW_REGISTRY` | The Windows registry file (default `$VFW_ROOT/registry.reg`); empty keeps it in memory only |
 | `VFW_TRACE=1` | Log calls into the built-in DLLs and every driver message to stderr |
 | `VFW_TIMEOUT=<s>` | Report and stop (exit 124) when one call into a DLL takes longer |
+| `VFW_CWD` | The current directory DLLs start in, a Windows (`C:\work`) or Unix directory (default `C:\`) |
 | `VFW_DATE` | The date and time (UTC) DLLs see at startup, `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM[:SS]`; the clock runs on from there (default: the host's) |
 | `VFW_COMPRESSOR` | What `ICCompressorChoose` answers: a FOURCC (`TST0`), `uncompressed` or `cancel` |
 | `VFW_ACM_FORMAT` | What `acmFormatChoose` answers: a format tag and, optionally, rate, channels and bits (`1,22050,1,8`), or `cancel` |

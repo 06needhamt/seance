@@ -925,8 +925,7 @@ char *k32_full_path(const char *name)
 	else if (name[0] && name[1] == ':')
 		snprintf(buf, sizeof(buf), "%c:\\%s", name[0], name + 2);
 	else if (name[0] == '\\' || name[0] == '/')
-		snprintf(buf, sizeof(buf), "%c:%s",
-			 path_rooted_drive(name) == 'c' ? 'C' : 'Z', name);
+		snprintf(buf, sizeof(buf), "%.2s%s", cwd, name);
 	else
 		snprintf(buf, sizeof(buf), "%s\\%s", cwd, name);
 	free(cwd);
