@@ -421,10 +421,7 @@ static int probe_acm(const char *path, const char *input)
 
 static const char *wide(const WCHAR *s, size_t max, char *buf, size_t size)
 {
-	size_t n = 0;
-	while (n < max && s[n])
-		n++;
-	utf16_to_utf8(s, n, buf, size);
+	utf16_field_to_utf8(s, max, buf, size);
 	return buf;
 }
 

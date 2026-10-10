@@ -16,6 +16,15 @@
  */
 size_t utf16_to_utf8(const WCHAR *s, size_t n, char *out, size_t outsz);
 
+/*
+ * The same for a WCHAR field of max units that a codec filled, up to its
+ * first NUL. Some codecs (WavLor.dll, TRICDC32.DRV) write an ANSI string
+ * into ICINFO's WCHAR fields: a field whose bytes are printable ASCII up to
+ * a NUL byte, two or more of them, is read as that.
+ */
+size_t utf16_field_to_utf8(const WCHAR *s, size_t max, char *out,
+			   size_t outsz);
+
 /* Case-insensitive (ASCII only) compare of n UTF-16 units with a C string. */
 int utf16_ascii_casecmp(const WCHAR *s, size_t n, const char *ascii);
 

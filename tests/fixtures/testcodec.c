@@ -129,6 +129,23 @@ EXPORT LONG testcodec_open_count(void)
 	return opens;
 }
 
+/*
+ * How many DRV_LOADs and DRV_OPENs found GetDriverModuleHandle of their
+ * driver handle wrong: ACM drivers load their names from it then.
+ */
+static LONG module_misses;
+
+static void check_module(HDRVR hdrvr)
+{
+	if (hdrvr && GetDriverModuleHandle(hdrvr) != self)
+		InterlockedIncrement(&module_misses);
+}
+
+EXPORT LONG testcodec_module_misses(void)
+{
+	return module_misses;
+}
+
 /* The dwQuality of the last frame compressed. */
 EXPORT DWORD testcodec_last_quality(void)
 {
@@ -562,6 +579,7 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		named_only = GetEnvironmentVariableA("TESTCODEC_NAMED_ONLY", v,
 						     sizeof(v)) == 1 && v[0] == '1';
 		log_msg(msg);
+		check_module(hdrvr);
 		return DefDriverProc(id, hdrvr, msg, l1, l2);
 	}
 	case DRV_FREE:
@@ -573,6 +591,7 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 	case DRV_OPEN: {
 		ICOPEN *op = (ICOPEN *)l2;
 		log_msg(msg);
+		check_module(hdrvr);
 		if (high(1, op))
 			return 0;
 		if (op) {

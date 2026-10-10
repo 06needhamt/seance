@@ -77,3 +77,24 @@ int utf16_ascii_casecmp(const WCHAR *s, size_t n, const char *ascii)
 		return 1;
 	return ascii[i] ? -1 : 0;
 }
+
+size_t utf16_field_to_utf8(const WCHAR *s, size_t max, char *out,
+			   size_t outsz)
+{
+	const unsigned char *b = (const unsigned char *)s;
+	size_t n = 0, k = 0;
+
+	while (n < max && s[n])
+		n++;
+	while (k < 2 * max && b[k] >= 0x20 && b[k] < 0x7f)
+		k++;
+	if (k >= 2 && k < 2 * max && !b[k] && b[1]) {
+		size_t len = outsz ? (k < outsz ? k : outsz - 1) : 0;
+		if (outsz) {
+			memcpy(out, b, len);
+			out[len] = 0;
+		}
+		return len;
+	}
+	return utf16_to_utf8(s, n, out, outsz);
+}

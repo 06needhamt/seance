@@ -96,10 +96,6 @@ BITMAPINFOHEADER *ic_negotiate_output(HIC hic, const BITMAPINFOHEADER *in,
 				      LRESULT *err);
 
 /*
- * ICM_DECOMPRESS_GET_FORMAT and ICM_COMPRESS_GET_FORMAT: the size query,
- * then the format, malloc()ed; NULL with *err set on failure.
- */
-/*
  * ICM_DECOMPRESS_BEGIN from in to out, asking the codec for the format it
  * would choose first (ICM_DECOMPRESS_GET_FORMAT), as players do whatever
  * output they then pick: some codecs set themselves up only then
@@ -107,6 +103,11 @@ BITMAPINFOHEADER *ic_negotiate_output(HIC hic, const BITMAPINFOHEADER *in,
  */
 LRESULT ic_decompress_begin(HIC hic, const BITMAPINFOHEADER *in,
 			    const BITMAPINFOHEADER *out);
+
+/*
+ * ICM_DECOMPRESS_GET_FORMAT and ICM_COMPRESS_GET_FORMAT: the size query,
+ * then the format, malloc()ed; NULL with *err set on failure.
+ */
 BITMAPINFOHEADER *ic_decompress_get_format(HIC hic, const BITMAPINFOHEADER *in,
 					   LRESULT *err);
 /*

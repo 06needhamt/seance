@@ -94,10 +94,9 @@ static void list_codecs(int open)
 		memset(&info, 0, sizeof(info));
 		if (ic_get_info(hic, &info, sizeof(info))) {
 			char name[64], desc[400];
-			info.szName[15] = 0;
-			info.szDescription[127] = 0;
-			utf16_to_utf8(info.szName, (size_t)-1, name, sizeof(name));
-			utf16_to_utf8(info.szDescription, (size_t)-1, desc, sizeof(desc));
+			utf16_field_to_utf8(info.szName, 16, name, sizeof(name));
+			utf16_field_to_utf8(info.szDescription, 128, desc,
+					    sizeof(desc));
 			printf("      %s: %s\n", name, desc);
 		} else {
 			printf("      no answer to ICM_GETINFO\n");
