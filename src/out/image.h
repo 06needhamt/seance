@@ -70,12 +70,19 @@ int image_to_i420(struct image_conv *c, const void *src, size_t len,
  * The other way: packs a picture into a frame of the format c was made
  * for (image_frame_size() bytes), e.g. to give a codec an input it
  * accepts. The source is top-down BGR24 for the RGB formats and I420 for
- * the YUV ones (image_pack_wants_i420). Palettised and RLE formats can't
+ * the YUV ones (image_pack_wants_i420). 8-bit palettised frames get each
+ * pixel's nearest palette colour; RLE and other palettised formats can't
  * be packed. Returns 0 or -1.
  */
 int image_can_pack(const struct image_conv *c);
 int image_pack_wants_i420(const struct image_conv *c);
 int image_pack(const struct image_conv *c, const BYTE *src, BYTE *dst);
+
+/*
+ * A palette for packing colour pictures into 8 bits: a 6x6x6 colour cube
+ * (index r * 36 + g * 6 + b) and 40 greys between its steps.
+ */
+void image_cube_palette(RGBQUAD pal[256]);
 
 /* Direct conversions between the two output layouts. */
 void image_bgr24_to_i420(const BYTE *bgr, int width, int height, BYTE *dst);

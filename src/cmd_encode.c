@@ -182,8 +182,17 @@ static int choose_input(HIC hic, const struct source *src, const char *forced,
 		unsupported = r == ICERR_UNSUPPORTED;
 	}
 	for (unsigned i = 0; (name = vfw_std_format(i, w, h, &t)); i++) {
-		if (t.bih.biBitCount == 8)
-			continue;	/* no palettes */
+		/*
+		 * 8 bits (the last tried): a colour cube's palette if the codec
+		 * takes it, else the grey ramp (pvwv220.dll takes only that).
+		 */
+		if (t.bih.biBitCount == 8) {
+			struct vfw_format cube = t;
+			image_cube_palette(cube.colors);
+			if (ic_send(hic, ICM_COMPRESS_QUERY, (DWORD_PTR)&cube.bih,
+				    0) == ICERR_OK)
+				t = cube;
+		}
 		if (forced ? strcasecmp(name, forced) != 0 :
 		    (r = ic_send(hic, ICM_COMPRESS_QUERY, (DWORD_PTR)&t.bih,
 				 0)) != ICERR_OK) {
