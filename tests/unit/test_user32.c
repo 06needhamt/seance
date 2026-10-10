@@ -485,6 +485,8 @@ static void test_misc(void)
 	FN(HDC, GetDC, HWND);
 	FN(int, ReleaseDC, HWND, HDC);
 	FN(SHORT, GetKeyState, int);
+	FN(int, GetKeyboardType, int);
+	FN(int, GetKeyboardLayoutList, int, HANDLE *);
 	FN(BOOL, GetCursorPos, LPPOINT);
 	FN(HWINSTA, GetProcessWindowStation, void);
 	FN(BOOL, GetUserObjectInformationA, HANDLE, int, PVOID, DWORD, LPDWORD);
@@ -565,6 +567,14 @@ static void test_misc(void)
 	CHECK(GetDC((HWND)0x1234) == NULL);
 
 	CHECK_EQ(GetKeyState(0x10), 0);
+	/* What Delphi's start-up code asks: not a Japanese keyboard. */
+	CHECK_EQ(GetKeyboardType(0), 4);
+	CHECK_EQ(GetKeyboardType(1), 0);
+	CHECK_EQ(GetKeyboardType(2), 12);
+	HANDLE layouts[4] = { 0 };
+	CHECK_EQ(GetKeyboardLayoutList(0, NULL), 1);
+	CHECK_EQ(GetKeyboardLayoutList(4, layouts), 1);
+	CHECK(layouts[0] == (HANDLE)0x04090409 && !layouts[1]);
 	POINT pt;
 	CHECK(GetCursorPos(&pt) && pt.x == 512);
 

@@ -201,6 +201,15 @@ It accepts these inputs:
 YUV is BT.601 limited range, and empty (dropped) frames repeat the previous one.
 Compressed streams need a codec: see `decode`.
 
+`-o /dev/null` (or another name for the null device) discards the output,
+for timing a decoder or checking that it gets through a file. With no
+`--format` it is raw frames, video, or raw PCM, audio, so nothing is
+converted; `encode` still writes an AVI. As the name then says nothing of
+audio, an AVI with both video and audio goes to `decode` for its audio
+when the codec handles only audio (an ACM driver, or a DLL whose filters
+or DMOs decode audio and not video), and likewise to `encode` whatever
+the output. `--audio` or `--stream` chooses otherwise.
+
 `--start` takes a frame number or a time (`2.5s`, `1500ms`, `1:02.5`), and
 `--duration`, like `--frames`, limits the output, as frames or a time.
 

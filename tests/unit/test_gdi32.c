@@ -814,6 +814,95 @@ static void test_text(void)
 	mod_free(user);
 }
 
+struct seen {
+	int n, ansi, fixed;
+	char faces[8][LF_FACESIZE];
+};
+
+static int CALLBACK font_a(const LOGFONTA *lf, const TEXTMETRICA *tm,
+			   DWORD type, LPARAM lp)
+{
+	struct seen *s = (struct seen *)lp;
+	const ENUMLOGFONTEXA *e = (const ENUMLOGFONTEXA *)lf;
+	const NEWTEXTMETRICEXA *m = (const NEWTEXTMETRICEXA *)tm;
+
+	if (s->n < 8)
+		memcpy(s->faces[s->n], lf->lfFaceName, LF_FACESIZE);
+	s->n++;
+	s->ansi += lf->lfCharSet == ANSI_CHARSET &&
+		   tm->tmCharSet == ANSI_CHARSET && type == TRUETYPE_FONTTYPE &&
+		   !strcmp((const char *)e->elfFullName, lf->lfFaceName) &&
+		   !strcmp((const char *)e->elfScript, "Western") &&
+		   m->ntmTm.ntmFlags == NTM_REGULAR && tm->tmHeight > 0 &&
+		   m->ntmTm.ntmAvgWidth == (UINT)tm->tmAveCharWidth;
+	/* TMPF_FIXED_PITCH set means variable. */
+	s->fixed += !(tm->tmPitchAndFamily & TMPF_FIXED_PITCH);
+	return 1;
+}
+
+static int CALLBACK font_w(const LOGFONTW *lf, const TEXTMETRICW *tm,
+			   DWORD type, LPARAM lp)
+{
+	struct seen *s = (struct seen *)lp;
+
+	s->n++;
+	s->ansi += lf->lfFaceName[0] == 'A' && tm->tmCharSet == ANSI_CHARSET;
+	return s->n < 2;	/* stop after the second */
+}
+
+/* Fonts are enumerated as a few scalable ANSI families (VCL asks). */
+static void test_font_enum(void)
+{
+	FN(int, EnumFontFamiliesExA, HDC, const LOGFONTA *, void *, LPARAM, DWORD);
+	FN(int, EnumFontFamiliesExW, HDC, const LOGFONTW *, void *, LPARAM, DWORD);
+	FN(int, EnumFontFamiliesA, HDC, LPCSTR, void *, LPARAM);
+	FN(int, EnumFontsA, HDC, LPCSTR, void *, LPARAM);
+	FN(HDC, CreateCompatibleDC, HDC);
+	FN(BOOL, DeleteDC, HDC);
+	HDC dc = CreateCompatibleDC(NULL);
+	LOGFONTA lf = { .lfCharSet = DEFAULT_CHARSET };
+	struct seen s = { 0 };
+
+	CHECK_EQ(EnumFontFamiliesExA(dc, &lf, (void *)font_a, (LPARAM)&s, 0), 1);
+	CHECK(s.n >= 3);
+	CHECK_EQ(s.ansi, s.n);
+	CHECK_EQ(s.fixed, 1);			/* Courier New */
+	CHECK(!strcmp(s.faces[0], "MS Sans Serif"));
+
+	/* By face, any case; a face or charset it lacks gives nothing. */
+	memset(&s, 0, sizeof(s));
+	strcpy(lf.lfFaceName, "arial");
+	CHECK_EQ(EnumFontFamiliesExA(dc, &lf, (void *)font_a, (LPARAM)&s, 0), 1);
+	CHECK_EQ(s.n, 1);
+	CHECK(!strcmp(s.faces[0], "Arial"));
+	memset(&s, 0, sizeof(s));
+	strcpy(lf.lfFaceName, "Wingdings");
+	CHECK_EQ(EnumFontFamiliesExA(dc, &lf, (void *)font_a, (LPARAM)&s, 0), 1);
+	CHECK_EQ(s.n, 0);
+	lf.lfFaceName[0] = 0;
+	lf.lfCharSet = 128;			/* SHIFTJIS_CHARSET */
+	CHECK_EQ(EnumFontFamiliesExA(dc, &lf, (void *)font_a, (LPARAM)&s, 0), 1);
+	CHECK_EQ(s.n, 0);
+	CHECK_EQ(EnumFontFamiliesExA(dc, &lf, NULL, 0, 0), 0);
+
+	/* The callback's 0 stops it, and is what it returns. */
+	memset(&s, 0, sizeof(s));
+	LOGFONTW lw = { .lfCharSet = ANSI_CHARSET };
+	CHECK_EQ(EnumFontFamiliesExW(dc, &lw, (void *)font_w, (LPARAM)&s, 0), 0);
+	CHECK_EQ(s.n, 2);
+	CHECK_EQ(s.ansi, 1);			/* the second is Arial */
+
+	memset(&s, 0, sizeof(s));
+	CHECK_EQ(EnumFontFamiliesA(dc, "Courier New", (void *)font_a,
+				   (LPARAM)&s), 1);
+	CHECK_EQ(s.n, 1);
+	CHECK_EQ(s.fixed, 1);
+	memset(&s, 0, sizeof(s));
+	CHECK_EQ(EnumFontsA(dc, NULL, (void *)font_a, (LPARAM)&s), 1);
+	CHECK(s.n >= 3);
+	CHECK(DeleteDC(dc));
+}
+
 int main(void)
 {
 	CHECK_EQ(lowmem_reserve(), 0);
@@ -833,6 +922,7 @@ int main(void)
 	test_blits();
 	test_palettes();
 	test_text();
+	test_font_enum();
 
 	mod_free(gdi);
 	mod_free(k32);

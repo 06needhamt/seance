@@ -6,10 +6,12 @@
  * 'WINX', and TRICDC32.DRV opens only under the handlers in a table of
  * its own ('ty2n', 'rtc3', ...).
  *
- * Two places hold them: the 32-bit immediates its code compares with
+ * Three places hold them: the 32-bit immediates its code compares with
  * (cmp eax, imm32 and cmp r/m32, imm32, as a DRV_OPEN handler checks
- * ICOPEN.fccHandler), and aligned words standing alone in its data (not
- * part of a longer string), as a table of them. Each is four ASCII
+ * ICOPEN.fccHandler); aligned words standing alone in its data (not
+ * part of a longer string), as a table of them; and an aligned pair of
+ * one in upper and lower case standing alone, as VFCodec.dll (the VFAPI
+ * Reader Codec, a Delphi DLL) keeps 'VIFP' and 'vifp'. Each is four ASCII
  * letters and digits, a letter first; the stream and driver types
  * ('vidc', 'vids', ...) aren't handlers and are left out.
  */
@@ -43,6 +45,15 @@ static int looks_like_fourcc(const BYTE *b)
 		if (!strncasecmp((const char *)b, types[i], 4))
 			return 0;
 	return 1;
+}
+
+/* Whether b is a, with its letters' case changed (and some letter). */
+static int case_pair(const BYTE *a, const BYTE *b)
+{
+	return memcmp(a, b, 4) && !strncasecmp((const char *)a,
+						(const char *)b, 4) &&
+	       is_alnum(b[0]) && is_alnum(b[1]) && is_alnum(b[2]) &&
+	       is_alnum(b[3]);
 }
 
 static size_t add(FOURCC *out, size_t n, size_t max, const BYTE *b)
@@ -110,11 +121,18 @@ size_t vfw_dll_handlers(const char *path, FOURCC *out, size_t max)
 			} else if (pass == 1 && !code &&
 				   (s->Characteristics &
 				    IMAGE_SCN_CNT_INITIALIZED_DATA)) {
-				for (DWORD k = 0; k + 4 <= size; k += 4)
-					if (looks_like_fourcc(p + k) &&
-					    !(k && is_printable(p[k - 1])) &&
-					    !(k + 4 < size && is_printable(p[k + 4])))
+				for (DWORD k = 0; k + 4 <= size; k += 4) {
+					if (!looks_like_fourcc(p + k) ||
+					    (k && is_printable(p[k - 1])))
+						continue;
+					if (!(k + 4 < size && is_printable(p[k + 4])))
 						n = add(out, n, max, p + k);
+					else if (k + 8 <= size &&
+						 case_pair(p + k, p + k + 4) &&
+						 !(k + 8 < size &&
+						   is_printable(p[k + 8])))
+						n = add(out, n, max, p + k);
+				}
 			}
 		}
 	pe_free(img);

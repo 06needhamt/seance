@@ -469,9 +469,12 @@ static int open_avi(struct source *s, const struct source_options *o)
 	s->stream = &s->avi->streams[n];
 	s->conv = image_conv_new(bih, s->stream->format_size);
 	if (!s->conv) {
+		/* Copied: vfw_set_error writes where vfw_error() points. */
+		char why[256];
+		snprintf(why, sizeof(why), "%s", vfw_error());
 		vfw_set_error("%s: the video is compressed or in a format this "
-			      "can't read (%s); decode it first", s->path,
-			      vfw_error());
+			      "can't read%s%s%s; decode it first", s->path,
+			      why[0] ? " (" : "", why, why[0] ? ")" : "");
 		return -1;
 	}
 	s->rate = s->stream->header.dwRate;

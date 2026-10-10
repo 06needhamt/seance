@@ -202,10 +202,12 @@ say "the codec answers nothing without its FOURCC" and suggest
 
 **Done:** a DLL opened without a handler that doesn't answer
 `ICM_GETINFO` is opened again under each FOURCC found in it (`cmp`
-immediates in its code, then standalone words in its data;
+immediates in its code, then standalone words in its data, and
+standalone upper and lower case pairs such as `VIFPvifp`;
 `src/vfw/handlers.c`), and the first that answers is used, with a note.
-wnvwinx opens as `WINX` and TRICDC32 as `rtc3`. testcodec's
-`TESTCODEC_NAMED_ONLY` answers only as `TST0`.
+wnvwinx opens as `WINX`, TRICDC32 as `rtc3` and VFCodec.dll (the VFAPI
+Reader Codec) as `VIFP`. testcodec's `TESTCODEC_NAMED_ONLY` answers only
+as `TST0`, or with `=2` only as its data pair `TSTP`/`tstp`.
 
 ### H7. Accept DirectShow encoders that register no output subtype
 

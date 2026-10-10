@@ -739,7 +739,7 @@ int cmd_encode(int argc, char **argv)
 
 	/* Audio: a WAV, raw PCM, or an AVI's audio stream. */
 	if (raw || cli_wants_audio(path, so.stream, want_audio, NULL, out_path,
-				   audio_only_kinds)) {
+				   audio_only_kinds, target, clsid_arg, 1)) {
 		if (fourcc || forced || keyint != (unsigned long)-1 || rate ||
 		    count != (unsigned long)-1 || so.raw_format || wo.force_odml) {
 			fprintf(stderr, "seance: --fourcc, --codec-input, --keyint, "

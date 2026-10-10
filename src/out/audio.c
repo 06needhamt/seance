@@ -13,6 +13,7 @@
 #include "avi/avi.h"
 #include "common/error.h"
 #include "out/audio.h"
+#include "out/output.h"
 
 struct audio_output {
 	enum audio_output_kind kind;
@@ -56,6 +57,10 @@ int audio_output_kind_from_path(const char *path, enum audio_output_kind *k)
 {
 	const char *dot = strrchr(path, '.');
 
+	if (output_is_null(path)) {
+		*k = AUDIO_OUT_PCM;
+		return 0;
+	}
 	if (dot && !strchr(dot, '/') &&
 	    !audio_output_kind_from_name(dot + 1, k))
 		return 0;

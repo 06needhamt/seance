@@ -74,6 +74,8 @@ fails $emu "$harness" convert --raw s17 --rate 1 --channels 1 "$work/in.pcm" \
 fails $emu "$harness" convert "$work/a.wav" -o "$work/x.wav" --frames 3
 fails $emu "$harness" convert "$work/a.wav" -o "$work/x.wav" --start 1.5x
 fails $emu "$harness" convert "$work/a.wav" -o "$work/x.mp3"
+# The null device needs no extension.
+$emu "$harness" convert "$work/a.wav" -o /dev/null 2>&1 | grep -q -- "-> raw"
 fails $emu "$harness" convert "$work/a.avi" -o "$work/x.y4m"
 rm -rf "$work"
 
@@ -165,6 +167,8 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	done
 	fails env VFW_ENV_TESTFILTER_AUDIO_RATE=1 $emu "$harness" decode "$f" \
 		"$work/t.avi" -o "$work/x.wav"
+	$emu "$harness" decode "$f" "$work/t.avi" -o /dev/null 2>&1 |
+		grep -q "22050 Hz -> raw"
 	$emu "$harness" encode "$f" "$work/in.wav" -o "$work/t.wav" \
 		--bitrate 128 2>/dev/null
 	$emu "$harness" decode "$f" "$work/t.wav" -o - --format pcm 2>/dev/null |
@@ -295,6 +299,9 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	# FOURCC is found in it.
 	VFW_INI=/dev/null VFW_ENV_TESTCODEC_NAMED_ONLY=1 $emu "$harness" probe \
 		"$fixtures/testcodec.dll" 2>&1 | grep -q "opened as 'TST0', found"
+	# Its FOURCC kept as an upper and lower case pair in data.
+	VFW_INI=/dev/null VFW_ENV_TESTCODEC_NAMED_ONLY=2 $emu "$harness" probe \
+		"$fixtures/testcodec.dll" 2>&1 | grep -q "opened as 'TSTP', found"
 	# One that won't open to compress is probed as encode would use it.
 	VFW_ENV_TESTCODEC_DECODE_ONLY=1 $emu "$harness" probe \
 		"$fixtures/testcodec.dll" | grep -q "won't open to compress"
@@ -439,6 +446,10 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 			echo "smoke: own-allocator DirectShow encode differs" >&2
 			exit 1
 		}
+		# Decoding to the null device needs no extension.
+		$emu "$harness" decode "$fixtures/testcodec.dll" \
+			"$work/dshow-own.avi" -o /dev/null 2>&1 |
+			grep -q -- "-> raw frames"
 		# Every pointer the host gives a DirectShow filter is below 2 GB too.
 		VFW_ENV_TESTFILTER_STRICT=1 \
 			$emu "$harness" decode "$fixtures/testfilter.ax" "$work/t.avi" \

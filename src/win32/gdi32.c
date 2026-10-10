@@ -1157,6 +1157,208 @@ WINFN(BOOL) gdi_TextOutW(HDC hdc, int x, int y, LPCWSTR s, int n)
 	return n >= 0 && gdi_ExtTextOutW(hdc, x, y, 0, NULL, s, (UINT)n, NULL);
 }
 
+/*
+ * Font enumeration. There is one font, which draws any face at any size, so
+ * it is listed under the faces programs commonly ask for, each a scalable
+ * ANSI family as a TrueType font would be.
+ */
+static const struct {
+	const char *face;
+	BYTE pitch;
+} font_faces[] = {
+	{ "MS Sans Serif", VARIABLE_PITCH | FF_SWISS },
+	{ "Arial", VARIABLE_PITCH | FF_SWISS },
+	{ "Tahoma", VARIABLE_PITCH | FF_SWISS },
+	{ "Times New Roman", VARIABLE_PITCH | FF_ROMAN },
+	{ "Courier New", FIXED_PITCH | FF_MODERN },
+};
+
+typedef int (CALLBACK *FONTENUMPROCW)(const LOGFONTW *, const TEXTMETRICW *,
+				      DWORD, LPARAM);
+typedef int (CALLBACK *FONTENUMPROCA)(const LOGFONTA *, const TEXTMETRICA *,
+				      DWORD, LPARAM);
+
+static void ascii_to_wide(WCHAR *out, const char *s, size_t n)
+{
+	size_t i = 0;
+
+	for (; s[i] && i + 1 < n; i++)
+		out[i] = (BYTE)s[i];
+	out[i] = 0;
+}
+
+static int same_face(const WCHAR *a, const char *b)
+{
+	for (;; a++, b++) {
+		WCHAR x = *a >= 'a' && *a <= 'z' ? *a - 32 : *a;
+		char y = *b >= 'a' && *b <= 'z' ? *b - 32 : *b;
+		if (x != (BYTE)y)
+			return 0;
+		if (!x)
+			return 1;
+	}
+}
+
+/* Entry i as EnumFontFamiliesExW describes it. */
+static void font_entry(size_t i, ENUMLOGFONTEXW *lf, NEWTEXTMETRICEXW *tm)
+{
+	LOGFONTW want = { .lfHeight = 16 };
+	TEXTMETRICW m;
+
+	memset(lf, 0, sizeof(*lf));
+	memset(tm, 0, sizeof(*tm));
+	ascii_to_wide(want.lfFaceName, font_faces[i].face, LF_FACESIZE);
+	HFONT f = gdi_CreateFontIndirectW(&want);
+	HDC dc = gdi_CreateCompatibleDC(NULL);
+	HGDIOBJ old = gdi_SelectObject(dc, f);
+	gdi_text_metrics(dc, &m);
+	gdi_SelectObject(dc, old);
+	gdi_DeleteDC(dc);
+	gdi_DeleteObject(f);
+
+	BYTE pitch = font_faces[i].pitch;
+	m.tmPitchAndFamily = (pitch & 0xf0) | TMPF_TRUETYPE | TMPF_VECTOR |
+			     ((pitch & 3) == VARIABLE_PITCH ? TMPF_FIXED_PITCH : 0);
+	/* TEXTMETRICW is NEWTEXTMETRICW's first fields. */
+	memcpy(&tm->ntmTm, &m, sizeof(m));
+	tm->ntmTm.tmCharSet = ANSI_CHARSET;
+	tm->ntmTm.ntmFlags = NTM_REGULAR;
+	tm->ntmTm.ntmSizeEM = (UINT)m.tmHeight;
+	tm->ntmTm.ntmCellHeight = (UINT)m.tmHeight;
+	tm->ntmTm.ntmAvgWidth = (UINT)m.tmAveCharWidth;
+	tm->ntmFontSig.fsUsb[0] = 1;		/* Basic Latin */
+	tm->ntmFontSig.fsCsb[0] = 1;		/* Latin 1 */
+
+	lf->elfLogFont.lfHeight = m.tmHeight;
+	lf->elfLogFont.lfWidth = m.tmAveCharWidth;
+	lf->elfLogFont.lfWeight = FW_NORMAL;
+	lf->elfLogFont.lfCharSet = ANSI_CHARSET;
+	lf->elfLogFont.lfOutPrecision = OUT_STROKE_PRECIS;
+	lf->elfLogFont.lfClipPrecision = CLIP_STROKE_PRECIS;
+	lf->elfLogFont.lfQuality = DRAFT_QUALITY;
+	lf->elfLogFont.lfPitchAndFamily = font_faces[i].pitch;
+	ascii_to_wide(lf->elfLogFont.lfFaceName, font_faces[i].face,
+		      LF_FACESIZE);
+	ascii_to_wide(lf->elfFullName, font_faces[i].face, LF_FULLFACESIZE);
+	ascii_to_wide(lf->elfStyle, "Regular", LF_FACESIZE);
+	ascii_to_wide(lf->elfScript, "Western", LF_FACESIZE);
+}
+
+static void font_entry_a(const ENUMLOGFONTEXW *w, const NEWTEXTMETRICEXW *tw,
+			 ENUMLOGFONTEXA *a, NEWTEXTMETRICEXA *ta)
+{
+	memset(a, 0, sizeof(*a));
+	memset(ta, 0, sizeof(*ta));
+	memcpy(&a->elfLogFont, &w->elfLogFont, offsetof(LOGFONTA, lfFaceName));
+	/* The names are ASCII. */
+	for (int i = 0; i < LF_FACESIZE; i++) {
+		a->elfLogFont.lfFaceName[i] = (CHAR)w->elfLogFont.lfFaceName[i];
+		a->elfStyle[i] = (BYTE)w->elfStyle[i];
+		a->elfScript[i] = (BYTE)w->elfScript[i];
+	}
+	for (int i = 0; i < LF_FULLFACESIZE; i++)
+		a->elfFullName[i] = (BYTE)w->elfFullName[i];
+
+	const NEWTEXTMETRICW *m = &tw->ntmTm;
+	memcpy(&ta->ntmTm, m, offsetof(NEWTEXTMETRICA, tmFirstChar));
+	ta->ntmTm.tmFirstChar = (BYTE)m->tmFirstChar;
+	ta->ntmTm.tmLastChar = (BYTE)m->tmLastChar;
+	ta->ntmTm.tmDefaultChar = (BYTE)m->tmDefaultChar;
+	ta->ntmTm.tmBreakChar = (BYTE)m->tmBreakChar;
+	ta->ntmTm.tmItalic = m->tmItalic;
+	ta->ntmTm.tmUnderlined = m->tmUnderlined;
+	ta->ntmTm.tmStruckOut = m->tmStruckOut;
+	ta->ntmTm.tmPitchAndFamily = m->tmPitchAndFamily;
+	ta->ntmTm.tmCharSet = m->tmCharSet;
+	ta->ntmTm.ntmFlags = m->ntmFlags;
+	ta->ntmTm.ntmSizeEM = m->ntmSizeEM;
+	ta->ntmTm.ntmCellHeight = m->ntmCellHeight;
+	ta->ntmTm.ntmAvgWidth = m->ntmAvgWidth;
+	ta->ntmFontSig = tw->ntmFontSig;
+}
+
+/*
+ * Calls procw or proca for each face matching face (all if NULL or empty)
+ * in charset (any if DEFAULT_CHARSET); the last value it returned, or 1 if
+ * nothing matched. The LOGFONT and TEXTMETRIC each get are the start of
+ * an ENUMLOGFONTEX and NEWTEXTMETRICEX, as for every EnumFont* function.
+ */
+static int enum_fonts(const WCHAR *face, BYTE charset, FONTENUMPROCW procw,
+		      FONTENUMPROCA proca, LPARAM lp)
+{
+	int ret = 1;
+
+	if (charset != DEFAULT_CHARSET && charset != ANSI_CHARSET)
+		return ret;
+	for (size_t i = 0; i < sizeof(font_faces) / sizeof(font_faces[0]); i++) {
+		ENUMLOGFONTEXW lf;
+		NEWTEXTMETRICEXW tm;
+
+		if (face && face[0] && !same_face(face, font_faces[i].face))
+			continue;
+		font_entry(i, &lf, &tm);
+		TRACE("font enumeration: %s", font_faces[i].face);
+		if (procw) {
+			ret = procw(&lf.elfLogFont, (const TEXTMETRICW *)&tm,
+				    TRUETYPE_FONTTYPE, lp);
+		} else {
+			ENUMLOGFONTEXA lfa;
+			NEWTEXTMETRICEXA tma;
+			font_entry_a(&lf, &tm, &lfa, &tma);
+			ret = proca(&lfa.elfLogFont, (const TEXTMETRICA *)&tma,
+				    TRUETYPE_FONTTYPE, lp);
+		}
+		if (!ret)
+			break;
+	}
+	return ret;
+}
+
+/* An ANSI face name as UTF-16, "" for NULL. */
+static void face_w(LPCSTR face, WCHAR out[LF_FACESIZE])
+{
+	out[0] = 0;
+	if (face && face[0])
+		cp_to_utf16(CP_ACP, face, -1, out, LF_FACESIZE, 0);
+	out[LF_FACESIZE - 1] = 0;
+}
+
+WINFN(int) gdi_EnumFontFamiliesExW(HDC hdc, const LOGFONTW *lf,
+				   FONTENUMPROCW proc, LPARAM lp, DWORD flags)
+{
+	if (!proc)
+		return 0;
+	return enum_fonts(lf ? lf->lfFaceName : NULL,
+			  lf ? lf->lfCharSet : DEFAULT_CHARSET, proc, NULL, lp);
+}
+
+WINFN(int) gdi_EnumFontFamiliesExA(HDC hdc, const LOGFONTA *lf,
+				   FONTENUMPROCA proc, LPARAM lp, DWORD flags)
+{
+	WCHAR face[LF_FACESIZE];
+
+	if (!proc)
+		return 0;
+	face_w(lf ? lf->lfFaceName : NULL, face);
+	return enum_fonts(face, lf ? lf->lfCharSet : DEFAULT_CHARSET, NULL,
+			  proc, lp);
+}
+
+WINFN(int) gdi_EnumFontFamiliesW(HDC hdc, LPCWSTR face, FONTENUMPROCW proc,
+				 LPARAM lp)
+{
+	return proc ? enum_fonts(face, DEFAULT_CHARSET, proc, NULL, lp) : 0;
+}
+
+WINFN(int) gdi_EnumFontFamiliesA(HDC hdc, LPCSTR face, FONTENUMPROCA proc,
+				 LPARAM lp)
+{
+	WCHAR w[LF_FACESIZE];
+
+	face_w(face, w);
+	return proc ? enum_fonts(w, DEFAULT_CHARSET, NULL, proc, lp) : 0;
+}
+
 static BOOL dc_point(HDC hdc, POINT *old, int x, int y, int which, int offset)
 {
 	gdi_lock();
@@ -1242,6 +1444,12 @@ static const struct builtin_export exports[] = {
 	E(DeleteDC),
 	E(DeleteEnhMetaFile),
 	E(DeleteObject),
+	E(EnumFontFamiliesA),
+	E(EnumFontFamiliesExA),
+	E(EnumFontFamiliesExW),
+	E(EnumFontFamiliesW),
+	{ "EnumFontsA", 0, (void *)gdi_EnumFontFamiliesA },
+	{ "EnumFontsW", 0, (void *)gdi_EnumFontFamiliesW },
 	E(ExtTextOutA),
 	E(ExtTextOutW),
 	E(Escape),

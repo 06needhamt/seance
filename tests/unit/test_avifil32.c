@@ -12,6 +12,9 @@ typedef HRESULT (WINAPI *read_fn)(void *, LONG, LONG, void *, LONG, LONG *,
 typedef LONG (WINAPI *long_fn)(void *);
 typedef LONG (WINAPI *time_fn)(void *, LONG);
 typedef ULONG (WINAPI *release_fn)(void *);
+typedef void *(WINAPI *frame_open_fn)(void *, const void *);
+typedef void *(WINAPI *frame_fn)(void *, LONG);
+typedef HRESULT (WINAPI *frame_close_fn)(void *);
 
 int main(void)
 {
@@ -50,6 +53,17 @@ int main(void)
 		CHECK_EQ(time(NULL, 0), -1);
 		CHECK_EQ(file_release(NULL), 0u);
 		CHECK_EQ(stream_release(NULL), 0u);
+	}
+
+	/* No stream opens, so none gives frames (VFCodec.dll imports these). */
+	frame_open_fn frame_open = builtin_export(dll, "AVIStreamGetFrameOpen");
+	frame_fn frame = builtin_export(dll, "AVIStreamGetFrame");
+	frame_close_fn frame_close = builtin_export(dll, "AVIStreamGetFrameClose");
+	CHECK(frame_open && frame && frame_close);
+	if (frame_open && frame && frame_close) {
+		CHECK(frame_open(NULL, NULL) == NULL);
+		CHECK(frame(NULL, 0) == NULL);
+		CHECK_EQ(frame_close(NULL), 0);
 	}
 
 	return test_summary("test_avifil32");

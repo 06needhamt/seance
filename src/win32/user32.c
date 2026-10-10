@@ -357,9 +357,33 @@ WINFN(BOOL) user_GetKeyboardState(PBYTE keys)
 	return keys != NULL;
 }
 
+/* An enhanced 101/102-key keyboard: Delphi's start-up code asks, to see
+ * whether it runs on a Japanese or Korean one. */
+WINFN(int) user_GetKeyboardType(int what)
+{
+	switch (what) {
+	case 0:
+		return 4;	/* type: IBM enhanced */
+	case 1:
+		return 0;	/* OEM subtype */
+	case 2:
+		return 12;	/* function keys */
+	default:
+		return 0;
+	}
+}
+
 WINFN(HANDLE) user_GetKeyboardLayout(DWORD tid)
 {
 	return (HANDLE)0x04090409;
+}
+
+/* One layout installed, the one GetKeyboardLayout reports. */
+WINFN(int) user_GetKeyboardLayoutList(int n, HANDLE *list)
+{
+	if (n > 0 && list)
+		list[0] = (HANDLE)0x04090409;
+	return 1;
 }
 
 WINFN(BOOL) user_GetCursorPos(LPPOINT pt)
@@ -720,7 +744,9 @@ static const struct builtin_export exports[] = {
 	E(GetDoubleClickTime),
 	E(GetKeyState),
 	E(GetKeyboardLayout),
+	E(GetKeyboardLayoutList),
 	E(GetKeyboardState),
+	E(GetKeyboardType),
 	E(GetMonitorInfoA),
 	E(GetMonitorInfoW),
 	E(GetProcessWindowStation),

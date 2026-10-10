@@ -265,7 +265,8 @@ int cmd_convert(int argc, char **argv)
 	int audio = raw || job.sample != AUDIO_NONE || !strcmp(in, "-") ||
 		    cli_wants_audio(in, stream == (unsigned long)-1 ? -1 :
 				    stream > 99 ? 99 : (long)stream,
-				    want_audio, format, out, audio_kinds);
+				    want_audio, format, out, audio_kinds,
+				    NULL, NULL, 0);
 	if (audio) {
 		job.in = in;
 		job.out = out;
