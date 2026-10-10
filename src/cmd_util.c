@@ -19,6 +19,9 @@
 #include "runtime/runtime.h"
 #include "vfw/icm.h"
 #include "vfw/registry.h"
+#include "win32/ole.h"
+#include "xform.h"
+#include "win32/codepage.h"
 #include "win32/msacm32.h"
 
 int cli_parse_count(const char *opt, const char *s, unsigned long *out)
@@ -103,8 +106,35 @@ unsigned long long cli_position_units(const struct cli_position *p,
 	return (unsigned long long)(p->seconds * rate / scale + 1e-6);
 }
 
+/* Whether codec decodes (encoder: encodes) audio and not video. */
+static int codec_does_audio(const char *codec, const char *clsid_arg,
+			    int encoder)
+{
+	struct xform_class found;
+	CLSID clsid;
+	HRESULT hr;
+
+	if (!strcasecmp(codec, "auto") || runtime_enter())
+		return 0;
+	if (clsid_arg) {
+		WCHAR *w = utf8_to_utf16_dup(clsid_arg);
+		int bad = !w || ole_guid_parse(w, &clsid);
+		free(w);
+		if (bad)
+			return 0;	/* reported by the command */
+	}
+	const CLSID *selected = clsid_arg ? &clsid : NULL;
+	/* A VfW codec is no ACM driver, so finds no audio here. */
+	hr = xform_find(codec, selected, 1, encoder, &found);
+	if (FAILED(hr) && hr != VFW_E_DUPLICATE_NAME)
+		return 0;
+	hr = xform_find(codec, selected, 0, encoder, &found);
+	return FAILED(hr) && hr != VFW_E_DUPLICATE_NAME;
+}
+
 int cli_wants_audio(const char *in, long stream, int want, const char *format,
-		    const char *out, const char *const *audio_kinds)
+		    const char *out, const char *const *audio_kinds,
+		    const char *codec, const char *clsid, int encoder)
 {
 	const char *dot = out ? strrchr(out, '.') : NULL;
 	const char *name = format ? format :
@@ -128,8 +158,11 @@ int cli_wants_audio(const char *in, long stream, int want, const char *format,
 	if (stream >= 0)
 		audio = (unsigned long)stream < avi->nstreams &&
 			avi_stream_wfx(&avi->streams[stream]);
+	else if (avi_audio_stream(avi) < 0)
+		audio = 0;
 	else
-		audio = avi_video_stream(avi) < 0 && avi_audio_stream(avi) >= 0;
+		audio = avi_video_stream(avi) < 0 ||
+			(codec && codec_does_audio(codec, clsid, encoder));
 	avi_close(avi);
 	return audio;
 }

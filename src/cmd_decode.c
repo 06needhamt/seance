@@ -670,7 +670,9 @@ int cmd_decode(int argc, char **argv)
 	if (job.sample != AUDIO_NONE || !strcmp(path, "-") ||
 	    cli_wants_audio(path, stream == (unsigned long)-1 ? -1 :
 			    stream > 99 ? 99 : (long)stream, want_audio, format,
-			    out_path, audio_only_kinds)) {
+			    out_path, audio_only_kinds,
+			    !format && output_is_null(out_path) ? target : NULL,
+			    clsid_arg, 0)) {
 		if (fourcc || forced || count != (unsigned long)-1) {
 			fprintf(stderr, "seance: --fourcc, --output-format and "
 				"--frames are for video\n");

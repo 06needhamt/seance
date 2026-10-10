@@ -32,9 +32,15 @@ int cli_parse_position(const char *opt, const char *s, struct cli_position *p);
  * out's extension) that only audio has (one of audio_kinds), or an AVI
  * file without video but with audio. Standard input ("-") is video unless
  * asked or the output says otherwise.
+ *
+ * An AVI with both is video unless codec is given (when the output names
+ * no kind: an encoder's AVI, or the null device) and handles only audio:
+ * an ACM driver, or a server whose decoder (encoder) of audio, or the one
+ * with CLSID clsid, is found and of video isn't.
  */
 int cli_wants_audio(const char *in, long stream, int want, const char *format,
-		    const char *out, const char *const *audio_kinds);
+		    const char *out, const char *const *audio_kinds,
+		    const char *codec, const char *clsid, int encoder);
 
 /* A position in units of scale / rate seconds (frames, or samples). */
 unsigned long long cli_position_units(const struct cli_position *p,

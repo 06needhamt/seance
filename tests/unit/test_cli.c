@@ -1,8 +1,15 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * The commands' option parsing: counts, sizes, rates, and positions given
- * as counts or times.
+ * as counts or times; and whether an AVI with video and audio is taken
+ * for its audio.
  */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#include "avi/avi.h"
 #include "cmd_util.h"
 #include "test.h"
 
@@ -67,9 +74,77 @@ static void test_positions(void)
 	}
 }
 
+/*
+ * An AVI with video and audio is video, unless asked, a stream or the
+ * output says audio, or the output names no kind (the null device, or
+ * encode's AVI) and the codec handles only audio.
+ */
+static void test_audio_or_video(void)
+{
+	static const char *const kinds[] = { "wav", "pcm", NULL };
+	char dir[] = "/tmp/test_cli.XXXXXX", avi[64];
+	BITMAPINFOHEADER bih = {
+		.biSize = sizeof(bih), .biWidth = 16, .biHeight = 16,
+		.biPlanes = 1, .biBitCount = 24, .biSizeImage = 16 * 16 * 3,
+	};
+	WAVEFORMATEX wf = {
+		.wFormatTag = WAVE_FORMAT_PCM, .nChannels = 1,
+		.nSamplesPerSec = 8000, .nAvgBytesPerSec = 16000,
+		.nBlockAlign = 2, .wBitsPerSample = 16,
+	};
+	static BYTE frame[16 * 16 * 3], samples[1600];
+
+	CHECK(mkdtemp(dir) != NULL);
+	snprintf(avi, sizeof(avi), "%s/av.avi", dir);
+	struct avi_writer *w = avi_writer_create(avi, NULL);
+	CHECK(w != NULL);
+	if (!w)
+		return;
+	CHECK_EQ(avi_writer_add_video(w, &bih, sizeof(bih), 0, 10, 1), 0);
+	CHECK_EQ(avi_writer_add_audio(w, &wf, sizeof(wf), 0, 0, 0), 1);
+	CHECK_EQ(avi_writer_write(w, 0, frame, sizeof(frame), 1), 0);
+	CHECK_EQ(avi_writer_write(w, 1, samples, sizeof(samples), 1), 0);
+	CHECK_EQ(avi_writer_close(w), 0);
+
+	CHECK(!cli_wants_audio(avi, -1, 0, NULL, "/dev/null", kinds, NULL,
+			       NULL, 0));
+	CHECK(cli_wants_audio(avi, -1, 1, NULL, "/dev/null", kinds, NULL,
+			      NULL, 0));
+	CHECK(cli_wants_audio(avi, 1, 0, NULL, "/dev/null", kinds, NULL,
+			      NULL, 0));
+	CHECK(cli_wants_audio(avi, -1, 0, NULL, "out.wav", kinds, NULL,
+			      NULL, 0));
+	CHECK(!cli_wants_audio(avi, -1, 0, NULL, "/dev/null", kinds, "auto",
+			       NULL, 0));
+
+	const char *acm = fixture("testacm.acm");
+	const char *vfw = fixture("testcodec.dll");
+	const char *both = fixture("testfilter.ax");
+	/* An ACM driver does only audio, both ways. */
+	CHECK(cli_wants_audio(avi, -1, 0, NULL, "/dev/null", kinds, acm,
+			      NULL, 0));
+	CHECK(cli_wants_audio(avi, -1, 0, NULL, "/dev/null", kinds, acm,
+			      NULL, 1));
+	/* Its stream, chosen, still wins. */
+	CHECK(!cli_wants_audio(avi, 0, 0, NULL, "/dev/null", kinds, acm,
+			       NULL, 0));
+	/* A VfW codec does only video; testfilter.ax does both. */
+	CHECK(!cli_wants_audio(avi, -1, 0, NULL, "/dev/null", kinds, vfw,
+			       NULL, 0));
+	CHECK(!cli_wants_audio(avi, -1, 0, NULL, "/dev/null", kinds, both,
+			       NULL, 0));
+	CHECK(!cli_wants_audio(avi, -1, 0, NULL, "/dev/null", kinds, both,
+			       NULL, 1));
+
+	unlink(avi);
+	rmdir(dir);
+}
+
 int main(void)
 {
 	test_counts_sizes_rates();
 	test_positions();
+	/* Last: it skips the rest without the fixtures. */
+	test_audio_or_video();
 	return test_summary("test_cli");
 }
