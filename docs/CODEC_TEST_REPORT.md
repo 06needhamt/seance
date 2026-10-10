@@ -7,6 +7,13 @@ codec offers. This report records what works and what doesn't. For each
 failure it says what would have to be added or changed to make it work,
 and whether the fault is in seance or in the codec.
 
+**Status:** every change listed under "What seance needed" (H1–H12) has
+since been made: H1–H4 in `8d3348e`, H5–H7 in `3b72665`, H8 in
+`f651d89`, H9 in `2076bc7`, H10 in `02d172c`, H11 in `fec837b` and H12
+in `797ba9d`. Each comes with a fixture mode that fails without it. The
+summary below gives the results with them; each H section ends with
+what was done and what it gave.
+
 ## How it was tested
 
 - **Survey:** `tests/samples.sh` (`info` and `probe`) over all 58 files,
@@ -43,29 +50,29 @@ and whether the fault is in seance or in the codec.
 | SCLS.DLL (SCLS) | VfW | **all paths work**: 3 inputs, 5 paths, lossless; sample decodes |
 | wtvc.DLL (WTVC 1.12) | VfW | **all paths work**: 3 × 1, lossless (no public sample) |
 | nsvideo.dll (NSVI) | VfW | **all paths work**: 1 × 1, 45 dB |
-| pvwv220.dll (PVW2 2.10) | VfW | **works**: 8 inputs × 8 outputs, 35.8–39.5 dB; PAL8 input untested (**H9**) |
+| pvwv220.dll (PVW2 2.10) | VfW | **works**: 8 inputs × 8 outputs, 35.8–39.5 dB; PAL8 input works with a grey palette (**H9**) |
 | Sif1_vfw.dll (SIF1) | VfW | **all paths work**: 4 × 5, 36.5–37.1 dB |
 | wavelet.dll (ADV1 1.20) | VfW | **all paths work**: 1 × 1, 40.8 dB; ADV1 sample decodes |
 | Amv2Codec.dll (AMV2) | VfW | **works**: 3 inputs × BGR32; 30–32 dB because this build stamps an "AMV2 VideoCodec" logo |
 | lsvxdec.dll, psiv.dll, vdowave.drv | VfW decoders | **work** on their samples, every output format |
 | SN4Codec.dll (SN40) | VfW | decoding **works** (I420/YV12/BGR24); encoding broken, see below |
-| WavLor.dll (Verint ADV1) | VfW decoder | **works** on the ADV1 sample; can't read ADV601's own output (a different ADV1 variant) |
-| TRICDC32.DRV (Trident ty0n) | VfW decoder | **works** on the ty0n sample (BGR24, RGB555); `probe` without a file can't open it (**H6**) |
-| wnvwinx.dll (WINX 2.9) | VfW | **works only with `--fourcc WINX`** (**H6**); 3 × 7 paths |
-| ADV601.dll (ADV1 1.11) | VfW | encoding **crashes**; fixed by **H1** (verified, 42.6 dB) |
-| wv32vfw.dll (SMSV 2.00b6) | VfW | **black output** whenever an output format is named; fixed by **H3** (verified) |
-| vsslight.dll (VSSV 1.3.1) | VfW | encoding **refused**; fixed by **H4** (verified, 35–41 dB). UYVY is broken in the codec |
-| sp6x_32.dll (SP61) | VfW decoder | **heap corruption** after decoding; fixed by **H2** (verified) |
-| aslcodec_vfw.dll (ASLC 1.6) | VfW | 5 of 7 inputs work (trial logo in a corner); UYVY swapped by the codec; PAL8 untested (**H9**) |
-| aslcodec_dshow.dll | DirectShow | encoder **not found** by seance (**H7**) |
-| LCODCCMW2E.dll (LEAD MCMW 2.0 eval) | DirectShow | encode and BGR24 decode work; PAL8 decode wrong (**H8**) |
-| Sif1Dec.ax | DirectShow | YV12/YUY2/UYVY/BGR32 work; BGR24 misaligned (**H8**) |
-| WavCWAIP.dll (wavc 1.20) | VfW | BGR24 works with `VFW_DATE` before 2008 (17.8 dB, ignores quality); I420 crashes in the codec (**H11**) |
+| WavLor.dll (Verint ADV1) | VfW decoder | **works** on the ADV1 sample; can't read ADV601's own output (a different ADV1 variant); its ANSI name now reads right (**H12**) |
+| TRICDC32.DRV (Trident ty0n) | VfW decoder | **works** on the ty0n sample (BGR24, RGB555); opens as `rtc3` by itself, found in its code (**H6**) |
+| wnvwinx.dll (WINX 2.9) | VfW | **works**: opens as `WINX` by itself (**H6**); 3 × 7 paths |
+| ADV601.dll (ADV1 1.11) | VfW | **works** since **H1**: 42.6 dB |
+| wv32vfw.dll (SMSV 2.00b6) | VfW | **works** since **H3**: 26.4 dB; the SMSV sample decodes |
+| vsslight.dll (VSSV 1.3.1) | VfW | **works** since **H4**: 7 inputs, 35–41 dB. UYVY is broken in the codec; its UYVY overrun is caught (**H10**) |
+| sp6x_32.dll (SP61) | VfW decoder | **works** since **H2**: the sample decodes clean |
+| aslcodec_vfw.dll (ASLC 1.6) | VfW | 5 of 7 inputs work (trial logo in a corner); UYVY swapped by the codec; PAL8 crashes in the codec (**H9**) |
+| aslcodec_dshow.dll | DirectShow | **works** since **H7**: encodes ASLC, which aslcodec_vfw.dll decodes at 29.3 dB (trial logo) |
+| LCODCCMW2E.dll (LEAD MCMW 2.0 eval) | DirectShow | encode and decode work; its "RGB8" output is 24-bit and is read as such since **H8** |
+| Sif1Dec.ax | DirectShow | YV12/YUY2/UYVY/BGR32 work; BGR24 is one row off, the filter's bug (root-caused under **H8**) |
+| WavCWAIP.dll (wavc 1.20) | VfW | BGR24 works with `VFW_DATE` before 2008 (17.8 dB, ignores quality); I420 crashes in `ICM_COMPRESS_END`, and the file is finished anyway (**H11**) |
 | xfcodec.dll (XFR1) | VfW | only BGR32 input is right; the other inputs and YV12 output are broken in the codec |
-| vgpix32d.dll (VGPX 3.10) | VfW decoder | decode-only; no VGPX sample exists (the VTLP sample isn't VGPX); `probe` misreports it as an encoder (**H5**) |
-| lhacm.acm, lhacm2.acm (L&H 0x1101–4, 0x70–73) | ACM | **work**: encode and decode; the 0x70/0x72 samples decode to clear speech; names missing (**H12**) |
-| smcelp32.acm (Philips CELP 0x0120) | ACM | **works** at 8 and 16 kHz; sample decodes; name missing (**H12**) |
-| alf2cd.acm (0x1fc4) | ACM | **works** at 44.1 kHz stereo (round trip correlation 1.00); name missing (**H12**) |
+| vgpix32d.dll (VGPX 3.10) | VfW decoder | decode-only, as `probe` now says (**H5**); no VGPX sample exists (the VTLP sample isn't VGPX) |
+| lhacm.acm, lhacm2.acm (L&H 0x1101–4, 0x70–73) | ACM | **work**: encode and decode; the 0x70/0x72 samples decode to clear speech; named since **H12** |
+| smcelp32.acm (Philips CELP 0x0120) | ACM | **works** at 8 and 16 kHz; sample decodes; named since **H12** |
+| alf2cd.acm (0x1fc4) | ACM | **works** at 44.1 kHz stereo (round trip correlation 1.00); named since **H12** |
 | nsrt2432.acm (Voxware RT24 0x181c) | ACM | **needs `rt32cmp.dll`**, which isn't in the archive |
 | vdowave.acm (VDOWave 0xfffc/0xffff) | ACM | **needs `RATECFG.DLL`**, which isn't in the archive |
 | MultiCodec.dll, NuB2.dll, tm2x.dll, decvdo.dll, vdo32_30.drv, vsswlt.dll | VfW | **don't load**: companion DLLs missing (see below) |
@@ -74,7 +81,7 @@ and whether the fault is in seance or in the codec.
 | 3ivx Delta 3.5.qtx, ACTLComponent.qtx, BeHereiVideo.qtx | QuickTime | out of scope (QuickTime components) |
 | vid_3ivX.xa | XAnim | out of scope (a Linux ELF plug-in for XAnim) |
 
-## What seance needs (by priority)
+## What seance needed (by priority; all done)
 
 ### H1. Give codecs a status callback before compressing (verified)
 
@@ -88,6 +95,10 @@ calls without checking for NULL, and seance never sends that message.
 whose `Status` is a `CALLBACK` that returns 0. Do the same on the
 `ICImageCompress` path. With that change ADV601 encodes and round-trips
 at 42.6 dB.
+
+**Done:** encode and `ICImageCompress` send `ICM_SET_STATUS_PROC` (a
+callback that returns 0) before `ICM_COMPRESS_BEGIN`. ADV601 encodes at
+42.6 dB. testcodec's `TESTCODEC_STATUS` calls the callback unchecked.
 
 ### H2. Pad the compressed input buffers (verified)
 
@@ -103,6 +114,11 @@ data, as FFmpeg does (`AV_INPUT_BUFFER_PADDING_SIZE`, 64 bytes), in
 DrawDib, and the DirectShow and DMO sample buffers. With 64 bytes, sp6x
 runs clean and its output is unchanged.
 
+**Done:** `src/common/padding.h` (`VFW_INPUT_PADDING`, 64 zeroed bytes)
+after decode input, `ICImageDecompress`, DrawDib, and DirectShow, DMO and
+ACM input buffers. sp6x decodes clean. testcodec's `TESTCODEC_PADDING`
+reads the 64 bytes and wants them zero.
+
 ### H3. Send `ICM_DECOMPRESS_GET_FORMAT` even when the output is forced (verified)
 
 **wv32vfw.dll** returns `ICERR_OK` from `ICM_DECOMPRESS` but writes
@@ -117,6 +133,11 @@ as VirtualDub do the same. With that change both encode paths
 round-trip (26 dB, the codec's default ratio) and the SMSV sample
 decodes.
 
+**Done:** `ic_decompress_begin()` asks `ICM_DECOMPRESS_GET_FORMAT`
+first on every path (decode, `ICImageDecompress`, DrawDib). wv32vfw
+round-trips at 26.4 dB and the SMSV sample decodes. testcodec's
+`TESTCODEC_ASK_FORMAT` decodes to nothing otherwise.
+
 ### H4. Don't require `ICM_COMPRESS_QUERY(in, out)` to accept the codec's own format (verified)
 
 **vsslight.dll** accepts `ICM_COMPRESS_QUERY(in, NULL)`, then rejects
@@ -130,6 +151,11 @@ crashes in the codec (H10).
 **Change:** when the full query fails on a format the codec suggested
 itself, warn and carry on to `ICM_COMPRESS_BEGIN`, and fail only if
 `ICM_COMPRESS_BEGIN` fails.
+
+**Done:** that query is a warning; `ICM_COMPRESS_BEGIN` decides, and its
+error says the query refused too. `ICImageCompress` asks without the
+output unless the caller named one. vsslight encodes all 7 inputs.
+testcodec's `TESTCODEC_PICKY` refuses its own format.
 
 ### H5. Make `probe`'s compression section match what `encode` does
 
@@ -146,6 +172,13 @@ so it reports encoders that `encode` can't use:
 **Change:** open the codec in `ICMODE_COMPRESS` for the compression
 section, and say so if it refuses. Also run the `(in, out)` query and
 report the result, and flag an output format that isn't compressed.
+
+**Done:** `probe` compresses in an instance opened with `ICMODE_COMPRESS`
+and says when that's refused ("it only decompresses": vgpix32d). It
+flags outputs that aren't compressed (SN4Codec), and says when the codec
+refuses its own format with the input (vsslight). Its round trip
+decompresses with the instance it opened itself, which pvwv220 needs.
+testcodec's `TESTCODEC_DECODE_ONLY` refuses compress opens.
 
 ### H6. Find a codec's FOURCC when it is given only as a DLL
 
@@ -167,6 +200,13 @@ that path. Failing that, try 4-byte immediates the DLL compares
 say "the codec answers nothing without its FOURCC" and suggest
 `--fourcc`.
 
+**Done:** a DLL opened without a handler that doesn't answer
+`ICM_GETINFO` is opened again under each FOURCC found in it (`cmp`
+immediates in its code, then standalone words in its data;
+`src/vfw/handlers.c`), and the first that answers is used, with a note.
+wnvwinx opens as `WINX` and TRICDC32 as `rtc3`. testcodec's
+`TESTCODEC_NAMED_ONLY` answers only as `TST0`.
+
 ### H7. Accept DirectShow encoders that register no output subtype
 
 **aslcodec_dshow.dll** registers its output pin as `MEDIATYPE_Video` with
@@ -180,6 +220,12 @@ is "other".
 take the FOURCC from the output pin's connected media type
 (`biCompression` or the subtype). Treat one CLSID in several categories
 as one filter even when the roles worked out for each entry differ.
+
+**Done:** an encoder whose registration names no compression is accepted.
+It is connected with any video subtype and its FOURCC is taken from the
+type it connects with. A filter whose input names only raw types and
+whose output names no subtype counts as an encoder. aslcodec_dshow
+encodes. testfilter's `TESTFILTER_NO_SUBTYPE` registers such an encoder.
 
 ### H8. Use the media type the DirectShow decoder actually connected with
 
@@ -200,6 +246,18 @@ as one filter even when the roles worked out for each entry differ.
 (and any media type a sample carries). Build the converter from that:
 palette, `biHeight` sign and stride. Size the allocator from it as well.
 
+**Done:** decode connects a filter's or DMO's output with the decoder's
+own type of the subtype wanted first, as a renderer takes it in a graph.
+It reads frames in the layout that type describes; failing that, it
+uses the type it made, as before.
+LEAD's decoder proposes "RGB8" with a 24-bit header and writes 24 bits
+whatever it is connected with. Its PAL8 output is now read as that
+(19.2 dB, the same as its BGR24). Sif1Dec.ax is root-caused: its RGB24
+path writes row *y* at (*y* + 1) × stride, into a buffer it sizes for 32
+bits, so the picture starts one row in. That is the filter's bug; use its
+BGR32 output. testfilter's `TESTFILTER_OWN_LAYOUT` writes the top-down
+RGB it proposes whatever it is given.
+
 ### H9. Accept PAL8 as encode input
 
 pvwv220, wnvwinx, xfcodec and aslcodec_vfw all advertise PAL8 input, but
@@ -209,6 +267,14 @@ couldn't be tested on any of them.
 **Change:** add PAL8 to the encoder's input formats, with a fixed
 palette (the standard grey ramp, or a 6×6×6 cube) and a quantiser from
 the input picture.
+
+**Done:** PAL8 is the last standard encode input tried. Frames get each
+pixel's nearest palette colour: a 6×6×6 colour cube plus 40 greys if the
+codec takes that palette, else the grey ramp matched on brightness.
+pvwv220 takes only greys and round-trips at 23.4 dB luma, about what its
+I420 path gives. aslcodec_vfw accepts PAL8 but crashes in its own
+entropy coder (`+0x6945`, walking a tree into NULL) whatever the palette
+or picture. xfcodec refuses `ICM_COMPRESS_BEGIN` for it.
 
 ### H10. Catch output buffer overruns before they corrupt the heap
 
@@ -223,6 +289,16 @@ mapping with an inaccessible guard page after them, sized up to whole
 pages. An overrun then becomes a clean error naming the codec and the
 message.
 
+**Done:** `src/runtime/guard.c`. Each output buffer (encode's, decode's,
+`ICImageCompress`'s and `ICImageDecompress`'s) starts a page of its own
+mapping, with an inaccessible page after the last page it touches. The
+rest of that last page is slack, as the Windows heap and glibc give big
+blocks: aslcodec_vfw's BGR24 output writes a little past the frame. The
+crash report names the buffer and by how much it was overrun:
+"SIGSEGV at vsslight.dll+0x4a27b, accessing …, 2560 bytes past the end of
+the 153600-byte output buffer"; SN4Codec's compressor is caught the same
+way. testcodec's `TESTCODEC_OVERRUN` writes a page past its frame.
+
 ### H11. Finish the file when a codec crashes in `*_END`
 
 **WavCWAIP.dll**, I420 input: all 10 frames compress, then
@@ -232,6 +308,16 @@ its I420 path never adds to that count. That is a codec bug. seance
 could still finish the AVI if `ICM_COMPRESS_END` or
 `ICM_DECOMPRESS_END` crashes after every frame was processed, and print
 a warning.
+
+**Done:** `crash_try()` (`src/runtime/crash.c`) runs a call into DLL code
+with a recovery point: a fault nothing in the DLL handles is reported,
+then unwinds to it. The SEH chain, call frames and FPU/SSE control words
+are restored. `ic_end()` sends `ICM_COMPRESS_END` and `ICM_DECOMPRESS_END`
+under it; after a crash it warns and sends the codec nothing more. The
+WavCWAIP I420 file comes out whole and decodes. Its size and quality vary
+between runs (25.6 KB/26.8 dB with a fresh `drive_c`, 1.6 KB/14 dB after),
+because the codec keeps state there. testcodec's `TESTCODEC_END_CRASH`
+divides by zero in both.
 
 ### H12. `GetDriverModuleHandle` returns NULL during `DRV_LOAD` and `DRV_OPEN` (cosmetic, root-caused)
 
@@ -245,6 +331,12 @@ format-tag names then come out empty, which `samples.sh` shows as `'?'`.
 strings that a codec writes as ANSI into the WCHAR fields (WavLor.dll,
 TRICDC32.DRV) are shown as CJK mojibake. `probe` could spot that and
 decode them as ANSI.
+
+**Done:** `drv_module()` finds instances that are still opening, and
+`probe` and `list` read ICINFO names written as ANSI as such. lhacm,
+lhacm2, smcelp32 and alf2cd are named ("L&H Codecs", "Philips CELP",
+"NCT ALF2 CD Audio CODEC"), and WavLor and TRICDC32 read "WavLor" and
+"Trident CODEC".
 
 ## Problems in the codecs themselves
 
@@ -263,13 +355,21 @@ paths.
   and V swapped. Only BGR32 input → YUY2/UYVY/BGR32/BGR24 output is
   right (47–49 dB).
 - **vsslight.dll:** UYVY input comes back at 12 dB, and UYVY output
-  overruns its buffer (H10).
+  overruns its buffer by 4 rows (now reported as such, H10).
 - **SN4Codec.dll:** the encode side doesn't work as a VfW compressor. Its
   output format is `BI_RGB` with handler `0000`, and it overruns its
   buffer (H10). Decoding works.
 - **WavCWAIP.dll:** an evaluation build that stops in 2008, so set
   `VFW_DATE=2007-06-01`. It ignores `--quality` (≈68 kbit/s, 17.8 dB),
-  and its I420 path crashes in `ICM_COMPRESS_END` (H11).
+  and its I420 path crashes in `ICM_COMPRESS_END`, which seance now
+  survives (H11). It keeps state in `C:\Windows` between runs, which
+  changes its output.
+- **aslcodec_vfw.dll, xfcodec.dll:** both advertise PAL8 input. aslcodec
+  crashes in its entropy coder on it, and xfcodec refuses
+  `ICM_COMPRESS_BEGIN` (H9).
+- **Sif1Dec.ax:** its BGR24 output starts one row into the sample (H8).
+- **LCODCCMW2E.dll:** its "RGB8" output type has a 24-bit header and
+  carries 24-bit frames (H8).
 - **ADV601.dll vs WavLor.dll vs wavelet.dll:** all three use the ADV1
   FOURCC but aren't compatible with each other. wavelet.dll crashes on
   ADV601's output, and ADV601 decodes wavelet.dll's output at 11.8 dB.
@@ -337,5 +437,6 @@ build/seance encode <driver.acm> tone.wav -o enc.wav --format-tag <tag>
 build/seance decode <driver.acm> enc.wav -o dec.wav --sample-format s16
 ```
 
-Needed settings: `VFW_DATE=2007-06-01` for WavCWAIP.dll, `--fourcc WINX`
-for wnvwinx.dll, and `--clsid` for servers with several classes.
+Needed settings: `VFW_DATE=2007-06-01` for WavCWAIP.dll and `--clsid`
+for servers with several classes. (wnvwinx.dll needed `--fourcc WINX`
+before H6.)

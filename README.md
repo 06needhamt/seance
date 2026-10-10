@@ -258,12 +258,19 @@ without one, it uses the codec's own FOURCC. It prints the codec's suggested
 output, which of the standard formats it accepts (I420, YV12, YUY2, UYVY,
 BGR32, BGR24, RGB565, RGB555, PAL8), and the output the harness would pick.
 
-For compression, it tries each standard format as input, at `--size`
-(default 320x240). For each accepted input it shows the compressed format,
-the largest frame size, and whether the codec decodes that format again.
+For compression, it opens the codec as `encode` does (`ICMODE_COMPRESS`;
+it says so if the codec refuses, as decode-only codecs do) and tries each
+standard format as input, at `--size` (default 320x240). For each accepted
+input it shows the compressed format (flagged if it isn't compressed at
+all), whether the codec takes that format back with the input, the largest
+frame size, and whether the codec decodes that format again.
 
 Some codecs only open under their own FOURCC. `probe` retries with the
-handler the codec reports, and `--fourcc XXXX` sets it explicitly.
+handler the codec reports. A DLL that answers nothing when opened by its
+file name is tried under the FOURCCs found in its code and data, and the
+first that answers is used, with a note. `--fourcc XXXX` sets it
+explicitly. Names and descriptions a codec writes into `ICINFO` as ANSI,
+not UTF-16, are read as such.
 `VFW_TRACE=1` logs every driver message and its result.
 
 Codecs are registered for opening by FOURCC (and for codecs that open other
@@ -585,7 +592,9 @@ which the harness also exports to codecs. It reads:
 
 Frames go to the codec as they are if it takes them
 (`ICM_COMPRESS_QUERY`); otherwise they are converted to the first standard
-format it takes, or to `--codec-input`. `--keyint` (default: the codec's
+format it takes, or to `--codec-input`. PAL8, the last tried, gets each
+pixel's nearest colour of a 6x6x6 cube (and 40 greys) if the codec takes
+that palette, else of the grey ramp, by brightness. `--keyint` (default: the codec's
 `ICM_GETDEFAULTKEYFRAMERATE`), `--quality` (0 to 10000) and `--bitrate`
 (kbit/s, for codecs that can aim for one) set the sequence, and
 `ICM_COMPRESS_FRAMES_INFO` tells the codec about them and the frame rate.
@@ -746,6 +755,20 @@ decodes below 40 dB.
   seance: crash: SIGSEGV at testcodec.dll+0x178e, accessing (nil)
   seance:   in DriverProc(DRV_USER+0x64) of testcodec.dll
   ```
+
+  One crash is survived: in `ICM_COMPRESS_END` or `ICM_DECOMPRESS_END`,
+  once every frame is done. It is reported the same way, then `encode` or
+  `decode` finishes its file with a warning and sends the codec nothing
+  more.
+- **Buffer overruns.** Each buffer a codec compresses or decompresses into
+  has its own pages, with an inaccessible page after the last one (the
+  rest of that page is slack, as heap blocks have on Windows). A codec
+  that writes past it faults there, and the crash report says which
+  buffer and how far past its end, instead of the heap being found
+  corrupt later.
+- **Input padding.** Compressed input (decode's frames, and the samples
+  given to DirectShow filters, DMOs and ACM drivers) is followed by 64
+  zeroed bytes, as FFmpeg does, for codecs whose bit readers read ahead.
 - **Hangs.** With `VFW_TIMEOUT=<seconds>`, a single call into a DLL that
   takes longer is reported the same way, and the harness exits with 124.
 - **Code in data.** Windows ran programs without DEP (data execution

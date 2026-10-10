@@ -268,7 +268,7 @@ Single codecs tried one at a time, with what each needed:
 | Sunplus `sp4x_32.dll`, `sp6x_32.dll` (SP41-SP47, SP60-SP62) | VfW | decoders only: every compress message is a stub; 12-bit input at 160x120 to 640x480 only | `encode` and `probe` now say a codec only decompresses |
 | Pegasus `pvwv220.dll` (PVW2) | VfW | encodes and decodes, 38 dB | runs DLLs it carries from heap memory with its own PE loader: data pages are made executable on the fault, as Windows without DEP and Wine do |
 | `wtvc.dll` (WTVC) | VfW | encodes and decodes, 47 dB | answers `ICM_COMPRESS_GET_SIZE` only after `ICM_COMPRESS_BEGIN`: asked again then |
-| `WavCWAIP.dll` (wavc) | VfW | encodes and decodes with `VFW_DATE` before 2008 and BGR24 input | an evaluation build that stops in 2008; writes `\Windows\WavCWAIP.ini`, now on `C:` |
+| `WavCWAIP.dll` (wavc) | VfW | encodes and decodes with `VFW_DATE` before 2008 | an evaluation build that stops in 2008; writes `\Windows\WavCWAIP.ini`, now on `C:`; its I420 path crashes in `ICM_COMPRESS_END`, which is now survived |
 | LEAD MCMW 2.0 (`LCODCCMW2E.dll` and `LCMW2.dll`, LCW2) | DirectShow | encodes and decodes, 37.5-45 dB outside a 16-row band | `SHDeleteKeyA`; one filter in two categories; an output type of its own; samples full until told otherwise; `IMediaSample2` properties in part |
 
 The LEAD encoder is an evaluation build ("LEAD MCMW 2.0 Eval Encoder") that
@@ -282,8 +282,13 @@ alone); it has no `IAMVideoCompression`, so `--keyint` is refused.
 All 58 files in that archive were later tested together, over every
 encode and decode path. The results are in
 [docs/CODEC_TEST_REPORT.md](docs/CODEC_TEST_REPORT.md), with the harness
-changes each failing codec needs (H1-H12), the faults that are the
-codecs' own, and the companion DLLs that are missing.
+changes each failing codec needed (H1-H12, all since made: a status
+callback, input padding, `ICM_DECOMPRESS_GET_FORMAT` before every
+decompression, a lenient compress query, `probe` in compress mode, FOURCC
+discovery, encoders that register no subtype, decoders' own output types,
+PAL8 input, guarded output buffers, surviving a crash in `*_END`, and
+drivers' module handles), the faults that are the codecs' own, and the
+companion DLLs that are missing.
 
 ## In-repository baseline
 
