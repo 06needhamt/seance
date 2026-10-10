@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "common/padding.h"
 #include "dmo/dmo.h"
 
 struct buffer {
@@ -106,7 +107,8 @@ HRESULT dmo_buffer_create(DWORD max_length, DWORD alignment,
 		align *= 2;
 	if (!(b = calloc(1, sizeof(*b))))
 		return E_OUTOFMEMORY;
-	size_t size = max_length ? max_length : 1;
+	/* Zeroed padding after the data, as for other compressed input. */
+	size_t size = (size_t)max_length + VFW_INPUT_PADDING;
 	size = (size + align - 1) / align * align;
 	if (posix_memalign((void **)&b->data, align, size)) {
 		free(b);

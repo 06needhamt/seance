@@ -294,6 +294,36 @@ int cli_open_codec(const char *arg, const char *fourcc, FOURCC guess,
 		if (!c->hic && !i)
 			snprintf(first_error, sizeof(first_error), "%s", vfw_error());
 	}
+	if (c->hic)
+		c->have_info = ic_get_info(c->hic, &c->info, sizeof(c->info)) != 0;
+	/*
+	 * Some codecs open, or answer, only under a FOURCC of their own, and a
+	 * DLL named alone gives none: look for one in the DLL itself.
+	 */
+	if (c->is_dll && !named && (!c->hic || !c->have_info)) {
+		FOURCC found[64];
+		size_t nfound = vfw_dll_handlers(c->target, found, 64);
+		for (size_t i = 0; i < nfound; i++) {
+			HIC h = try_open(c, found[i], modes, nmodes);
+			ICINFO info;
+			if (h && ic_get_info(h, &info, sizeof(info))) {
+				char fcc[FOURCC_STR_SIZE];
+				fprintf(stderr, "seance: %s answers only under a "
+					"FOURCC of its own; opened as '%s', found in "
+					"it (--fourcc names another)\n", c->target,
+					fourcc_str(found[i], fcc));
+				if (c->hic)
+					ic_close(c->hic);
+				c->hic = h;
+				c->handler = found[i];
+				c->info = info;
+				c->have_info = 1;
+				break;
+			}
+			if (h)
+				ic_close(h);
+		}
+	}
 	if (!c->hic) {
 		char fcc[FOURCC_STR_SIZE];
 		const char *e = first_error[0] ? first_error : vfw_error();
@@ -308,7 +338,6 @@ int cli_open_codec(const char *arg, const char *fourcc, FOURCC guess,
 		return 1;
 	}
 
-	c->have_info = ic_get_info(c->hic, &c->info, sizeof(c->info)) != 0;
 	/* Reopen under the codec's own FOURCC if it was opened without one. */
 	if (c->is_dll && c->have_info && !c->handler && c->info.fccHandler) {
 		HIC again = try_open(c, c->info.fccHandler, modes, nmodes);
@@ -321,6 +350,11 @@ int cli_open_codec(const char *arg, const char *fourcc, FOURCC guess,
 	if (c->is_dll && c->handler && !vfw_find(ICTYPE_VIDEO, c->handler))
 		vfw_register(ICTYPE_VIDEO, c->handler, c->target);
 	return 0;
+}
+
+HIC cli_reopen_codec(const struct cli_codec *c, UINT mode)
+{
+	return try_open(c, c->handler, &mode, 1);
 }
 
 const char *cli_codec_name(const struct cli_codec *c)

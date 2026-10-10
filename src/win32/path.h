@@ -6,7 +6,9 @@
  *   C:\x\y       $VFW_ROOT/drive_c/x/y  ($VFW_ROOT defaults to
  *                ~/.seance; C:\WINDOWS\system32 and C:\WINDOWS\TEMP
  *                are created on first use)
- *   x\y, \x\y    relative to the current directory / its drive
+ *   x\y, \x\y    relative to the current directory / its drive: the
+ *                Windows side's own, C:\ unless $VFW_CWD or
+ *                SetCurrentDirectory says otherwise, not the harness's
  *
  * Components are matched case-insensitively against what exists, since
  * Windows paths are case-insensitive. All strings here are UTF-8.
@@ -23,7 +25,11 @@ char *path_to_windows(const char *unix_path);
 /* The Unix directory behind C:. */
 const char *path_drive_c(void);
 
-/* Current directory, as a Windows path (malloc()ed), and changing it. */
+/*
+ * The Windows side's current directory, a Windows path (malloc()ed), and
+ * changing it (-1 with errno if win is no directory); the harness's own
+ * stays where it is.
+ */
 char *path_getcwd(void);
 int path_chdir(const char *win);
 

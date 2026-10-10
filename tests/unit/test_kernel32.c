@@ -13,6 +13,7 @@
 #include "runtime/runtime.h"
 #include "runtime/teb.h"
 #include "test.h"
+#include "win32/k32.h"
 
 static struct module *k32;
 
@@ -599,6 +600,31 @@ static void test_time(void)
 	GetLocalTime(&back);
 	CHECK(back.wYear >= 2024);
 
+	/* VFW_DATE's setting: that date from now on, still running. */
+	FN(void, GetSystemTime, LPSYSTEMTIME);
+	CHECK_EQ(win_clock_set("2007-06-01T12:30"), 0);
+	GetSystemTime(&back);
+	CHECK(back.wYear == 2007 && back.wMonth == 6 && back.wDay == 1 &&
+	      back.wHour == 12 && back.wMinute == 30 && back.wSecond <= 1);
+	GetLocalTime(&back);
+	CHECK(back.wYear == 2007 && back.wMonth == 6 && back.wHour == 12);
+	GetSystemTimeAsFileTime(&ft);
+	FileTimeToSystemTime(&ft, &back);
+	CHECK(back.wYear == 2007 && back.wDay == 1);
+	CHECK_EQ(win_unix_now() / 86400, 13665);	/* 2007-06-01 */
+	CHECK_EQ(win_clock_set("2007-06-01T23:59:58"), 0);
+	Sleep(2100);
+	GetSystemTime(&back);
+	CHECK(back.wMonth == 6 && back.wDay == 2 && back.wHour == 0);
+	CHECK_EQ(win_clock_set("2007-02-29"), -1);
+	CHECK_EQ(win_clock_set("2007-6-1x"), -1);
+	CHECK_EQ(win_clock_set("2007-06-01T24:00"), -1);
+	CHECK_EQ(win_clock_set("1600-01-01"), -1);
+	CHECK_EQ(win_clock_set("yesterday"), -1);
+	CHECK_EQ(win_clock_set(NULL), 0);
+	GetSystemTime(&back);
+	CHECK(back.wYear >= 2024);
+
 	LARGE_INTEGER f, a, b;
 	CHECK(QueryPerformanceFrequency(&f));
 	CHECK_EQ(f.QuadPart, 10000000);
@@ -828,6 +854,54 @@ static void test_files(void)
 	CHECK_STR(part, "c.txt");
 	CHECK_EQ(GetFullPathNameA("C:\\x\\..\\..\\y", sizeof(buf), buf, NULL), 4);
 	CHECK_STR(buf, "C:\\y");
+
+	/*
+	 * The current directory DLLs see is the Windows side's own, on C: to
+	 * begin with: drive-less rooted paths ("\\Windows\\codec.ini", as
+	 * codecs write) and relative ones are taken from it, and changing it
+	 * leaves the harness's where it was.
+	 */
+	FN(DWORD, GetCurrentDirectoryA, DWORD, LPSTR);
+	FN(BOOL, SetCurrentDirectoryA, LPCSTR);
+	char host_before[512], host_after[512];
+	CHECK(getcwd(host_before, sizeof(host_before)) != NULL);
+	CHECK_EQ(GetCurrentDirectoryA(sizeof(buf), buf), 3);
+	CHECK_STR(buf, "C:\\");
+	CHECK_EQ(GetFullPathNameA("\\Windows\\codec.ini", sizeof(buf), buf,
+				  NULL), 20);
+	CHECK_STR(buf, "C:\\Windows\\codec.ini");
+	CHECK(GetFullPathNameA("codec.log", sizeof(buf), buf, NULL));
+	CHECK_STR(buf, "C:\\codec.log");
+	h = CreateFileA("\\Windows\\rooted.ini", GENERIC_WRITE, 0, NULL,
+			CREATE_ALWAYS, 0, NULL);
+	CHECK(h != INVALID_HANDLE_VALUE);
+	CloseHandle(h);
+	snprintf(unix_name, sizeof(unix_name), "%s/drive_c/windows/rooted.ini",
+		 root);
+	CHECK(stat(unix_name, &st) == 0);
+	CHECK(DeleteFileA("C:\\WINDOWS\\rooted.ini"));
+
+	CHECK(SetCurrentDirectoryA("windows\\temp"));
+	CHECK_EQ(GetCurrentDirectoryA(sizeof(buf), buf), 15);
+	CHECK_STR(buf, "C:\\windows\\temp");
+	h = CreateFileA("relative.txt", GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0,
+			NULL);
+	CHECK(h != INVALID_HANDLE_VALUE);
+	CloseHandle(h);
+	snprintf(unix_name, sizeof(unix_name),
+		 "%s/drive_c/windows/temp/relative.txt", root);
+	CHECK(stat(unix_name, &st) == 0);
+	CHECK(DeleteFileA("C:relative.txt"));	/* that drive's directory */
+	CHECK(!SetCurrentDirectoryA("C:\\nowhere"));
+	CHECK(!SetCurrentDirectoryA("C:\\WINDOWS\\TEMP\\Test File.txt"));
+	CHECK(SetCurrentDirectoryA("Z:\\tmp"));
+	CHECK(GetFullPathNameA("\\x", sizeof(buf), buf, NULL));
+	CHECK_STR(buf, "Z:\\x");
+	CHECK(GetFullPathNameA("y", sizeof(buf), buf, NULL));
+	CHECK_STR(buf, "Z:\\tmp\\y");
+	CHECK(getcwd(host_after, sizeof(host_after)) != NULL);
+	CHECK_STR(host_after, host_before);
+	CHECK(SetCurrentDirectoryA("C:\\"));
 
 	/* Standard handles. */
 	HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);

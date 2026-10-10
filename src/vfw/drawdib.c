@@ -257,8 +257,7 @@ static BOOL begin(struct hdd *d, HDC hdc, int dx_dst, int dy_dst,
 			return FALSE;
 		}
 		if (!(d->out = draw_format(d->hic, bi)) ||
-		    ic_send(d->hic, ICM_DECOMPRESS_BEGIN, (DWORD_PTR)bi,
-			    (DWORD_PTR)d->out) != ICERR_OK)
+		    ic_decompress_begin(d->hic, bi, d->out) != ICERR_OK)
 			goto fail;
 		d->started = 1;
 	} else {

@@ -40,6 +40,8 @@ struct image_conv {
 
 	BYTE *rle;		/* RLE: palette indices, bottom row first */
 	BYTE *scratch;		/* intermediate frame */
+	WORD *nearest;		/* 8-bit packing: colour -> index, or 0xffff */
+	int nearest_grey;	/* nearest is by brightness */
 };
 
 static int clamp8(int v)
@@ -324,6 +326,7 @@ void image_conv_free(struct image_conv *c)
 		return;
 	free(c->rle);
 	free(c->scratch);
+	free(c->nearest);
 	free(c);
 }
 
@@ -639,7 +642,92 @@ void image_i420_to_bgr24(const BYTE *yuv, int w, int h, BYTE *d)
 
 int image_can_pack(const struct image_conv *c)
 {
-	return c->kind != K_PAL && c->kind != K_RLE;
+	return (c->kind == K_PAL && c->bpp == 8) ||
+	       (c->kind != K_PAL && c->kind != K_RLE);
+}
+
+void image_cube_palette(RGBQUAD pal[256])
+{
+	int i = 0;
+
+	for (int r = 0; r < 6; r++)
+		for (int g = 0; g < 6; g++)
+			for (int b = 0; b < 6; b++)
+				pal[i++] = (RGBQUAD){ (BYTE)(b * 51), (BYTE)(g * 51),
+						      (BYTE)(r * 51), 0 };
+	/* Eight greys inside each of the cube's five grey steps. */
+	for (int step = 0; step < 5; step++)
+		for (int k = 1; k <= 8; k++, i++) {
+			BYTE v = (BYTE)(step * 51 + (51 * k + 4) / 9);
+			pal[i] = (RGBQUAD){ v, v, v, 0 };
+		}
+}
+
+/* The palette entry nearest a colour (B, G, R). */
+static BYTE nearest_entry(const struct image_conv *c, int b, int g, int r)
+{
+	long best = -1;
+	BYTE k_best = 0;
+
+	for (int k = 0; k < 256; k++) {
+		long db = b - c->pal[k][0], dg = g - c->pal[k][1],
+		     dr = r - c->pal[k][2];
+		long d = 2 * dr * dr + 4 * dg * dg + 3 * db * db;
+		if (best < 0 || d < best) {
+			best = d;
+			k_best = (BYTE)k;
+		}
+	}
+	return k_best;
+}
+
+/*
+ * Top-down BGR24 to 8-bit indices, each pixel the nearest palette colour.
+ * A palette of greys only is matched on brightness, through a table made
+ * up front; any other on colour cut to 6 bits a channel, each such colour
+ * looked up the first time a frame has it (by the middle of its range,
+ * so a palette's own colours come back as themselves).
+ */
+static int pack_pal8(struct image_conv *c, const BYTE *bgr, BYTE *dst)
+{
+	int w = c->w, h = c->h;
+
+	if (!c->nearest) {
+		int grey = 1;
+		for (int k = 0; k < 256 && grey; k++)
+			grey = c->pal[k][0] == c->pal[k][1] &&
+			       c->pal[k][1] == c->pal[k][2];
+		c->nearest_grey = grey;
+		c->nearest = malloc((grey ? 256 : 64 * 64 * 64) * sizeof(WORD));
+		if (!c->nearest) {
+			vfw_set_error("out of memory");
+			return -1;
+		}
+		if (grey)
+			for (int v = 0; v < 256; v++)
+				c->nearest[v] = nearest_entry(c, v, v, v);
+		else
+			memset(c->nearest, 0xff, 64 * 64 * 64 * sizeof(WORD));
+	}
+	memset(dst, 0, c->frame_size);
+	for (int y = 0; y < h; y++) {
+		const BYTE *s = bgr + (size_t)(c->bottom_up ? h - 1 - y : y) * w * 3;
+		BYTE *d = dst + (size_t)y * c->stride;
+		for (int x = 0; x < w; x++, s += 3) {
+			if (c->nearest_grey) {
+				d[x] = (BYTE)c->nearest[(77 * s[2] + 150 * s[1] +
+							 29 * s[0] + 128) >> 8];
+				continue;
+			}
+			int b = s[0] >> 2, g = s[1] >> 2, r = s[2] >> 2;
+			WORD *e = &c->nearest[b << 12 | g << 6 | r];
+			if (*e == 0xffff)
+				*e = nearest_entry(c, b * 4 + 2, g * 4 + 2,
+						   r * 4 + 2);
+			d[x] = (BYTE)*e;
+		}
+	}
+	return 0;
 }
 
 int image_pack_wants_i420(const struct image_conv *c)
@@ -734,6 +822,8 @@ int image_pack(const struct image_conv *c, const BYTE *src, BYTE *dst)
 		vfw_set_error("can't write frames as %s", c->name);
 		return -1;
 	}
+	if (c->kind == K_PAL)
+		return pack_pal8((struct image_conv *)c, src, dst);
 	if (is_rgb(c))
 		pack_rgb(c, src, dst);
 	else

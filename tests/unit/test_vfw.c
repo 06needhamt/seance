@@ -10,6 +10,7 @@
 #include "avi/avi.h"
 #include "commands.h"
 #include "common/error.h"
+#include "common/unicode.h"
 #include "loader/modules.h"
 #include "runtime/runtime.h"
 #include "test.h"
@@ -264,6 +265,7 @@ typedef int (*selftest_fn)(void);
 static stats_fn codec_stats;
 static count_fn codec_opens;
 static DWORD (*codec_quality)(void);
+static count_fn codec_module_misses;
 
 static int log_is(const UINT *want, int n)
 {
@@ -294,6 +296,8 @@ static void test_driver_lifecycle(const char *codec)
 	CHECK_EQ(drv_open_count(), 2);
 	CHECK_EQ(codec_opens(), 2);
 	CHECK(drv_module(a) && drv_module(a) == drv_module(b));
+	/* The driver found its module while loading and opening. */
+	CHECK_EQ(codec_module_misses(), 0);
 	ICINFO info;
 	CHECK_EQ(drv_send(a, ICM_GETINFO, (LPARAM)&info, sizeof(info)),
 		 sizeof(info));
@@ -1540,6 +1544,32 @@ static void test_codec_cli(const char *codec)
 	unlink(seq_avi);
 }
 
+/* ICINFO strings, in UTF-16 as they should be or in ANSI as some write. */
+static void test_info_text(void)
+{
+	WCHAR field[16];
+	char out[64];
+
+	memset(field, 0, sizeof(field));
+	memcpy(field, "WavLor", 7);
+	CHECK_EQ(utf16_field_to_utf8(field, 16, out, sizeof(out)), 6);
+	CHECK_STR(out, "WavLor");
+	CHECK_EQ(utf16_field_to_utf8(field, 16, out, 4), 3);
+	CHECK_STR(out, "Wav");
+
+	static const WCHAR name[16] = { 'T', 'S', 'T', '0', ' ', 0xe9 };
+	CHECK_EQ(utf16_field_to_utf8(name, 16, out, sizeof(out)), 7);
+	CHECK_STR(out, "TST0 \xc3\xa9");
+	static const WCHAR one[16] = { 'A' };
+	utf16_field_to_utf8(one, 16, out, sizeof(out));
+	CHECK_STR(out, "A");
+
+	/* No NUL in the field: as many units as it holds. */
+	for (int i = 0; i < 16; i++)
+		field[i] = 'x';
+	CHECK_EQ(utf16_field_to_utf8(field, 16, out, sizeof(out)), 16);
+}
+
 int main(void)
 {
 	char codec[4096];
@@ -1550,6 +1580,7 @@ int main(void)
 	setup_root(codec);
 	CHECK_EQ(runtime_enter(), 0);
 
+	test_info_text();
 	test_registry();
 	test_names();
 	test_driver_proc();
@@ -1563,7 +1594,9 @@ int main(void)
 	codec_stats = mod_get_proc(m, "testcodec_stats");
 	codec_opens = mod_get_proc(m, "testcodec_open_count");
 	codec_quality = mod_get_proc(m, "testcodec_last_quality");
-	CHECK(codec_stats && codec_opens && codec_quality);
+	codec_module_misses = mod_get_proc(m, "testcodec_module_misses");
+	CHECK(codec_stats && codec_opens && codec_quality &&
+	      codec_module_misses);
 	if (codec_stats && codec_opens && codec_quality) {
 		test_driver_lifecycle(codec);
 		test_icm();

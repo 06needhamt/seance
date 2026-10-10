@@ -765,9 +765,52 @@ static void test_pack(void)
 		image_conv_free(c);
 	}
 
-	/* Palettes can't be packed. */
-	struct fmt f = make_fmt(W, H, 8, BI_RGB);
+	/*
+	 * 8 bits: each pixel the nearest palette colour. The cube's own
+	 * colours come back as themselves, and with a grey palette each
+	 * pixel is the grey as bright as it.
+	 */
+	struct fmt f = make_fmt(W, -H, 8, BI_RGB);
+	image_cube_palette((RGBQUAD *)f.extra);
 	struct image_conv *c = conv_for(&f);
+	CHECK(c && image_can_pack(c) && !image_pack_wants_i420(c));
+	BYTE cube[W * H * 3];
+	for (int i = 0; i < W * H; i++) {
+		int k = (i * 37) % 216;
+		cube[3 * i] = (BYTE)(k % 6 * 51);
+		cube[3 * i + 1] = (BYTE)(k / 6 % 6 * 51);
+		cube[3 * i + 2] = (BYTE)(k / 36 * 51);
+	}
+	CHECK(c && image_pack(c, cube, packed) == 0);
+	int exact = 1;
+	for (int i = 0; i < W * H; i++)
+		exact &= packed[(i / W) * ((W + 3) & ~3) + i % W] == (i * 37) % 216;
+	CHECK(exact);
+	CHECK(c && image_to_bgr24(c, packed, image_frame_size(c), back) == 0);
+	CHECK(!memcmp(back, cube, sizeof(cube)));
+	/* Any colour lands within a cube step of itself. */
+	CHECK(c && image_pack(c, src, packed) == 0);
+	CHECK(c && image_to_bgr24(c, packed, image_frame_size(c), back) == 0);
+	int worst = 0;
+	for (size_t i = 0; i < sizeof(src); i++) {
+		int d = abs(back[i] - src[i]);
+		worst = d > worst ? d : worst;
+	}
+	CHECK(worst <= 26);
+	image_conv_free(c);
+
+	for (int i = 0; i < 256; i++)
+		f.extra[i] = (DWORD)i * 0x010101;
+	c = conv_for(&f);
+	for (int i = 0; i < W * H; i++)
+		memcpy(cube + 3 * i, "\x0a\xc8\x28", 3);	/* brightness 130 */
+	CHECK(c && image_pack(c, cube, packed) == 0 && packed[0] == 130 &&
+	      packed[(H - 1) * 8 + W - 1] == 130);
+	image_conv_free(c);
+
+	/* Fewer bits with a palette can't be packed. */
+	f = make_fmt(W, H, 4, BI_RGB);
+	c = conv_for(&f);
 	CHECK(c && !image_can_pack(c));
 	CHECK(c && image_pack(c, src, packed) == -1);
 	image_conv_free(c);

@@ -258,12 +258,19 @@ without one, it uses the codec's own FOURCC. It prints the codec's suggested
 output, which of the standard formats it accepts (I420, YV12, YUY2, UYVY,
 BGR32, BGR24, RGB565, RGB555, PAL8), and the output the harness would pick.
 
-For compression, it tries each standard format as input, at `--size`
-(default 320x240). For each accepted input it shows the compressed format,
-the largest frame size, and whether the codec decodes that format again.
+For compression, it opens the codec as `encode` does (`ICMODE_COMPRESS`;
+it says so if the codec refuses, as decode-only codecs do) and tries each
+standard format as input, at `--size` (default 320x240). For each accepted
+input it shows the compressed format (flagged if it isn't compressed at
+all), whether the codec takes that format back with the input, the largest
+frame size, and whether the codec decodes that format again.
 
 Some codecs only open under their own FOURCC. `probe` retries with the
-handler the codec reports, and `--fourcc XXXX` sets it explicitly.
+handler the codec reports. A DLL that answers nothing when opened by its
+file name is tried under the FOURCCs found in its code and data, and the
+first that answers is used, with a note. `--fourcc XXXX` sets it
+explicitly. Names and descriptions a codec writes into `ICINFO` as ANSI,
+not UTF-16, are read as such.
 `VFW_TRACE=1` logs every driver message and its result.
 
 Codecs are registered for opening by FOURCC (and for codecs that open other
@@ -281,6 +288,14 @@ The file is `$VFW_INI`, else `$VFW_ROOT/vfw.ini` (default
 directory, and Windows paths go through the drive mapping (`C:` is
 `$VFW_ROOT/drive_c`, `Z:` is `/`). `list` shows the entries and opens each
 one to show its name.
+
+DLLs have a current directory of their own, as a Windows program does:
+`C:\` to begin with (`VFW_CWD` sets another, a Windows or Unix directory),
+changed by `SetCurrentDirectory` without moving the harness. Relative paths a
+DLL uses, and rooted ones without a drive such as the `\Windows\codec.ini`
+some codecs write, are taken from it, so a codec's settings, logs and scratch
+files land in `drive_c` rather than in `/` or the directory you run from. The
+files named on the command line are the harness's, relative to where you are.
 
 Codecs usually import more than kernel32, winmm and msvfw32. The msvcrt
 family (msvcrt.dll, msvcr70-140, msvcp*, ucrtbase, api-ms-win-crt-*) is a
@@ -308,7 +323,11 @@ comdlg32 are built in too, headless:
   conversion between every DIB format and blits between them (`BitBlt`,
   `StretchBlt`, `StretchDIBits`, `GetDIBits`, ...), palettes, brushes,
   pens and fonts. The display is a 1024x768 32-bit device that discards
-  what is drawn on it; text is measured but not drawn.
+  what is drawn on it. Text (`TextOut`, `ExtTextOut`, user32's `DrawText`)
+  is drawn into memory DCs with one built-in font, X11's public-domain
+  misc-fixed 8x13 scaled to each `LOGFONT` (bold, italic, underline and
+  strikeout synthesised), and measured the same way, so the captions and
+  banners codecs draw into frames appear.
 - **advapi32:** the registry, kept in a `.reg` file (see below), with
   change notification; `Drivers32` there shows the codecs and ACM
   drivers `vfw.ini` registers. Security answers as for an administrator on XP: tokens,
@@ -573,7 +592,9 @@ which the harness also exports to codecs. It reads:
 
 Frames go to the codec as they are if it takes them
 (`ICM_COMPRESS_QUERY`); otherwise they are converted to the first standard
-format it takes, or to `--codec-input`. `--keyint` (default: the codec's
+format it takes, or to `--codec-input`. PAL8, the last tried, gets each
+pixel's nearest colour of a 6x6x6 cube (and 40 greys) if the codec takes
+that palette, else of the grey ramp, by brightness. `--keyint` (default: the codec's
 `ICM_GETDEFAULTKEYFRAMERATE`), `--quality` (0 to 10000) and `--bitrate`
 (kbit/s, for codecs that can aim for one) set the sequence, and
 `ICM_COMPRESS_FRAMES_INFO` tells the codec about them and the frame rate.
@@ -734,8 +755,32 @@ decodes below 40 dB.
   seance: crash: SIGSEGV at testcodec.dll+0x178e, accessing (nil)
   seance:   in DriverProc(DRV_USER+0x64) of testcodec.dll
   ```
+
+  One crash is survived: in `ICM_COMPRESS_END` or `ICM_DECOMPRESS_END`,
+  once every frame is done. It is reported the same way, then `encode` or
+  `decode` finishes its file with a warning and sends the codec nothing
+  more.
+- **Buffer overruns.** Each buffer a codec compresses or decompresses into
+  has its own pages, with an inaccessible page after the last one (the
+  rest of that page is slack, as heap blocks have on Windows). A codec
+  that writes past it faults there, and the crash report says which
+  buffer and how far past its end, instead of the heap being found
+  corrupt later.
+- **Input padding.** Compressed input (decode's frames, and the samples
+  given to DirectShow filters, DMOs and ACM drivers) is followed by 64
+  zeroed bytes, as FFmpeg does, for codecs whose bit readers read ahead.
 - **Hangs.** With `VFW_TIMEOUT=<seconds>`, a single call into a DLL that
   takes longer is reported the same way, and the harness exits with 124.
+- **Code in data.** Windows ran programs without DEP (data execution
+  prevention) unless they opted in, and some codecs build or unpack code in
+  heap memory or on the stack and run it there (`pvwv220.dll` has its own PE
+  loader for the DLLs it carries). As in Wine, when that faults, the page is
+  made executable and the code continues; `VFW_TRACE=1` logs each page.
+- **The date.** Some DLLs behave differently depending on the date (time
+  limited evaluation builds stop working after a date). `VFW_DATE` sets the
+  date DLLs see through `GetSystemTime`, `GetLocalTime`,
+  `GetSystemTimeAsFileTime` and the CRT's `time`; tick counts, the
+  performance counter and file times stay the host's.
 
 ### Environment variables
 
@@ -748,6 +793,8 @@ decodes below 40 dB.
 | `VFW_REGISTRY` | The Windows registry file (default `$VFW_ROOT/registry.reg`); empty keeps it in memory only |
 | `VFW_TRACE=1` | Log calls into the built-in DLLs and every driver message to stderr |
 | `VFW_TIMEOUT=<s>` | Report and stop (exit 124) when one call into a DLL takes longer |
+| `VFW_CWD` | The current directory DLLs start in, a Windows (`C:\work`) or Unix directory (default `C:\`) |
+| `VFW_DATE` | The date and time (UTC) DLLs see at startup, `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM[:SS]`; the clock runs on from there (default: the host's) |
 | `VFW_COMPRESSOR` | What `ICCompressorChoose` answers: a FOURCC (`TST0`), `uncompressed` or `cancel` |
 | `VFW_ACM_FORMAT` | What `acmFormatChoose` answers: a format tag and, optionally, rate, channels and bits (`1,22050,1,8`), or `cancel` |
 | `VFW_OPEN_FILE`, `VFW_SAVE_FILE` | What `GetOpenFileName` and `GetSaveFileName` answer: a file, or `cancel` (the default) |
@@ -762,7 +809,7 @@ decodes below 40 dB.
 | `include/win32/` | Win32 types, PE image structures, GDI, window-manager and registry definitions, driver and ICM definitions, laid out to match 32-bit Windows |
 | `src/loader/` | PE parsing, mapping and relocation (`pe.c`); the module table and dependency loading (`modules.c`) |
 | `src/runtime/` | TEB and `%fs`, implicit TLS, the built-in DLL registry, trap thunks for unimplemented imports, the 2 GB limit (`lowmem.c`), crash and hang reports (`crash.c`) |
-| `src/win32/` | Built-in kernel32 (`k32_*.c`) and kernelbase, ntdll, the msvcrt family (`crt_*.c`), user32 (`user32.c`, `u32_*.c`), gdi32 (`gdi32.c`, `gdi_bitmap.c`), advapi32 (`advapi32.c`, `adv_security.c`) and its registry (`reg.c`), version, ole32, oleaut32 (`oleaut32.c`, `oleaut_conv.c`, `oleaut_array.c`, `errinfo.c`), shell32 (`shell32.c`, `shell_file.c`), comctl32 (`comctl32.c`, `comctl_dpa.c`, `comctl_imagelist.c`, `comctl_sheet.c`), comdlg32, winmm, msvfw32 and quartz (`quartz.c`) |
+| `src/win32/` | Built-in kernel32 (`k32_*.c`) and kernelbase, ntdll, the msvcrt family (`crt_*.c`), user32 (`user32.c`, `u32_*.c`), gdi32 (`gdi32.c`, `gdi_bitmap.c`, `gdi_text.c`), advapi32 (`advapi32.c`, `adv_security.c`) and its registry (`reg.c`), version, ole32, oleaut32 (`oleaut32.c`, `oleaut_conv.c`, `oleaut_array.c`, `errinfo.c`), shell32 (`shell32.c`, `shell_file.c`), comctl32 (`comctl32.c`, `comctl_dpa.c`, `comctl_imagelist.c`, `comctl_sheet.c`), comdlg32, winmm, msvfw32 and quartz (`quartz.c`) |
 | `src/dshow/` | DirectShow: finding and registering filters (`discover.c`) |
 | `src/vfw/` | Installable drivers (`driver.c`), the codec registry (`registry.c`), the ICM API (`icm.c`), sequence compression (`seq.c`) |
 | `src/avi/` | AVI reader (AVI 1.0 and OpenDML) and writer |

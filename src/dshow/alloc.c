@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #include <pthread.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,7 +17,7 @@ struct sample {
 	LONG size, actual;
 	REFERENCE_TIME start, stop;
 	LONGLONG media_start, media_stop;
-	DWORD flags;
+	DWORD flags, type_flags, stream_id;
 	AM_MEDIA_TYPE mt;
 	int have_time, have_media_time, have_mt, busy;
 };
@@ -56,8 +57,10 @@ static ULONG WINAPI sample_release(IMediaSample2 *p)
 	ULONG n = __atomic_sub_fetch(&s->refs, 1, __ATOMIC_ACQ_REL);
 	if (!n) {
 		struct allocator *a = s->allocator;
-		dshow_free_media_type(&s->mt); s->have_mt = 0; s->actual = 0;
-		s->flags = 0; s->have_time = s->have_media_time = 0;
+		/* As strmbase's CMediaSample: the data length stays as it was. */
+		dshow_free_media_type(&s->mt); s->have_mt = 0;
+		s->flags = s->type_flags = s->stream_id = 0;
+		s->have_time = s->have_media_time = 0;
 		pthread_mutex_lock(&a->lock);
 		s->busy = 0;
 		pthread_cond_signal(&a->available);
@@ -104,27 +107,86 @@ static HRESULT WINAPI sample_disc(IMediaSample2*p){return flag_get(sample_from(p
 static HRESULT WINAPI sample_set_disc(IMediaSample2*p,BOOL v){return flag_set(sample_from(p),AM_SAMPLE_DATADISCONTINUITY,v);}
 static HRESULT WINAPI sample_get_media(IMediaSample2*p,LONGLONG*a,LONGLONG*b){struct sample*s=sample_from(p);if(!s->have_media_time)return VFW_E_MEDIA_TIME_NOT_SET;if(a)memcpy(a,&s->media_start,sizeof(*a));if(b)memcpy(b,&s->media_stop,sizeof(*b));return S_OK;}
 static HRESULT WINAPI sample_set_media(IMediaSample2*p,LONGLONG*a,LONGLONG*b){struct sample*s=sample_from(p);s->have_media_time=a!=NULL;if(a)memcpy(&s->media_start,a,sizeof(*a));if(b)memcpy(&s->media_stop,b,sizeof(*b));return S_OK;}
-static HRESULT WINAPI sample_get_props(IMediaSample2*p,DWORD n,BYTE*out)
+/*
+ * Whether the first n bytes of an AM_SAMPLE2_PROPERTIES hold field f. As
+ * strmbase's CMediaSample, the properties may be any leading part of the
+ * structure: CTransformFilter::InitializeOutputSample reads them up to
+ * tStart and copies them up to dwStreamId, which is how a transform's
+ * output gets its input's sync point, times and flags.
+ */
+#define HAS_FIELD(f, n) (offsetof(AM_SAMPLE2_PROPERTIES, f) + \
+			 sizeof(((AM_SAMPLE2_PROPERTIES *)0)->f) <= (n))
+
+static HRESULT WINAPI sample_get_props(IMediaSample2 *p, DWORD n, BYTE *out)
 {
-	if (!out || n < sizeof(AM_SAMPLE2_PROPERTIES))
-		return E_INVALIDARG;
+	if (!n)
+		return S_OK;
+	if (!out)
+		return E_POINTER;
 	struct sample *s = sample_from(p);
 	AM_SAMPLE2_PROPERTIES q = { 0 };
-	q.cbData = sizeof(q);
+	q.cbData = n < sizeof(q) ? n : sizeof(q);
+	q.dwTypeSpecificFlags = s->type_flags;
 	q.dwSampleFlags = s->flags |
 		(s->have_time ? AM_SAMPLE_TIMEVALID | AM_SAMPLE_STOPVALID : 0) |
 		(s->have_mt ? AM_SAMPLE_TYPECHANGED : 0);
 	q.lActual = s->actual;
 	q.tStart = s->start;
 	q.tStop = s->stop;
+	q.dwStreamId = s->stream_id;
 	q.pMediaType = s->have_mt ? &s->mt : NULL;
 	q.pbBuffer = s->data;
 	q.cbBuffer = s->size;
-	memcpy(out, &q, sizeof(q));
+	memcpy(out, &q, q.cbData);
 	return S_OK;
 }
-static HRESULT WINAPI sample_set_props(IMediaSample2*p,DWORD n,const BYTE*in)
-{if(!in||n<sizeof(AM_SAMPLE2_PROPERTIES))return E_INVALIDARG;const AM_SAMPLE2_PROPERTIES*q=(const void*)in;struct sample*s=sample_from(p);if(q->lActual<0||q->lActual>s->size)return VFW_E_BUFFER_OVERFLOW;s->actual=q->lActual;s->flags=q->dwSampleFlags;s->start=q->tStart;s->stop=q->tStop;s->have_time=!!(q->dwSampleFlags&AM_SAMPLE_TIMEVALID);return sample_set_mt(p,q->pMediaType);}
+
+static HRESULT WINAPI sample_set_props(IMediaSample2 *p, DWORD n, const BYTE *in)
+{
+	struct sample *s = sample_from(p);
+	AM_SAMPLE2_PROPERTIES q = { 0 };
+
+	if (!HAS_FIELD(cbData, n))
+		return S_OK;
+	if (!in)
+		return E_POINTER;
+	memcpy(&q, in, n < sizeof(q) ? n : sizeof(q));
+	/* No more than is there. */
+	if (q.cbData < n)
+		n = q.cbData;
+	if (n > sizeof(q))
+		return E_INVALIDARG;
+	/* Checks first, so a refusal changes nothing. */
+	if (HAS_FIELD(pbBuffer, n) && q.pbBuffer && q.pbBuffer != s->data)
+		return E_INVALIDARG;
+	if (HAS_FIELD(cbBuffer, n) && q.cbBuffer && q.cbBuffer != s->size)
+		return E_INVALIDARG;
+	if (HAS_FIELD(lActual, n) && (q.lActual < 0 || q.lActual > s->size))
+		return VFW_E_BUFFER_OVERFLOW;
+	if (HAS_FIELD(pMediaType, n) &&
+	    (q.dwSampleFlags & AM_SAMPLE_TYPECHANGED) && !q.pMediaType)
+		return E_POINTER;
+	if (HAS_FIELD(dwStreamId, n))
+		s->stream_id = q.dwStreamId;
+	if (HAS_FIELD(dwTypeSpecificFlags, n))
+		s->type_flags = q.dwTypeSpecificFlags;
+	if (HAS_FIELD(dwSampleFlags, n)) {
+		s->flags = q.dwSampleFlags &
+			   ~(AM_SAMPLE_TIMEVALID | AM_SAMPLE_STOPVALID |
+			     AM_SAMPLE_TYPECHANGED);
+		s->have_time = !!(q.dwSampleFlags & AM_SAMPLE_TIMEVALID);
+	}
+	if (HAS_FIELD(lActual, n))
+		s->actual = q.lActual;
+	if (HAS_FIELD(tStart, n))
+		s->start = q.tStart;
+	if (HAS_FIELD(tStop, n))
+		s->stop = q.tStop;
+	if (HAS_FIELD(pMediaType, n))
+		return sample_set_mt(p, q.dwSampleFlags & AM_SAMPLE_TYPECHANGED ?
+				     q.pMediaType : NULL);
+	return S_OK;
+}
 
 static const IMediaSample2Vtbl sample_vtbl={sample_qi,sample_addref,sample_release,sample_pointer,sample_size,sample_get_time,sample_set_time,sample_sync,sample_set_sync,sample_preroll,sample_set_preroll,sample_actual,sample_set_actual,sample_get_mt,sample_set_mt,sample_disc,sample_set_disc,sample_get_media,sample_set_media,sample_get_props,sample_set_props};
 
@@ -139,7 +201,7 @@ static HRESULT WINAPI alloc_commit(IMemAllocator*p)
 {
 	struct allocator*a=allocator_from(p);if(a->committed)return S_OK;if(a->props.cBuffers<=0||a->props.cbBuffer<=0)return VFW_E_SIZENOTSET;
 	a->samples=calloc(a->props.cBuffers,sizeof(*a->samples));if(!a->samples)return E_OUTOFMEMORY;
-	for(LONG i=0;i<a->props.cBuffers;i++){struct sample*s=&a->samples[i];s->iface.lpVtbl=&sample_vtbl;s->allocator=a;s->size=a->props.cbBuffer;size_t n=(size_t)s->size+a->props.cbPrefix+a->props.cbAlign-1;s->allocation=malloc(n);if(!s->allocation){allocator_clear(a);return E_OUTOFMEMORY;}uintptr_t q=(uintptr_t)(s->allocation+a->props.cbPrefix);q=(q+a->props.cbAlign-1)&~(uintptr_t)(a->props.cbAlign-1);s->data=(BYTE*)q;}
+	for(LONG i=0;i<a->props.cBuffers;i++){struct sample*s=&a->samples[i];s->iface.lpVtbl=&sample_vtbl;s->allocator=a;s->size=a->props.cbBuffer;s->actual=s->size;/* a new CMediaSample is full */size_t n=(size_t)s->size+a->props.cbPrefix+a->props.cbAlign-1;s->allocation=malloc(n);if(!s->allocation){allocator_clear(a);return E_OUTOFMEMORY;}uintptr_t q=(uintptr_t)(s->allocation+a->props.cbPrefix);q=(q+a->props.cbAlign-1)&~(uintptr_t)(a->props.cbAlign-1);s->data=(BYTE*)q;}
 	a->committed=1;return S_OK;
 }
 static HRESULT WINAPI alloc_decommit(IMemAllocator*p){struct allocator*a=allocator_from(p);pthread_mutex_lock(&a->lock);a->committed=0;int busy=0;for(LONG i=0;a->samples&&i<a->props.cBuffers;i++)busy|=a->samples[i].busy;if(!busy)allocator_clear(a);pthread_cond_broadcast(&a->available);pthread_mutex_unlock(&a->lock);return S_OK;}

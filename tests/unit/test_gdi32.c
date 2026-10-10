@@ -642,6 +642,178 @@ static void test_palettes(void)
 	DeleteDC(dc);
 }
 
+/* Text drawn into a DIB section with the built-in font. */
+static void test_text(void)
+{
+	FN(HDC, CreateCompatibleDC, HDC);
+	FN(BOOL, DeleteDC, HDC);
+	FN(HBITMAP, CreateDIBSection, HDC, const BITMAPINFO *, UINT, void **,
+	   HANDLE, DWORD);
+	FN(HGDIOBJ, SelectObject, HDC, HGDIOBJ);
+	FN(BOOL, DeleteObject, HGDIOBJ);
+	FN(COLORREF, SetTextColor, HDC, COLORREF);
+	FN(COLORREF, SetBkColor, HDC, COLORREF);
+	FN(int, SetBkMode, HDC, int);
+	FN(UINT, SetTextAlign, HDC, UINT);
+	FN(BOOL, TextOutA, HDC, int, int, LPCSTR, int);
+	FN(BOOL, TextOutW, HDC, int, int, LPCWSTR, int);
+	FN(BOOL, ExtTextOutA, HDC, int, int, UINT, const RECT *, LPCSTR, UINT,
+	   const INT *);
+	FN(BOOL, GetTextMetricsA, HDC, LPTEXTMETRICA);
+	FN(BOOL, GetTextExtentPoint32A, HDC, LPCSTR, int, LPSIZE);
+	FN(HFONT, CreateFontA, int, int, int, int, int, DWORD, DWORD, DWORD, DWORD,
+	   DWORD, DWORD, DWORD, DWORD, LPCSTR);
+	FN(BOOL, MoveToEx, HDC, int, int, LPPOINT);
+	struct module *user = mod_load("user32.dll", NULL);
+	CHECK(user != NULL);
+	if (!user)
+		return;
+	int (WINAPI *DrawTextA)(HDC, LPCSTR, int, LPRECT, UINT) =
+		(int (WINAPI *)(HDC, LPCSTR, int, LPRECT, UINT))get_from(user,
+									"DrawTextA");
+
+	enum { W = 96, H = 48 };
+	struct bmi bi;
+	DWORD *px;
+	HDC dc = CreateCompatibleDC(NULL);
+	header(&bi, W, -H, 32, BI_RGB);
+	HBITMAP bm = CreateDIBSection(NULL, (BITMAPINFO *)&bi, DIB_RGB_COLORS,
+				      (void **)&px, NULL, 0);
+	HGDIOBJ old = SelectObject(dc, bm);
+	TEXTMETRICA tm;
+	CHECK(GetTextMetricsA(dc, &tm));
+	int cw = tm.tmAveCharWidth, ch = tm.tmHeight;
+	CHECK(cw > 0 && ch == 16 && tm.tmAscent < ch);
+
+	/* Ink in the text colour, inside the character's cell only. */
+	memset(px, 0xff, W * H * 4);
+	SetTextColor(dc, RGB(255, 0, 0));	/* 0xff0000 in the DWORD */
+	SetBkMode(dc, TRANSPARENT);
+	CHECK(TextOutA(dc, 2, 3, "H", 1));
+	int ink = 0, stray = 0, other = 0;
+	for (int y = 0; y < H; y++)
+		for (int x = 0; x < W; x++) {
+			DWORD v = px[y * W + x] & 0xffffff;
+			int in = x >= 2 && x < 2 + cw && y >= 3 && y < 3 + ch;
+			if (v == 0xff0000)
+				in ? ink++ : stray++;
+			else if (v != 0xffffff)
+				other++;
+		}
+	CHECK(ink > ch);	/* the two stems, at least */
+	CHECK_EQ(stray, 0);
+	CHECK_EQ(other, 0);
+
+	/* OPAQUE fills the cell with the background colour. */
+	SetBkMode(dc, OPAQUE);
+	SetBkColor(dc, RGB(0, 0, 255));
+	static const WCHAR dot[] = { '.', 0 };
+	CHECK(TextOutW(dc, 40, 3, dot, 1));
+	int filled = 1;
+	for (int y = 3; y < 3 + ch; y++)
+		for (int x = 40; x < 40 + cw; x++)
+			filled &= (px[y * W + x] & 0xffffff) == 0x0000ff ||
+				  (px[y * W + x] & 0xffffff) == 0xff0000;
+	CHECK(filled);
+	CHECK((px[3 * W + 40] & 0xffffff) == 0x0000ff);
+	CHECK((px[3 * W + 40 + cw] & 0xffffff) == 0xffffff);
+
+	/* Right and baseline alignment: the cell ends at x, its ascent above y. */
+	memset(px, 0xff, W * H * 4);
+	SetBkMode(dc, OPAQUE);
+	CHECK_EQ(SetTextAlign(dc, TA_RIGHT | TA_BASELINE), TA_LEFT | TA_TOP);
+	CHECK(TextOutA(dc, 60, 30, "I", 1));
+	CHECK((px[(30 - tm.tmAscent) * W + 60 - cw] & 0xffffff) != 0xffffff);
+	CHECK((px[(30 - tm.tmAscent) * W + 60] & 0xffffff) == 0xffffff);
+	CHECK((px[(30 - tm.tmAscent - 1) * W + 59] & 0xffffff) == 0xffffff);
+	CHECK((px[(30 - tm.tmAscent + ch - 1) * W + 59] & 0xffffff) != 0xffffff);
+	CHECK((px[(30 - tm.tmAscent + ch) * W + 59] & 0xffffff) == 0xffffff);
+	/* TA_UPDATECP: from the current position, which moves on. */
+	SetTextAlign(dc, TA_UPDATECP);
+	POINT cp;
+	CHECK(MoveToEx(dc, 0, 0, NULL));
+	CHECK(TextOutA(dc, 50, 50, "ab", 2));
+	CHECK(MoveToEx(dc, 0, 0, &cp));
+	CHECK(cp.x == 2 * cw && cp.y == 0);
+	SetTextAlign(dc, TA_LEFT | TA_TOP);
+
+	/* ETO_OPAQUE fills the rectangle; ETO_CLIPPED keeps the text in it. */
+	memset(px, 0xff, W * H * 4);
+	RECT rc = { 0, 0, 5, 5 };
+	SetBkMode(dc, TRANSPARENT);
+	CHECK(ExtTextOutA(dc, 0, 0, ETO_OPAQUE | ETO_CLIPPED, &rc, "MM", 2, NULL));
+	CHECK((px[0] & 0xffffff) == 0x0000ff);
+	int outside = 0;
+	for (int y = 0; y < H; y++)
+		for (int x = 0; x < W; x++)
+			if ((x >= 5 || y >= 5) && (px[y * W + x] & 0xffffff) != 0xffffff)
+				outside++;
+	CHECK_EQ(outside, 0);
+	/* dx places each character. */
+	memset(px, 0xff, W * H * 4);
+	INT dx[2] = { 30, cw };
+	CHECK(ExtTextOutA(dc, 0, 0, 0, NULL, "||", 2, dx));
+	int first = 0, second = 0;
+	for (int y = 0; y < ch; y++)
+		for (int x = 0; x < W; x++)
+			if ((px[y * W + x] & 0xffffff) == 0xff0000)
+				x < cw ? first++ : x >= 30 && x < 30 + cw ? second++ : 0;
+	CHECK(first > 0 && first == second);
+
+	/* A larger, bold font: its metrics and extents agree with the ink. */
+	HFONT big = CreateFontA(-26, 0, 0, 0, FW_BOLD, 0, 1, 0, 0, 0, 0, 0, 0,
+				"Arial");
+	HGDIOBJ oldfont = SelectObject(dc, big);
+	CHECK(GetTextMetricsA(dc, &tm));
+	CHECK_EQ(tm.tmHeight, 26 + 26 / 8);
+	CHECK_EQ(tm.tmInternalLeading, 26 / 8);
+	SIZE size;
+	CHECK(GetTextExtentPoint32A(dc, "WW", 2, &size));
+	CHECK(size.cx == 2 * tm.tmAveCharWidth && size.cy == tm.tmHeight);
+	memset(px, 0xff, W * H * 4);
+	CHECK(TextOutA(dc, 0, 0, "_", 1));
+	/* The underline: a full row under the baseline. */
+	int row = 1;
+	for (int x = 0; x < tm.tmAveCharWidth; x++)
+		row &= (px[(tm.tmAscent + 1) * W + x] & 0xffffff) == 0xff0000;
+	CHECK(row);
+	SelectObject(dc, oldfont);
+	CHECK(DeleteObject(big));
+
+	/* DrawText: measured, and drawn centred in its rectangle. */
+	if (DrawTextA) {
+		RECT r = { 10, 10, 10, 10 };
+		CHECK_EQ(DrawTextA(dc, "ab\ncde", -1, &r, DT_CALCRECT), 2 * ch);
+		CHECK(r.right == 10 + 3 * cw && r.bottom == 10 + 2 * ch);
+		r = (RECT){ 0, 0, 10, 10 };
+		CHECK_EQ(DrawTextA(dc, "&File", -1, &r, DT_CALCRECT), ch);
+		CHECK_EQ(r.right, 4 * cw);
+		r = (RECT){ 0, 0, 4 * cw, 10 };
+		CHECK_EQ(DrawTextA(dc, "one two three", -1, &r,
+				   DT_CALCRECT | DT_WORDBREAK), 3 * ch);
+		memset(px, 0xff, W * H * 4);
+		r = (RECT){ 0, 0, W, H };
+		CHECK_EQ(DrawTextA(dc, "x", 1, &r,
+				   DT_CENTER | DT_VCENTER | DT_SINGLELINE), ch);
+		int lo = W, hi = -1, top = H, bottom = -1;
+		for (int y = 0; y < H; y++)
+			for (int x = 0; x < W; x++)
+				if ((px[y * W + x] & 0xffffff) == 0xff0000) {
+					if (x < lo) lo = x;
+					if (x > hi) hi = x;
+					if (y < top) top = y;
+					if (y > bottom) bottom = y;
+				}
+		CHECK(lo >= (W - cw) / 2 && hi < (W + cw) / 2);
+		CHECK(top >= (H - ch) / 2 && bottom < (H + ch) / 2);
+	}
+
+	SelectObject(dc, old);
+	CHECK(DeleteObject(bm));
+	CHECK(DeleteDC(dc));
+	mod_free(user);
+}
+
 int main(void)
 {
 	CHECK_EQ(lowmem_reserve(), 0);
@@ -660,6 +832,7 @@ int main(void)
 	test_dibits();
 	test_blits();
 	test_palettes();
+	test_text();
 
 	mod_free(gdi);
 	mod_free(k32);

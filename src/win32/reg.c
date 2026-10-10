@@ -11,6 +11,7 @@
 #include "common/log.h"
 #include "win32/codepage.h"
 #include "win32/internal.h"
+#include "win32/k32.h"
 #include "win32/path.h"
 #include "win32/reg.h"
 
@@ -54,7 +55,7 @@ static const struct {
 static FILETIME now(void)
 {
 	FILETIME ft;
-	ULONGLONG t = ((ULONGLONG)time(NULL) + 11644473600ULL) * 10000000ULL;
+	ULONGLONG t = win_filetime_now();
 
 	ft.dwLowDateTime = (DWORD)t;
 	ft.dwHighDateTime = (DWORD)(t >> 32);
@@ -543,6 +544,25 @@ LONG reg_delete(struct reg_key *k)
 	if (k->nsub || k->parent == &root)
 		return ERROR_ACCESS_DENIED;
 	detach(k);
+	return ERROR_SUCCESS;
+}
+
+LONG reg_delete_tree(struct reg_key *k, int keep)
+{
+	while (k->nsub) {
+		LONG err = reg_delete_tree(k->sub[k->nsub - 1], 0);
+		if (err)
+			return err;
+	}
+	if (!keep)
+		return reg_delete(k);
+	while (k->nval) {
+		char *name = strdup(k->val[k->nval - 1].name);
+		LONG err = name ? reg_unset(k, name) : ERROR_NOT_ENOUGH_MEMORY;
+		free(name);
+		if (err)
+			return err;
+	}
 	return ERROR_SUCCESS;
 }
 

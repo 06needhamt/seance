@@ -98,6 +98,74 @@ static void pop_component(char *out, size_t root_len)
 		strcpy(out, "/");
 }
 
+/*
+ * The current directory DLLs see: the Windows process's own, kept apart
+ * from the harness's. A program run on Windows has one on the system
+ * drive, so it starts at C:\\ ($VFW_CWD, a Windows or Unix directory,
+ * says otherwise), and drive-less rooted paths ("\\Windows\\codec.ini")
+ * and relative ones a DLL uses are taken from it. SetCurrentDirectory
+ * changes it without moving the harness, whose own relative paths (the
+ * files on its command line) stay the user's.
+ */
+static char win_cwd[PATH_MAX];
+static pthread_mutex_t cwd_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* $VFW_CWD as a Windows path, or NULL for C:\\. Run once, with win_cwd C:\\. */
+static char *initial_cwd(void)
+{
+	const char *v = getenv("VFW_CWD");
+	struct stat st;
+	char *w = NULL;
+
+	if (!v || !*v)
+		return NULL;
+	char *u = v[0] == '/' ? strdup(v) : NULL;
+	if (!u) {
+		/* Taken from C:\\, as a Windows path would be. */
+		u = path_to_unix(v);
+	}
+	if (u && !stat(u, &st) && S_ISDIR(st.st_mode)) {
+		w = path_to_windows(u);
+	} else {
+		fprintf(stderr, "seance: VFW_CWD: %s is not a directory; using "
+			"C:\\\n", v);
+	}
+	free(u);
+	return w;
+}
+
+/* The current directory, a Windows path, into cwd (PATH_MAX bytes). */
+static void current(char *cwd)
+{
+	static int ready;
+
+	pthread_mutex_lock(&cwd_lock);
+	if (!ready) {
+		ready = 1;
+		snprintf(win_cwd, sizeof(win_cwd), "C:\\");
+		pthread_mutex_unlock(&cwd_lock);
+		char *w = initial_cwd();
+		pthread_mutex_lock(&cwd_lock);
+		if (w)
+			snprintf(win_cwd, sizeof(win_cwd), "%s", w);
+		free(w);
+	}
+	snprintf(cwd, PATH_MAX, "%s", win_cwd);
+	pthread_mutex_unlock(&cwd_lock);
+}
+
+/* The Unix directory for the current one, into out; -1 if it has none. */
+static int unix_dir(const char *cwd, char *out, size_t size)
+{
+	char *u = path_to_unix(cwd);
+	int r = u && strlen(u) < size ? 0 : -1;
+
+	if (!r)
+		snprintf(out, size, "%s", u);
+	free(u);
+	return r;
+}
+
 char *path_to_unix(const char *win)
 {
 	char out[PATH_MAX];
@@ -110,25 +178,27 @@ char *path_to_unix(const char *win)
 	if (!strncmp(p, "\\\\?\\", 4))
 		p += 4;
 
+	char cwd[PATH_MAX];
+	current(cwd);
 	if (p[0] && p[1] == ':') {
 		char drive = p[0] | 0x20;
-		if (drive == 'z')
-			snprintf(out, sizeof(out), "/");
-		else if (drive == 'c')
-			snprintf(out, sizeof(out), "%s", path_drive_c());
-		else
+		if (drive != 'z' && drive != 'c')
 			return NULL;
-		/* "C:x" (relative to that drive's cwd) is taken from its root. */
 		p += 2;
+		/* "C:x": from that drive's current directory, if it is current. */
+		if (*p != '\\' && *p != '/' && (cwd[0] | 0x20) == drive) {
+			if (unix_dir(cwd, out, sizeof(out)))
+				return NULL;
+		} else {
+			snprintf(out, sizeof(out), "%s",
+				 drive == 'c' ? path_drive_c() : "/");
+		}
 	} else if (*p == '\\' || *p == '/') {
-		/* Rooted without a drive: the current drive. */
-		char *cwd = path_getcwd();
-		char drive = cwd ? (cwd[0] | 0x20) : 'z';
-		free(cwd);
-		snprintf(out, sizeof(out), "%s", drive == 'c' ? path_drive_c() : "/");
-	} else {
-		if (!getcwd(out, sizeof(out)))
-			return NULL;
+		/* Rooted: on the current directory's drive. */
+		snprintf(out, sizeof(out), "%s",
+			 (cwd[0] | 0x20) == 'c' ? path_drive_c() : "/");
+	} else if (unix_dir(cwd, out, sizeof(out))) {
+		return NULL;
 	}
 	root_len = strcmp(out, "/") ? strlen(out) : 0;
 
@@ -187,16 +257,33 @@ char *path_getcwd(void)
 {
 	char cwd[PATH_MAX];
 
-	if (!getcwd(cwd, sizeof(cwd)))
-		return strdup("C:\\");
-	return path_to_windows(cwd);
+	current(cwd);
+	return strdup(cwd);
 }
 
 int path_chdir(const char *win)
 {
+	struct stat st;
 	char *u = path_to_unix(win);
-	int r = u ? chdir(u) : (errno = ENOENT, -1);
 
+	if (!u) {
+		errno = ENOENT;
+		return -1;
+	}
+	int failed = stat(u, &st);
+	int e = failed ? errno : ENOTDIR;
+	if (failed || !S_ISDIR(st.st_mode)) {
+		free(u);
+		errno = e;
+		return -1;
+	}
+	char *w = path_to_windows(u);
 	free(u);
-	return r;
+	if (!w)
+		return -1;
+	pthread_mutex_lock(&cwd_lock);
+	snprintf(win_cwd, sizeof(win_cwd), "%s", w);
+	pthread_mutex_unlock(&cwd_lock);
+	free(w);
+	return 0;
 }

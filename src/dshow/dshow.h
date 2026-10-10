@@ -74,6 +74,9 @@ HRESULT dshow_call_pin_end_flush(IPin *pin);
 HRESULT dshow_call_pin_new_segment(IPin *pin, REFERENCE_TIME start,
 				   REFERENCE_TIME stop, double rate);
 HRESULT dshow_call_pin_query_accept(IPin *pin, const AM_MEDIA_TYPE *mt);
+HRESULT dshow_call_pin_enum_media_types(IPin *pin, IEnumMediaTypes **out);
+HRESULT dshow_call_enum_media_types_next(IEnumMediaTypes *e,
+					 AM_MEDIA_TYPE **mt);
 HRESULT dshow_call_mem_receive(IMemInputPin *pin, IMediaSample *sample);
 HRESULT dshow_call_mem_receive_multiple(IMemInputPin *pin,
 					IMediaSample **samples, LONG count,
@@ -96,8 +99,9 @@ typedef HRESULT (*dshow_output_fn)(void *opaque, IMediaSample *sample,
 /*
  * Connects filter between the host's source and sink, input in and output
  * out, and runs it. out may be partial (a major type and subtype, with no
- * format), for a filter to complete: dshow_host_output_type gives the type
- * it connected with.
+ * format): the first of the output pin's own types it stands for is
+ * connected, as in a graph builder's connection, else the filter is left
+ * to complete it. dshow_host_output_type gives the type connected.
  */
 HRESULT dshow_host_create(IBaseFilter *filter, const AM_MEDIA_TYPE *input,
 			  const AM_MEDIA_TYPE *output, dshow_output_fn callback,

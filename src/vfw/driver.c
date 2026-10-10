@@ -159,7 +159,7 @@ struct module *drv_module(HDRVR h)
 	struct module *m = NULL;
 
 	pthread_mutex_lock(&lock);
-	int s = slot_of(h, 0);
+	int s = slot_of(h, 1);
 	if (s >= 0)
 		m = instances[s].dm->mod;
 	pthread_mutex_unlock(&lock);

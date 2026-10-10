@@ -14,7 +14,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "common/log.h"
 #include "common/error.h"
+#include "runtime/guard.h"
 #include "vfw/icm.h"
 
 #define MAX_SEQS 64
@@ -82,7 +84,7 @@ static void free_buffers(COMPVARS *pc)
 {
 	free(pc->lpbiIn);
 	free(pc->lpbiOut);
-	free(pc->lpBitsOut);
+	guard_free(pc->lpBitsOut);
 	free(pc->lpBitsPrev);
 	pc->lpbiIn = pc->lpbiOut = NULL;
 	pc->lpBitsOut = pc->lpBitsPrev = NULL;
@@ -126,12 +128,16 @@ BOOL ic_seq_start_ex(COMPVARS *pc, const BITMAPINFO *in, DWORD rate,
 		goto fail;
 	}
 	pc->lpbiOut = (BITMAPINFO *)out;
-	r = ic_send(pc->hic, ICM_COMPRESS_QUERY, (DWORD_PTR)pc->lpbiIn,
-		    (DWORD_PTR)out);
-	if (r != ICERR_OK) {
-		vfw_set_error("ICM_COMPRESS_QUERY: %s", icerr_name(r, err));
-		goto fail;
-	}
+	/*
+	 * Some codecs refuse their own output format when asked about it with
+	 * the input (vsslight.dll, ICERR_BADFORMAT) yet compress to it: the
+	 * format is the codec's, so only ICM_COMPRESS_BEGIN refusing it counts.
+	 */
+	LRESULT query = ic_send(pc->hic, ICM_COMPRESS_QUERY,
+				(DWORD_PTR)pc->lpbiIn, (DWORD_PTR)out);
+	if (query != ICERR_OK)
+		vfw_warn("ICM_COMPRESS_QUERY refuses the codec's own output "
+			 "format (%s); going on", icerr_name(query, err));
 
 	s->in_frame = image_bytes(ib);
 	r = ic_send(pc->hic, ICM_COMPRESS_GET_SIZE, (DWORD_PTR)pc->lpbiIn,
@@ -141,7 +147,10 @@ BOOL ic_seq_start_ex(COMPVARS *pc, const BITMAPINFO *in, DWORD rate,
 	else
 		/* No answer: allow twice the input, as some drivers expect. */
 		s->max_frame = s->in_frame * 2 + 65536;
-	pc->lpBitsOut = calloc(1, s->max_frame);
+	/* Nor less than the output format says a frame takes. */
+	if (out->biSizeImage > s->max_frame)
+		s->max_frame = out->biSizeImage;
+	pc->lpBitsOut = guard_alloc(s->max_frame, "output buffer");
 	if (!pc->lpBitsOut)
 		goto nomem;
 
@@ -192,12 +201,36 @@ BOOL ic_seq_start_ex(COMPVARS *pc, const BITMAPINFO *in, DWORD rate,
 		.lKeyRate = pc->lKey, .dwRate = rate, .dwScale = scale,
 	};
 	ic_send(pc->hic, ICM_COMPRESS_FRAMES_INFO, (DWORD_PTR)&f, sizeof(f));
+	ic_set_status_proc(pc->hic);
 
 	r = ic_send(pc->hic, ICM_COMPRESS_BEGIN, (DWORD_PTR)pc->lpbiIn,
 		    (DWORD_PTR)out);
 	if (r != ICERR_OK) {
-		vfw_set_error("ICM_COMPRESS_BEGIN: %s", icerr_name(r, err));
+		char err2[24];
+		if (query != ICERR_OK)
+			vfw_set_error("ICM_COMPRESS_BEGIN: %s (and "
+				      "ICM_COMPRESS_QUERY: %s)", icerr_name(r, err),
+				      icerr_name(query, err2));
+		else
+			vfw_set_error("ICM_COMPRESS_BEGIN: %s", icerr_name(r, err));
 		goto fail;
+	}
+	/*
+	 * Asked again, now that it has begun: some codecs work the size out
+	 * from what ICM_COMPRESS_BEGIN sets up (wtvc.dll answers 380 bytes
+	 * before it, for any frame).
+	 */
+	r = ic_send(pc->hic, ICM_COMPRESS_GET_SIZE, (DWORD_PTR)pc->lpbiIn,
+		    (DWORD_PTR)out);
+	if (r > 0 && (DWORD)r > s->max_frame) {
+		void *bigger = guard_alloc((size_t)r, "output buffer");
+		if (!bigger) {
+			ic_send(pc->hic, ICM_COMPRESS_END, 0, 0);
+			goto nomem;
+		}
+		guard_free(pc->lpBitsOut);
+		pc->lpBitsOut = bigger;
+		s->max_frame = (DWORD)r;
 	}
 	pc->lFrame = 0;
 	pc->lKeyCount = 0;
@@ -271,7 +304,7 @@ void STUB_WINAPI ic_seq_end(COMPVARS *pc)
 	if (!s)
 		return;
 	if (ic_valid(pc->hic))
-		ic_send(pc->hic, ICM_COMPRESS_END, 0, 0);
+		ic_end(pc->hic, ICM_COMPRESS_END);
 	free_buffers(pc);
 	release(s);
 }

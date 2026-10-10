@@ -10,9 +10,18 @@
  * The reports are made in signal context, from a crash: they format with
  * snprintf and look up the module without waiting for the loader lock,
  * which is as careful as a crash report can usefully be.
+ *
+ * One fault isn't a crash: running code from memory that is readable but
+ * not executable, such as the heap or the stack. Windows ran programs
+ * without DEP (data execution prevention) unless they asked for it, and
+ * codecs relied on that, building code at run time (pvwv220.dll loads
+ * the DLLs it carries into heap memory with a PE loader of its own). As
+ * Wine does, the pages are made executable and the code carries on.
  */
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
+#include <setjmp.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,10 +31,13 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "common/log.h"
 #include "common/sanitizer.h"
 #include "loader/modules.h"
 #include "runtime/crash.h"
+#include "runtime/guard.h"
 #include "runtime/seh.h"
+#include "runtime/teb.h"
 
 #define MAX_THREADS 256
 #define ALT_STACK   (64 * 1024)
@@ -36,6 +48,7 @@ struct slot {
 	volatile int depth;
 	struct timespec start;	/* of the outermost call in progress */
 	void *alt_stack;
+	sigjmp_buf *recover;	/* crash_try's, while one is in progress */
 };
 
 static struct slot slots[MAX_THREADS];
@@ -99,8 +112,15 @@ static void report_fault(int sig, const void *pc, const void *fault_addr)
 {
 	char where[160], line[400];
 
+	char buffer[160];
+
 	describe(pc, where, sizeof(where));
-	if (sig == SIGSEGV || sig == SIGBUS)
+	if ((sig == SIGSEGV || sig == SIGBUS) &&
+	    guard_describe(fault_addr, buffer, sizeof(buffer)))
+		snprintf(line, sizeof(line), "seance: crash: %s at %s, "
+			 "accessing %p, %s\n", signame(sig), where, fault_addr,
+			 buffer);
+	else if (sig == SIGSEGV || sig == SIGBUS)
 		snprintf(line, sizeof(line), "seance: crash: %s at %s, "
 			 "accessing %p\n", signame(sig), where, fault_addr);
 	else
@@ -110,18 +130,107 @@ static void report_fault(int sig, const void *pc, const void *fault_addr)
 	report_call(mine);
 }
 
+/* Back to crash_try, if the thread is in one. */
+static void recover(int sig)
+{
+	struct slot *s = mine;
+
+	if (s && s->recover) {
+		sigjmp_buf *jb = s->recover;
+		s->recover = NULL;
+		siglongjmp(*jb, sig);
+	}
+}
+
 void crash_report_and_die(int sig, const void *pc, const void *fault_addr)
 {
 	report_fault(sig, pc, fault_addr);
+	recover(sig);
 	signal(sig, SIG_DFL);
 	raise(sig);
 	_exit(128 + sig);	/* raise() should not return */
+}
+
+/* x86 page fault error code bits, in the context's REG_ERR. */
+#define PF_PROTECTION 0x01		/* the page was present */
+#define PF_FETCH      0x10		/* an instruction fetch */
+
+/*
+ * The protection of the mapping holding addr, from /proc/self/maps, read
+ * without stdio as this is signal context: PROT_* bits, or -1 if no
+ * mapping holds it.
+ */
+static int mapping_prot(uintptr_t addr)
+{
+	char buf[4096], line[256];
+	size_t len = 0;
+	ssize_t n;
+	int fd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC), prot = -1;
+
+	if (fd < 0)
+		return -1;
+	while (prot < 0 && (n = read(fd, buf, sizeof(buf))) > 0) {
+		for (ssize_t i = 0; i < n && prot < 0; i++) {
+			if (buf[i] != '\n') {
+				if (len + 1 < sizeof(line))
+					line[len++] = buf[i];
+				continue;
+			}
+			line[len] = 0;
+			len = 0;
+			/* "08048000-08056000 r-xp ..." */
+			char *end;
+			unsigned long lo = strtoul(line, &end, 16), hi;
+			if (*end != '-')
+				continue;
+			hi = strtoul(end + 1, &end, 16);
+			if (*end != ' ' || addr < lo || addr >= hi)
+				continue;
+			prot = (end[1] == 'r' ? PROT_READ : 0) |
+			       (end[2] == 'w' ? PROT_WRITE : 0) |
+			       (end[3] == 'x' ? PROT_EXEC : 0);
+		}
+	}
+	close(fd);
+	return prot;
+}
+
+/*
+ * An instruction fetch from a readable page that isn't executable: the
+ * page is made executable, as Windows without DEP would have it, and 1
+ * returned for the code to go on. 0 for any other fault.
+ */
+static int run_data(int sig, const siginfo_t *si, const ucontext_t *uc)
+{
+	unsigned long err = (unsigned long)uc->uc_mcontext.gregs[REG_ERR];
+	uintptr_t page = (uintptr_t)si->si_addr & ~(uintptr_t)(getpagesize() - 1);
+
+	if (sig != SIGSEGV || si->si_code != SEGV_ACCERR ||
+	    (err & (PF_PROTECTION | PF_FETCH)) != (PF_PROTECTION | PF_FETCH))
+		return 0;
+	int prot = mapping_prot(page);
+	if (prot < 0 || !(prot & PROT_READ) || (prot & PROT_EXEC) ||
+	    mprotect((void *)page, (size_t)getpagesize(), prot | PROT_EXEC))
+		return 0;
+	if (vfw_trace_enabled) {
+		char where[160], line[256];
+		describe((const void *)uc->uc_mcontext.gregs[REG_EIP], where,
+			 sizeof(where));
+		snprintf(line, sizeof(line), "trace[%d] running code at %s from "
+			 "data: page %#lx made executable (no DEP)\n",
+			 (int)getpid(), where, (unsigned long)page);
+		put(line);
+	}
+	return 1;
 }
 
 static void on_fault(int sig, siginfo_t *si, void *ctx)
 {
 	ucontext_t *uc = ctx;
 	const void *pc = (const void *)uc->uc_mcontext.gregs[REG_EIP];
+
+	if (run_data(sig, si, uc))
+		return;
 
 	/*
 	 * Give seh.c first chance at it: a thread running DLL code may have
@@ -134,6 +243,8 @@ static void on_fault(int sig, siginfo_t *si, void *ctx)
 		return;
 
 	report_fault(sig, pc, si->si_addr);
+	if (si->si_code > 0)		/* a fault, not a signal sent */
+		recover(sig);
 
 	/* Die of the signal, as without the handler. */
 	signal(sig, SIG_DFL);
@@ -279,4 +390,41 @@ void crash_leave(const struct crash_frame *saved)
 		return;
 	__atomic_store_n(&s->depth, s->depth - 1, __ATOMIC_RELEASE);
 	s->cur = *saved;
+}
+
+int crash_try(void (*fn)(void *arg), void *arg)
+{
+	struct slot *s = mine;
+	struct win_teb *teb = teb_current();
+
+	if (!s) {
+		fn(arg);
+		return 0;
+	}
+
+	sigjmp_buf jb;
+	sigjmp_buf *volatile outer = s->recover;
+	struct crash_frame cur = s->cur;
+	int depth = s->depth;
+	void *chain = teb ? teb->ExceptionList : NULL;
+	unsigned short fpcw;
+	unsigned int mxcsr;
+	__asm__ volatile("fnstcw %0" : "=m"(fpcw));
+	__asm__ volatile("stmxcsr %0" : "=m"(mxcsr));
+
+	int sig = sigsetjmp(jb, 1);
+	if (!sig) {
+		s->recover = &jb;
+		fn(arg);
+		s->recover = outer;
+		return 0;
+	}
+	s->recover = outer;
+	s->cur = cur;
+	__atomic_store_n(&s->depth, depth, __ATOMIC_RELEASE);
+	if (teb)
+		teb->ExceptionList = chain;
+	__asm__ volatile("cld; fninit; fldcw %0" : : "m"(fpcw));
+	__asm__ volatile("ldmxcsr %0" : : "m"(mxcsr));
+	return sig;
 }

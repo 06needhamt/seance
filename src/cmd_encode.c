@@ -182,8 +182,17 @@ static int choose_input(HIC hic, const struct source *src, const char *forced,
 		unsupported = r == ICERR_UNSUPPORTED;
 	}
 	for (unsigned i = 0; (name = vfw_std_format(i, w, h, &t)); i++) {
-		if (t.bih.biBitCount == 8)
-			continue;	/* no palettes */
+		/*
+		 * 8 bits (the last tried): a colour cube's palette if the codec
+		 * takes it, else the grey ramp (pvwv220.dll takes only that).
+		 */
+		if (t.bih.biBitCount == 8) {
+			struct vfw_format cube = t;
+			image_cube_palette(cube.colors);
+			if (ic_send(hic, ICM_COMPRESS_QUERY, (DWORD_PTR)&cube.bih,
+				    0) == ICERR_OK)
+				t = cube;
+		}
 		if (forced ? strcasecmp(name, forced) != 0 :
 		    (r = ic_send(hic, ICM_COMPRESS_QUERY, (DWORD_PTR)&t.bih,
 				 0)) != ICERR_OK) {
@@ -313,9 +322,10 @@ static int write_file(const char *path, const void *data, size_t size)
 }
 
 /*
- * Connects the encoder with this input format and its compression; the
- * output format the stream header gets (with any codec data the encoder
- * adds) in *output. 0, or -1 if the encoder won't take it.
+ * Connects the encoder with this input format and its compression (0 if
+ * the encoder hasn't said: whatever it gives); the output format the
+ * stream header gets (with any codec data the encoder adds) in *output.
+ * 0, or -1 if the encoder won't take it.
  */
 static int com_try_input(struct xform *x, const BITMAPINFOHEADER *input,
 			 size_t input_size, FOURCC compression, DWORD rate,
@@ -334,13 +344,35 @@ static int com_try_input(struct xform *x, const BITMAPINFOHEADER *input,
 	encoded.biSizeImage = raw > (UINT32_MAX - 4096) / 2 ? UINT32_MAX :
 			      raw * 2 + 4096;
 	HRESULT hr = dshow_bih_to_mt(input, input_size, rate, scale, 0, &in_mt);
-	if (SUCCEEDED(hr))
+	if (SUCCEEDED(hr) && compression)
 		hr = dshow_bih_to_mt(&encoded, sizeof(encoded), rate, scale, 0,
 				     &out_mt);
-	if (SUCCEEDED(hr))
-		hr = xform_connect(x, &in_mt, &out_mt, com_write_encoded, sink);
-	if (SUCCEEDED(hr))
-		hr = dshow_mt_to_bih(xform_output_type(x), output, output_size);
+	else if (SUCCEEDED(hr))
+		out_mt.majortype = in_mt.majortype;	/* any subtype */
+	/*
+	 * The encoder's own output type of that compression first, as a
+	 * graph builder connects it to a file writer that takes anything: it
+	 * may carry codec data, and some encoders take nothing else (LEAD's).
+	 * Failing that, the type made here from the input.
+	 */
+	if (SUCCEEDED(hr)) {
+		AM_MEDIA_TYPE partial = {
+			.majortype = out_mt.majortype, .subtype = out_mt.subtype,
+		};
+		hr = xform_connect(x, &in_mt, &partial, com_write_encoded, sink);
+		/* (A filter may take the partial type and add no format.) */
+		if (SUCCEEDED(hr))
+			hr = dshow_mt_to_bih(xform_output_type(x), output,
+					     output_size);
+		if (FAILED(hr) && compression) {
+			xform_disconnect(x);
+			hr = xform_connect(x, &in_mt, &out_mt, com_write_encoded,
+					   sink);
+			if (SUCCEEDED(hr))
+				hr = dshow_mt_to_bih(xform_output_type(x), output,
+						     output_size);
+		}
+	}
 	if (SUCCEEDED(hr)) {
 		free(sink->format);
 		sink->format_size = *output_size;
@@ -479,6 +511,13 @@ static int encode_com(const char *target, const CLSID *selected,
 			forced ? "the requested" : "any");
 		goto done;
 	}
+	/* An encoder that registered no compression says it now. */
+	if (!compression)
+		compression = output_format->biCompression;
+	if (!compression || compression == BI_BITFIELDS) {
+		fprintf(stderr, "seance: the encoder's output isn't compressed\n");
+		goto done;
+	}
 
 	sink.writer = avi_writer_open(out_path, output_format, (DWORD)output_size,
 		compression, rate, scale, writer_options);
@@ -515,9 +554,14 @@ static int encode_com(const char *target, const CLSID *selected,
 		size_t input_bytes = feed.from ? image_frame_size(feed.to) : len;
 		REFERENCE_TIME a = (REFERENCE_TIME)pushed * scale * 10000000 / rate;
 		REFERENCE_TIME b = (REFERENCE_TIME)(pushed + 1) * scale * 10000000 / rate;
-		int key = !pushed || (keyint && keyint != (unsigned long)-1 &&
-				      pushed % keyint == 0);
-		DWORD flags = key ? AM_SAMPLE_SPLICEPOINT : 0;
+		/*
+		 * Every uncompressed frame is a sync point, as a file source
+		 * gives them: an encoder that sets none of its own (strmbase's
+		 * copy the input's) makes every frame a keyframe, as it would
+		 * on Windows, and one with keyframes of its own (asked for
+		 * through IAMVideoCompression or ICodecAPI) marks the rest.
+		 */
+		DWORD flags = AM_SAMPLE_SPLICEPOINT;
 		if (!pushed)
 			flags |= AM_SAMPLE_DATADISCONTINUITY;
 		double then = now();

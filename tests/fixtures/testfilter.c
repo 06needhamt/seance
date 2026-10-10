@@ -175,6 +175,18 @@ static HRESULT register_decoder(void)
 }
 
 /* The encoder, the old way: YUY2 or RGB24 in, TST0 out. */
+/*
+ * With TESTFILTER_NO_SUBTYPE=1, the encoder registers its output as any
+ * video, as some encoders do: what it makes is known only once connected.
+ */
+static BOOL no_subtype(void)
+{
+	char value[2];
+
+	return GetEnvironmentVariableA("TESTFILTER_NO_SUBTYPE", value,
+				       sizeof(value)) == 1 && value[0] == '1';
+}
+
 static HRESULT register_encoder(void)
 {
 	IFilterMapper *fm;
@@ -200,7 +212,44 @@ static HRESULT register_encoder(void)
 						   FALSE, FALSE, guid_null,
 						   NULL)))
 		hr = fm->lpVtbl->RegisterPinType(fm, clsid_encoder, L"Output",
-						 mt_video, st_tst0);
+						 mt_video, no_subtype() ?
+						 guid_null : st_tst0);
+	fm->lpVtbl->Release(fm);
+	return hr;
+}
+
+/*
+ * With TESTFILTER_TWO_CATEGORIES=1, the encoder is registered among the
+ * video compressors as well, as LEAD's encoders are: one filter found
+ * twice.
+ */
+static const GUID cat_video_compressor = { 0x33d9a760, 0x90c8, 0x11d0,
+	{ 0xbd, 0x43, 0x00, 0xa0, 0xc9, 0x11, 0xce, 0x86 } };
+static const REGPINTYPES encoder_out[] = { { &mt_video, &st_tst0 } };
+static const REGFILTERPINS2 encoder_pins[] = {
+	{ 0, 1, 2, decoder_out, 0, NULL, NULL },
+	{ REG_PINFLAG_B_OUTPUT, 1, 1, encoder_out, 0, NULL, NULL },
+};
+
+static HRESULT register_compressor(void)
+{
+	IFilterMapper2 *fm;
+	REGFILTER2 rf2;
+	char value[2];
+
+	if (GetEnvironmentVariableA("TESTFILTER_TWO_CATEGORIES", value,
+				    sizeof(value)) != 1 || value[0] != '1')
+		return S_OK;
+	HRESULT hr = CoCreateInstance(&clsid_mapper2, NULL, CLSCTX_INPROC_SERVER,
+				      &iid_mapper2, (void **)&fm);
+	if (FAILED(hr))
+		return hr;
+	rf2.dwVersion = 2;
+	rf2.dwMerit = MERIT_DO_NOT_USE;
+	rf2.cPins2 = 2;
+	rf2.rgPins2 = encoder_pins;
+	hr = fm->lpVtbl->RegisterFilter(fm, &clsid_encoder, encoder_name, NULL,
+					&cat_video_compressor, NULL, &rf2);
 	fm->lpVtbl->Release(fm);
 	return hr;
 }
@@ -256,7 +305,8 @@ HRESULT WINAPI DllRegisterServer(void)
 	    SUCCEEDED(hr = register_class(&clsid_audio_encoder,
 					  audio_encoder_name)) &&
 	    SUCCEEDED(hr = register_decoder()) &&
-	    SUCCEEDED(hr = register_encoder()))
+	    SUCCEEDED(hr = register_encoder()) &&
+	    SUCCEEDED(hr = register_compressor()))
 		hr = register_audio();
 	CoUninitialize();
 	return hr;

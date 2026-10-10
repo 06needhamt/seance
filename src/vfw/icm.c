@@ -12,6 +12,7 @@
 #include "common/fourcc.h"
 #include "common/log.h"
 #include "out/image.h"
+#include "runtime/crash.h"
 #include "runtime/runtime.h"
 #include "vfw/driver.h"
 #include "vfw/icm.h"
@@ -26,6 +27,7 @@ struct ic {
 	HDRVR drv;		/* NULL when free */
 	FOURCC type, handler;
 	UINT mode;
+	int crashed;		/* in ic_end: not sent DRV_CLOSE */
 	char driver[256];	/* DLL path, or "" for a function */
 };
 
@@ -48,15 +50,6 @@ int ic_valid(HIC hic)
 	int r = slot_of(hic) >= 0;
 	pthread_mutex_unlock(&lock);
 	return r;
-}
-
-static HDRVR drv_of(HIC hic)
-{
-	pthread_mutex_lock(&lock);
-	int s = slot_of(hic);
-	HDRVR d = s >= 0 ? ics[s].drv : NULL;
-	pthread_mutex_unlock(&lock);
-	return d;
 }
 
 const char *ic_driver_name(HIC hic)
@@ -82,6 +75,7 @@ static HIC add_ic(HDRVR drv, FOURCC type, FOURCC handler, UINT mode,
 			ics[i].type = type;
 			ics[i].handler = handler;
 			ics[i].mode = mode;
+			ics[i].crashed = 0;
 			snprintf(ics[i].driver, sizeof(ics[i].driver), "%s",
 				 driver ? driver : "");
 		}
@@ -178,22 +172,72 @@ LRESULT STUB_WINAPI ic_close(HIC hic)
 	pthread_mutex_lock(&lock);
 	int s = slot_of(hic);
 	HDRVR drv = s >= 0 ? ics[s].drv : NULL;
+	int crashed = s >= 0 && ics[s].crashed;
 	if (s >= 0)
 		ics[s].drv = NULL;
 	pthread_mutex_unlock(&lock);
 	if (!drv)
 		return ICERR_BADHANDLE;
-	drv_close(drv, 0, 0);
+	if (!crashed)
+		drv_close(drv, 0, 0);
+	return ICERR_OK;
+}
+
+struct end_call {
+	HIC hic;
+	UINT msg;
+	LRESULT r;
+};
+
+static void send_end(void *arg)
+{
+	struct end_call *c = arg;
+
+	c->r = ic_send(c->hic, c->msg, 0, 0);
+}
+
+LRESULT ic_end(HIC hic, UINT msg)
+{
+	struct end_call c = { hic, msg, ICERR_OK };
+	char name[24];
+
+	if (!crash_try(send_end, &c))
+		return c.r;
+	pthread_mutex_lock(&lock);
+	int s = slot_of(hic);
+	if (s >= 0)
+		ics[s].crashed = 1;
+	pthread_mutex_unlock(&lock);
+	vfw_warn("the codec crashed in %s, after the last frame: carrying on "
+		 "without it", drv_msg_name(msg, name));
 	return ICERR_OK;
 }
 
 LRESULT STUB_WINAPI ic_send(HIC hic, UINT msg, DWORD_PTR l1, DWORD_PTR l2)
 {
-	HDRVR drv = drv_of(hic);
+	pthread_mutex_lock(&lock);
+	int s = slot_of(hic);
+	HDRVR drv = s >= 0 ? ics[s].drv : NULL;
+	int crashed = s >= 0 && ics[s].crashed;
+	pthread_mutex_unlock(&lock);
 
 	if (!drv)
 		return ICERR_BADHANDLE;
+	if (crashed)
+		return ICERR_ERROR;
 	return drv_send(drv, msg, (LPARAM)l1, (LPARAM)l2);
+}
+
+static LONG CALLBACK status_proc(LPARAM l, UINT message, LONG value)
+{
+	return 0;
+}
+
+void ic_set_status_proc(HIC hic)
+{
+	ICSETSTATUSPROC status = { .Status = status_proc };
+
+	ic_send(hic, ICM_SET_STATUS_PROC, (DWORD_PTR)&status, sizeof(status));
 }
 
 /* szDriver: the DLL's file name, as Windows fills it in. */
@@ -522,6 +566,15 @@ BITMAPINFOHEADER *ic_decompress_get_format(HIC hic, const BITMAPINFOHEADER *in,
 					   LRESULT *err)
 {
 	return ic_get_format(hic, ICM_DECOMPRESS_GET_FORMAT, in, NULL, err);
+}
+
+LRESULT ic_decompress_begin(HIC hic, const BITMAPINFOHEADER *in,
+			    const BITMAPINFOHEADER *out)
+{
+	LRESULT r;
+
+	free(ic_decompress_get_format(hic, in, &r));
+	return ic_send(hic, ICM_DECOMPRESS_BEGIN, (DWORD_PTR)in, (DWORD_PTR)out);
 }
 
 BITMAPINFOHEADER *ic_compress_get_format(HIC hic, const BITMAPINFOHEADER *in,

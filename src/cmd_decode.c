@@ -12,10 +12,12 @@
 #include <time.h>
 
 #include "avi/avi.h"
+#include "common/padding.h"
 #include "cmd_audio.h"
 #include "cmd_util.h"
 #include "commands.h"
 #include "common/error.h"
+#include "common/log.h"
 #include "common/fourcc.h"
 #include "common/unicode.h"
 #include "dmo/discover.h"
@@ -24,6 +26,7 @@
 #include "loader/pe.h"
 #include "out/image.h"
 #include "out/output.h"
+#include "runtime/guard.h"
 #include "runtime/runtime.h"
 #include "vfw/icm.h"
 #include "win32/codepage.h"
@@ -31,6 +34,23 @@
 #include "win32/path.h"
 #include "xform.h"
 
+
+/*
+ * The buffer a compressed frame is read into: room for size bytes and the
+ * zeroed padding after them (common/padding.h). -1 if out of memory.
+ */
+static int input_buffer(BYTE **buf, size_t *cap, size_t size)
+{
+	if (size + VFW_INPUT_PADDING > *cap) {
+		BYTE *b = realloc(*buf, size + VFW_INPUT_PADDING);
+		if (!b)
+			return -1;
+		*buf = b;
+		*cap = size + VFW_INPUT_PADDING;
+	}
+	memset(*buf + size, 0, VFW_INPUT_PADDING);
+	return 0;
+}
 static int usage(void)
 {
 	fprintf(stderr,
@@ -233,6 +253,35 @@ static HRESULT com_write_output(void *opaque, const struct xform_output *o,
 	return S_OK;
 }
 
+/*
+ * The format frames come in when the filter or DMO completed the type:
+ * the one it connected with (which carries its palette, which way up it
+ * is, and may differ from what was asked in more than that), if it
+ * describes the picture offered. malloc()ed, at least a struct
+ * vfw_format; NULL if it doesn't.
+ */
+static BITMAPINFOHEADER *connected_format(struct xform *x,
+					  const struct vfw_format *offered)
+{
+	const AM_MEDIA_TYPE *mt = xform_output_type(x);
+	BITMAPINFOHEADER *bih = NULL, *out = NULL;
+	size_t size = 0;
+	char desc[160];
+
+	if (!mt || FAILED(dshow_mt_to_bih(mt, &bih, &size)))
+		return NULL;
+	int same = bih->biWidth == offered->bih.biWidth &&
+		   labs(bih->biHeight) == labs(offered->bih.biHeight);
+	TRACE("decode: the decoder's own type: %s%s",
+	      cli_format_desc(bih, desc, sizeof(desc)),
+	      same ? "" : ", a different picture");
+	if (same &&
+	    (out = calloc(1, size > sizeof(*offered) ? size : sizeof(*offered))))
+		memcpy(out, bih, size);
+	free(bih);
+	return out;
+}
+
 static char *registered_decoder(const BITMAPINFOHEADER *input, CLSID *clsid)
 {
 	struct dshow_registered *filters = NULL;
@@ -384,6 +433,25 @@ static int decode_com(const char *target, const CLSID *selected,
 				if (FAILED(dshow_bih_to_mt(&fmt.bih, sizeof(fmt), rate,
 							   scale, 0, &out_mt)))
 					continue;
+				/*
+				 * The decoder's own type of that subtype first, as a
+				 * renderer takes it in a graph: it carries the
+				 * decoder's palette (LEAD's) and the layout it
+				 * writes. Failing that, the type made here.
+				 */
+				AM_MEDIA_TYPE partial = {
+					.majortype = out_mt.majortype,
+					.subtype = out_mt.subtype,
+				};
+				connect_hr = xform_connect(x, &in_mt, &partial,
+							   com_write_output, &sink);
+				if (SUCCEEDED(connect_hr) &&
+				    (out = connected_format(x, &fmt))) {
+					connected = 1;
+					break;
+				}
+				if (SUCCEEDED(connect_hr))
+					xform_disconnect(x);
 				connect_hr = xform_connect(x, &in_mt, &out_mt,
 							   com_write_output, &sink);
 				if (SUCCEEDED(connect_hr)) {
@@ -471,14 +539,9 @@ static int decode_com(const char *target, const CLSID *selected,
 			frame++;
 			continue;
 		}
-		if (chunk->size > cap) {
-			BYTE *next = realloc(buf, chunk->size);
-			if (!next) {
-				fprintf(stderr, "seance: out of memory\n");
-				goto done;
-			}
-			buf = next;
-			cap = chunk->size;
+		if (input_buffer(&buf, &cap, chunk->size)) {
+			fprintf(stderr, "seance: out of memory\n");
+			goto done;
 		}
 		if (avi_read_chunk(avi, chunk, buf)) {
 			fprintf(stderr, "seance: %s\n", vfw_error());
@@ -773,7 +836,7 @@ int cmd_decode(int argc, char **argv)
 		fprintf(stderr, "seance: %s\n", vfw_error());
 		goto done;
 	}
-	r = ic_send(codec.hic, ICM_DECOMPRESS_BEGIN, (DWORD_PTR)in, (DWORD_PTR)out);
+	r = ic_decompress_begin(codec.hic, in, out);
 	if (r != ICERR_OK) {
 		fprintf(stderr, "seance: ICM_DECOMPRESS_BEGIN: %s\n",
 			icerr_name(r, err));
@@ -793,7 +856,7 @@ int cmd_decode(int argc, char **argv)
 	size_t pic_size = conv ? image_frame_size(conv) : 0;
 	if (out->biSizeImage > pic_size)
 		pic_size = out->biSizeImage;
-	if (!pic_size || !(pic = calloc(1, pic_size))) {
+	if (!pic_size || !(pic = guard_alloc(pic_size, "output buffer"))) {
 		fprintf(stderr, "seance: %s\n", pic_size ? "out of memory" :
 			"the output format has no image size");
 		goto done;
@@ -849,14 +912,9 @@ int cmd_decode(int argc, char **argv)
 			frame++;
 			continue;
 		}
-		if (k->size > cap) {
-			BYTE *b = realloc(buf, k->size);
-			if (!b) {
-				fprintf(stderr, "seance: out of memory\n");
-				goto done;
-			}
-			buf = b;
-			cap = k->size;
+		if (input_buffer(&buf, &cap, k->size)) {
+			fprintf(stderr, "seance: out of memory\n");
+			goto done;
 		}
 		if (avi_read_chunk(avi, k, buf)) {
 			fprintf(stderr, "seance: %s: %s\n", path, vfw_error());
@@ -923,12 +981,12 @@ done:
 	if (o)
 		output_close(o);
 	if (begun)
-		ic_send(codec.hic, ICM_DECOMPRESS_END, 0, 0);
+		ic_end(codec.hic, ICM_DECOMPRESS_END);
 	cli_close_codec(&codec);
 	image_conv_free(conv);
 	free(state);
 	free(buf);
-	free(pic);
+	guard_free(pic);
 	free(out);
 	free(in);
 	avi_close(avi);

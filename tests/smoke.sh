@@ -281,12 +281,65 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		printf 'YUV4MPEG2 W16 H16 F25:1 Ip A1:1 C420jpeg\nFRAME\n'
 		head -c 384 /dev/zero
 	} >"$work/v.y4m"
+	# VFW_DATE has to be a date.
+	VFW_DATE=2007-02-29 $emu "$harness" list 2>&1 |
+		grep -q "VFW_DATE wants a date"
+	VFW_DATE=2007-06-01T12:00 $emu "$harness" list >/dev/null
 	# A codec that only decompresses is said to, not to refuse the formats.
 	VFW_ENV_TESTCODEC_NOCOMPRESS=1 $emu "$harness" encode \
 		"$fixtures/testcodec.dll" "$work/v.y4m" -o "$work/x.avi" 2>&1 |
 		grep -q "doesn't compress: .*ICERR_UNSUPPORTED"
 	VFW_ENV_TESTCODEC_NOCOMPRESS=1 $emu "$harness" probe \
 		"$fixtures/testcodec.dll" | grep -q "it only decompresses"
+	# One that answers only under its FOURCC, named only as a DLL: the
+	# FOURCC is found in it.
+	VFW_INI=/dev/null VFW_ENV_TESTCODEC_NAMED_ONLY=1 $emu "$harness" probe \
+		"$fixtures/testcodec.dll" 2>&1 | grep -q "opened as 'TST0', found"
+	# One that won't open to compress is probed as encode would use it.
+	VFW_ENV_TESTCODEC_DECODE_ONLY=1 $emu "$harness" probe \
+		"$fixtures/testcodec.dll" | grep -q "won't open to compress"
+	VFW_ENV_TESTCODEC_PICKY=1 $emu "$harness" probe \
+		"$fixtures/testcodec.dll" | grep -q "refuses its own format"
+	# One that only knows how big a frame gets once it has begun is asked
+	# again then, and given room for it.
+	{
+		printf 'YUV4MPEG2 W16 H16 F25:1 Ip A1:1 C420jpeg\nFRAME\n'
+		head -c 384 /dev/urandom
+	} >"$work/noise.y4m"
+	VFW_ENV_TESTCODEC_LATESIZE=1 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/noise.y4m" -o "$work/late.avi" \
+		2>/dev/null
+	$emu "$harness" decode "$fixtures/testcodec.dll" "$work/late.avi" \
+		-o "$work/late.y4m" 2>/dev/null
+	cmp "$work/noise.y4m" "$work/late.y4m"
+	# Codecs as fussy as some real ones: one calls a status callback it
+	# never checked it was given and refuses its own format with the input
+	# (encoding), one reads past its input and decodes nothing unless asked
+	# its format first (decoding, the output named).
+	VFW_ENV_TESTCODEC_STATUS=1 VFW_ENV_TESTCODEC_PICKY=1 \
+		$emu "$harness" encode "$fixtures/testcodec.dll" "$work/noise.y4m" \
+		-o "$work/fussy.avi" 2>/dev/null
+	VFW_ENV_TESTCODEC_PADDING=1 VFW_ENV_TESTCODEC_ASK_FORMAT=1 \
+		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/fussy.avi" \
+		-o "$work/fussy.y4m" --output-format I420 2>/dev/null
+	cmp "$work/noise.y4m" "$work/fussy.y4m"
+	# A codec that crashes in ICM_*_END after the last frame still gives
+	# whole files (not under a sanitizer, which takes faults itself).
+	if [ "$lowmem" = 1 ]; then
+		VFW_ENV_TESTCODEC_END_CRASH=1 $emu "$harness" encode \
+			"$fixtures/testcodec.dll" "$work/noise.y4m" \
+			-o "$work/end.avi" 2>&1 |
+			grep -q "crashed in ICM_COMPRESS_END, after the last frame"
+		VFW_ENV_TESTCODEC_END_CRASH=1 $emu "$harness" decode \
+			"$fixtures/testcodec.dll" "$work/end.avi" \
+			-o "$work/end.y4m" 2>/dev/null
+		cmp "$work/noise.y4m" "$work/end.y4m"
+		# One that writes past its output buffer faults right there.
+		VFW_ENV_TESTCODEC_OVERRUN=1 $emu "$harness" encode \
+			"$fixtures/testcodec.dll" "$work/noise.y4m" \
+			-o "$work/over.avi" 2>&1 |
+			grep -q "bytes past the end of the [0-9]*-byte output buffer"
+	fi
 	VFW_ENV_TESTACM_OPENCRASH=1 $emu "$harness" encode "$a" "$work/v.y4m" \
 		-o "$work/x.avi" 2>&1 | grep -q "is an ACM audio driver"
 	VFW_ENV_TESTACM_OPENCRASH=1 $emu "$harness" probe "$a" --fourcc TSTA \
@@ -331,6 +384,45 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		}
 		# A filter that supplies its own allocator (three or more buffers, with a
 		# prefix and alignment) has the host fill its samples, both ways.
+		# An encoder registered in two categories is still one encoder,
+		# one that connects only with the output type it proposes gets
+		# it (both as LEAD's encoders), and one that proposes none gets
+		# the type made from the input.
+		VFW_ENV_TESTFILTER_TWO_CATEGORIES=1 \
+			$emu "$harness" encode "$fixtures/testfilter.ax" \
+			"$work/in.y4m" -o "$work/two.avi" 2>/dev/null
+		VFW_ENV_TESTFILTER_OWN_OUTPUT=1 \
+			$emu "$harness" encode "$fixtures/testfilter.ax" \
+			"$work/in.y4m" -o "$work/own.avi" 2>&1 |
+			grep -q "4 bytes of extra data"
+		# An intra-only encoder that marks no keyframes of its own passes
+		# on its inputs' sync points: every uncompressed frame is one.
+		VFW_ENV_TESTFILTER_INTRA=1 \
+			$emu "$harness" encode "$fixtures/testfilter.ax" \
+			"$work/in.y4m" -o "$work/intra.avi" 2>&1 |
+			grep -q "4 frames (4 key)"
+		VFW_ENV_TESTFILTER_NO_PROPOSAL=1 \
+			$emu "$harness" encode "$fixtures/testfilter.ax" \
+			"$work/in.y4m" -o "$work/made.avi" 2>&1 |
+			grep -v "extra data" | grep -q "'TST0'"
+		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/made.avi" \
+			-o "$work/made.y4m" 2>/dev/null
+		cmp -s "$work/in.y4m" "$work/made.y4m" || {
+			echo "smoke: made output type round trip differs" >&2
+			exit 1
+		}
+		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/own.avi" \
+			-o "$work/own.y4m" 2>/dev/null
+		cmp -s "$work/in.y4m" "$work/own.y4m" || {
+			echo "smoke: own output type round trip differs" >&2
+			exit 1
+		}
+		# An encoder registered as making any video still encodes: the
+		# FOURCC comes from the type it connects with.
+		VFW_ENV_TESTFILTER_NO_SUBTYPE=1 \
+			$emu "$harness" encode "$fixtures/testfilter.ax" \
+			"$work/in.y4m" -o "$work/any.avi" 2>&1 |
+			grep -q "'TST0'"
 		VFW_ENV_TESTFILTER_OWN_ALLOCATOR=1 \
 			$emu "$harness" decode "$fixtures/testfilter.ax" "$work/t.avi" \
 			-o "$work/dshow-own.y4m" 2>/dev/null
@@ -371,6 +463,19 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 			-o "$work/start.y4m" --start 1 2>/dev/null
 		cmp -s "$work/start.ref.y4m" "$work/start.y4m" || {
 			echo "smoke: asynchronous seek decode differs" >&2
+			exit 1
+		}
+		# A decoder that writes the layout of the type it proposes (top-down
+		# RGB here), whatever it was given, is read in that layout.
+		$emu "$harness" encode "$fixtures/testcodec.dll" "$work/in.y4m" \
+			-o "$work/rgb.avi" --codec-input BGR24 2>/dev/null
+		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/rgb.avi" \
+			-o "$work/rgb.ref.y4m" 2>/dev/null
+		VFW_ENV_TESTFILTER_OWN_LAYOUT=1 \
+			$emu "$harness" decode "$fixtures/testfilter.ax" "$work/rgb.avi" \
+			-o "$work/rgb.y4m" --output-format BGR24 2>/dev/null
+		cmp -s "$work/rgb.ref.y4m" "$work/rgb.y4m" || {
+			echo "smoke: decoder's own output layout differs" >&2
 			exit 1
 		}
 		# A filter that announces a new output format mid-stream (here YV12,

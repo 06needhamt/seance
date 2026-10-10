@@ -46,6 +46,12 @@ const struct vfw_codec *vfw_enum(FOURCC type, unsigned i);
 /* The first codec whose DLL is path (by file identity or name), or NULL. */
 const struct vfw_codec *vfw_find_path(const char *path);
 
+/*
+ * handlers.c: up to max FOURCCs the DLL at path may want to be opened
+ * under, read from its code and data, the likelier first.
+ */
+size_t vfw_dll_handlers(const char *path, FOURCC *out, size_t max);
+
 /* Adds or replaces a run-time entry. Returns 0 or -1. */
 int vfw_register(FOURCC type, FOURCC handler, const char *path);
 

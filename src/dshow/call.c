@@ -130,6 +130,28 @@ HRESULT dshow_call_pin_receive_connection(IPin *pin, IPin *connector,
 	     pin->lpVtbl->ReceiveConnection(pin, connector, mt));
 }
 
+HRESULT dshow_call_pin_enum_media_types(IPin *pin, IEnumMediaTypes **out)
+{
+	if (!pin || !out)
+		return E_POINTER;
+	*out = NULL;
+	CALL("IPin::EnumMediaTypes", pin->lpVtbl->EnumMediaTypes,
+	     pin->lpVtbl->EnumMediaTypes(pin, out));
+}
+
+/* One type; S_FALSE at the end. */
+HRESULT dshow_call_enum_media_types_next(IEnumMediaTypes *e, AM_MEDIA_TYPE **mt)
+{
+	ULONG got = 0;
+
+	if (!e || !mt)
+		return E_POINTER;
+	*mt = NULL;
+	CALL("IEnumMediaTypes::Next", e->lpVtbl->Next,
+	     e->lpVtbl->Next(e, 1, mt, &got) == S_OK && got && *mt ? S_OK :
+	     S_FALSE);
+}
+
 HRESULT dshow_call_pin_disconnect(IPin *pin)
 {
 	if (!pin)

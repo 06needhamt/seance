@@ -15,6 +15,7 @@
 #include "win32/codepage.h"
 #include "win32/internal.h"
 #include "win32/path.h"
+#include "win32/reg.h"
 
 static int wi_cmp(const WCHAR *a, const WCHAR *b, size_t n, int fold)
 {
@@ -349,13 +350,30 @@ WINFN(HRESULT) sl_UrlGetPartW(LPCWSTR url, LPWSTR buf, LPDWORD size, DWORD part,
 	return hr;
 }
 
+/* A key and everything under it (a filter's DllUnregisterServer uses it). */
+WINFN(DWORD) sl_SHDeleteKeyA(HKEY h, LPCSTR sub)
+{
+	char *s = acp_to_utf8(sub ? sub : "");
+	LONG r = s ? adv_delete_tree(h, s) : ERROR_NOT_ENOUGH_MEMORY;
+	free(s);
+	return (DWORD)r;
+}
+
+WINFN(DWORD) sl_SHDeleteKeyW(HKEY h, LPCWSTR sub)
+{
+	char *s = sub ? utf16_to_utf8_dup(sub) : strdup("");
+	LONG r = s ? adv_delete_tree(h, s) : ERROR_NOT_ENOUGH_MEMORY;
+	free(s);
+	return (DWORD)r;
+}
+
 WINFN(HRESULT) sl_DllGetVersion(DLLVERSIONINFO *v)
 { if(!v || v->cbSize<sizeof(*v)) return E_INVALIDARG; v->dwMajorVersion=6; v->dwMinorVersion=0; v->dwBuildNumber=2900; v->dwPlatformID=2; return S_OK; }
 
 #define E(n) { #n, 0, (void *)sl_##n }
 /* kernelbase.dll (kernel32.c) serves these too, as Windows 7's does. */
 const struct builtin_export shlwapi_exports[] = {
-	E(DllGetVersion), E(PathAddBackslashA), E(PathAddBackslashW), E(PathAppendA),
+	E(DllGetVersion), E(SHDeleteKeyA), E(SHDeleteKeyW), E(PathAddBackslashA), E(PathAddBackslashW), E(PathAppendA),
 	E(PathCombineA), E(PathCombineW), E(PathFileExistsA), E(PathFileExistsW), E(PathFindExtensionA),
 	E(PathFindExtensionW), E(PathFindFileNameA), E(PathFindFileNameW),
 	E(PathIsDirectoryA), E(PathIsDirectoryW), E(PathIsFileSpecA), E(PathIsFileSpecW),

@@ -302,6 +302,18 @@ typedef struct tagTEXTMETRICW {
 #define STRETCH_DELETESCANS 3
 #define STRETCH_HALFTONE    4
 
+/* ExtTextOut and SetTextAlign. */
+#define ETO_OPAQUE    0x0002
+#define ETO_CLIPPED   0x0004
+#define TA_NOUPDATECP 0
+#define TA_UPDATECP   1
+#define TA_LEFT       0
+#define TA_RIGHT      2
+#define TA_CENTER     6
+#define TA_TOP        0
+#define TA_BOTTOM     8
+#define TA_BASELINE   24
+
 /* Fonts. */
 #define FW_DONTCARE    0
 #define FW_NORMAL      400

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #include <stdlib.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <string.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -495,6 +496,54 @@ static void allocator(void)
 		ole_taskmem_free(back);
 	}
 	dshow_free_media_type(&mt);
+
+	/*
+	 * As strmbase's CMediaSample: a new sample is full until told
+	 * otherwise (decoders that never set the length rely on it), and the
+	 * properties may be read and written in part, as
+	 * CTransformFilter::InitializeOutputSample does to give its output
+	 * its input's sync point and times.
+	 */
+	CHECK_EQ(s[1]->lpVtbl->GetActualDataLength(s[1]), 100);
+	CHECK(s[1]->lpVtbl->QueryInterface(s[1], &IID_IMediaSample2,
+					   (void **)&s2) == S_OK);
+	if (s2) {
+		AM_SAMPLE2_PROPERTIES part;
+		DWORD upto_start = offsetof(AM_SAMPLE2_PROPERTIES, tStart);
+		DWORD upto_stream = offsetof(AM_SAMPLE2_PROPERTIES, dwStreamId);
+		memset(&part, 0xcc, sizeof(part));
+		CHECK(s2->lpVtbl->GetProperties(s2, upto_start, (BYTE *)&part) == S_OK);
+		CHECK_EQ(part.cbData, upto_start);
+		CHECK_EQ(part.lActual, 100);
+		CHECK(!(part.dwSampleFlags & AM_SAMPLE_SPLICEPOINT));
+		BYTE untouched[sizeof(part.tStart)];
+		memset(untouched, 0xcc, sizeof(untouched));
+		CHECK(!memcmp(&part.tStart, untouched, sizeof(untouched)));	/* not written */
+		part.cbData = upto_stream;
+		part.dwSampleFlags = AM_SAMPLE_SPLICEPOINT | AM_SAMPLE_TIMEVALID;
+		part.lActual = 40;
+		part.tStart = 7;
+		part.tStop = 9;
+		CHECK(s2->lpVtbl->SetProperties(s2, upto_stream, (BYTE *)&part) == S_OK);
+		CHECK(s[1]->lpVtbl->IsSyncPoint(s[1]) == S_OK);
+		CHECK_EQ(s[1]->lpVtbl->GetActualDataLength(s[1]), 40);
+		CHECK(s[1]->lpVtbl->GetTime(s[1], &astart, &astop) == S_OK);
+		CHECK(astart == 7 && astop == 9);
+		part.lActual = 101;
+		CHECK(s2->lpVtbl->SetProperties(s2, upto_stream, (BYTE *)&part) ==
+		      VFW_E_BUFFER_OVERFLOW);
+		CHECK_EQ(s[1]->lpVtbl->GetActualDataLength(s[1]), 40);
+		s2->lpVtbl->Release(s2);
+	}
+	s[0]->lpVtbl->Release(s[0]);
+	s[1]->lpVtbl->Release(s[1]);
+	/* The length stays as it was when a sample comes back round. */
+	CHECK(a->lpVtbl->GetBuffer(a, &s[1], NULL, NULL, 0) == S_OK);
+	CHECK(a->lpVtbl->GetBuffer(a, &s[0], NULL, NULL, 0) == S_OK);
+	CHECK(s[0]->lpVtbl->GetActualDataLength(s[0]) == 40 ||
+	      s[1]->lpVtbl->GetActualDataLength(s[1]) == 40);
+	CHECK(s[0]->lpVtbl->IsSyncPoint(s[0]) == S_FALSE &&
+	      s[1]->lpVtbl->IsSyncPoint(s[1]) == S_FALSE);
 	s[0]->lpVtbl->Release(s[0]);
 	s[1]->lpVtbl->Release(s[1]);
 	CHECK(a->lpVtbl->Decommit(a) == S_OK);

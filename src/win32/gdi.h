@@ -104,6 +104,27 @@ HBRUSH gdi_sys_color_brush(int index, COLORREF color);
 extern const PALETTEENTRY gdi_default_palette[20];
 void gdi_halftone_palette(PALETTEENTRY out[256]);
 
+/*
+ * gdi_bitmap.c, for text: fills rc with colour c, and paints a w x h mask
+ * (a byte a pixel, non-zero for ink) at (x, y), fg on the ink and, if bg
+ * isn't NULL, *bg on the rest. Both draw nothing outside clip (if any) or
+ * the DC's bitmap; 0 if hdc is no DC.
+ */
+int gdi_fill_color(HDC hdc, const RECT *rc, COLORREF c, const RECT *clip);
+int gdi_paint_mask(HDC hdc, int x, int y, int w, int h, const BYTE *mask,
+		   COLORREF fg, const COLORREF *bg, const RECT *clip);
+
+/*
+ * gdi_text.c: the one font, scaled to a LOGFONT. The metrics a DC's font
+ * gives (0 if hdc is no DC), how wide n characters of it are, and drawing
+ * text as ExtTextOut does (opts ETO_*, rc, dx per character as given).
+ * gdi_text_width with no DC measures the system font.
+ */
+int gdi_text_metrics(HDC hdc, TEXTMETRICW *tm);
+int gdi_text_width(HDC hdc, int n, int *width, int *height);
+int gdi_text_out(HDC hdc, int x, int y, UINT opts, const RECT *rc,
+		 const WCHAR *s, int n, const INT *dx);
+
 /* gdi_bitmap.c: freeing a bitmap's memory. */
 void gdi_bitmap_free(struct gdi_bitmap *b);
 /* The stock 1x1 monochrome bitmap a new memory DC holds. */

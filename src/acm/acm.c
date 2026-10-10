@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "common/padding.h"
 #include "acm/acm.h"
 #include "common/error.h"
 #include "common/log.h"
@@ -488,8 +489,11 @@ again:
 		if (need > MAX_OUTPUT)
 			need = MAX_OUTPUT;
 		if (reserve(&s->dst, &s->dst_cap, need) ||
-		    reserve(&s->pending, &s->pending_cap, 1))
+		    reserve(&s->pending, &s->pending_cap,
+			    s->held + VFW_INPUT_PADDING))
 			return E_OUTOFMEMORY;
+		/* Zeroed padding after the input, as for other codecs. */
+		memset(s->pending + s->held, 0, VFW_INPUT_PADDING);
 
 		ACMSTREAMHEADER h = { .cbStruct = sizeof(h) };
 		h.pbSrc = s->pending;

@@ -7,6 +7,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "common/padding.h"
 #include "dshow/dshow.h"
 #include "win32/ole.h"
 
@@ -549,7 +550,9 @@ static ULONG input_buffer(const AM_MEDIA_TYPE *in) {
     if (want > bytes)
       bytes = (ULONG)want;
   }
-  return bytes;
+  /* And the zeroed padding after a sample's data. */
+  return bytes <= UINT32_MAX - VFW_INPUT_PADDING ? bytes + VFW_INPUT_PADDING
+                                                 : bytes;
 }
 
 static HRESULT negotiate_allocator(struct dshow_host *h, ULONG bytes) {
@@ -576,6 +579,55 @@ static HRESULT negotiate_allocator(struct dshow_host *h, ULONG bytes) {
   if (SUCCEEDED(hr))
     hr = h->allocator->lpVtbl->Commit(h->allocator);
   return hr;
+}
+
+static const GUID null_guid;
+
+/* A type with no format: what to connect is for the filter to say. */
+static int is_partial(const AM_MEDIA_TYPE *mt) {
+  return guid_eq(&mt->formattype, &null_guid) && !mt->cbFormat;
+}
+
+/* Whether full is one of the types partial stands for (CMediaType::MatchesPartial). */
+static int matches_partial(const AM_MEDIA_TYPE *full,
+                           const AM_MEDIA_TYPE *partial) {
+  return (guid_eq(&partial->majortype, &null_guid) ||
+          guid_eq(&partial->majortype, &full->majortype)) &&
+         (guid_eq(&partial->subtype, &null_guid) ||
+          guid_eq(&partial->subtype, &full->subtype)) &&
+         !guid_eq(&full->formattype, &null_guid) && full->cbFormat &&
+         full->pbFormat;
+}
+
+/*
+ * Connects the filter's output to the sink with out. A partial type is
+ * completed as a graph builder's connection does it (strmbase's
+ * CBasePin::AgreeMediaType, our sink proposing nothing): with the first of
+ * the output pin's own types that it stands for, and failing those, given
+ * to the filter as it is to complete.
+ */
+static HRESULT connect_output(struct dshow_host *h, const AM_MEDIA_TYPE *out) {
+  if (!out || !is_partial(out))
+    return dshow_call_pin_connect(h->output, &h->sink.pin, out);
+  IEnumMediaTypes *e = NULL;
+  if (SUCCEEDED(dshow_call_pin_enum_media_types(h->output, &e)) && e) {
+    AM_MEDIA_TYPE *mt = NULL;
+    HRESULT hr = E_FAIL;
+    while (FAILED(hr) && dshow_call_enum_media_types_next(e, &mt) == S_OK) {
+      if (matches_partial(mt, out)) {
+        hr = dshow_call_pin_connect(h->output, &h->sink.pin, mt);
+        /* A filter that failed after we took the connection may not undo it. */
+        if (FAILED(hr))
+          pin_disconnect(&h->sink.pin);
+      }
+      dshow_free_media_type(mt);
+      ole_taskmem_free(mt);
+    }
+    e->lpVtbl->Release(e);
+    if (SUCCEEDED(hr))
+      return hr;
+  }
+  return dshow_call_pin_connect(h->output, &h->sink.pin, out);
 }
 
 HRESULT dshow_host_create(IBaseFilter *f, const AM_MEDIA_TYPE *in,
@@ -627,7 +679,7 @@ HRESULT dshow_host_create(IBaseFilter *f, const AM_MEDIA_TYPE *in,
   if (SUCCEEDED(hr))
     hr = dshow_call_pin_receive_connection(h->input, &h->source.pin, in);
   if (SUCCEEDED(hr))
-    hr = dshow_call_pin_connect(h->output, &h->sink.pin, out);
+    hr = connect_output(h, out);
   if (SUCCEEDED(hr))
     hr = negotiate_allocator(h, input_buffer(in));
   if (SUCCEEDED(hr))
@@ -670,6 +722,9 @@ HRESULT dshow_host_push(struct dshow_host *h, const void *data, size_t size,
     hr = VFW_E_BUFFER_OVERFLOW;
   else if (SUCCEEDED(hr = s->lpVtbl->GetPointer(s, &p))) {
     memcpy(p, data, size);
+    /* Zeroed padding after the data, as far as the sample has room. */
+    size_t room = (size_t)s->lpVtbl->GetSize(s) - size;
+    memset(p + size, 0, room < VFW_INPUT_PADDING ? room : VFW_INPUT_PADDING);
     s->lpVtbl->SetActualDataLength(s, size);
     s->lpVtbl->SetSyncPoint(s, !!(flags & AM_SAMPLE_SPLICEPOINT));
     s->lpVtbl->SetPreroll(s, !!(flags & AM_SAMPLE_PREROLL));

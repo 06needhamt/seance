@@ -38,7 +38,15 @@ CRTFN(int) crt__adjust_fdiv(void) { return 0; }
 CRTFN(clock_t) crt_clock(void) { return clock(); }
 CRTFN(void) crt_exit(int status) { exit(status); }
 CRTFN(char *) crt_getenv(const char *name) { return getenv(name); }
-CRTFN(time_t) crt_time(time_t *out) { return time(out); }
+/* The clock DLLs see, which VFW_DATE may set. */
+CRTFN(time_t) crt_time(time_t *out)
+{
+	time_t t = (time_t)win_unix_now();
+
+	if (out)
+		*out = t;
+	return t;
+}
 CRTFN(struct tm *) crt_localtime(const time_t *t) { return localtime(t); }
 /*
  * The harness runs in UTC (see k32_time.c): no zone offset, no daylight

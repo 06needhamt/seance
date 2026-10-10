@@ -3,11 +3,13 @@
  * seance: load and run 32-bit Video for Windows codecs on Linux.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "commands.h"
 #include "runtime/crash.h"
 #include "runtime/lowmem.h"
+#include "win32/k32.h"
 
 #ifndef SEANCE_VERSION
 #define SEANCE_VERSION "0.1.0-dev"
@@ -88,6 +90,13 @@ int main(int argc, char **argv)
 		/* Crashes and hangs in DLL code get reported. */
 		if (crash_install())
 			return 2;
+		/* The date and time DLLs see, when not the host's. */
+		const char *date = getenv("VFW_DATE");
+		if (win_clock_set(date)) {
+			fprintf(stderr, "seance: VFW_DATE wants a date, "
+				"YYYY-MM-DD[THH:MM[:SS]], not '%s'\n", date);
+			return 2;
+		}
 		/* DLL code only ever sees memory below 2 GB. */
 		return lowmem_run(c->run, argc - 1, argv + 1);
 	}

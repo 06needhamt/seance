@@ -431,6 +431,39 @@ WINFN(LONG) adv_RegDeleteKeyW(HKEY h, LPCWSTR sub)
 	return r;
 }
 
+LONG adv_delete_tree(HKEY h, const char *sub)
+{
+	LONG err = ERROR_SUCCESS;
+	char *path = sub_path(h, sub ? sub : "", &err);
+
+	if (!path)
+		return err;
+	reg_lock();
+	struct reg_key *k = reg_open(path);
+	err = k ? reg_delete_tree(k, !sub || !*sub) : ERROR_FILE_NOT_FOUND;
+	reg_save();
+	reg_unlock();
+	TRACE("delete tree %s = %ld", path, (long)err);
+	free(path);
+	return err;
+}
+
+WINFN(LONG) adv_RegDeleteTreeA(HKEY h, LPCSTR sub)
+{
+	char *s = sub ? acp_to_utf8(sub) : NULL;
+	LONG r = adv_delete_tree(h, s);
+	free(s);
+	return r;
+}
+
+WINFN(LONG) adv_RegDeleteTreeW(HKEY h, LPCWSTR sub)
+{
+	char *s = sub ? utf16_to_utf8_dup(sub) : NULL;
+	LONG r = adv_delete_tree(h, s);
+	free(s);
+	return r;
+}
+
 WINFN(LONG) adv_RegDeleteKeyExA(HKEY h, LPCSTR sub, REGSAM sam, DWORD reserved)
 {
 	return adv_RegDeleteKeyA(h, sub);
@@ -1371,6 +1404,8 @@ static const struct builtin_export exports[] = {
 	E(RegDeleteKeyExA),
 	E(RegDeleteKeyExW),
 	E(RegDeleteKeyW),
+	E(RegDeleteTreeA),
+	E(RegDeleteTreeW),
 	E(RegDeleteValueA),
 	E(RegDeleteValueW),
 	E(RegDisablePredefinedCache),

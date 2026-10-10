@@ -58,6 +58,18 @@ struct reg_key *reg_create(const char *path, int is_volatile, int *created,
 /* Deletes k, which must have no subkeys. Returns a Win32 error code. */
 LONG reg_delete(struct reg_key *k);
 
+/*
+ * Deletes k's subkeys, all the way down, and then k, or with keep its
+ * values instead (RegDeleteTree on the key itself). A Win32 error code.
+ */
+LONG reg_delete_tree(struct reg_key *k, int keep);
+
+/*
+ * advapi32's: deletes subkey sub of h and everything under it, or with
+ * an empty sub, h's subkeys and values (h stays). A Win32 error code.
+ */
+LONG adv_delete_tree(HKEY h, const char *sub);
+
 struct reg_value *reg_get(struct reg_key *k, const char *name);
 LONG reg_set(struct reg_key *k, const char *name, DWORD type,
 	     const void *data, DWORD size);
