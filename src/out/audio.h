@@ -29,8 +29,9 @@ enum audio_output_kind {
 int audio_output_kind_from_name(const char *name, enum audio_output_kind *k);
 
 /*
- * Picks a kind from a path's extension (.wav, .pcm or .raw, .avi).
- * Returns 0, or -1 (with vfw_error()) when it names none.
+ * Picks a kind from a path's extension (.wav, .pcm or .raw, .avi), raw
+ * for the null device. Returns 0, or -1 (with vfw_error()) when it names
+ * none.
  */
 int audio_output_kind_from_path(const char *path, enum audio_output_kind *k);
 

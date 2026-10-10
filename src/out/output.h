@@ -30,8 +30,14 @@ enum output_kind {
 /* Picks a kind from a name ("y4m", "bmp", ...). Returns 0 or -1. */
 int output_kind_from_name(const char *name, enum output_kind *kind);
 
-/* Picks a kind from a path's extension. Returns 0 or -1. */
+/*
+ * Picks a kind from a path's extension, raw frames for the null device.
+ * Returns 0 or -1.
+ */
 int output_kind_from_path(const char *path, enum output_kind *kind);
+
+/* Whether path is the null device (/dev/null, or another name for it). */
+int output_is_null(const char *path);
 
 const char *output_kind_name(enum output_kind kind);
 

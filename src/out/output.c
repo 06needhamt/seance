@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "common/error.h"
@@ -52,11 +53,27 @@ int output_kind_from_name(const char *name, enum output_kind *kind)
 	return -1;
 }
 
+int output_is_null(const char *path)
+{
+	struct stat a, b;
+
+	if (!strcmp(path, "/dev/null"))
+		return 1;
+	return !stat(path, &a) && S_ISCHR(a.st_mode) &&
+	       !stat("/dev/null", &b) && S_ISCHR(b.st_mode) &&
+	       a.st_rdev == b.st_rdev;
+}
+
 int output_kind_from_path(const char *path, enum output_kind *kind)
 {
 	const char *slash = strrchr(path, '/');
 	const char *dot = strrchr(slash ? slash : path, '.');
 
+	/* Discarded: as the codec gives them, with nothing to convert. */
+	if (output_is_null(path)) {
+		*kind = OUT_RAW;
+		return 0;
+	}
 	if (!dot || output_kind_from_name(dot + 1, kind)) {
 		vfw_set_error("%s: can't tell the output format from the name; "
 			      "use .y4m, .bmp, .yuv, .bgr or .raw, or --format",
