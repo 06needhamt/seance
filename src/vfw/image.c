@@ -100,12 +100,14 @@ HANDLE STUB_WINAPI ic_image_compress(HIC hic, UINT flags, BITMAPINFO *in,
 		vfw_set_error("ICImageCompress: no output format");
 		goto done;
 	}
+	/* A codec refusing its own format here may still compress to it (seq.c). */
 	if ((err = ic_send(hic, ICM_COMPRESS_QUERY, (DWORD_PTR)in,
-			   (DWORD_PTR)out)) != ICERR_OK) {
+			   (DWORD_PTR)out)) != ICERR_OK && out_fmt) {
 		vfw_set_error("ICImageCompress: the codec rejects the formats");
 		goto done;
 	}
 
+	ic_set_status_proc(hic);
 	if ((err = ic_send(hic, ICM_COMPRESS_BEGIN, (DWORD_PTR)in,
 			   (DWORD_PTR)out)) != ICERR_OK) {
 		vfw_set_error("ICImageCompress: ICM_COMPRESS_BEGIN failed");
@@ -217,8 +219,7 @@ HANDLE STUB_WINAPI ic_image_decompress(HIC hic, UINT flags, BITMAPINFO *in,
 		vfw_set_error("ICImageDecompress: no room for the output");
 		goto done;
 	}
-	if ((err = ic_send(hic, ICM_DECOMPRESS_BEGIN, (DWORD_PTR)in,
-			   (DWORD_PTR)out)) != ICERR_OK) {
+	if ((err = ic_decompress_begin(hic, &in->bmiHeader, out)) != ICERR_OK) {
 		vfw_set_error("ICImageDecompress: ICM_DECOMPRESS_BEGIN failed");
 		goto done;
 	}

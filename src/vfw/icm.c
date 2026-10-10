@@ -196,6 +196,18 @@ LRESULT STUB_WINAPI ic_send(HIC hic, UINT msg, DWORD_PTR l1, DWORD_PTR l2)
 	return drv_send(drv, msg, (LPARAM)l1, (LPARAM)l2);
 }
 
+static LONG CALLBACK status_proc(LPARAM l, UINT message, LONG value)
+{
+	return 0;
+}
+
+void ic_set_status_proc(HIC hic)
+{
+	ICSETSTATUSPROC status = { .Status = status_proc };
+
+	ic_send(hic, ICM_SET_STATUS_PROC, (DWORD_PTR)&status, sizeof(status));
+}
+
 /* szDriver: the DLL's file name, as Windows fills it in. */
 static void set_driver_name(ICINFO *info, const char *path)
 {
@@ -522,6 +534,15 @@ BITMAPINFOHEADER *ic_decompress_get_format(HIC hic, const BITMAPINFOHEADER *in,
 					   LRESULT *err)
 {
 	return ic_get_format(hic, ICM_DECOMPRESS_GET_FORMAT, in, NULL, err);
+}
+
+LRESULT ic_decompress_begin(HIC hic, const BITMAPINFOHEADER *in,
+			    const BITMAPINFOHEADER *out)
+{
+	LRESULT r;
+
+	free(ic_decompress_get_format(hic, in, &r));
+	return ic_send(hic, ICM_DECOMPRESS_BEGIN, (DWORD_PTR)in, (DWORD_PTR)out);
 }
 
 BITMAPINFOHEADER *ic_compress_get_format(HIC hic, const BITMAPINFOHEADER *in,

@@ -24,6 +24,17 @@
  *
  * With TESTCODEC_NOCOMPRESS=1 it only decompresses, answering every
  * ICM_COMPRESS_QUERY with ICERR_UNSUPPORTED, as Sunplus's webcam codecs do.
+ * Four more, each as a real codec does and each set to 1 by itself:
+ *   TESTCODEC_STATUS      it calls the status callback from
+ *                         ICM_SET_STATUS_PROC on every frame without
+ *                         checking one was given (ADV601.dll)
+ *   TESTCODEC_PADDING     it reads the 64 bytes after its compressed input
+ *                         and wants them zero (sp6x_32.dll, vgpix32d.dll)
+ *   TESTCODEC_ASK_FORMAT  it decodes to nothing unless asked
+ *                         ICM_DECOMPRESS_GET_FORMAT before
+ *                         ICM_DECOMPRESS_BEGIN (wv32vfw.dll)
+ *   TESTCODEC_PICKY       it refuses ICM_COMPRESS_QUERY with an output
+ *                         format, its own included (vsslight.dll)
  * With TESTCODEC_LATESIZE=1 it only knows how big a frame can get once
  * ICM_COMPRESS_BEGIN has been sent, and says 16 bytes before (in
  * ICM_COMPRESS_GET_SIZE and the output format), as wtvc.dll does.
@@ -58,6 +69,11 @@ struct instance {
 	/* Decompression: the current picture, in the compressed layout. */
 	BYTE *dcur;
 	int dvalid;
+	/* TESTCODEC_ASK_FORMAT: asked for its format since the last BEGIN; ready. */
+	int asked, ready;
+	/* ICM_SET_STATUS_PROC's callback. */
+	LPARAM status_param;
+	LONG (CALLBACK *status)(LPARAM, UINT, LONG);
 	/* Drawing: DrawDib, where to, and a BGR24 frame to draw from. */
 	HDRAWDIB hdd;
 	HDC hdc;
@@ -72,6 +88,7 @@ static HINSTANCE self;
 static int strict;	/* TESTCODEC_STRICT */
 static int nocompress;	/* TESTCODEC_NOCOMPRESS */
 static int latesize;	/* TESTCODEC_LATESIZE */
+static int needs_status, needs_padding, ask_format, picky;
 #define EARLY_SIZE 16	/* what it says before ICM_COMPRESS_BEGIN */
 static DWORD last_quality = 0xffffffff;	/* of the last ICM_COMPRESS */
 static DWORD msg_log[MAX_LOG];
@@ -392,6 +409,14 @@ static LRESULT decompress(struct instance *inst, ICDECOMPRESS *d)
 		return ICERR_BADPARAM;
 	if (decompress_query(in, out) != ICERR_OK || !inst->dcur)
 		return ICERR_BADFORMAT;
+	/* As wv32vfw.dll: set up only by ICM_DECOMPRESS_GET_FORMAT, else nothing. */
+	if (ask_format && !inst->ready)
+		return ICERR_OK;
+	/* As decoders that read past their input: there must be zeros. */
+	if (needs_padding && !(d->dwFlags & ICDECOMPRESS_NULLFRAME))
+		for (DWORD i = 0; i < 64; i++)
+			if (src[in->biSizeImage + i])
+				return ICERR_BADFORMAT;
 	if (!(d->dwFlags & ICDECOMPRESS_NULLFRAME)) {
 		if (in->biSizeImage < 4 || src[1] != in->biBitCount ||
 		    (src[0] != 'K' && src[0] != 'D'))
@@ -516,6 +541,14 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 						     sizeof(v)) == 1 && v[0] == '1';
 		latesize = GetEnvironmentVariableA("TESTCODEC_LATESIZE", v,
 						   sizeof(v)) == 1 && v[0] == '1';
+		needs_status = GetEnvironmentVariableA("TESTCODEC_STATUS", v,
+						       sizeof(v)) == 1 && v[0] == '1';
+		needs_padding = GetEnvironmentVariableA("TESTCODEC_PADDING", v,
+							sizeof(v)) == 1 && v[0] == '1';
+		ask_format = GetEnvironmentVariableA("TESTCODEC_ASK_FORMAT", v,
+						     sizeof(v)) == 1 && v[0] == '1';
+		picky = GetEnvironmentVariableA("TESTCODEC_PICKY", v,
+						sizeof(v)) == 1 && v[0] == '1';
 		log_msg(msg);
 		return DefDriverProc(id, hdrvr, msg, l1, l2);
 	}
@@ -610,6 +643,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 	case ICM_COMPRESS_QUERY:
 		if (nocompress)
 			return ICERR_UNSUPPORTED;
+		if (picky && l2)
+			return ICERR_BADFORMAT;
 		return compress_query((BITMAPINFOHEADER *)l1, (BITMAPINFOHEADER *)l2);
 	case ICM_COMPRESS_GET_FORMAT:
 		return compress_get_format((BITMAPINFOHEADER *)l1,
@@ -640,7 +675,19 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		inst->cframe = 0;
 		return ICERR_OK;
 	}
+	case ICM_SET_STATUS_PROC: {
+		const ICSETSTATUSPROC *sp = (const ICSETSTATUSPROC *)l1;
+		if (!sp)
+			return ICERR_BADPARAM;
+		inst->status_param = sp->lParam;
+		inst->status = sp->Status;
+		return ICERR_OK;
+	}
 	case ICM_COMPRESS:
+		/* Unchecked, as ADV601.dll calls it. */
+		if (needs_status && inst->status(inst->status_param,
+						 ICSTATUS_STATUS, 0))
+			return ICERR_ABORT;
 		return compress(inst, (ICCOMPRESS *)l1);
 	case ICM_COMPRESS_END:
 		release(inst->cprev);
@@ -651,6 +698,7 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		return decompress_query((BITMAPINFOHEADER *)l1,
 					(BITMAPINFOHEADER *)l2);
 	case ICM_DECOMPRESS_GET_FORMAT:
+		inst->asked = 1;
 		return decompress_get_format((BITMAPINFOHEADER *)l1,
 					     (BITMAPINFOHEADER *)l2);
 	case ICM_DECOMPRESS_BEGIN: {
@@ -658,6 +706,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		LRESULT r = decompress_query(in, (BITMAPINFOHEADER *)l2);
 		if (r != ICERR_OK)
 			return r;
+		inst->ready = inst->asked;
+		inst->asked = 0;
 		release(inst->dcur);
 		if (!(inst->dcur = alloc(frame_bytes(in))))
 			return ICERR_MEMORY;

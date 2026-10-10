@@ -12,6 +12,7 @@
 #include <time.h>
 
 #include "avi/avi.h"
+#include "common/padding.h"
 #include "cmd_audio.h"
 #include "cmd_util.h"
 #include "commands.h"
@@ -31,6 +32,23 @@
 #include "win32/path.h"
 #include "xform.h"
 
+
+/*
+ * The buffer a compressed frame is read into: room for size bytes and the
+ * zeroed padding after them (common/padding.h). -1 if out of memory.
+ */
+static int input_buffer(BYTE **buf, size_t *cap, size_t size)
+{
+	if (size + VFW_INPUT_PADDING > *cap) {
+		BYTE *b = realloc(*buf, size + VFW_INPUT_PADDING);
+		if (!b)
+			return -1;
+		*buf = b;
+		*cap = size + VFW_INPUT_PADDING;
+	}
+	memset(*buf + size, 0, VFW_INPUT_PADDING);
+	return 0;
+}
 static int usage(void)
 {
 	fprintf(stderr,
@@ -471,14 +489,9 @@ static int decode_com(const char *target, const CLSID *selected,
 			frame++;
 			continue;
 		}
-		if (chunk->size > cap) {
-			BYTE *next = realloc(buf, chunk->size);
-			if (!next) {
-				fprintf(stderr, "seance: out of memory\n");
-				goto done;
-			}
-			buf = next;
-			cap = chunk->size;
+		if (input_buffer(&buf, &cap, chunk->size)) {
+			fprintf(stderr, "seance: out of memory\n");
+			goto done;
 		}
 		if (avi_read_chunk(avi, chunk, buf)) {
 			fprintf(stderr, "seance: %s\n", vfw_error());
@@ -773,7 +786,7 @@ int cmd_decode(int argc, char **argv)
 		fprintf(stderr, "seance: %s\n", vfw_error());
 		goto done;
 	}
-	r = ic_send(codec.hic, ICM_DECOMPRESS_BEGIN, (DWORD_PTR)in, (DWORD_PTR)out);
+	r = ic_decompress_begin(codec.hic, in, out);
 	if (r != ICERR_OK) {
 		fprintf(stderr, "seance: ICM_DECOMPRESS_BEGIN: %s\n",
 			icerr_name(r, err));
@@ -849,14 +862,9 @@ int cmd_decode(int argc, char **argv)
 			frame++;
 			continue;
 		}
-		if (k->size > cap) {
-			BYTE *b = realloc(buf, k->size);
-			if (!b) {
-				fprintf(stderr, "seance: out of memory\n");
-				goto done;
-			}
-			buf = b;
-			cap = k->size;
+		if (input_buffer(&buf, &cap, k->size)) {
+			fprintf(stderr, "seance: out of memory\n");
+			goto done;
 		}
 		if (avi_read_chunk(avi, k, buf)) {
 			fprintf(stderr, "seance: %s: %s\n", path, vfw_error());

@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "common/log.h"
 #include "common/error.h"
 #include "vfw/icm.h"
 
@@ -126,12 +127,16 @@ BOOL ic_seq_start_ex(COMPVARS *pc, const BITMAPINFO *in, DWORD rate,
 		goto fail;
 	}
 	pc->lpbiOut = (BITMAPINFO *)out;
-	r = ic_send(pc->hic, ICM_COMPRESS_QUERY, (DWORD_PTR)pc->lpbiIn,
-		    (DWORD_PTR)out);
-	if (r != ICERR_OK) {
-		vfw_set_error("ICM_COMPRESS_QUERY: %s", icerr_name(r, err));
-		goto fail;
-	}
+	/*
+	 * Some codecs refuse their own output format when asked about it with
+	 * the input (vsslight.dll, ICERR_BADFORMAT) yet compress to it: the
+	 * format is the codec's, so only ICM_COMPRESS_BEGIN refusing it counts.
+	 */
+	LRESULT query = ic_send(pc->hic, ICM_COMPRESS_QUERY,
+				(DWORD_PTR)pc->lpbiIn, (DWORD_PTR)out);
+	if (query != ICERR_OK)
+		vfw_warn("ICM_COMPRESS_QUERY refuses the codec's own output "
+			 "format (%s); going on", icerr_name(query, err));
 
 	s->in_frame = image_bytes(ib);
 	r = ic_send(pc->hic, ICM_COMPRESS_GET_SIZE, (DWORD_PTR)pc->lpbiIn,
@@ -195,11 +200,18 @@ BOOL ic_seq_start_ex(COMPVARS *pc, const BITMAPINFO *in, DWORD rate,
 		.lKeyRate = pc->lKey, .dwRate = rate, .dwScale = scale,
 	};
 	ic_send(pc->hic, ICM_COMPRESS_FRAMES_INFO, (DWORD_PTR)&f, sizeof(f));
+	ic_set_status_proc(pc->hic);
 
 	r = ic_send(pc->hic, ICM_COMPRESS_BEGIN, (DWORD_PTR)pc->lpbiIn,
 		    (DWORD_PTR)out);
 	if (r != ICERR_OK) {
-		vfw_set_error("ICM_COMPRESS_BEGIN: %s", icerr_name(r, err));
+		char err2[24];
+		if (query != ICERR_OK)
+			vfw_set_error("ICM_COMPRESS_BEGIN: %s (and "
+				      "ICM_COMPRESS_QUERY: %s)", icerr_name(r, err),
+				      icerr_name(query, err2));
+		else
+			vfw_set_error("ICM_COMPRESS_BEGIN: %s", icerr_name(r, err));
 		goto fail;
 	}
 	/*

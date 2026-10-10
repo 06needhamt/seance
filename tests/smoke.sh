@@ -303,6 +303,17 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	$emu "$harness" decode "$fixtures/testcodec.dll" "$work/late.avi" \
 		-o "$work/late.y4m" 2>/dev/null
 	cmp "$work/noise.y4m" "$work/late.y4m"
+	# Codecs as fussy as some real ones: one calls a status callback it
+	# never checked it was given and refuses its own format with the input
+	# (encoding), one reads past its input and decodes nothing unless asked
+	# its format first (decoding, the output named).
+	VFW_ENV_TESTCODEC_STATUS=1 VFW_ENV_TESTCODEC_PICKY=1 \
+		$emu "$harness" encode "$fixtures/testcodec.dll" "$work/noise.y4m" \
+		-o "$work/fussy.avi" 2>/dev/null
+	VFW_ENV_TESTCODEC_PADDING=1 VFW_ENV_TESTCODEC_ASK_FORMAT=1 \
+		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/fussy.avi" \
+		-o "$work/fussy.y4m" --output-format I420 2>/dev/null
+	cmp "$work/noise.y4m" "$work/fussy.y4m"
 	VFW_ENV_TESTACM_OPENCRASH=1 $emu "$harness" encode "$a" "$work/v.y4m" \
 		-o "$work/x.avi" 2>&1 | grep -q "is an ACM audio driver"
 	VFW_ENV_TESTACM_OPENCRASH=1 $emu "$harness" probe "$a" --fourcc TSTA \

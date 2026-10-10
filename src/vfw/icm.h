@@ -24,6 +24,12 @@ HIC STUB_WINAPI ic_open_function(DWORD type, DWORD handler, UINT mode,
 LRESULT STUB_WINAPI ic_close(HIC hic);
 /* ICSendMessage: ICERR_BADHANDLE for a bad handle. */
 LRESULT STUB_WINAPI ic_send(HIC hic, UINT msg, DWORD_PTR l1, DWORD_PTR l2);
+/*
+ * Gives a compressor a status callback (ICM_SET_STATUS_PROC) that answers
+ * every ICSTATUS_* with 0, "carry on": some call the one they keep without
+ * checking it was set (ADV601.dll, on its first frame).
+ */
+void ic_set_status_proc(HIC hic);
 /* ICGetInfo: bytes written, or 0. Fills szDriver if the codec doesn't. */
 LRESULT STUB_WINAPI ic_get_info(HIC hic, ICINFO *info, DWORD cb);
 /* ICInfo: handler is an index (< 256) or a FOURCC. */
@@ -93,6 +99,14 @@ BITMAPINFOHEADER *ic_negotiate_output(HIC hic, const BITMAPINFOHEADER *in,
  * ICM_DECOMPRESS_GET_FORMAT and ICM_COMPRESS_GET_FORMAT: the size query,
  * then the format, malloc()ed; NULL with *err set on failure.
  */
+/*
+ * ICM_DECOMPRESS_BEGIN from in to out, asking the codec for the format it
+ * would choose first (ICM_DECOMPRESS_GET_FORMAT), as players do whatever
+ * output they then pick: some codecs set themselves up only then
+ * (wv32vfw.dll otherwise "decodes" every frame to nothing).
+ */
+LRESULT ic_decompress_begin(HIC hic, const BITMAPINFOHEADER *in,
+			    const BITMAPINFOHEADER *out);
 BITMAPINFOHEADER *ic_decompress_get_format(HIC hic, const BITMAPINFOHEADER *in,
 					   LRESULT *err);
 /*

@@ -7,6 +7,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "common/padding.h"
 #include "dshow/dshow.h"
 #include "win32/ole.h"
 
@@ -549,7 +550,9 @@ static ULONG input_buffer(const AM_MEDIA_TYPE *in) {
     if (want > bytes)
       bytes = (ULONG)want;
   }
-  return bytes;
+  /* And the zeroed padding after a sample's data. */
+  return bytes <= UINT32_MAX - VFW_INPUT_PADDING ? bytes + VFW_INPUT_PADDING
+                                                 : bytes;
 }
 
 static HRESULT negotiate_allocator(struct dshow_host *h, ULONG bytes) {
@@ -719,6 +722,9 @@ HRESULT dshow_host_push(struct dshow_host *h, const void *data, size_t size,
     hr = VFW_E_BUFFER_OVERFLOW;
   else if (SUCCEEDED(hr = s->lpVtbl->GetPointer(s, &p))) {
     memcpy(p, data, size);
+    /* Zeroed padding after the data, as far as the sample has room. */
+    size_t room = (size_t)s->lpVtbl->GetSize(s) - size;
+    memset(p + size, 0, room < VFW_INPUT_PADDING ? room : VFW_INPUT_PADDING);
     s->lpVtbl->SetActualDataLength(s, size);
     s->lpVtbl->SetSyncPoint(s, !!(flags & AM_SAMPLE_SPLICEPOINT));
     s->lpVtbl->SetPreroll(s, !!(flags & AM_SAMPLE_PREROLL));
