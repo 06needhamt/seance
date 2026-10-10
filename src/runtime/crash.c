@@ -21,6 +21,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <setjmp.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,6 +36,7 @@
 #include "loader/modules.h"
 #include "runtime/crash.h"
 #include "runtime/seh.h"
+#include "runtime/teb.h"
 
 #define MAX_THREADS 256
 #define ALT_STACK   (64 * 1024)
@@ -45,6 +47,7 @@ struct slot {
 	volatile int depth;
 	struct timespec start;	/* of the outermost call in progress */
 	void *alt_stack;
+	sigjmp_buf *recover;	/* crash_try's, while one is in progress */
 };
 
 static struct slot slots[MAX_THREADS];
@@ -119,9 +122,22 @@ static void report_fault(int sig, const void *pc, const void *fault_addr)
 	report_call(mine);
 }
 
+/* Back to crash_try, if the thread is in one. */
+static void recover(int sig)
+{
+	struct slot *s = mine;
+
+	if (s && s->recover) {
+		sigjmp_buf *jb = s->recover;
+		s->recover = NULL;
+		siglongjmp(*jb, sig);
+	}
+}
+
 void crash_report_and_die(int sig, const void *pc, const void *fault_addr)
 {
 	report_fault(sig, pc, fault_addr);
+	recover(sig);
 	signal(sig, SIG_DFL);
 	raise(sig);
 	_exit(128 + sig);	/* raise() should not return */
@@ -219,6 +235,8 @@ static void on_fault(int sig, siginfo_t *si, void *ctx)
 		return;
 
 	report_fault(sig, pc, si->si_addr);
+	if (si->si_code > 0)		/* a fault, not a signal sent */
+		recover(sig);
 
 	/* Die of the signal, as without the handler. */
 	signal(sig, SIG_DFL);
@@ -364,4 +382,41 @@ void crash_leave(const struct crash_frame *saved)
 		return;
 	__atomic_store_n(&s->depth, s->depth - 1, __ATOMIC_RELEASE);
 	s->cur = *saved;
+}
+
+int crash_try(void (*fn)(void *arg), void *arg)
+{
+	struct slot *s = mine;
+	struct win_teb *teb = teb_current();
+
+	if (!s) {
+		fn(arg);
+		return 0;
+	}
+
+	sigjmp_buf jb;
+	sigjmp_buf *volatile outer = s->recover;
+	struct crash_frame cur = s->cur;
+	int depth = s->depth;
+	void *chain = teb ? teb->ExceptionList : NULL;
+	unsigned short fpcw;
+	unsigned int mxcsr;
+	__asm__ volatile("fnstcw %0" : "=m"(fpcw));
+	__asm__ volatile("stmxcsr %0" : "=m"(mxcsr));
+
+	int sig = sigsetjmp(jb, 1);
+	if (!sig) {
+		s->recover = &jb;
+		fn(arg);
+		s->recover = outer;
+		return 0;
+	}
+	s->recover = outer;
+	s->cur = cur;
+	__atomic_store_n(&s->depth, depth, __ATOMIC_RELEASE);
+	if (teb)
+		teb->ExceptionList = chain;
+	__asm__ volatile("cld; fninit; fldcw %0" : : "m"(fpcw));
+	__asm__ volatile("ldmxcsr %0" : : "m"(mxcsr));
+	return sig;
 }

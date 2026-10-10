@@ -96,6 +96,15 @@ BITMAPINFOHEADER *ic_negotiate_output(HIC hic, const BITMAPINFOHEADER *in,
 				      LRESULT *err);
 
 /*
+ * ICM_COMPRESS_END or ICM_DECOMPRESS_END (msg) once every frame is done. A
+ * codec that crashes there (WavCWAIP.dll divides by a count its I420 path
+ * never adds to) has done its work: the crash is reported, then a warning,
+ * and the codec is left alone (ic_close sends it nothing more). ICERR_OK
+ * then, else the codec's answer.
+ */
+LRESULT ic_end(HIC hic, UINT msg);
+
+/*
  * ICM_DECOMPRESS_BEGIN from in to out, asking the codec for the format it
  * would choose first (ICM_DECOMPRESS_GET_FORMAT), as players do whatever
  * output they then pick: some codecs set themselves up only then

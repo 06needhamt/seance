@@ -40,6 +40,9 @@
  *   TESTCODEC_DECODE_ONLY it refuses DRV_OPEN to compress, though it answers
  *                         ICM_COMPRESS_QUERY when opened otherwise
  *                         (vgpix32d.dll)
+ *   TESTCODEC_END_CRASH   it divides by zero in ICM_COMPRESS_END and
+ *                         ICM_DECOMPRESS_END (WavCWAIP.dll, by a byte count
+ *                         it never kept)
  * With TESTCODEC_LATESIZE=1 it only knows how big a frame can get once
  * ICM_COMPRESS_BEGIN has been sent, and says 16 bytes before (in
  * ICM_COMPRESS_GET_SIZE and the output format), as wtvc.dll does.
@@ -97,6 +100,8 @@ static int nocompress;	/* TESTCODEC_NOCOMPRESS */
 static int latesize;	/* TESTCODEC_LATESIZE */
 static int needs_status, needs_padding, ask_format, picky, decode_only;
 static int named_only;
+static int end_crash;
+static volatile int zero;
 #define EARLY_SIZE 16	/* what it says before ICM_COMPRESS_BEGIN */
 static DWORD last_quality = 0xffffffff;	/* of the last ICM_COMPRESS */
 static DWORD msg_log[MAX_LOG];
@@ -578,6 +583,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 						      sizeof(v)) == 1 && v[0] == '1';
 		named_only = GetEnvironmentVariableA("TESTCODEC_NAMED_ONLY", v,
 						     sizeof(v)) == 1 && v[0] == '1';
+		end_crash = GetEnvironmentVariableA("TESTCODEC_END_CRASH", v,
+						    sizeof(v)) == 1 && v[0] == '1';
 		log_msg(msg);
 		check_module(hdrvr);
 		return DefDriverProc(id, hdrvr, msg, l1, l2);
@@ -728,7 +735,7 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 	case ICM_COMPRESS_END:
 		release(inst->cprev);
 		inst->cprev = NULL;
-		return ICERR_OK;
+		return end_crash ? (LRESULT)inst->magic / zero : ICERR_OK;
 
 	case ICM_DECOMPRESS_QUERY:
 		return decompress_query((BITMAPINFOHEADER *)l1,
@@ -755,7 +762,7 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 	case ICM_DECOMPRESS_END:
 		release(inst->dcur);
 		inst->dcur = NULL;
-		return ICERR_OK;
+		return end_crash ? (LRESULT)inst->magic / zero : ICERR_OK;
 
 	case ICM_DRAW_QUERY:
 		return ok_tst0((BITMAPINFOHEADER *)l1) &&

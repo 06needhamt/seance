@@ -931,7 +931,7 @@ done:
 	if (o)
 		output_close(o);
 	if (begun)
-		ic_send(codec.hic, ICM_DECOMPRESS_END, 0, 0);
+		ic_end(codec.hic, ICM_DECOMPRESS_END);
 	cli_close_codec(&codec);
 	image_conv_free(conv);
 	free(state);

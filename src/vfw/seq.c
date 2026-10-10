@@ -303,7 +303,7 @@ void STUB_WINAPI ic_seq_end(COMPVARS *pc)
 	if (!s)
 		return;
 	if (ic_valid(pc->hic))
-		ic_send(pc->hic, ICM_COMPRESS_END, 0, 0);
+		ic_end(pc->hic, ICM_COMPRESS_END);
 	free_buffers(pc);
 	release(s);
 }

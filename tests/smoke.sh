@@ -323,6 +323,18 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/fussy.avi" \
 		-o "$work/fussy.y4m" --output-format I420 2>/dev/null
 	cmp "$work/noise.y4m" "$work/fussy.y4m"
+	# A codec that crashes in ICM_*_END after the last frame still gives
+	# whole files (not under a sanitizer, which takes faults itself).
+	if [ "$lowmem" = 1 ]; then
+		VFW_ENV_TESTCODEC_END_CRASH=1 $emu "$harness" encode \
+			"$fixtures/testcodec.dll" "$work/noise.y4m" \
+			-o "$work/end.avi" 2>&1 |
+			grep -q "crashed in ICM_COMPRESS_END, after the last frame"
+		VFW_ENV_TESTCODEC_END_CRASH=1 $emu "$harness" decode \
+			"$fixtures/testcodec.dll" "$work/end.avi" \
+			-o "$work/end.y4m" 2>/dev/null
+		cmp "$work/noise.y4m" "$work/end.y4m"
+	fi
 	VFW_ENV_TESTACM_OPENCRASH=1 $emu "$harness" encode "$a" "$work/v.y4m" \
 		-o "$work/x.avi" 2>&1 | grep -q "is an ACM audio driver"
 	VFW_ENV_TESTACM_OPENCRASH=1 $emu "$harness" probe "$a" --fourcc TSTA \
