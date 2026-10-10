@@ -3,10 +3,9 @@
  * gdi32.dll: the object table, DCs, palettes, brushes, pens and fonts.
  * Bitmaps, DIBs and blits are in gdi_bitmap.c. See gdi.h for the model.
  *
- * Text is measured with fixed metrics derived from the font's height and
- * never drawn: TextOut and ExtTextOut succeed without touching pixels.
- * Mapping modes, ROP2 and the text alignment are stored and reported
- * back but not applied (every DC works in MM_TEXT pixels).
+ * Text is measured and drawn by gdi_text.c, with one bitmap font scaled
+ * to each LOGFONT. Mapping modes and ROP2 are stored and reported back but
+ * not applied (every DC works in MM_TEXT pixels).
  */
 #include <pthread.h>
 #include <stdlib.h>
@@ -1062,61 +1061,18 @@ WINFN(HFONT) gdi_CreateFontW(int h, int w, int esc, int orient, int weight,
 	return create_font(&lf);
 }
 
-/*
- * The metrics every font gets: a cell of its height (16 pixels if it
- * asks for 0), characters 7/16 as wide unless it says otherwise.
- */
-static int font_metrics(HDC hdc, TEXTMETRICW *tm)
-{
-	LOGFONTW lf;
-
-	gdi_lock();
-	struct gdi_obj *d = gdi_get(hdc, OBJ_DC);
-	struct gdi_obj *f = d ? gdi_get(d->u.dc.s.font, OBJ_FONT) : NULL;
-	if (f)
-		lf = f->u.font;
-	gdi_unlock();
-	if (!f)
-		return 0;
-
-	int h = lf.lfHeight < 0 ? -lf.lfHeight : lf.lfHeight;
-	if (!h)
-		h = 16;
-	int internal = lf.lfHeight < 0 ? h / 8 : 0;	/* < 0: character height */
-	int cell = h + internal;
-	int w = lf.lfWidth ? (lf.lfWidth < 0 ? -lf.lfWidth : lf.lfWidth) :
-			     (cell * 7 + 8) / 16;
-	memset(tm, 0, sizeof(*tm));
-	tm->tmHeight = cell;
-	tm->tmAscent = (cell * 13 + 8) / 16;
-	tm->tmDescent = cell - tm->tmAscent;
-	tm->tmInternalLeading = internal;
-	tm->tmAveCharWidth = w;
-	tm->tmMaxCharWidth = 2 * w;
-	tm->tmWeight = lf.lfWeight ? lf.lfWeight : FW_NORMAL;
-	tm->tmDigitizedAspectX = tm->tmDigitizedAspectY = 96;
-	tm->tmFirstChar = 0x20;
-	tm->tmLastChar = 0xff;
-	tm->tmDefaultChar = '?';
-	tm->tmBreakChar = ' ';
-	tm->tmItalic = lf.lfItalic;
-	tm->tmUnderlined = lf.lfUnderline;
-	tm->tmStruckOut = lf.lfStrikeOut;
-	tm->tmPitchAndFamily = lf.lfPitchAndFamily;
-	tm->tmCharSet = lf.lfCharSet;
-	return 1;
-}
+/* Text: gdi_text.c measures and draws it. */
 
 WINFN(BOOL) gdi_GetTextMetricsW(HDC hdc, LPTEXTMETRICW tm)
 {
-	return tm && font_metrics(hdc, tm);
+	return tm && gdi_text_metrics(hdc, tm);
 }
 
 WINFN(BOOL) gdi_GetTextMetricsA(HDC hdc, LPTEXTMETRICA tm)
 {
 	TEXTMETRICW w;
 
-	if (!tm || !font_metrics(hdc, &w))
+	if (!tm || !gdi_text_metrics(hdc, &w))
 		return FALSE;
 	memcpy(tm, &w, offsetof(TEXTMETRICA, tmFirstChar));
 	tm->tmFirstChar = w.tmFirstChar;
@@ -1133,18 +1089,34 @@ WINFN(BOOL) gdi_GetTextMetricsA(HDC hdc, LPTEXTMETRICA tm)
 
 static BOOL text_extent(HDC hdc, int n, LPSIZE size)
 {
-	TEXTMETRICW tm;
+	int w, h;
 
-	if (!size || n < 0 || !font_metrics(hdc, &tm))
+	if (!size || !gdi_text_width(hdc, n, &w, &h))
 		return FALSE;
-	size->cx = n * tm.tmAveCharWidth;
-	size->cy = tm.tmHeight;
+	size->cx = w;
+	size->cy = h;
 	return TRUE;
+}
+
+/* An ANSI string as UTF-16 (malloc()ed, *wn its length), NULL on failure. */
+static WCHAR *ansi_text(LPCSTR s, int n, int *wn)
+{
+	*wn = n > 0 ? cp_to_utf16(CP_ACP, s, n, NULL, 0, 0) : 0;
+	if (*wn < 0)
+		return NULL;
+	WCHAR *w = malloc(((size_t)*wn + 1) * sizeof(WCHAR));
+	if (w && *wn)
+		cp_to_utf16(CP_ACP, s, n, w, *wn, 0);
+	return w;
 }
 
 WINFN(BOOL) gdi_GetTextExtentPoint32A(HDC h, LPCSTR s, int n, LPSIZE size)
 {
-	return text_extent(h, n, size);
+	int wn;
+	WCHAR *w = n > 0 && s ? ansi_text(s, n, &wn) : NULL;
+	BOOL ok = text_extent(h, w ? wn : n, size);
+	free(w);
+	return ok;
 }
 
 WINFN(BOOL) gdi_GetTextExtentPoint32W(HDC h, LPCWSTR s, int n, LPSIZE size)
@@ -1152,33 +1124,37 @@ WINFN(BOOL) gdi_GetTextExtentPoint32W(HDC h, LPCWSTR s, int n, LPSIZE size)
 	return text_extent(h, n, size);
 }
 
-WINFN(BOOL) gdi_TextOutA(HDC hdc, int x, int y, LPCSTR s, int n)
+WINFN(BOOL) gdi_ExtTextOutW(HDC hdc, int x, int y, UINT opts, const RECT *rc,
+			    LPCWSTR s, UINT n, const INT *dx)
 {
-	gdi_lock();
-	BOOL ok = gdi_get(hdc, OBJ_DC) != NULL;
-	gdi_unlock();
-	TRACE("TextOutA(%.*s): not drawn", n > 0 ? n : 0, s ? s : "");
-	return ok;
-}
-
-WINFN(BOOL) gdi_TextOutW(HDC hdc, int x, int y, LPCWSTR s, int n)
-{
-	gdi_lock();
-	BOOL ok = gdi_get(hdc, OBJ_DC) != NULL;
-	gdi_unlock();
-	return ok;
+	TRACE("ExtTextOutW(%d, %d, %u characters)", x, y, n);
+	return n <= INT32_MAX && gdi_text_out(hdc, x, y, opts, rc, s, (int)n, dx);
 }
 
 WINFN(BOOL) gdi_ExtTextOutA(HDC hdc, int x, int y, UINT opts, const RECT *rc,
 			    LPCSTR s, UINT n, const INT *dx)
 {
-	return gdi_TextOutA(hdc, x, y, s, n);
+	int wn = 0;
+	WCHAR *w = NULL;
+
+	if (n > INT32_MAX || (n && (!s || !(w = ansi_text(s, (int)n, &wn)))))
+		return FALSE;
+	TRACE("ExtTextOutA(%d, %d, %.*s)", x, y, (int)n, s ? s : "");
+	/* A double-byte string's dx is per byte; ours one per character. */
+	BOOL ok = gdi_text_out(hdc, x, y, opts, rc, w, wn,
+			       wn == (int)n ? dx : NULL);
+	free(w);
+	return ok;
 }
 
-WINFN(BOOL) gdi_ExtTextOutW(HDC hdc, int x, int y, UINT opts, const RECT *rc,
-			    LPCWSTR s, UINT n, const INT *dx)
+WINFN(BOOL) gdi_TextOutA(HDC hdc, int x, int y, LPCSTR s, int n)
 {
-	return gdi_TextOutW(hdc, x, y, s, n);
+	return n >= 0 && gdi_ExtTextOutA(hdc, x, y, 0, NULL, s, (UINT)n, NULL);
+}
+
+WINFN(BOOL) gdi_TextOutW(HDC hdc, int x, int y, LPCWSTR s, int n)
+{
+	return n >= 0 && gdi_ExtTextOutW(hdc, x, y, 0, NULL, s, (UINT)n, NULL);
 }
 
 static BOOL dc_point(HDC hdc, POINT *old, int x, int y, int which, int offset)

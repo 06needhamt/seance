@@ -594,8 +594,9 @@ static void test_misc(void)
 	CHECK(legacy.left == -4 && legacy.top == -23 &&
 	      legacy.right == 44 && legacy.bottom == 24);
 	legacy = (RECT){ 0 };
+	/* No DC: measured in the system font (16 high, 16 * 8 / 13 wide). */
 	CHECK_EQ(DrawTextA(NULL, "one\ntwo", -1, &legacy, 0x400), 32);
-	CHECK(legacy.right == 24 && legacy.bottom == 32);
+	CHECK(legacy.right == 30 && legacy.bottom == 32);
 	legacy = (RECT){ 1, 2, 3, 4 };
 	CHECK(!GetUpdateRect(NULL, &legacy, FALSE));
 	CHECK(legacy.left == 0 && legacy.bottom == 0);

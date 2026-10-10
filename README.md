@@ -316,7 +316,11 @@ comdlg32 are built in too, headless:
   conversion between every DIB format and blits between them (`BitBlt`,
   `StretchBlt`, `StretchDIBits`, `GetDIBits`, ...), palettes, brushes,
   pens and fonts. The display is a 1024x768 32-bit device that discards
-  what is drawn on it; text is measured but not drawn.
+  what is drawn on it. Text (`TextOut`, `ExtTextOut`, user32's `DrawText`)
+  is drawn into memory DCs with one built-in font, X11's public-domain
+  misc-fixed 8x13 scaled to each `LOGFONT` (bold, italic, underline and
+  strikeout synthesised), and measured the same way, so the captions and
+  banners codecs draw into frames appear.
 - **advapi32:** the registry, kept in a `.reg` file (see below), with
   change notification; `Drivers32` there shows the codecs and ACM
   drivers `vfw.ini` registers. Security answers as for an administrator on XP: tokens,
@@ -782,7 +786,7 @@ decodes below 40 dB.
 | `include/win32/` | Win32 types, PE image structures, GDI, window-manager and registry definitions, driver and ICM definitions, laid out to match 32-bit Windows |
 | `src/loader/` | PE parsing, mapping and relocation (`pe.c`); the module table and dependency loading (`modules.c`) |
 | `src/runtime/` | TEB and `%fs`, implicit TLS, the built-in DLL registry, trap thunks for unimplemented imports, the 2 GB limit (`lowmem.c`), crash and hang reports (`crash.c`) |
-| `src/win32/` | Built-in kernel32 (`k32_*.c`) and kernelbase, ntdll, the msvcrt family (`crt_*.c`), user32 (`user32.c`, `u32_*.c`), gdi32 (`gdi32.c`, `gdi_bitmap.c`), advapi32 (`advapi32.c`, `adv_security.c`) and its registry (`reg.c`), version, ole32, oleaut32 (`oleaut32.c`, `oleaut_conv.c`, `oleaut_array.c`, `errinfo.c`), shell32 (`shell32.c`, `shell_file.c`), comctl32 (`comctl32.c`, `comctl_dpa.c`, `comctl_imagelist.c`, `comctl_sheet.c`), comdlg32, winmm, msvfw32 and quartz (`quartz.c`) |
+| `src/win32/` | Built-in kernel32 (`k32_*.c`) and kernelbase, ntdll, the msvcrt family (`crt_*.c`), user32 (`user32.c`, `u32_*.c`), gdi32 (`gdi32.c`, `gdi_bitmap.c`, `gdi_text.c`), advapi32 (`advapi32.c`, `adv_security.c`) and its registry (`reg.c`), version, ole32, oleaut32 (`oleaut32.c`, `oleaut_conv.c`, `oleaut_array.c`, `errinfo.c`), shell32 (`shell32.c`, `shell_file.c`), comctl32 (`comctl32.c`, `comctl_dpa.c`, `comctl_imagelist.c`, `comctl_sheet.c`), comdlg32, winmm, msvfw32 and quartz (`quartz.c`) |
 | `src/dshow/` | DirectShow: finding and registering filters (`discover.c`) |
 | `src/vfw/` | Installable drivers (`driver.c`), the codec registry (`registry.c`), the ICM API (`icm.c`), sequence compression (`seq.c`) |
 | `src/avi/` | AVI reader (AVI 1.0 and OpenDML) and writer |

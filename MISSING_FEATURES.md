@@ -272,8 +272,8 @@ Single codecs tried one at a time, with what each needed:
 | LEAD MCMW 2.0 (`LCODCCMW2E.dll` and `LCMW2.dll`, LCW2) | DirectShow | encodes and decodes, 37.5-45 dB outside a 16-row band | `SHDeleteKeyA`; one filter in two categories; an output type of its own; samples full until told otherwise; `IMediaSample2` properties in part |
 
 The LEAD encoder is an evaluation build ("LEAD MCMW 2.0 Eval Encoder") that
-draws a banner into the bottom 16 rows of every frame with GDI text, which
-the headless GDI leaves blank. It sets no sync points of its own and keeps
+draws that banner into the bottom 16 rows of every frame with GDI text, as
+it appears on Windows (the round trip's 37.5-45 dB leaves those rows out). It sets no sync points of its own and keeps
 its inputs', so every frame is a keyframe, as on Windows (LCW2 frames stand
 alone); it has no `IAMVideoCompression`, so `--keyint` is refused.
 

@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "win32/codepage.h"
+#include "win32/gdi.h"
 #include "win32/internal.h"
 #include "win32/user.h"
 
@@ -83,43 +85,143 @@ WINFN(BOOL) user_DestroyMenu(HMENU menu)
 	return menu != NULL;
 }
 
-static int draw_text(LPCSTR text, int count, LPRECT rc, UINT format)
+/*
+ * DrawText: the text in lines, broken at line breaks and, with
+ * DT_WORDBREAK, between words to fit the rectangle's width; each drawn as
+ * ExtTextOut draws it, left, centred or right in rc, clipped to it unless
+ * DT_NOCLIP; a single line centred or at the bottom if asked. "&x" is x
+ * (the prefix underline isn't drawn) unless DT_NOPREFIX, and tabs are
+ * eight characters with DT_EXPANDTABS. DT_CALCRECT measures instead,
+ * setting rc's right and bottom. The text's height is returned; with no
+ * DC it is measured in the system font, and not drawn.
+ */
+static int draw_text(HDC hdc, const WCHAR *in, int n, RECT *rc, UINT fmt)
 {
-	int lines = 1, max = 0, current = 0;
+	int cw, ch;
 
-	if (!text || !rc)
+	if (!in || !rc || !gdi_text_width(hdc, 1, &cw, &ch))
 		return 0;
-	if (count < 0)
-		count = strlen(text);
-	for (int i = 0; i < count; i++) {
-		if (text[i] == '\n') {
-			if (current > max)
-				max = current;
-			current = 0;
-			lines++;
+	if (n < 0)
+		for (n = 0; in[n]; n++)
+			;
+	/* The text as it is drawn: prefixes and tabs dealt with. */
+	WCHAR *text = malloc(((size_t)n * 8 + 1) * sizeof(WCHAR));
+	if (!text)
+		return 0;
+	int len = 0;
+	for (int i = 0; i < n; i++) {
+		if (in[i] == '&' && !(fmt & DT_NOPREFIX) && i + 1 < n) {
+			text[len++] = in[++i];
+		} else if (in[i] == '\t' && (fmt & DT_EXPANDTABS)) {
+			do
+				text[len++] = ' ';
+			while (len % 8);
 		} else {
-			current++;
+			text[len++] = in[i];
 		}
 	}
-	if (current > max)
-		max = current;
-	if (format & 0x400) {
-		rc->right = rc->left + max * 8;
-		rc->bottom = rc->top + lines * 16;
+
+	int room = rc->right - rc->left;
+	int max = 0, lines = 0, pos = 0;
+	int single = fmt & DT_SINGLELINE;
+	struct { int start, length; } *line = malloc(((size_t)len + 1) * sizeof(*line));
+	if (!line) {
+		free(text);
+		return 0;
 	}
-	return lines * 16;
+	while (pos < len || !lines) {
+		int end = pos;
+		while (end < len && (single || (text[end] != '\n' && text[end] != '\r')))
+			end++;
+		/* Broken between words to fit, at least a word a line. */
+		if ((fmt & DT_WORDBREAK) && !single && room > 0 &&
+		    (end - pos) * cw > room) {
+			int cut = pos + room / cw;
+			while (cut > pos && text[cut] != ' ')
+				cut--;
+			if (cut == pos) {
+				cut = pos;
+				while (cut < end && text[cut] != ' ')
+					cut++;
+			}
+			end = cut;
+		}
+		line[lines].start = pos;
+		line[lines].length = end - pos;
+		if ((end - pos) * cw > max)
+			max = (end - pos) * cw;
+		lines++;
+		pos = end;
+		if (pos < len && text[pos] == ' ' && (fmt & DT_WORDBREAK))
+			pos++;
+		else if (pos < len && text[pos] == '\r')
+			pos += pos + 1 < len && text[pos + 1] == '\n' ? 2 : 1;
+		else if (pos < len && text[pos] == '\n')
+			pos++;
+		if (pos >= len)
+			break;
+	}
+	int height = lines * ch;
+
+	if (fmt & DT_CALCRECT) {
+		rc->right = rc->left + max;
+		rc->bottom = rc->top + height;
+	} else if (hdc) {
+		int top = rc->top;
+		if (single && (fmt & DT_VCENTER))
+			top = rc->top + (rc->bottom - rc->top - ch) / 2;
+		else if (single && (fmt & DT_BOTTOM))
+			top = rc->bottom - ch;
+		for (int l = 0; l < lines; l++) {
+			int w = line[l].length * cw, x = rc->left;
+			if (fmt & DT_CENTER)
+				x = rc->left + (room - w) / 2;
+			else if (fmt & DT_RIGHT)
+				x = rc->right - w;
+			gdi_text_out(hdc, x, top + l * ch,
+				     fmt & DT_NOCLIP ? 0 : ETO_CLIPPED, rc,
+				     text + line[l].start, line[l].length, NULL);
+		}
+	}
+	free(line);
+	free(text);
+	return height;
+}
+
+WINFN(int) user_DrawTextW(HDC hdc, LPCWSTR text, int count, LPRECT rc,
+			  UINT format)
+{
+	return draw_text(hdc, text, count, rc, format);
 }
 
 WINFN(int) user_DrawTextA(HDC hdc, LPCSTR text, int count, LPRECT rc,
-			   UINT format)
+			  UINT format)
 {
-	return draw_text(text, count, rc, format);
+	if (!text)
+		return 0;
+	if (count < 0)
+		count = (int)strlen(text);
+	int wn = count ? cp_to_utf16(CP_ACP, text, count, NULL, 0, 0) : 0;
+	WCHAR *w = wn >= 0 ? malloc(((size_t)wn + 1) * sizeof(WCHAR)) : NULL;
+	if (!w)
+		return 0;
+	if (wn)
+		cp_to_utf16(CP_ACP, text, count, w, wn, 0);
+	int r = draw_text(hdc, w, wn, rc, format);
+	free(w);
+	return r;
 }
 
 WINFN(int) user_DrawTextExA(HDC hdc, LPSTR text, int count, LPRECT rc,
-			     UINT format, void *params)
+			    UINT format, void *params)
 {
 	return user_DrawTextA(hdc, text, count, rc, format);
+}
+
+WINFN(int) user_DrawTextExW(HDC hdc, LPWSTR text, int count, LPRECT rc,
+			    UINT format, void *params)
+{
+	return user_DrawTextW(hdc, text, count, rc, format);
 }
 
 WINFN(BOOL) user_EnableMenuItem(HMENU menu, UINT id, UINT flags)
@@ -332,6 +434,8 @@ const struct builtin_export u32_legacy_exports[] = {
 	E(DestroyMenu),
 	E(DrawTextA),
 	E(DrawTextExA),
+	E(DrawTextExW),
+	E(DrawTextW),
 	E(EnableMenuItem),
 	E(GetClassLongA),
 	E(GetCursor),

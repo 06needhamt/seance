@@ -975,6 +975,77 @@ int gdi_fill_rect(HDC hdc, const RECT *rc, HBRUSH brush)
 	return ok;
 }
 
+/* A COLORREF as RGB: PALETTEINDEX ones from the DC's palette. */
+static COLORREF dc_rgb(const struct gdi_obj *d, COLORREF c)
+{
+	if ((c >> 24) == 1)
+		return gdi_palette_color(&d->u.dc, (WORD)c);
+	return c & 0xffffff;
+}
+
+/* rc cut to clip (if any) and to the surface; 0 if nothing is left. */
+static int clip_rect(RECT *rc, const RECT *clip, const struct surface *s)
+{
+	if (clip) {
+		if (rc->left < clip->left) rc->left = clip->left;
+		if (rc->top < clip->top) rc->top = clip->top;
+		if (rc->right > clip->right) rc->right = clip->right;
+		if (rc->bottom > clip->bottom) rc->bottom = clip->bottom;
+	}
+	if (rc->left < 0) rc->left = 0;
+	if (rc->top < 0) rc->top = 0;
+	if (rc->right > s->width) rc->right = s->width;
+	if (rc->bottom > s->height) rc->bottom = s->height;
+	return rc->left < rc->right && rc->top < rc->bottom;
+}
+
+int gdi_fill_color(HDC hdc, const RECT *rc, COLORREF c, const RECT *clip)
+{
+	struct surface s;
+	int ok = 0;
+
+	gdi_lock();
+	struct gdi_obj *d = gdi_get(hdc, OBJ_DC);
+	if (d && rc) {
+		ok = 1;
+		RECT r = *rc;
+		if (dc_surface(d, &s) && clip_rect(&r, clip, &s)) {
+			COLORREF rgb = dc_rgb(d, c);
+			for (int y = r.top; y < r.bottom; y++)
+				for (int x = r.left; x < r.right; x++)
+					px_put(&s, x, y, rgb);
+		}
+	}
+	gdi_unlock();
+	return ok;
+}
+
+int gdi_paint_mask(HDC hdc, int x, int y, int w, int h, const BYTE *mask,
+		   COLORREF fg, const COLORREF *bg, const RECT *clip)
+{
+	struct surface s;
+	int ok = 0;
+
+	gdi_lock();
+	struct gdi_obj *d = gdi_get(hdc, OBJ_DC);
+	if (d && mask && w >= 0 && h >= 0) {
+		ok = 1;
+		RECT r = { x, y, x + w, y + h };
+		if (dc_surface(d, &s) && clip_rect(&r, clip, &s)) {
+			COLORREF ink = dc_rgb(d, fg), paper = bg ? dc_rgb(d, *bg) : 0;
+			for (int py = r.top; py < r.bottom; py++)
+				for (int px = r.left; px < r.right; px++) {
+					if (mask[(size_t)(py - y) * w + (px - x)])
+						px_put(&s, px, py, ink);
+					else if (bg)
+						px_put(&s, px, py, paper);
+				}
+		}
+	}
+	gdi_unlock();
+	return ok;
+}
+
 /*
  * A DIB onto a DC. ySrc counts from the bottom of a bottom-up DIB, as the
  * DIB's own scanlines do.

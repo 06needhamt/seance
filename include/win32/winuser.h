@@ -129,6 +129,20 @@ typedef struct tagMONITORINFO {
 	DWORD dwFlags;
 } MONITORINFO, *LPMONITORINFO;
 
+/* DrawText. */
+#define DT_TOP        0x0000
+#define DT_LEFT       0x0000
+#define DT_CENTER     0x0001
+#define DT_RIGHT      0x0002
+#define DT_VCENTER    0x0004
+#define DT_BOTTOM     0x0008
+#define DT_WORDBREAK  0x0010
+#define DT_SINGLELINE 0x0020
+#define DT_EXPANDTABS 0x0040
+#define DT_NOCLIP     0x0100
+#define DT_CALCRECT   0x0400
+#define DT_NOPREFIX   0x0800
+
 /* MessageBox. */
 #define MB_OK                0x00000000
 #define MB_OKCANCEL          0x00000001
