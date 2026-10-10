@@ -40,7 +40,7 @@ struct filter {
 	LONG key_interval, pframes;
 	double quality;
 	DWORDLONG window;
-	BOOL async, no_eos, require_segment, segment, peer_info, dynamic, dynamic_extra, no_preroll, codec_api_only, notify_error, strict, own_allocator, own_output;
+	BOOL async, no_eos, require_segment, segment, peer_info, dynamic, dynamic_extra, no_preroll, codec_api_only, notify_error, strict, own_allocator, own_output, no_proposal;
 	LONG workers;
 	HRESULT async_error;
 	CRITICAL_SECTION transform_lock;
@@ -534,20 +534,20 @@ static BOOL inspect_peer(IPin*peer){
 }
 static HRESULT WINAPI pin_receive_connection(IPin*p,IPin*peer,const AM_MEDIA_TYPE*mt){struct pin*x=(void*)p;if(!peer||!mt)return E_POINTER;LOWPTR(x->filter,peer);LOWPTR(x->filter,mt);LOWPTR(x->filter,mt->pbFormat);if(x->filter->peer_info&&!inspect_peer(peer))return E_UNEXPECTED;if(x->direction!=PINDIR_INPUT)return VFW_E_INVALID_DIRECTION;if(x->connected)return VFW_E_ALREADY_CONNECTED;if(x->filter->audio&&FAILED(audio_check_input(x->filter,mt)))return VFW_E_TYPE_NOT_ACCEPTED;HRESULT hr=copy_type(&x->type,mt);if(FAILED(hr))return hr;x->peer=peer;peer->lpVtbl->AddRef(peer);x->connected=TRUE;if(x->filter->audio)audio_reset(x->filter);return S_OK;}
 /*
- * TESTFILTER_OWN_OUTPUT: the video encoder connects only with the output
- * type it makes itself, as LEAD's encoders do: one with a format block is
- * refused, and for the subtype alone it gives its own, the input's
- * picture as TST0 with 4 bytes of codec data after the header.
+ * The video encoder's own output type, which its output pin proposes once
+ * the input is connected: the input's picture as TST0, with 4 bytes of
+ * codec data after the header.
  */
+static const GUID guid_null;
 static const GUID fmt_video={0x05589f80,0xc356,0x11ce,{0xbf,0x01,0x00,0xaa,0x00,0x55,0x59,0x5a}};
 static const GUID st_tst0={0x30545354,0x0000,0x0010,{0x80,0x00,0x00,0xaa,0x00,0x38,0x9b,0x71}};
-static HRESULT own_output_type(struct filter*f,const AM_MEDIA_TYPE*mt,AM_MEDIA_TYPE*full)
+static const GUID iid_enum_types={0x89c31040,0x846b,0x11ce,{0x97,0xd3,0x00,0xaa,0x00,0x55,0x59,0x5a}};
+static HRESULT encoder_type(struct filter*f,AM_MEDIA_TYPE*full)
 {
-	if(mt->cbFormat||!eq(&mt->subtype,&st_tst0)||!f->input.connected)
-		return VFW_E_TYPE_NOT_ACCEPTED;
 	const AM_MEDIA_TYPE*in=&f->input.type;
-	if(!eq(&in->formattype,&fmt_video)||in->cbFormat<sizeof(VIDEOINFOHEADER))
-		return VFW_E_TYPE_NOT_ACCEPTED;
+	if(!f->input.connected||!eq(&in->formattype,&fmt_video)||
+	   in->cbFormat<sizeof(VIDEOINFOHEADER))
+		return VFW_E_NOT_CONNECTED;
 	*full=*in;
 	full->pUnk=NULL;
 	full->subtype=st_tst0;
@@ -566,6 +566,70 @@ static HRESULT own_output_type(struct filter*f,const AM_MEDIA_TYPE*mt,AM_MEDIA_T
 	return S_OK;
 }
 
+/*
+ * The type the video encoder connects its output with. A partial one (no
+ * format) gets its own, as strmbase completes one from GetMediaType; with
+ * TESTFILTER_OWN_OUTPUT it takes nothing else, as LEAD's encoders; with
+ * TESTFILTER_NO_PROPOSAL it proposes nothing and takes only full types.
+ */
+static HRESULT encoder_output_type(struct filter*f,const AM_MEDIA_TYPE*mt,AM_MEDIA_TYPE*full)
+{
+	if(eq(&mt->formattype,&guid_null)&&!mt->cbFormat){
+		if(f->no_proposal)return VFW_E_TYPE_NOT_ACCEPTED;
+		if(!eq(&mt->subtype,&st_tst0)&&!eq(&mt->subtype,&guid_null))
+			return VFW_E_TYPE_NOT_ACCEPTED;
+		return encoder_type(f,full);
+	}
+	if(f->own_output){
+		AM_MEDIA_TYPE own;
+		HRESULT hr=encoder_type(f,&own);
+		if(FAILED(hr))return hr;
+		BOOL same=eq(&mt->subtype,&own.subtype)&&eq(&mt->formattype,&own.formattype)&&
+			mt->cbFormat==own.cbFormat&&mt->pbFormat;
+		for(ULONG i=0;same&&i<own.cbFormat;i++)same=mt->pbFormat[i]==own.pbFormat[i];
+		free_type(&own);
+		if(!same)return VFW_E_TYPE_NOT_ACCEPTED;
+	}
+	return copy_type(full,mt);
+}
+
+/* The output pin's types: the video encoder's own, once its input is connected. */
+struct enum_types { IEnumMediaTypes iface; LONG refs; AM_MEDIA_TYPE type; ULONG count, pos; };
+static HRESULT WINAPI types_qi(IEnumMediaTypes*p,REFIID iid,void**out){if(!out)return E_POINTER;if(eq(iid,&iid_unknown)||eq(iid,&iid_enum_types)){*out=p;p->lpVtbl->AddRef(p);return S_OK;}*out=NULL;return E_NOINTERFACE;}
+static ULONG WINAPI types_addref(IEnumMediaTypes*p){return InterlockedIncrement(&((struct enum_types*)p)->refs);}
+static ULONG WINAPI types_release(IEnumMediaTypes*p){struct enum_types*e=(void*)p;LONG n=InterlockedDecrement(&e->refs);if(!n){free_type(&e->type);release(e);}return n;}
+static HRESULT WINAPI types_next(IEnumMediaTypes*p,ULONG n,AM_MEDIA_TYPE**out,ULONG*got)
+{
+	struct enum_types*e=(void*)p;
+	ULONG done=0;
+	if(!out||(!got&&n!=1))return E_POINTER;
+	while(done<n&&e->pos<e->count){
+		AM_MEDIA_TYPE*t=CoTaskMemAlloc(sizeof(*t));
+		if(!t||FAILED(copy_type(t,&e->type))){CoTaskMemFree(t);break;}
+		out[done++]=t;
+		e->pos++;
+	}
+	if(got)*got=done;
+	return done==n?S_OK:S_FALSE;
+}
+static HRESULT WINAPI types_skip(IEnumMediaTypes*p,ULONG n){struct enum_types*e=(void*)p;e->pos+=n;if(e->pos>e->count){e->pos=e->count;return S_FALSE;}return S_OK;}
+static HRESULT WINAPI types_reset(IEnumMediaTypes*p){((struct enum_types*)p)->pos=0;return S_OK;}
+static HRESULT WINAPI types_clone(IEnumMediaTypes*p,IEnumMediaTypes**out);
+static IEnumMediaTypesVtbl types_vtbl={types_qi,types_addref,types_release,types_next,types_skip,types_reset,types_clone};
+static HRESULT make_types(const AM_MEDIA_TYPE*type,ULONG count,ULONG pos,IEnumMediaTypes**out)
+{
+	struct enum_types*e=alloc(sizeof(*e));
+	if(!e)return E_OUTOFMEMORY;
+	e->iface.lpVtbl=&types_vtbl;
+	e->refs=1;
+	e->count=count;
+	e->pos=pos;
+	if(count&&FAILED(copy_type(&e->type,type))){release(e);return E_OUTOFMEMORY;}
+	*out=&e->iface;
+	return S_OK;
+}
+static HRESULT WINAPI types_clone(IEnumMediaTypes*p,IEnumMediaTypes**out){if(!out)return E_POINTER;struct enum_types*e=(void*)p;return make_types(&e->type,e->count,e->pos,out);}
+
 static HRESULT WINAPI pin_connect(IPin*p,IPin*peer,const AM_MEDIA_TYPE*mt)
 {
 	struct pin*x=(void*)p;
@@ -577,7 +641,7 @@ static HRESULT WINAPI pin_connect(IPin*p,IPin*peer,const AM_MEDIA_TYPE*mt)
 	if(x->direction!=PINDIR_OUTPUT)return VFW_E_INVALID_DIRECTION;
 	if(x->connected)return VFW_E_ALREADY_CONNECTED;
 	HRESULT hr=f->audio?audio_output_type(f,mt,&full):
-		f->own_output&&f->encoder?own_output_type(f,mt,&full):copy_type(&full,mt);
+		f->encoder?encoder_output_type(f,mt,&full):copy_type(&full,mt);
 	if(FAILED(hr))return hr;
 	hr=peer->lpVtbl->ReceiveConnection(peer,p,&full);
 	if(FAILED(hr)){free_type(&full);return hr;}
@@ -601,7 +665,21 @@ static HRESULT WINAPI pin_info(IPin*p,PIN_INFO*out){if(!out)return E_POINTER;str
 static HRESULT WINAPI pin_direction(IPin*p,PIN_DIRECTION*out){if(!out)return E_POINTER;*out=((struct pin*)p)->direction;return S_OK;}
 static HRESULT WINAPI pin_id(IPin*p,LPWSTR*out){return E_NOTIMPL;}
 static HRESULT WINAPI pin_accept(IPin*p,const AM_MEDIA_TYPE*mt){return mt?S_OK:E_POINTER;}
-static HRESULT WINAPI pin_enum_types(IPin*p,IEnumMediaTypes**out){return E_NOTIMPL;}
+static HRESULT WINAPI pin_enum_types(IPin*p,IEnumMediaTypes**out)
+{
+	struct pin*x=(void*)p;
+	struct filter*f=x->filter;
+	AM_MEDIA_TYPE own;
+	if(!out)return E_POINTER;
+	*out=NULL;
+	if(x->direction!=PINDIR_OUTPUT||!f->encoder||f->audio||f->no_proposal)
+		return E_NOTIMPL;
+	/* Nothing to propose until the input says what the picture is. */
+	if(FAILED(encoder_type(f,&own)))return make_types(NULL,0,0,out);
+	HRESULT hr=make_types(&own,1,0,out);
+	free_type(&own);
+	return hr;
+}
 static HRESULT WINAPI pin_internal(IPin*p,IPin**out,ULONG*n){return E_NOTIMPL;}
 static HRESULT WINAPI pin_eos(IPin*p){struct pin*x=(void*)p;while(x->filter->workers)Sleep(1);if(FAILED(x->filter->async_error))return x->filter->async_error;if(x->filter->no_eos)return S_OK;if(x->filter->audio){HRESULT hr=audio_end(x->filter);if(FAILED(hr))return hr;}return x->filter->output.connected?x->filter->output.peer->lpVtbl->EndOfStream(x->filter->output.peer):S_OK;}
 static HRESULT WINAPI pin_begin_flush(IPin*p){struct pin*x=(void*)p;x->flushing=TRUE;x->filter->valid=FALSE;if(x->filter->audio)audio_reset(x->filter);x->filter->segment=FALSE;x->filter->async_error=S_OK;return x->filter->output.connected?x->filter->output.peer->lpVtbl->BeginFlush(x->filter->output.peer):S_OK;}
@@ -818,5 +896,5 @@ static HRESULT WINAPI filter_vendor(IBaseFilter*p,LPWSTR*out){return E_NOTIMPL;}
 static IBaseFilterVtbl filter_vtbl={filter_qi,filter_addref,filter_release,filter_class,filter_stop,filter_pause,filter_run,filter_state,filter_set_clock,filter_get_clock,filter_enum,filter_find,filter_info,filter_join,filter_vendor};
 
 static BOOL env_on(const char*name){char value[2];return GetEnvironmentVariableA(name,value,sizeof(value))==1&&value[0]=='1';}
-HRESULT testfilter_create(BOOL encoder,BOOL audio,REFIID iid,void**out){if(!out)return E_POINTER;*out=NULL;struct filter*f=alloc(sizeof(*f));if(!f)return E_OUTOFMEMORY;f->audio=audio;f->split=env_on("TESTFILTER_AUDIO_SPLIT");f->hold=env_on("TESTFILTER_AUDIO_HOLD");f->float_switch=env_on("TESTFILTER_AUDIO_FLOAT");f->rate_switch=env_on("TESTFILTER_AUDIO_RATE");f->iface.lpVtbl=&filter_vtbl;f->compression.lpVtbl=&compression_vtbl;f->codec_api.lpVtbl=&codec_api_vtbl;f->codec_api_only=env_on("TESTFILTER_CODECAPI");f->persist.lpVtbl=&persist_vtbl;f->refs=1;f->encoder=encoder;f->quality=0.75;f->async=env_on("TESTFILTER_ASYNC");f->no_eos=env_on("TESTFILTER_NO_EOS");f->require_segment=env_on("TESTFILTER_REQUIRE_SEGMENT");f->peer_info=env_on("TESTFILTER_PEER_INFO");f->dynamic=env_on("TESTFILTER_DYNAMIC");f->dynamic_extra=env_on("TESTFILTER_DYNAMIC_EXTRA");f->no_preroll=env_on("TESTFILTER_NO_PREROLL");f->notify_error=env_on("TESTFILTER_NOTIFY_ERROR");f->strict=env_on("TESTFILTER_STRICT");f->own_allocator=env_on("TESTFILTER_OWN_ALLOCATOR");f->own_output=env_on("TESTFILTER_OWN_OUTPUT");InitializeCriticalSection(&f->transform_lock);f->input=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_INPUT};f->output=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_OUTPUT};InterlockedIncrement(&objects);HRESULT hr=filter_qi(&f->iface,iid,out);filter_release(&f->iface);return hr;}
+HRESULT testfilter_create(BOOL encoder,BOOL audio,REFIID iid,void**out){if(!out)return E_POINTER;*out=NULL;struct filter*f=alloc(sizeof(*f));if(!f)return E_OUTOFMEMORY;f->audio=audio;f->split=env_on("TESTFILTER_AUDIO_SPLIT");f->hold=env_on("TESTFILTER_AUDIO_HOLD");f->float_switch=env_on("TESTFILTER_AUDIO_FLOAT");f->rate_switch=env_on("TESTFILTER_AUDIO_RATE");f->iface.lpVtbl=&filter_vtbl;f->compression.lpVtbl=&compression_vtbl;f->codec_api.lpVtbl=&codec_api_vtbl;f->codec_api_only=env_on("TESTFILTER_CODECAPI");f->persist.lpVtbl=&persist_vtbl;f->refs=1;f->encoder=encoder;f->quality=0.75;f->async=env_on("TESTFILTER_ASYNC");f->no_eos=env_on("TESTFILTER_NO_EOS");f->require_segment=env_on("TESTFILTER_REQUIRE_SEGMENT");f->peer_info=env_on("TESTFILTER_PEER_INFO");f->dynamic=env_on("TESTFILTER_DYNAMIC");f->dynamic_extra=env_on("TESTFILTER_DYNAMIC_EXTRA");f->no_preroll=env_on("TESTFILTER_NO_PREROLL");f->notify_error=env_on("TESTFILTER_NOTIFY_ERROR");f->strict=env_on("TESTFILTER_STRICT");f->own_allocator=env_on("TESTFILTER_OWN_ALLOCATOR");f->own_output=env_on("TESTFILTER_OWN_OUTPUT");f->no_proposal=env_on("TESTFILTER_NO_PROPOSAL");InitializeCriticalSection(&f->transform_lock);f->input=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_INPUT};f->output=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_OUTPUT};InterlockedIncrement(&objects);HRESULT hr=filter_qi(&f->iface,iid,out);filter_release(&f->iface);return hr;}
 LONG testfilter_objects(void){return objects;}

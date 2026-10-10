@@ -337,21 +337,30 @@ static int com_try_input(struct xform *x, const BITMAPINFOHEADER *input,
 	if (SUCCEEDED(hr))
 		hr = dshow_bih_to_mt(&encoded, sizeof(encoded), rate, scale, 0,
 				     &out_mt);
-	if (SUCCEEDED(hr))
-		hr = xform_connect(x, &in_mt, &out_mt, com_write_encoded, sink);
 	/*
-	 * Some encoders connect only with the output type they propose
-	 * themselves (LEAD's want their own format block, with its codec
-	 * data): given just the subtype, the encoder completes it.
+	 * The encoder's own output type of that compression first, as a
+	 * graph builder connects it to a file writer that takes anything: it
+	 * may carry codec data, and some encoders take nothing else (LEAD's).
+	 * Failing that, the type made here from the input.
 	 */
-	if (hr == VFW_E_TYPE_NOT_ACCEPTED) {
+	if (SUCCEEDED(hr)) {
 		AM_MEDIA_TYPE partial = {
 			.majortype = out_mt.majortype, .subtype = out_mt.subtype,
 		};
 		hr = xform_connect(x, &in_mt, &partial, com_write_encoded, sink);
+		/* (A filter may take the partial type and add no format.) */
+		if (SUCCEEDED(hr))
+			hr = dshow_mt_to_bih(xform_output_type(x), output,
+					     output_size);
+		if (FAILED(hr)) {
+			xform_disconnect(x);
+			hr = xform_connect(x, &in_mt, &out_mt, com_write_encoded,
+					   sink);
+			if (SUCCEEDED(hr))
+				hr = dshow_mt_to_bih(xform_output_type(x), output,
+						     output_size);
+		}
 	}
-	if (SUCCEEDED(hr))
-		hr = dshow_mt_to_bih(xform_output_type(x), output, output_size);
 	if (SUCCEEDED(hr)) {
 		free(sink->format);
 		sink->format_size = *output_size;

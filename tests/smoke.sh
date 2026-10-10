@@ -348,8 +348,9 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		# A filter that supplies its own allocator (three or more buffers, with a
 		# prefix and alignment) has the host fill its samples, both ways.
 		# An encoder registered in two categories is still one encoder,
-		# and one that connects only with the output type it makes is
-		# given just the subtype (both as LEAD's encoders do).
+		# one that connects only with the output type it proposes gets
+		# it (both as LEAD's encoders), and one that proposes none gets
+		# the type made from the input.
 		VFW_ENV_TESTFILTER_TWO_CATEGORIES=1 \
 			$emu "$harness" encode "$fixtures/testfilter.ax" \
 			"$work/in.y4m" -o "$work/two.avi" 2>/dev/null
@@ -357,6 +358,16 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 			$emu "$harness" encode "$fixtures/testfilter.ax" \
 			"$work/in.y4m" -o "$work/own.avi" 2>&1 |
 			grep -q "4 bytes of extra data"
+		VFW_ENV_TESTFILTER_NO_PROPOSAL=1 \
+			$emu "$harness" encode "$fixtures/testfilter.ax" \
+			"$work/in.y4m" -o "$work/made.avi" 2>&1 |
+			grep -v "extra data" | grep -q "'TST0'"
+		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/made.avi" \
+			-o "$work/made.y4m" 2>/dev/null
+		cmp -s "$work/in.y4m" "$work/made.y4m" || {
+			echo "smoke: made output type round trip differs" >&2
+			exit 1
+		}
 		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/own.avi" \
 			-o "$work/own.y4m" 2>/dev/null
 		cmp -s "$work/in.y4m" "$work/own.y4m" || {
