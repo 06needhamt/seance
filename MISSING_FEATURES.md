@@ -277,6 +277,14 @@ the headless GDI leaves blank. It sets no sync points of its own, so only
 the frames asked to be keyframes are (the first); it has no
 `IAMVideoCompression`, so `--keyint` is refused.
 
+### The whole `ffmpeg-unimplemented-codecs-2026-10-03` archive
+
+All 58 files in that archive were later tested together, over every
+encode and decode path. The results are in
+[docs/CODEC_TEST_REPORT.md](docs/CODEC_TEST_REPORT.md), with the harness
+changes each failing codec needs (H1-H12), the faults that are the
+codecs' own, and the companion DLLs that are missing.
+
 ## In-repository baseline
 
 For comparison, the same command over `build/fixtures` examined 23 fixture
