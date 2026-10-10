@@ -40,7 +40,7 @@ struct filter {
 	LONG key_interval, pframes;
 	double quality;
 	DWORDLONG window;
-	BOOL async, no_eos, require_segment, segment, peer_info, dynamic, dynamic_extra, no_preroll, codec_api_only, notify_error, strict, own_allocator, own_output, no_proposal;
+	BOOL async, no_eos, require_segment, segment, peer_info, dynamic, dynamic_extra, no_preroll, codec_api_only, notify_error, strict, own_allocator, own_output, no_proposal, intra;
 	LONG workers;
 	HRESULT async_error;
 	CRITICAL_SECTION transform_lock;
@@ -817,9 +817,16 @@ static HRESULT transform(struct filter*f,IMediaSample*input)
 	if(FAILED(hr))return hr;
 	BYTE*dst=NULL;hr=sample->lpVtbl->GetPointer(sample,&dst);
 	if(SUCCEEDED(hr)&&f->encoder){
-		BOOL key=input->lpVtbl->IsSyncPoint(input)==S_OK||!f->valid||(f->key_interval>0&&f->frame%(DWORD)f->key_interval==0);
+		/* Its own keyframes, as an encoder decides them: every uncompressed input is a sync point. */
+		BOOL key=!f->valid||(f->key_interval>0&&f->frame%(DWORD)f->key_interval==0);
+		/*
+		 * TESTFILTER_INTRA: every frame stands alone and, as LEAD's
+		 * encoder, it marks none: the sample keeps the input's sync point,
+		 * as strmbase's InitializeOutputSample copies it.
+		 */
+		if(f->intra)key=TRUE;
 		LONG cap=sample->lpVtbl->GetSize(sample);if(cap<4)hr=VFW_E_BUFFER_OVERFLOW;
-		else{dst[0]=key?'K':'D';dst[1]=(BYTE)ib->biBitCount;dst[2]=dst[3]=0;if(key){DWORD n=rle_encode(src,raw,dst+4);if(n+4>(DWORD)cap)hr=VFW_E_BUFFER_OVERFLOW;else sample->lpVtbl->SetActualDataLength(sample,n+4);}else{for(DWORD i=0;i<raw;i++)f->picture[i]^=src[i];DWORD n=rle_encode(f->picture,raw,dst+4);if(n+4>(DWORD)cap)hr=VFW_E_BUFFER_OVERFLOW;else sample->lpVtbl->SetActualDataLength(sample,n+4);}if(SUCCEEDED(hr)){for(DWORD i=0;i<raw;i++)f->picture[i]=src[i];f->valid=TRUE;sample->lpVtbl->SetSyncPoint(sample,key);}}
+		else{dst[0]=key?'K':'D';dst[1]=(BYTE)ib->biBitCount;dst[2]=dst[3]=0;if(key){DWORD n=rle_encode(src,raw,dst+4);if(n+4>(DWORD)cap)hr=VFW_E_BUFFER_OVERFLOW;else sample->lpVtbl->SetActualDataLength(sample,n+4);}else{for(DWORD i=0;i<raw;i++)f->picture[i]^=src[i];DWORD n=rle_encode(f->picture,raw,dst+4);if(n+4>(DWORD)cap)hr=VFW_E_BUFFER_OVERFLOW;else sample->lpVtbl->SetActualDataLength(sample,n+4);}if(SUCCEEDED(hr)){for(DWORD i=0;i<raw;i++)f->picture[i]=src[i];f->valid=TRUE;sample->lpVtbl->SetSyncPoint(sample,f->intra?input->lpVtbl->IsSyncPoint(input)==S_OK:key);}}
 	}else if(SUCCEEDED(hr)){
 		if(input_len<4||src[1]!=ib->biBitCount||(src[0]!='K'&&src[0]!='D'))hr=VFW_E_INVALID_FILE_FORMAT;
 		else if(src[0]=='D'&&!f->valid)hr=VFW_E_SAMPLE_REJECTED;
@@ -896,5 +903,5 @@ static HRESULT WINAPI filter_vendor(IBaseFilter*p,LPWSTR*out){return E_NOTIMPL;}
 static IBaseFilterVtbl filter_vtbl={filter_qi,filter_addref,filter_release,filter_class,filter_stop,filter_pause,filter_run,filter_state,filter_set_clock,filter_get_clock,filter_enum,filter_find,filter_info,filter_join,filter_vendor};
 
 static BOOL env_on(const char*name){char value[2];return GetEnvironmentVariableA(name,value,sizeof(value))==1&&value[0]=='1';}
-HRESULT testfilter_create(BOOL encoder,BOOL audio,REFIID iid,void**out){if(!out)return E_POINTER;*out=NULL;struct filter*f=alloc(sizeof(*f));if(!f)return E_OUTOFMEMORY;f->audio=audio;f->split=env_on("TESTFILTER_AUDIO_SPLIT");f->hold=env_on("TESTFILTER_AUDIO_HOLD");f->float_switch=env_on("TESTFILTER_AUDIO_FLOAT");f->rate_switch=env_on("TESTFILTER_AUDIO_RATE");f->iface.lpVtbl=&filter_vtbl;f->compression.lpVtbl=&compression_vtbl;f->codec_api.lpVtbl=&codec_api_vtbl;f->codec_api_only=env_on("TESTFILTER_CODECAPI");f->persist.lpVtbl=&persist_vtbl;f->refs=1;f->encoder=encoder;f->quality=0.75;f->async=env_on("TESTFILTER_ASYNC");f->no_eos=env_on("TESTFILTER_NO_EOS");f->require_segment=env_on("TESTFILTER_REQUIRE_SEGMENT");f->peer_info=env_on("TESTFILTER_PEER_INFO");f->dynamic=env_on("TESTFILTER_DYNAMIC");f->dynamic_extra=env_on("TESTFILTER_DYNAMIC_EXTRA");f->no_preroll=env_on("TESTFILTER_NO_PREROLL");f->notify_error=env_on("TESTFILTER_NOTIFY_ERROR");f->strict=env_on("TESTFILTER_STRICT");f->own_allocator=env_on("TESTFILTER_OWN_ALLOCATOR");f->own_output=env_on("TESTFILTER_OWN_OUTPUT");f->no_proposal=env_on("TESTFILTER_NO_PROPOSAL");InitializeCriticalSection(&f->transform_lock);f->input=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_INPUT};f->output=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_OUTPUT};InterlockedIncrement(&objects);HRESULT hr=filter_qi(&f->iface,iid,out);filter_release(&f->iface);return hr;}
+HRESULT testfilter_create(BOOL encoder,BOOL audio,REFIID iid,void**out){if(!out)return E_POINTER;*out=NULL;struct filter*f=alloc(sizeof(*f));if(!f)return E_OUTOFMEMORY;f->audio=audio;f->split=env_on("TESTFILTER_AUDIO_SPLIT");f->hold=env_on("TESTFILTER_AUDIO_HOLD");f->float_switch=env_on("TESTFILTER_AUDIO_FLOAT");f->rate_switch=env_on("TESTFILTER_AUDIO_RATE");f->iface.lpVtbl=&filter_vtbl;f->compression.lpVtbl=&compression_vtbl;f->codec_api.lpVtbl=&codec_api_vtbl;f->codec_api_only=env_on("TESTFILTER_CODECAPI");f->persist.lpVtbl=&persist_vtbl;f->refs=1;f->encoder=encoder;f->quality=0.75;f->async=env_on("TESTFILTER_ASYNC");f->no_eos=env_on("TESTFILTER_NO_EOS");f->require_segment=env_on("TESTFILTER_REQUIRE_SEGMENT");f->peer_info=env_on("TESTFILTER_PEER_INFO");f->dynamic=env_on("TESTFILTER_DYNAMIC");f->dynamic_extra=env_on("TESTFILTER_DYNAMIC_EXTRA");f->no_preroll=env_on("TESTFILTER_NO_PREROLL");f->notify_error=env_on("TESTFILTER_NOTIFY_ERROR");f->strict=env_on("TESTFILTER_STRICT");f->own_allocator=env_on("TESTFILTER_OWN_ALLOCATOR");f->own_output=env_on("TESTFILTER_OWN_OUTPUT");f->no_proposal=env_on("TESTFILTER_NO_PROPOSAL");f->intra=env_on("TESTFILTER_INTRA");InitializeCriticalSection(&f->transform_lock);f->input=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_INPUT};f->output=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_OUTPUT};InterlockedIncrement(&objects);HRESULT hr=filter_qi(&f->iface,iid,out);filter_release(&f->iface);return hr;}
 LONG testfilter_objects(void){return objects;}

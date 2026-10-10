@@ -535,9 +535,14 @@ static int encode_com(const char *target, const CLSID *selected,
 		size_t input_bytes = feed.from ? image_frame_size(feed.to) : len;
 		REFERENCE_TIME a = (REFERENCE_TIME)pushed * scale * 10000000 / rate;
 		REFERENCE_TIME b = (REFERENCE_TIME)(pushed + 1) * scale * 10000000 / rate;
-		int key = !pushed || (keyint && keyint != (unsigned long)-1 &&
-				      pushed % keyint == 0);
-		DWORD flags = key ? AM_SAMPLE_SPLICEPOINT : 0;
+		/*
+		 * Every uncompressed frame is a sync point, as a file source
+		 * gives them: an encoder that sets none of its own (strmbase's
+		 * copy the input's) makes every frame a keyframe, as it would
+		 * on Windows, and one with keyframes of its own (asked for
+		 * through IAMVideoCompression or ICodecAPI) marks the rest.
+		 */
+		DWORD flags = AM_SAMPLE_SPLICEPOINT;
 		if (!pushed)
 			flags |= AM_SAMPLE_DATADISCONTINUITY;
 		double then = now();

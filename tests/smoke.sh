@@ -358,6 +358,12 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 			$emu "$harness" encode "$fixtures/testfilter.ax" \
 			"$work/in.y4m" -o "$work/own.avi" 2>&1 |
 			grep -q "4 bytes of extra data"
+		# An intra-only encoder that marks no keyframes of its own passes
+		# on its inputs' sync points: every uncompressed frame is one.
+		VFW_ENV_TESTFILTER_INTRA=1 \
+			$emu "$harness" encode "$fixtures/testfilter.ax" \
+			"$work/in.y4m" -o "$work/intra.avi" 2>&1 |
+			grep -q "4 frames (4 key)"
 		VFW_ENV_TESTFILTER_NO_PROPOSAL=1 \
 			$emu "$harness" encode "$fixtures/testfilter.ax" \
 			"$work/in.y4m" -o "$work/made.avi" 2>&1 |

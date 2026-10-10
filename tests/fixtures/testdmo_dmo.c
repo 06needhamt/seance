@@ -663,8 +663,8 @@ static HRESULT encode(struct dmo *d, const BYTE *src, DWORD len, BYTE *dst,
 
 	if (len < raw)
 		return E_INVALIDARG;
-	*key = (d->pending_flags & DMO_INPUT_DATA_BUFFERF_SYNCPOINT) ||
-	       !d->valid || (d->key_interval > 0 &&
+	/* Its own keyframes: every uncompressed input is a sync point. */
+	*key = !d->valid || (d->key_interval > 0 &&
 			     d->frame % (DWORD)d->key_interval == 0);
 	if (cap < raw * 2 + 4)
 		return E_INVALIDARG;

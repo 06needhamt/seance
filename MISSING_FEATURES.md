@@ -273,9 +273,9 @@ Single codecs tried one at a time, with what each needed:
 
 The LEAD encoder is an evaluation build ("LEAD MCMW 2.0 Eval Encoder") that
 draws a banner into the bottom 16 rows of every frame with GDI text, which
-the headless GDI leaves blank. It sets no sync points of its own, so only
-the frames asked to be keyframes are (the first); it has no
-`IAMVideoCompression`, so `--keyint` is refused.
+the headless GDI leaves blank. It sets no sync points of its own and keeps
+its inputs', so every frame is a keyframe, as on Windows (LCW2 frames stand
+alone); it has no `IAMVideoCompression`, so `--keyint` is refused.
 
 ### The whole `ffmpeg-unimplemented-codecs-2026-10-03` archive
 
