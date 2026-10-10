@@ -25,6 +25,7 @@
 #include "loader/pe.h"
 #include "out/image.h"
 #include "out/output.h"
+#include "runtime/guard.h"
 #include "runtime/runtime.h"
 #include "vfw/icm.h"
 #include "win32/codepage.h"
@@ -806,7 +807,7 @@ int cmd_decode(int argc, char **argv)
 	size_t pic_size = conv ? image_frame_size(conv) : 0;
 	if (out->biSizeImage > pic_size)
 		pic_size = out->biSizeImage;
-	if (!pic_size || !(pic = calloc(1, pic_size))) {
+	if (!pic_size || !(pic = guard_alloc(pic_size, "output buffer"))) {
 		fprintf(stderr, "seance: %s\n", pic_size ? "out of memory" :
 			"the output format has no image size");
 		goto done;
@@ -936,7 +937,7 @@ done:
 	image_conv_free(conv);
 	free(state);
 	free(buf);
-	free(pic);
+	guard_free(pic);
 	free(out);
 	free(in);
 	avi_close(avi);

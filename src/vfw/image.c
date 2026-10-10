@@ -15,6 +15,7 @@
 
 #include "common/error.h"
 #include "common/log.h"
+#include "runtime/guard.h"
 #include "vfw/icm.h"
 #include "win32/k32.h"
 
@@ -123,7 +124,7 @@ HANDLE STUB_WINAPI ic_image_compress(HIC hic, UINT flags, BITMAPINFO *in,
 		      image_size(&in->bmiHeader);
 	if (max > 0 && out->biSizeImage > (DWORD)max)
 		max = out->biSizeImage;
-	if (max <= 0 || !(buf = malloc((size_t)max))) {
+	if (max <= 0 || !(buf = guard_alloc((size_t)max, "output buffer"))) {
 		vfw_set_error("ICImageCompress: no room for the output");
 		goto done;
 	}
@@ -148,7 +149,7 @@ done:
 	if (opened)
 		ic_close(hic);
 	free(out);
-	free(buf);
+	guard_free(buf);
 	return h;
 }
 
@@ -215,7 +216,7 @@ HANDLE STUB_WINAPI ic_image_decompress(HIC hic, UINT flags, BITMAPINFO *in,
 	}
 
 	DWORD n = out->biSizeImage ? out->biSizeImage : image_size(out);
-	if (!n || !(pixels = calloc(1, n))) {
+	if (!n || !(pixels = guard_alloc(n, "output buffer"))) {
 		vfw_set_error("ICImageDecompress: no room for the output");
 		goto done;
 	}
@@ -241,6 +242,6 @@ done:
 		TRACE("%s (%s)", vfw_error(), icerr_name(err, buf));
 	}
 	free(out);
-	free(pixels);
+	guard_free(pixels);
 	return h;
 }

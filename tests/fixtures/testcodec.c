@@ -40,6 +40,8 @@
  *   TESTCODEC_DECODE_ONLY it refuses DRV_OPEN to compress, though it answers
  *                         ICM_COMPRESS_QUERY when opened otherwise
  *                         (vgpix32d.dll)
+ *   TESTCODEC_OVERRUN     it writes a page past the end of its largest
+ *                         frame when compressing (SN4Codec.dll)
  *   TESTCODEC_END_CRASH   it divides by zero in ICM_COMPRESS_END and
  *                         ICM_DECOMPRESS_END (WavCWAIP.dll, by a byte count
  *                         it never kept)
@@ -101,6 +103,7 @@ static int latesize;	/* TESTCODEC_LATESIZE */
 static int needs_status, needs_padding, ask_format, picky, decode_only;
 static int named_only;
 static int end_crash;
+static int overrun;
 static volatile int zero;
 #define EARLY_SIZE 16	/* what it says before ICM_COMPRESS_BEGIN */
 static DWORD last_quality = 0xffffffff;	/* of the last ICM_COMPRESS */
@@ -585,6 +588,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 						     sizeof(v)) == 1 && v[0] == '1';
 		end_crash = GetEnvironmentVariableA("TESTCODEC_END_CRASH", v,
 						    sizeof(v)) == 1 && v[0] == '1';
+		overrun = GetEnvironmentVariableA("TESTCODEC_OVERRUN", v,
+						  sizeof(v)) == 1 && v[0] == '1';
 		log_msg(msg);
 		check_module(hdrvr);
 		return DefDriverProc(id, hdrvr, msg, l1, l2);
@@ -731,6 +736,11 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		if (needs_status && inst->status(inst->status_param,
 						 ICSTATUS_STATUS, 0))
 			return ICERR_ABORT;
+		if (overrun) {
+			ICCOMPRESS *c = (ICCOMPRESS *)l1;
+			((volatile BYTE *)c->lpOutput)[max_size(c->lpbiInput) +
+						       4096] = 0;
+		}
 		return compress(inst, (ICCOMPRESS *)l1);
 	case ICM_COMPRESS_END:
 		release(inst->cprev);

@@ -488,8 +488,12 @@ static void probe_decompress(HIC hic, const BITMAPINFOHEADER *in)
 	free(out);
 }
 
-/* Compression of each standard input format at w x h. */
-static void probe_compress(HIC hic, LONG w, LONG h)
+/*
+ * Compression of each standard input format at w x h, by hic opened to
+ * compress; dhic, as probe opened it, is asked to decompress the result
+ * (pvwv220.dll answers only what it was opened for).
+ */
+static void probe_compress(HIC hic, HIC dhic, LONG w, LONG h)
 {
 	struct vfw_format f;
 	const char *name;
@@ -525,7 +529,7 @@ static void probe_compress(HIC hic, LONG w, LONG h)
 		else
 			printf("    largest frame: not reported (%s)\n",
 			       icerr_name(size, err));
-		probe_decompress(hic, out);
+		probe_decompress(dhic, out);
 		free(out);
 	}
 	if (!any && unsupported)
@@ -680,9 +684,9 @@ int cmd_probe(int argc, char **argv)
 		       "(ICMODE_COMPRESS refused): it only decompresses\n");
 	} else {
 		if (!in || have_size)
-			probe_compress(chic, w, h);
+			probe_compress(chic, hic, w, h);
 		else
-			probe_compress(chic, in->biWidth,
+			probe_compress(chic, hic, in->biWidth,
 				       in->biHeight < 0 ? -in->biHeight : in->biHeight);
 		ic_close(chic);
 	}

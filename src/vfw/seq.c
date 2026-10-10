@@ -16,6 +16,7 @@
 
 #include "common/log.h"
 #include "common/error.h"
+#include "runtime/guard.h"
 #include "vfw/icm.h"
 
 #define MAX_SEQS 64
@@ -83,7 +84,7 @@ static void free_buffers(COMPVARS *pc)
 {
 	free(pc->lpbiIn);
 	free(pc->lpbiOut);
-	free(pc->lpBitsOut);
+	guard_free(pc->lpBitsOut);
 	free(pc->lpBitsPrev);
 	pc->lpbiIn = pc->lpbiOut = NULL;
 	pc->lpBitsOut = pc->lpBitsPrev = NULL;
@@ -149,7 +150,7 @@ BOOL ic_seq_start_ex(COMPVARS *pc, const BITMAPINFO *in, DWORD rate,
 	/* Nor less than the output format says a frame takes. */
 	if (out->biSizeImage > s->max_frame)
 		s->max_frame = out->biSizeImage;
-	pc->lpBitsOut = calloc(1, s->max_frame);
+	pc->lpBitsOut = guard_alloc(s->max_frame, "output buffer");
 	if (!pc->lpBitsOut)
 		goto nomem;
 
@@ -222,12 +223,12 @@ BOOL ic_seq_start_ex(COMPVARS *pc, const BITMAPINFO *in, DWORD rate,
 	r = ic_send(pc->hic, ICM_COMPRESS_GET_SIZE, (DWORD_PTR)pc->lpbiIn,
 		    (DWORD_PTR)out);
 	if (r > 0 && (DWORD)r > s->max_frame) {
-		void *bigger = calloc(1, (size_t)r);
+		void *bigger = guard_alloc((size_t)r, "output buffer");
 		if (!bigger) {
 			ic_send(pc->hic, ICM_COMPRESS_END, 0, 0);
 			goto nomem;
 		}
-		free(pc->lpBitsOut);
+		guard_free(pc->lpBitsOut);
 		pc->lpBitsOut = bigger;
 		s->max_frame = (DWORD)r;
 	}

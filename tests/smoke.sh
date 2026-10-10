@@ -334,6 +334,11 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 			"$fixtures/testcodec.dll" "$work/end.avi" \
 			-o "$work/end.y4m" 2>/dev/null
 		cmp "$work/noise.y4m" "$work/end.y4m"
+		# One that writes past its output buffer faults right there.
+		VFW_ENV_TESTCODEC_OVERRUN=1 $emu "$harness" encode \
+			"$fixtures/testcodec.dll" "$work/noise.y4m" \
+			-o "$work/over.avi" 2>&1 |
+			grep -q "bytes past the end of the [0-9]*-byte output buffer"
 	fi
 	VFW_ENV_TESTACM_OPENCRASH=1 $emu "$harness" encode "$a" "$work/v.y4m" \
 		-o "$work/x.avi" 2>&1 | grep -q "is an ACM audio driver"

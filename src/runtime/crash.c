@@ -35,6 +35,7 @@
 #include "common/sanitizer.h"
 #include "loader/modules.h"
 #include "runtime/crash.h"
+#include "runtime/guard.h"
 #include "runtime/seh.h"
 #include "runtime/teb.h"
 
@@ -111,8 +112,15 @@ static void report_fault(int sig, const void *pc, const void *fault_addr)
 {
 	char where[160], line[400];
 
+	char buffer[160];
+
 	describe(pc, where, sizeof(where));
-	if (sig == SIGSEGV || sig == SIGBUS)
+	if ((sig == SIGSEGV || sig == SIGBUS) &&
+	    guard_describe(fault_addr, buffer, sizeof(buffer)))
+		snprintf(line, sizeof(line), "seance: crash: %s at %s, "
+			 "accessing %p, %s\n", signame(sig), where, fault_addr,
+			 buffer);
+	else if (sig == SIGSEGV || sig == SIGBUS)
 		snprintf(line, sizeof(line), "seance: crash: %s at %s, "
 			 "accessing %p\n", signame(sig), where, fault_addr);
 	else
