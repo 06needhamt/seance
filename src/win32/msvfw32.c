@@ -5,8 +5,7 @@
  * ICSeqCompressFrame* sequence API, ICImageCompress/ICImageDecompress, and
  * ICCompressorChoose answering without its dialog, and DrawDib* with
  * ICDrawBegin/ICDraw and StretchDIB (src/vfw/drawdib.c). MCIWnd* and the
- * rest of the GUI
- * side are left as traps.
+ * rest of the GUI side are left as traps.
  */
 #include "vfw/icm.h"
 #include "win32/internal.h"
