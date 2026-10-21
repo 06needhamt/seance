@@ -692,6 +692,101 @@ static BOOL monitor_info(HMONITOR h, MONITORINFO *mi, int wide)
 WINFN(BOOL) user_GetMonitorInfoA(HMONITOR h, LPMONITORINFO mi) { return monitor_info(h, mi, 0); }
 WINFN(BOOL) user_GetMonitorInfoW(HMONITOR h, LPMONITORINFO mi) { return monitor_info(h, mi, 1); }
 
+/*
+ * The one display has one mode, the screen GetSystemMetrics and
+ * GetDeviceCaps describe; it is mode 0, the current and the registry's.
+ * The device is the primary display, named or not.
+ */
+static BOOL display_mode(const WCHAR *device, DWORD mode, BYTE *out, int wide)
+{
+	static const char name[] = "\\\\.\\DISPLAY1";
+	static const char gdi_name[] = "DISPLAY";
+	DEVMODEW w;		/* the A layout's fields, widened */
+
+	if (device && device[0]) {
+		size_t i = 0;
+		for (; name[i] && (device[i] | 0x20) == (name[i] | 0x20); i++)
+			;
+		if (name[i] || device[i]) {
+			win_set_error(ERROR_INVALID_PARAMETER);
+			return FALSE;
+		}
+	}
+	if (mode != ENUM_CURRENT_SETTINGS && mode != ENUM_REGISTRY_SETTINGS &&
+	    mode != 0) {
+		win_set_error(ERROR_INVALID_PARAMETER);	/* no more modes */
+		return FALSE;
+	}
+	if (!out) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	memset(&w, 0, sizeof(w));
+	for (size_t i = 0; i < sizeof(gdi_name); i++)
+		w.dmDeviceName[i] = gdi_name[i];
+	w.dmSpecVersion = DM_SPECVERSION;
+	w.dmDriverVersion = DM_SPECVERSION;
+	w.dmFields = DM_POSITION | DM_BITSPERPEL | DM_PELSWIDTH |
+		     DM_PELSHEIGHT | DM_DISPLAYFLAGS | DM_DISPLAYFREQUENCY;
+	w.dmBitsPerPel = GDI_SCREEN_BPP;
+	w.dmPelsWidth = USER_SCREEN_WIDTH;
+	w.dmPelsHeight = USER_SCREEN_HEIGHT;
+	w.dmDisplayFrequency = 60;
+
+	/* The caller says how big its structure is; only that is written. */
+	WORD size = ((const DEVMODEA *)out)->dmSize;
+	if (wide) {
+		w.dmSize = sizeof(DEVMODEW);
+		memcpy(out, &w, size && size < sizeof(w) ? size : sizeof(w));
+		return TRUE;
+	}
+	DEVMODEA a;
+	memset(&a, 0, sizeof(a));
+	for (size_t i = 0; i < CCHDEVICENAME; i++)
+		a.dmDeviceName[i] = (BYTE)w.dmDeviceName[i];
+	memcpy(&a.dmSpecVersion, &w.dmSpecVersion,
+	       offsetof(DEVMODEA, dmFormName) - offsetof(DEVMODEA, dmSpecVersion));
+	memcpy(&a.dmLogPixels, &w.dmLogPixels,
+	       sizeof(a) - offsetof(DEVMODEA, dmLogPixels));
+	a.dmSize = sizeof(DEVMODEA);
+	memcpy(out, &a, size && size < sizeof(a) ? size : sizeof(a));
+	return TRUE;
+}
+
+static WCHAR *device_w(const char *s, WCHAR *buf, size_t n)
+{
+	if (!s)
+		return NULL;
+	size_t i = 0;
+	for (; s[i] && i + 1 < n; i++)
+		buf[i] = (BYTE)s[i];
+	buf[i] = 0;
+	return buf;
+}
+
+WINFN(BOOL) user_EnumDisplaySettingsExW(LPCWSTR device, DWORD mode,
+					DEVMODEW *dm, DWORD flags)
+{
+	return display_mode(device, mode, (BYTE *)dm, 1);
+}
+
+WINFN(BOOL) user_EnumDisplaySettingsW(LPCWSTR device, DWORD mode, DEVMODEW *dm)
+{
+	return display_mode(device, mode, (BYTE *)dm, 1);
+}
+
+WINFN(BOOL) user_EnumDisplaySettingsExA(LPCSTR device, DWORD mode,
+					DEVMODEA *dm, DWORD flags)
+{
+	WCHAR w[64];
+	return display_mode(device_w(device, w, 64), mode, (BYTE *)dm, 0);
+}
+
+WINFN(BOOL) user_EnumDisplaySettingsA(LPCSTR device, DWORD mode, DEVMODEA *dm)
+{
+	return user_EnumDisplaySettingsExA(device, mode, dm, 0);
+}
+
 WINFN(DWORD) user_WaitForInputIdle(HANDLE process, DWORD ms) { return 0; }
 
 /* Registered window messages and clipboard formats share one table. */
@@ -747,6 +842,10 @@ static const struct builtin_export exports[] = {
 	E(GetKeyboardLayoutList),
 	E(GetKeyboardState),
 	E(GetKeyboardType),
+	E(EnumDisplaySettingsA),
+	E(EnumDisplaySettingsExA),
+	E(EnumDisplaySettingsExW),
+	E(EnumDisplaySettingsW),
 	E(GetMonitorInfoA),
 	E(GetMonitorInfoW),
 	E(GetProcessWindowStation),

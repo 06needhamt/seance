@@ -486,6 +486,9 @@ static void test_misc(void)
 	FN(int, ReleaseDC, HWND, HDC);
 	FN(SHORT, GetKeyState, int);
 	FN(int, GetKeyboardType, int);
+	FN(BOOL, EnumDisplaySettingsA, LPCSTR, DWORD, DEVMODEA *);
+	FN(BOOL, EnumDisplaySettingsW, LPCWSTR, DWORD, DEVMODEW *);
+	FN(BOOL, EnumDisplaySettingsExA, LPCSTR, DWORD, DEVMODEA *, DWORD);
 	FN(int, GetKeyboardLayoutList, int, HANDLE *);
 	FN(BOOL, GetCursorPos, LPPOINT);
 	FN(HWINSTA, GetProcessWindowStation, void);
@@ -577,6 +580,38 @@ static void test_misc(void)
 	CHECK(layouts[0] == (HANDLE)0x04090409 && !layouts[1]);
 	POINT pt;
 	CHECK(GetCursorPos(&pt) && pt.x == 512);
+
+	/* One display mode, the screen's (frapsvid.dll asks). */
+	DEVMODEA dm;
+	memset(&dm, 0xcc, sizeof(dm));
+	dm.dmSize = sizeof(dm);
+	dm.dmDriverExtra = 0;
+	CHECK(EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &dm));
+	CHECK_EQ(dm.dmSize, sizeof(DEVMODEA));
+	CHECK_EQ(dm.dmPelsWidth, 1024);
+	CHECK_EQ(dm.dmPelsHeight, 768);
+	CHECK_EQ(dm.dmBitsPerPel, 32);
+	CHECK_EQ(dm.dmDisplayFrequency, 60);
+	CHECK(dm.dmFields & DM_PELSWIDTH);
+	CHECK_EQ(dm.dmPosition.x, 0);
+	CHECK(!strcmp((const char *)dm.dmDeviceName, "DISPLAY"));
+	CHECK(EnumDisplaySettingsA("\\\\.\\display1", 0, &dm));
+	CHECK(EnumDisplaySettingsExA(NULL, ENUM_REGISTRY_SETTINGS, &dm, 0));
+	CHECK(!EnumDisplaySettingsA(NULL, 1, &dm));	/* no more modes */
+	CHECK(!EnumDisplaySettingsA("\\\\.\\DISPLAY2", 0, &dm));
+	DEVMODEW dw;
+	memset(&dw, 0, sizeof(dw));
+	dw.dmSize = sizeof(dw);
+	CHECK(EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &dw));
+	CHECK(dw.dmPelsWidth == 1024 && dw.dmBitsPerPel == 32 &&
+	      dw.dmDeviceName[0] == 'D' && dw.dmSize == sizeof(DEVMODEW));
+	/* A smaller structure (an older DEVMODE) is written only so far. */
+	BYTE small[sizeof(DEVMODEA) + 4];
+	memset(small, 0xcc, sizeof(small));
+	((DEVMODEA *)small)->dmSize = offsetof(DEVMODEA, dmICMMethod);
+	CHECK(EnumDisplaySettingsA(NULL, 0, (DEVMODEA *)small));
+	CHECK(((DEVMODEA *)small)->dmPelsHeight == 768 &&
+	      small[offsetof(DEVMODEA, dmICMMethod)] == 0xcc);
 
 	/* What the MSVC CRT asks before it shows a message box. */
 	USEROBJECTFLAGS f;

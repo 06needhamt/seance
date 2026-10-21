@@ -240,6 +240,48 @@ static void test_msvcrt(void)
 	CHECK(wcsrchr(path, '\\') == path + 3);
 	CHECK(wcsrchr(path, 'z') == NULL);
 	CHECK(wcsrchr(path, 0) == path + 5);
+	CFN(c, WCHAR *, wcschr, const WCHAR *, WCHAR);
+	CFN(c, WCHAR *, wcsstr, const WCHAR *, const WCHAR *);
+	CFN(c, WCHAR *, wcsncpy, WCHAR *, const WCHAR *, size_t);
+	CFN(c, WCHAR *, wcsncat, WCHAR *, const WCHAR *, size_t);
+	CFN(c, size_t, wcsspn, const WCHAR *, const WCHAR *);
+	CFN(c, size_t, wcscspn, const WCHAR *, const WCHAR *);
+	CFN(c, WCHAR *, wcspbrk, const WCHAR *, const WCHAR *);
+	CFN(c, WCHAR *, _wcsdup, const WCHAR *);
+	CFN(c, int, _wcsicmp, const WCHAR *, const WCHAR *);
+	CFN(c, int, _wcsnicmp, const WCHAR *, const WCHAR *, size_t);
+	CFN(c, WCHAR *, _wcslwr, WCHAR *);
+	CFN(c, WCHAR *, _wcsupr, WCHAR *);
+	static const WCHAR seps[] = { '\\', 'c', 0 }, bc[] = { 'b', '\\', 'c', 0 };
+	static const WCHAR upper[] = { 'A', '\\', 'B', 0 }, none[] = { 0 };
+	CHECK(wcschr(path, '\\') == path + 1);
+	CHECK(wcschr(path, 'z') == NULL);
+	CHECK(wcschr(path, 0) == path + 5);
+	CHECK(wcsstr(path, bc) == path + 2);
+	CHECK(wcsstr(path, upper) == NULL);
+	CHECK(wcsstr(path, none) == path);
+	CHECK_EQ(wcsspn(path, (const WCHAR[]){ 'a', '\\', 0 }), 2);
+	CHECK_EQ(wcscspn(path, seps), 1);
+	CHECK(wcspbrk(path, seps) == path + 1);
+	CHECK(wcspbrk(path, (const WCHAR[]){ 'q', 0 }) == NULL);
+	WCHAR wbuf[8];
+	memset(wbuf, 0xff, sizeof(wbuf));
+	CHECK(wcsncpy(wbuf, path, 3) == wbuf);
+	CHECK(wbuf[2] == 'b' && wbuf[3] == 0xffff);	/* not ended */
+	wcsncpy(wbuf, bc, 6);
+	CHECK(wbuf[3] == 0 && wbuf[5] == 0 && wbuf[6] == 0xffff);
+	wcsncat(wbuf, path, 2);
+	CHECK(wbuf[3] == 'a' && wbuf[4] == '\\' && wbuf[5] == 0);
+	CHECK_EQ(_wcsicmp(path, (const WCHAR[]){ 'A', '\\', 'B', '\\', 'C', 0 }), 0);
+	CHECK(_wcsicmp(path, upper) > 0);
+	CHECK_EQ(_wcsnicmp(path, upper, 3), 0);
+	WCHAR *dup = _wcsdup(path);
+	CHECK(dup && !_wcsicmp(dup, path));
+	_wcsupr(dup);
+	CHECK(dup[0] == 'A' && dup[1] == '\\' && dup[4] == 'C');
+	_wcslwr(dup);
+	CHECK(dup[0] == 'a' && dup[4] == 'c');
+	free(dup);
 	CFN(c, void *, malloc, size_t);
 	CFN(c, void, free, void *);
 	CFN(c, size_t, _msize, void *);
@@ -255,6 +297,18 @@ static void test_msvcrt(void)
 	CHECK_EQ(*codepage, 0);
 	CFN(c, void, __setusermatherr, void *);
 	__setusermatherr(NULL);
+
+	/* kernel32's copies of ntdll's (msrle32.dll imports RtlMoveMemory). */
+	FN(k, void, RtlMoveMemory, void *, const void *, SIZE_T);
+	FN(k, void, RtlZeroMemory, void *, SIZE_T);
+	FN(k, void, RtlFillMemory, void *, SIZE_T, BYTE);
+	BYTE mem[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+	RtlMoveMemory(mem + 1, mem, 4);		/* overlapping */
+	CHECK(mem[0] == 1 && mem[1] == 1 && mem[4] == 4 && mem[5] == 6);
+	RtlFillMemory(mem, 3, 0xab);
+	CHECK(mem[0] == 0xab && mem[2] == 0xab && mem[3] == 3);
+	RtlZeroMemory(mem + 4, 4);
+	CHECK(mem[3] == 3 && mem[4] == 0 && mem[7] == 0);
 
 	mod_free(k);
 	mod_free(c);
@@ -291,6 +345,10 @@ static void test_winsock(void)
 	FN(m, const char *, inet_ntop, int, const void *, char *, SIZE_T);
 	FN(m, unsigned short, htons, unsigned short);
 	FN(m, DWORD, ntohl, DWORD);
+	FN(m, DWORD, htonl, DWORD);
+	FN(m, DWORD, inet_addr, const char *);
+	FN(m, char *, inet_ntoa, DWORD);
+	FN(m, void *, gethostbyname, const char *);
 	struct { WORD ver, high; char d[257], s[129]; unsigned short a, b; char *v; } data;
 
 	/* Nothing works before it is started. */
@@ -320,6 +378,31 @@ static void test_winsock(void)
 	/* The pure functions work. */
 	CHECK_EQ(htons(0x1234), 0x3412);
 	CHECK_EQ(ntohl(0x01020304), 0x04030201);
+	CHECK_EQ(htonl(0x01020304), 0x04030201);
+	CHECK_EQ(inet_addr("10.1.2.3"), 0x0302010a);
+	CHECK_EQ(inet_addr("10.1.2.300"), 0xffffffffu);	/* INADDR_NONE */
+	CHECK_STR(inet_ntoa(0x0302010a), "10.1.2.3");
+	struct { char *name; char **aliases; short type, len; char **addrs; } *h =
+		gethostbyname("10.1.2.3");
+	CHECK(h && h->type == 2 && h->len == 4 && h->addrs[0] &&
+	      !memcmp(h->addrs[0], "\x0a\x01\x02\x03", 4) && !h->addrs[1] &&
+	      !strcmp(h->name, "10.1.2.3"));
+	CHECK(gethostbyname("example.invalid") == NULL);
+	CHECK_EQ(WSAGetLastError(), WSAHOST_NOT_FOUND);
+
+	/*
+	 * Codecs import wsock32 by ordinal (wmsdmoe2.dll: 8, htonl); its
+	 * ordinals part from ws2_32's at 10.
+	 */
+	if (alias) {
+		CHECK(mod_get_ordinal(alias, 8) == (void *)htonl);
+		CHECK(mod_get_ordinal(m, 8) == (void *)htonl);
+		CHECK(mod_get_ordinal(alias, 10) == (void *)inet_addr);
+		CHECK(mod_get_ordinal(m, 11) == (void *)inet_addr);
+		CHECK(mod_get_ordinal(m, 10) == get(m, "ioctlsocket"));
+		CHECK(mod_get_ordinal(alias, 12) == get(m, "ioctlsocket"));
+		CHECK(mod_get_ordinal(alias, 115) == (void *)WSAStartup);
+	}
 	BYTE addr[16];
 	char text[64];
 	CHECK_EQ(inet_pton(2, "192.168.1.20", addr), 1);

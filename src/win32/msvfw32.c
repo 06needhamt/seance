@@ -4,7 +4,8 @@
  * into it (wrappers opening another codec, for instance), the
  * ICSeqCompressFrame* sequence API, ICImageCompress/ICImageDecompress, and
  * ICCompressorChoose answering without its dialog, and DrawDib* with
- * ICDrawBegin/ICDraw (src/vfw/drawdib.c). MCIWnd* and the rest of the GUI
+ * ICDrawBegin/ICDraw and StretchDIB (src/vfw/drawdib.c). MCIWnd* and the
+ * rest of the GUI
  * side are left as traps.
  */
 #include "vfw/icm.h"

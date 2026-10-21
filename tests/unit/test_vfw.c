@@ -716,6 +716,60 @@ static int shows(const BYTE *t, LONG tw, LONG dx, LONG dy, LONG dw, LONG dh,
 }
 
 /* DrawDib* and ICDrawBegin/ICDraw, through msvfw32's exports. */
+/* StretchDIB: nearest-pixel scaling between DIBs of one depth (qdv.dll). */
+static void test_stretch_dib(void)
+{
+	struct module *vfw = mod_load("msvfw32.dll", NULL);
+	CHECK(vfw != NULL);
+	if (!vfw)
+		return;
+	void (WINAPI *stretch)(BITMAPINFOHEADER *, void *, int, int, int, int,
+			       BITMAPINFOHEADER *, void *, int, int, int, int) =
+		mod_get_proc(vfw, "StretchDIB");
+	CHECK(stretch != NULL);
+	if (!stretch)
+		return;
+	BITMAPINFOHEADER s = {
+		.biSize = sizeof(s), .biWidth = 2, .biHeight = 2, .biPlanes = 1,
+		.biBitCount = 24,
+	};
+	BITMAPINFOHEADER d = s;
+	d.biWidth = 5;			/* rows of 16 bytes, padded */
+	d.biHeight = 4;
+	/* Rows of 8 bytes: pixels 1, 2 then 3, 4 (each pixel n is n,n,n). */
+	BYTE src[16] = { 1, 1, 1, 2, 2, 2, 0, 0, 3, 3, 3, 4, 4, 4, 0, 0 };
+	BYTE dst[64];
+
+	memset(dst, 0xee, sizeof(dst));
+	stretch(&d, dst, 0, 0, 4, 4, &s, src, 0, 0, 2, 2);
+	static const BYTE want[4][4] = {
+		{ 1, 1, 2, 2 }, { 1, 1, 2, 2 }, { 3, 3, 4, 4 }, { 3, 3, 4, 4 },
+	};
+	int ok = 1;
+	for (int y = 0; y < 4; y++) {
+		for (int x = 0; x < 4; x++)
+			for (int c = 0; c < 3; c++)
+				ok &= dst[y * 16 + x * 3 + c] == want[y][x];
+		ok &= dst[y * 16 + 12] == 0xee;	/* the fifth column untouched */
+	}
+	CHECK(ok);
+
+	/* A part of the source, at an offset, clipped to the target. */
+	memset(dst, 0xee, sizeof(dst));
+	stretch(&d, dst, 3, 3, 4, 4, &s, src, 1, 1, 1, 1);
+	CHECK(dst[3 * 16 + 9] == 4 && dst[3 * 16 + 12] == 4);
+	CHECK(dst[3 * 16 + 6] == 0xee && dst[2 * 16 + 9] == 0xee);
+
+	/* Depths that differ, and empty rectangles, draw nothing. */
+	memset(dst, 0xee, sizeof(dst));
+	d.biBitCount = 32;
+	stretch(&d, dst, 0, 0, 4, 4, &s, src, 0, 0, 2, 2);
+	d.biBitCount = 24;
+	stretch(&d, dst, 0, 0, 0, 4, &s, src, 0, 0, 2, 2);
+	CHECK(dst[0] == 0xee && dst[63] == 0xee);
+	mod_free(vfw);
+}
+
 static void test_drawdib(void)
 {
 	struct module *vfw = mod_load("msvfw32.dll", NULL);
@@ -1583,6 +1637,7 @@ int main(void)
 	test_info_text();
 	test_registry();
 	test_names();
+	test_stretch_dib();
 	test_driver_proc();
 
 	struct module *m = mod_load(fixture("testcodec.dll"), NULL);

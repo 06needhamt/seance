@@ -166,6 +166,120 @@ typedef struct tagTEXTMETRICW {
 	BYTE tmCharSet;
 } TEXTMETRICW, *PTEXTMETRICW, *LPTEXTMETRICW;
 
+typedef struct _POINTL {
+	LONG x;
+	LONG y;
+} POINTL, *PPOINTL;
+
+/* A device's mode: EnumDisplaySettings, printers' settings. */
+#define CCHDEVICENAME 32
+#define CCHFORMNAME   32
+#define DM_SPECVERSION       0x0401
+#define DM_POSITION          0x00000020
+#define DM_BITSPERPEL        0x00040000
+#define DM_PELSWIDTH         0x00080000
+#define DM_PELSHEIGHT        0x00100000
+#define DM_DISPLAYFLAGS      0x00200000
+#define DM_DISPLAYFREQUENCY  0x00400000
+
+typedef struct _devicemodeA {
+	BYTE dmDeviceName[CCHDEVICENAME];
+	WORD dmSpecVersion;
+	WORD dmDriverVersion;
+	WORD dmSize;
+	WORD dmDriverExtra;
+	DWORD dmFields;
+	union {
+		struct {
+			short dmOrientation;
+			short dmPaperSize;
+			short dmPaperLength;
+			short dmPaperWidth;
+			short dmScale;
+			short dmCopies;
+			short dmDefaultSource;
+			short dmPrintQuality;
+		};
+		struct {
+			POINTL dmPosition;
+			DWORD dmDisplayOrientation;
+			DWORD dmDisplayFixedOutput;
+		};
+	};
+	short dmColor;
+	short dmDuplex;
+	short dmYResolution;
+	short dmTTOption;
+	short dmCollate;
+	BYTE dmFormName[CCHFORMNAME];
+	WORD dmLogPixels;
+	DWORD dmBitsPerPel;
+	DWORD dmPelsWidth;
+	DWORD dmPelsHeight;
+	union {
+		DWORD dmDisplayFlags;
+		DWORD dmNup;
+	};
+	DWORD dmDisplayFrequency;
+	DWORD dmICMMethod;
+	DWORD dmICMIntent;
+	DWORD dmMediaType;
+	DWORD dmDitherType;
+	DWORD dmReserved1;
+	DWORD dmReserved2;
+	DWORD dmPanningWidth;
+	DWORD dmPanningHeight;
+} DEVMODEA, *PDEVMODEA, *LPDEVMODEA;
+
+typedef struct _devicemodeW {
+	WCHAR dmDeviceName[CCHDEVICENAME];
+	WORD dmSpecVersion;
+	WORD dmDriverVersion;
+	WORD dmSize;
+	WORD dmDriverExtra;
+	DWORD dmFields;
+	union {
+		struct {
+			short dmOrientation;
+			short dmPaperSize;
+			short dmPaperLength;
+			short dmPaperWidth;
+			short dmScale;
+			short dmCopies;
+			short dmDefaultSource;
+			short dmPrintQuality;
+		};
+		struct {
+			POINTL dmPosition;
+			DWORD dmDisplayOrientation;
+			DWORD dmDisplayFixedOutput;
+		};
+	};
+	short dmColor;
+	short dmDuplex;
+	short dmYResolution;
+	short dmTTOption;
+	short dmCollate;
+	WCHAR dmFormName[CCHFORMNAME];
+	WORD dmLogPixels;
+	DWORD dmBitsPerPel;
+	DWORD dmPelsWidth;
+	DWORD dmPelsHeight;
+	union {
+		DWORD dmDisplayFlags;
+		DWORD dmNup;
+	};
+	DWORD dmDisplayFrequency;
+	DWORD dmICMMethod;
+	DWORD dmICMIntent;
+	DWORD dmMediaType;
+	DWORD dmDitherType;
+	DWORD dmReserved1;
+	DWORD dmReserved2;
+	DWORD dmPanningWidth;
+	DWORD dmPanningHeight;
+} DEVMODEW, *PDEVMODEW, *LPDEVMODEW;
+
 #define LF_FULLFACESIZE 64
 
 typedef struct tagFONTSIGNATURE {

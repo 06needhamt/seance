@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * ws2_32.dll (and wsock32.dll): Winsock for a machine with no network.
+ * ws2_32.dll and wsock32.dll: Winsock for a machine with no network.
  *
  * Starting it up works, the byte-order and address-text functions work, and
  * numeric addresses resolve, but no socket can be made: socket() fails as it
@@ -8,6 +8,9 @@
  * that the handle isn't one. Names don't resolve. That is enough for
  * libraries that link a network stack (FFmpeg's protocols) to load and to
  * find that nothing is reachable, which is true to what the harness is.
+ * The two DLLs share their functions but not all ordinals (wsock32's 10
+ * is inet_addr, ws2_32's ioctlsocket), and codecs import wsock32's by
+ * ordinal, so each has its own table.
  */
 #include <arpa/inet.h>
 #include <stdio.h>
@@ -123,6 +126,29 @@ WINFN(void) ws_WSASetLastError(int err)
 WINFN(unsigned short) ws_htons(unsigned short v) { return htons(v); }
 WINFN(unsigned short) ws_ntohs(unsigned short v) { return ntohs(v); }
 WINFN(DWORD) ws_ntohl(DWORD v) { return ntohl(v); }
+WINFN(DWORD) ws_htonl(DWORD v) { return htonl(v); }
+
+#define INADDR_NONE_WIN 0xffffffffu
+
+/* A dotted IPv4 address, in network order; INADDR_NONE if it isn't one. */
+WINFN(DWORD) ws_inet_addr(const char *s)
+{
+	struct in_addr a;
+
+	if (!s || !inet_aton(s, &a))
+		return INADDR_NONE_WIN;
+	return a.s_addr;
+}
+
+/* Into a buffer of the thread's, as Windows gives it. */
+WINFN(char *) ws_inet_ntoa(DWORD addr)
+{
+	static __thread char text[16];
+	const BYTE *b = (const BYTE *)&addr;
+
+	snprintf(text, sizeof(text), "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+	return text;
+}
 
 /* No sockets. */
 
@@ -231,6 +257,75 @@ WINFN(int) ws_gethostname(char *name, int len)
 		return fail(WSAEINVAL);
 	memcpy(name, host, sizeof(host));
 	return 0;
+}
+
+/* struct hostent as Windows lays it out, with room for one address. */
+struct win_hostent {
+	char *h_name;
+	char **h_aliases;
+	short h_addrtype, h_length;
+	char **h_addr_list;
+};
+
+static __thread struct {
+	struct win_hostent h;
+	char *aliases[1], *addrs[2];
+	char name[16];
+	BYTE addr[4];
+} host_entry;
+
+/* A numeric IPv4 address resolves to itself; any other name is not found. */
+WINFN(struct win_hostent *) ws_gethostbyname(const char *name)
+{
+	struct in_addr a;
+
+	if (!name || !inet_aton(name, &a)) {
+		win_set_error(WSAHOST_NOT_FOUND);
+		return NULL;
+	}
+	memset(&host_entry, 0, sizeof(host_entry));
+	memcpy(host_entry.addr, &a.s_addr, 4);
+	snprintf(host_entry.name, sizeof(host_entry.name), "%s",
+		 ws_inet_ntoa(a.s_addr));
+	host_entry.addrs[0] = (char *)host_entry.addr;
+	host_entry.h.h_name = host_entry.name;
+	host_entry.h.h_aliases = host_entry.aliases;
+	host_entry.h.h_addrtype = WIN_AF_INET;
+	host_entry.h.h_length = 4;
+	host_entry.h.h_addr_list = host_entry.addrs;
+	return &host_entry.h;
+}
+
+WINFN(struct win_hostent *) ws_gethostbyaddr(const char *addr, int len,
+					     int type)
+{
+	win_set_error(WSAHOST_NOT_FOUND);
+	return NULL;
+}
+
+/* No services or protocols database. */
+WINFN(void *) ws_getservbyname(const char *name, const char *proto)
+{
+	win_set_error(WSAHOST_NOT_FOUND);
+	return NULL;
+}
+
+WINFN(void *) ws_getservbyport(int port, const char *proto)
+{
+	win_set_error(WSAHOST_NOT_FOUND);
+	return NULL;
+}
+
+WINFN(void *) ws_getprotobyname(const char *name)
+{
+	win_set_error(WSAHOST_NOT_FOUND);
+	return NULL;
+}
+
+WINFN(void *) ws_getprotobynumber(int n)
+{
+	win_set_error(WSAHOST_NOT_FOUND);
+	return NULL;
 }
 
 WINFN(int) ws_getaddrinfo(const char *node, const char *service,
@@ -358,44 +453,99 @@ WINFN(int) ws_getnameinfo(const void *sa, int salen, char *host, DWORD hostlen,
 }
 
 #define E(name) { #name, 0, (void *)ws_##name }
+#define O(name, n) { #name, n, (void *)ws_##name }
 
+/* ws2_32's ordinals, as Windows numbers them. */
 static const struct builtin_export exports[] = {
-	E(WSACleanup),
-	E(WSAGetLastError),
+	O(accept, 1),
+	O(bind, 2),
+	O(closesocket, 3),
+	O(connect, 4),
+	O(getpeername, 5),
+	O(getsockname, 6),
+	O(getsockopt, 7),
+	O(htonl, 8),
+	O(htons, 9),
+	O(ioctlsocket, 10),
+	O(inet_addr, 11),
+	O(inet_ntoa, 12),
+	O(listen, 13),
+	O(ntohl, 14),
+	O(ntohs, 15),
+	O(recv, 16),
+	O(recvfrom, 17),
+	O(select, 18),
+	O(send, 19),
+	O(sendto, 20),
+	O(setsockopt, 21),
+	O(shutdown, 22),
+	O(socket, 23),
+	O(gethostbyaddr, 51),
+	O(gethostbyname, 52),
+	O(getprotobyname, 53),
+	O(getprotobynumber, 54),
+	O(getservbyname, 55),
+	O(getservbyport, 56),
+	O(gethostname, 57),
+	O(WSAGetLastError, 111),
+	O(WSASetLastError, 112),
+	O(WSAStartup, 115),
+	O(WSACleanup, 116),
+	O(__WSAFDIsSet, 151),
 	E(WSASend),
-	E(WSASetLastError),
-	E(WSAStartup),
-	E(__WSAFDIsSet),
-	E(accept),
-	E(bind),
-	E(closesocket),
-	E(connect),
 	E(freeaddrinfo),
 	E(getaddrinfo),
-	E(gethostname),
 	E(getnameinfo),
-	E(getpeername),
-	E(getsockname),
-	E(getsockopt),
-	E(htons),
 	E(inet_ntop),
 	E(inet_pton),
-	E(ioctlsocket),
-	E(listen),
-	E(ntohl),
-	E(ntohs),
-	E(recv),
-	E(recvfrom),
-	E(select),
-	E(send),
-	E(sendto),
-	E(setsockopt),
-	E(shutdown),
-	E(socket),
+	BUILTIN_END
+};
+
+/* wsock32's: the same up to 9, then its own order. */
+static const struct builtin_export wsock32_exports[] = {
+	O(accept, 1),
+	O(bind, 2),
+	O(closesocket, 3),
+	O(connect, 4),
+	O(getpeername, 5),
+	O(getsockname, 6),
+	O(getsockopt, 7),
+	O(htonl, 8),
+	O(htons, 9),
+	O(inet_addr, 10),
+	O(inet_ntoa, 11),
+	O(ioctlsocket, 12),
+	O(listen, 13),
+	O(ntohl, 14),
+	O(ntohs, 15),
+	O(recv, 16),
+	O(recvfrom, 17),
+	O(select, 18),
+	O(send, 19),
+	O(sendto, 20),
+	O(setsockopt, 21),
+	O(shutdown, 22),
+	O(socket, 23),
+	O(gethostbyaddr, 51),
+	O(gethostbyname, 52),
+	O(getprotobyname, 53),
+	O(getprotobynumber, 54),
+	O(getservbyname, 55),
+	O(getservbyport, 56),
+	O(gethostname, 57),
+	O(WSAGetLastError, 111),
+	O(WSASetLastError, 112),
+	O(WSAStartup, 115),
+	O(WSACleanup, 116),
+	O(__WSAFDIsSet, 151),
 	BUILTIN_END
 };
 
 static const struct builtin_export *const tables[] = { exports, NULL };
-static const char *const aliases[] = { "wsock32.dll", NULL };
+static const struct builtin_export *const wsock32_tables[] = {
+	wsock32_exports, NULL
+};
 
-const struct builtin_dll builtin_ws2_32 = { "ws2_32.dll", aliases, tables, 0 };
+const struct builtin_dll builtin_ws2_32 = { "ws2_32.dll", NULL, tables, 0 };
+const struct builtin_dll builtin_wsock32 = { "wsock32.dll", NULL,
+					     wsock32_tables, 0 };
