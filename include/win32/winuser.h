@@ -122,6 +122,10 @@ typedef struct tagUSEROBJECTFLAGS {
 	DWORD dwFlags;
 } USEROBJECTFLAGS, *PUSEROBJECTFLAGS;
 
+/* EnumDisplaySettings' mode numbers besides 0, 1, ... */
+#define ENUM_CURRENT_SETTINGS  ((DWORD)-1)
+#define ENUM_REGISTRY_SETTINGS ((DWORD)-2)
+
 typedef struct tagMONITORINFO {
 	DWORD cbSize;
 	RECT rcMonitor;

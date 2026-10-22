@@ -100,6 +100,117 @@ CRTFN(int) crt_wcsncmp(const WCHAR *a, const WCHAR *b, size_t n)
 	while (n-- && *a && *a == *b) a++, b++;
 	return n == (size_t)-1 ? 0 : (int)*a - (int)*b;
 }
+CRTFN(WCHAR *) crt_wcschr(const WCHAR *s, WCHAR c)
+{
+	for (;; s++) {
+		if (*s == c)
+			return (WCHAR *)s;
+		if (!*s)
+			return NULL;
+	}
+}
+CRTFN(WCHAR *) crt_wcsstr(const WCHAR *s, const WCHAR *find)
+{
+	if (!*find)
+		return (WCHAR *)s;
+	for (; *s; s++) {
+		size_t i = 0;
+		while (find[i] && s[i] == find[i])
+			i++;
+		if (!find[i])
+			return (WCHAR *)s;
+	}
+	return NULL;
+}
+CRTFN(WCHAR *) crt_wcsncpy(WCHAR *d, const WCHAR *s, size_t n)
+{
+	size_t i = 0;
+
+	for (; i < n && s[i]; i++)
+		d[i] = s[i];
+	for (; i < n; i++)
+		d[i] = 0;
+	return d;
+}
+CRTFN(WCHAR *) crt_wcsncat(WCHAR *d, const WCHAR *s, size_t n)
+{
+	WCHAR *p = d;
+
+	while (*p)
+		p++;
+	while (n-- && *s)
+		*p++ = *s++;
+	*p = 0;
+	return d;
+}
+static int wcs_has(const WCHAR *set, WCHAR c)
+{
+	for (; *set; set++)
+		if (*set == c)
+			return 1;
+	return 0;
+}
+CRTFN(size_t) crt_wcsspn(const WCHAR *s, const WCHAR *set)
+{
+	size_t n = 0;
+
+	while (s[n] && wcs_has(set, s[n]))
+		n++;
+	return n;
+}
+CRTFN(size_t) crt_wcscspn(const WCHAR *s, const WCHAR *set)
+{
+	size_t n = 0;
+
+	while (s[n] && !wcs_has(set, s[n]))
+		n++;
+	return n;
+}
+CRTFN(WCHAR *) crt_wcspbrk(const WCHAR *s, const WCHAR *set)
+{
+	s += crt_wcscspn(s, set);
+	return *s ? (WCHAR *)s : NULL;
+}
+CRTFN(WCHAR *) crt__wcsdup(const WCHAR *s)
+{
+	size_t n = (crt_wcslen(s) + 1) * sizeof(WCHAR);
+	WCHAR *p = malloc(n);
+
+	if (p)
+		memcpy(p, s, n);
+	return p;
+}
+/* Case folds ASCII only, as the C locale does (and _stricmp here). */
+static WCHAR wlower(WCHAR c)
+{
+	return c >= 'A' && c <= 'Z' ? c + 32 : c;
+}
+CRTFN(int) crt__wcsnicmp(const WCHAR *a, const WCHAR *b, size_t n)
+{
+	for (; n; n--, a++, b++) {
+		WCHAR x = wlower(*a), y = wlower(*b);
+		if (x != y || !x)
+			return (int)x - (int)y;
+	}
+	return 0;
+}
+CRTFN(int) crt__wcsicmp(const WCHAR *a, const WCHAR *b)
+{
+	return crt__wcsnicmp(a, b, (size_t)-1);
+}
+CRTFN(WCHAR *) crt__wcslwr(WCHAR *s)
+{
+	for (WCHAR *p = s; *p; p++)
+		*p = wlower(*p);
+	return s;
+}
+CRTFN(WCHAR *) crt__wcsupr(WCHAR *s)
+{
+	for (WCHAR *p = s; *p; p++)
+		if (*p >= 'a' && *p <= 'z')
+			*p -= 32;
+	return s;
+}
 CRTFN(WCHAR *) crt_wcsrchr(const WCHAR *s, WCHAR c)
 {
 	const WCHAR *last = NULL;
@@ -241,6 +352,8 @@ const struct builtin_export crt_string_exports[] = {
 	E(strpbrk), E(strspn), E(strcspn), E(strtok), E(strerror),
 	E(_stricmp), E(_strnicmp), E(_strdup), E(_strrev), E(_strlwr), E(_strupr),
 	E(_msize), E(wcslen), E(wcsrchr), E(wcscpy), E(wcscat), E(wcscmp), E(wcsncmp),
+	E(wcschr), E(wcsstr), E(wcsncpy), E(wcsncat), E(wcsspn), E(wcscspn),
+	E(wcspbrk), E(_wcsdup), E(_wcsicmp), E(_wcsnicmp), E(_wcslwr), E(_wcsupr),
 	E(strcoll), E(strxfrm),
 	E(atoi), E(atol), E(atof), E(strtol), E(strtoul), E(strtod),
 	E(_itoa), E(_ltoa), E(_ultoa),

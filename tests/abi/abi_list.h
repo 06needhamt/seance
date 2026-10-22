@@ -796,6 +796,21 @@
 	O(TEXTMETRICW, tmBreakChar) O(TEXTMETRICW, tmItalic) \
 	O(TEXTMETRICW, tmUnderlined) O(TEXTMETRICW, tmStruckOut) \
 	O(TEXTMETRICW, tmPitchAndFamily) O(TEXTMETRICW, tmCharSet) \
+	A(POINTL) S(POINTL) O(POINTL, y) \
+	A(DEVMODEA) S(DEVMODEA) O(DEVMODEA, dmSpecVersion) \
+	O(DEVMODEA, dmSize) O(DEVMODEA, dmFields) O(DEVMODEA, dmOrientation) \
+	O(DEVMODEA, dmPrintQuality) O(DEVMODEA, dmPosition) \
+	O(DEVMODEA, dmDisplayFixedOutput) O(DEVMODEA, dmColor) \
+	O(DEVMODEA, dmCollate) O(DEVMODEA, dmFormName) \
+	O(DEVMODEA, dmLogPixels) O(DEVMODEA, dmBitsPerPel) \
+	O(DEVMODEA, dmPelsWidth) O(DEVMODEA, dmPelsHeight) \
+	O(DEVMODEA, dmDisplayFlags) O(DEVMODEA, dmDisplayFrequency) \
+	O(DEVMODEA, dmICMMethod) O(DEVMODEA, dmPanningHeight) \
+	A(DEVMODEW) S(DEVMODEW) O(DEVMODEW, dmSpecVersion) \
+	O(DEVMODEW, dmFields) O(DEVMODEW, dmPosition) O(DEVMODEW, dmFormName) \
+	O(DEVMODEW, dmLogPixels) O(DEVMODEW, dmBitsPerPel) \
+	O(DEVMODEW, dmPelsWidth) O(DEVMODEW, dmDisplayFrequency) \
+	O(DEVMODEW, dmPanningHeight) \
 	A(FONTSIGNATURE) S(FONTSIGNATURE) O(FONTSIGNATURE, fsCsb) \
 	A(NEWTEXTMETRICA) S(NEWTEXTMETRICA) O(NEWTEXTMETRICA, tmCharSet) \
 	O(NEWTEXTMETRICA, ntmFlags) O(NEWTEXTMETRICA, ntmSizeEM) \

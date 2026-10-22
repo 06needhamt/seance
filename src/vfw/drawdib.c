@@ -487,6 +487,57 @@ WINFN(LRESULT) vfw_DrawDibProfileDisplay(LPBITMAPINFOHEADER bi)
 }
 
 /*
+ * StretchDIB: a rectangle of one uncompressed DIB scaled into another of
+ * the same depth (8, 16, 24 or 32 bits), nearest pixel, as Wine's does.
+ * Rows count from the first in memory (the bottom one, bottom-up) and
+ * both rectangles are clipped to their bitmaps; other depths, compressed
+ * DIBs and empty or inverted rectangles draw nothing.
+ */
+WINFN(void) vfw_StretchDIB(LPBITMAPINFOHEADER bi_dst, LPVOID dst, int x_dst,
+			   int y_dst, int dx_dst, int dy_dst,
+			   LPBITMAPINFOHEADER bi_src, LPVOID src, int x_src,
+			   int y_src, int dx_src, int dy_src)
+{
+	if (!bi_dst || !dst || !bi_src || !src ||
+	    bi_dst->biBitCount != bi_src->biBitCount ||
+	    (bi_dst->biCompression != BI_RGB &&
+	     bi_dst->biCompression != BI_BITFIELDS) ||
+	    (bi_src->biCompression != BI_RGB &&
+	     bi_src->biCompression != BI_BITFIELDS) ||
+	    dx_dst <= 0 || dy_dst <= 0 || dx_src <= 0 || dy_src <= 0) {
+		TRACE("StretchDIB: %d to %d bits, %dx%d to %dx%d: not drawn",
+		      bi_src ? bi_src->biBitCount : 0,
+		      bi_dst ? bi_dst->biBitCount : 0, dx_src, dy_src,
+		      dx_dst, dy_dst);
+		return;
+	}
+	int bpp = bi_src->biBitCount;
+	if (bpp != 8 && bpp != 16 && bpp != 24 && bpp != 32)
+		return;
+	size_t px = (size_t)bpp / 8;
+	LONG ws = bi_src->biWidth, hs = abs_height(bi_src);
+	LONG wd = bi_dst->biWidth, hd = abs_height(bi_dst);
+	size_t ss = ((size_t)ws * bpp + 31) / 32 * 4;
+	size_t sd = ((size_t)wd * bpp + 31) / 32 * 4;
+
+	for (int j = 0; j < dy_dst; j++) {
+		long long yd = (long long)y_dst + j;
+		long long ys = y_src + (long long)j * dy_src / dy_dst;
+		if (yd < 0 || yd >= hd || ys < 0 || ys >= hs)
+			continue;
+		BYTE *drow = (BYTE *)dst + (size_t)yd * sd;
+		const BYTE *srow = (const BYTE *)src + (size_t)ys * ss;
+		for (int i = 0; i < dx_dst; i++) {
+			long long xd = (long long)x_dst + i;
+			long long xs = x_src + (long long)i * dx_src / dx_dst;
+			if (xd < 0 || xd >= wd || xs < 0 || xs >= ws)
+				continue;
+			memcpy(drow + (size_t)xd * px, srow + (size_t)xs * px, px);
+		}
+	}
+}
+
+/*
  * ICDrawBegin and ICDraw (cdecl), after Wine: the arguments packed into
  * an ICDRAWBEGIN or ICDRAW for a codec that draws for itself.
  */
@@ -529,5 +580,6 @@ const struct builtin_export vfw_drawdib_exports[] = {
 	{ "DrawDibTime", 0, (void *)vfw_DrawDibTime },
 	{ "ICDraw", 0, (void *)ic_draw },
 	{ "ICDrawBegin", 0, (void *)ic_draw_begin },
+	{ "StretchDIB", 0, (void *)vfw_StretchDIB },
 	BUILTIN_END
 };

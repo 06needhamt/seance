@@ -1086,7 +1086,26 @@ WINFN(BOOL) k32_GlobalMemoryStatusEx(LPMEMORYSTATUSEX ms)
 
 #define E(name) { #name, 0, (void *)k32_##name }
 
+/* kernel32 exports these too, forwarded to ntdll on Windows. */
+WINFN(void) k32_RtlMoveMemory(void *dst, const void *src, SIZE_T len)
+{
+	memmove(dst, src, len);
+}
+
+WINFN(void) k32_RtlZeroMemory(void *dst, SIZE_T len)
+{
+	memset(dst, 0, len);
+}
+
+WINFN(void) k32_RtlFillMemory(void *dst, SIZE_T len, BYTE fill)
+{
+	memset(dst, fill, len);
+}
+
 const struct builtin_export k32_memory_exports[] = {
+	E(RtlFillMemory),
+	E(RtlMoveMemory),
+	E(RtlZeroMemory),
 	E(FlushInstructionCache),
 	E(GetProcessHeap),
 	E(GetProcessHeaps),
