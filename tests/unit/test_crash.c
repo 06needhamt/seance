@@ -6,10 +6,12 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 
 #include "common/sanitizer.h"
 #include "runtime/crash.h"
+#include "runtime/guard.h"
 #include "runtime/runtime.h"
 #include "test.h"
 #include "vfw/icm.h"
@@ -160,8 +162,43 @@ static int run_try(char *err, size_t size)
 	return status;
 }
 
+/*
+ * A guarded buffer of whole pages still has the slack the Windows heap's
+ * 32-byte block header leaves (avimszh.dll writes there), and the guard
+ * page right after.
+ */
+static void test_guard(void)
+{
+	long page = sysconf(_SC_PAGESIZE);
+	char *p = guard_alloc((size_t)page * 2, "test buffer");
+	char what[128];
+
+	CHECK(p != NULL);
+	if (!p)
+		return;
+	memset(p + page * 2, 0xab, 32);		/* doesn't fault */
+	CHECK(guard_describe(p + page * 3, what, sizeof(what)));
+	char want[128];
+	snprintf(want, sizeof(want), "%ld bytes past the end of the %ld-byte "
+		 "test buffer", page, page * 2);
+	CHECK_STR(what, want);
+	guard_free(p);
+
+	/* A size short of a page by less than the header gets the next one. */
+	p = guard_alloc((size_t)page - 8, "test buffer");
+	CHECK(p != NULL);
+	if (p) {
+		memset(p + page - 8, 0xab, 32);
+		CHECK(guard_describe(p + page * 2, what, sizeof(what)));
+		guard_free(p);
+	}
+}
+
 int main(void)
 {
+	/* Crashes and traps exit 128 + the signal, whatever we inherit. */
+	unsetenv("VFW_CORE");
+	test_guard();
 	const char *codec = fixture("testcodec.dll");
 	char err[4096];
 
@@ -170,12 +207,24 @@ int main(void)
 		printf("sanitizer build: checking the timeout only\n");
 	} else {
 		int st = run_child(codec, TESTCODEC_CRASH, NULL, err, sizeof(err));
-		CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV);
+		CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 128 + SIGSEGV);
 		CHECK(strstr(err, "seance: crash: SIGSEGV at testcodec.dll+0x"));
 		CHECK(strstr(err, "accessing (nil)") || strstr(err, "accessing 0x0"));
 		CHECK(strstr(err, "in DriverProc(DRV_USER+0x") &&
 		      strstr(err, ") of testcodec.dll"));
 		printf("crash report:\n%s", err);
+
+		/*
+		 * The crash ends the process with 128 + the signal, not by it
+		 * (no core dump), unless VFW_CORE=1 asks for that.
+		 */
+		struct rlimit none = { 0, 0 };
+		setrlimit(RLIMIT_CORE, &none);
+		setenv("VFW_CORE", "1", 1);
+		st = run_child(codec, TESTCODEC_CRASH, NULL, err, sizeof(err));
+		unsetenv("VFW_CORE");
+		CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV);
+		CHECK(strstr(err, "seance: crash: SIGSEGV at testcodec.dll+0x"));
 
 		/*
 		 * Code in the heap or on the stack runs, as on Windows without
@@ -186,7 +235,7 @@ int main(void)
 		st = run_from(1, err, sizeof(err));
 		CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 42);
 		st = run_from(2, err, sizeof(err));
-		CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV);
+		CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 128 + SIGSEGV);
 		CHECK(strstr(err, "seance: crash: SIGSEGV"));
 
 		/* A fault under crash_try is reported, and survived. */

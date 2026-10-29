@@ -302,7 +302,22 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	# Its FOURCC kept as an upper and lower case pair in data.
 	VFW_INI=/dev/null VFW_ENV_TESTCODEC_NAMED_ONLY=2 $emu "$harness" probe \
 		"$fixtures/testcodec.dll" 2>&1 | grep -q "opened as 'TSTP', found"
+	# A DLL that doesn't load isn't loaded again for each FOURCC or mode
+	# to try (Mvicod32.dll showed a message box each time): once to see
+	# whether it is an ACM driver, once as a codec.
+	[ "$(VFW_TRACE=1 $emu "$harness" probe "$fixtures/pe_fail.dll" 2>&1 |
+		grep -c "loaded .*pe_fail.dll at")" = 2 ]
+	# A DMO server's decoder isn't taken for a missing encoder.
+	$emu "$harness" encode "$fixtures/testdmo.dll" "$work/v.y4m" \
+		-o "$work/x.avi" --clsid '{5E6C9B41-3A7D-4F0E-9C11-0D2B7A6E4F80}' \
+		2>&1 | grep -q "has only a video decoder, not an encoder"
+	# RealPlayer's codecs (rv203260.dll) are said to be what they are.
+	$emu "$harness" encode "$fixtures/pe_realcodec.dll" "$work/v.y4m" \
+		-o "$work/x.avi" 2>&1 | grep -q "a RealPlayer codec (it exports RV20"
 	# One that won't open to compress is probed as encode would use it.
+	VFW_ENV_TESTCODEC_DECODE_ONLY=1 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/v.y4m" -o "$work/x.avi" 2>&1 |
+		grep -q "only decompresses: it opens to decompress, not to compress"
 	VFW_ENV_TESTCODEC_DECODE_ONLY=1 $emu "$harness" probe \
 		"$fixtures/testcodec.dll" | grep -q "won't open to compress"
 	VFW_ENV_TESTCODEC_PICKY=1 $emu "$harness" probe \
@@ -319,6 +334,12 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	$emu "$harness" decode "$fixtures/testcodec.dll" "$work/late.avi" \
 		-o "$work/late.y4m" 2>/dev/null
 	cmp "$work/noise.y4m" "$work/late.y4m"
+	# What a codec writes to its standard output goes to our stderr, not
+	# into ours, where the output can be.
+	VFW_ENV_TESTCODEC_CHATTY=1 $emu "$harness" decode \
+		"$fixtures/testcodec.dll" "$work/late.avi" -o - --format y4m \
+		2>"$work/chat.err" | cmp - "$work/late.y4m"
+	grep -q "testcodec: hello" "$work/chat.err"
 	# Codecs as fussy as some real ones: one calls a status callback it
 	# never checked it was given and refuses its own format with the input
 	# (encoding), one reads past its input and decodes nothing unless asked
@@ -330,6 +351,38 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/fussy.avi" \
 		-o "$work/fussy.y4m" --output-format I420 2>/dev/null
 	cmp "$work/noise.y4m" "$work/fussy.y4m"
+	# One that wants heights in 16s says so, and --pad or --crop give it
+	# them (repeating the last row, or dropping rows), from YUV or RGB.
+	{
+		printf 'YUV4MPEG2 W16 H24 F25:1 Ip A1:1 C420jpeg\nFRAME\n'
+		head -c 576 /dev/urandom
+	} >"$work/h24.y4m"
+	head -c 2304 /dev/urandom >"$work/h24.bgr"
+	VFW_ENV_TESTCODEC_ALIGN16=1 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/h24.y4m" -o "$work/x.avi" 2>&1 |
+		grep -q "at 16x24, but takes 16x32 and 16x16: add --pad 16 or --crop 16"
+	VFW_ENV_TESTCODEC_ALIGN16=1 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/h24.y4m" -o "$work/pad.avi" \
+		--pad 16 2>/dev/null
+	$emu "$harness" decode "$fixtures/testcodec.dll" "$work/pad.avi" \
+		-o "$work/pad.y4m" 2>/dev/null
+	head -1 "$work/pad.y4m" | grep -q "W16 H32 "
+	VFW_ENV_TESTCODEC_ALIGN16=1 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/h24.bgr" --input-format BGR24 \
+		--size 16x24 -o "$work/crop.avi" --crop 16 2>/dev/null
+	$emu "$harness" avi "$work/crop.avi" | grep -q "16x16, 24 bits, 'TST0'"
+	fails $emu "$harness" encode "$fixtures/testcodec.dll" "$work/h24.y4m" \
+		-o "$work/x.avi" --pad 3
+	# One that writes no output format is refused, not written as 0x0;
+	# one that flags no keyframes still gets its first frame as one.
+	VFW_ENV_TESTCODEC_EMPTY_FORMAT=1 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/noise.y4m" -o "$work/x.avi" 2>&1 |
+		grep -q "gives no output format (0x0)"
+	VFW_ENV_TESTCODEC_NO_KEYS=1 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/noise.y4m" \
+		-o "$work/nokeys.avi" 2>/dev/null
+	$emu "$harness" avi --chunks "$work/nokeys.avi" |
+		grep -q "^ *0  00dc .* key$"
 	# A codec that crashes in ICM_*_END after the last frame still gives
 	# whole files (not under a sanitizer, which takes faults itself).
 	if [ "$lowmem" = 1 ]; then
@@ -341,6 +394,12 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 			"$fixtures/testcodec.dll" "$work/end.avi" \
 			-o "$work/end.y4m" 2>/dev/null
 		cmp "$work/noise.y4m" "$work/end.y4m"
+		# One that crashes as it is unloaded has done its work by then.
+		VFW_ENV_TESTCODEC_DETACH_CRASH=1 $emu "$harness" probe \
+			"$fixtures/testcodec.dll" 2>&1 >/dev/null |
+			grep -q "crashed while being unloaded; carrying on"
+		VFW_ENV_TESTCODEC_DETACH_CRASH=1 $emu "$harness" probe \
+			"$fixtures/testcodec.dll" >/dev/null 2>&1
 		# One that writes past its output buffer faults right there.
 		VFW_ENV_TESTCODEC_OVERRUN=1 $emu "$harness" encode \
 			"$fixtures/testcodec.dll" "$work/noise.y4m" \
@@ -599,7 +658,7 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 			echo "smoke: DMO decode from --start differs" >&2
 			exit 1
 		}
-		for mode in "" NOTACCEPTING PRIVATE; do
+		for mode in "" NOTACCEPTING PRIVATE BITRATE; do
 			env ${mode:+VFW_ENV_TESTDMO_$mode=1} $emu "$harness" encode \
 				"$fixtures/testdmo.dll" "$work/in.y4m" \
 				-o "$work/dmo.avi" --keyint 2 2>/dev/null

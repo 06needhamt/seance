@@ -96,7 +96,15 @@ struct pe_image *pe_parse(const void *buf, size_t len)
 	size_t nt_off = dos.e_lfanew;
 	sig = rd32(p + nt_off);
 	if (sig != IMAGE_NT_SIGNATURE) {
-		vfw_set_error("not a PE file: no PE signature");
+		WORD kind = (WORD)sig;
+		if (kind == 0x454e)		/* "NE" */
+			vfw_set_error("a 16-bit Windows (NE) file, as Windows 3.x "
+				      "used; only 32-bit (i386 PE) DLLs run");
+		else if (kind == 0x454c || kind == 0x584c)	/* "LE", "LX" */
+			vfw_set_error("a VxD or OS/2 (%s) file, not a Windows "
+				      "DLL", kind == 0x454c ? "LE" : "LX");
+		else
+			vfw_set_error("not a PE file: no PE signature");
 		return NULL;
 	}
 	memcpy(&fh, p + nt_off + 4, sizeof(fh));

@@ -14,6 +14,7 @@
 #include "runtime/guard.h"
 
 #define MAX_GUARDED 256
+#define HEAP_HEADER 32
 
 struct guarded {
 	char *base;		/* the mapping; NULL when the entry is free */
@@ -32,9 +33,15 @@ void *guard_alloc(size_t n, const char *what)
 
 	if (!n)
 		n = 1;
-	if (n > SIZE_MAX - 2 * page)
+	if (n > SIZE_MAX - 3 * page)
 		return NULL;
-	size_t body = (n + page - 1) / page * page;
+	/*
+	 * Windows' heap puts a header of about 32 bytes before a big block
+	 * and commits whole pages, so a buffer of whole pages there has most
+	 * of a page after it; avimszh.dll writes into that, as it would
+	 * have here with none.
+	 */
+	size_t body = (n + HEAP_HEADER + page - 1) / page * page;
 	char *base = mmap(NULL, body + page, PROT_READ | PROT_WRITE,
 			  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (base == MAP_FAILED)

@@ -5,10 +5,12 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "common/error.h"
 #include "common/log.h"
 #include "loader/modules.h"
+#include "loader/pe.h"
 #include "runtime/runtime.h"
 #include "runtime/crash.h"
 #include "vfw/driver.h"
@@ -293,6 +295,39 @@ fail:
 	return NULL;
 }
 
+/* An entry point of RealPlayer's codecs (the *3260.dll), if mod has one. */
+static int realmedia_export(void *ctx, const struct pe_export *e)
+{
+	static const char *const prefixes[] = {
+		"RACreateDecoderInstance", "RAOpenCodec", "RAInitDecoder",
+		"PNCodec_",
+	};
+	const char *n = e->name;
+
+	if (!n)
+		return 0;
+	/* RV10toYUV420Init, RV20toYUV420Transform, RV40toYUV420Free, ... */
+	if (n[0] == 'R' && n[1] == 'V' && strstr(n, "toYUV420")) {
+		*(const char **)ctx = n;
+		return 1;
+	}
+	for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++)
+		if (!strncmp(n, prefixes[i], strlen(prefixes[i]))) {
+			*(const char **)ctx = n;
+			return 1;
+		}
+	return 0;
+}
+
+static const char *realmedia_entry(const struct module *mod)
+{
+	const char *found = NULL;
+
+	if (mod->img)
+		pe_foreach_export(mod->img, realmedia_export, &found);
+	return found;
+}
+
 HDRVR drv_open(const char *dll, const WCHAR *alias, LPARAM lp2)
 {
 	if (runtime_enter())
@@ -307,7 +342,15 @@ HDRVR drv_open(const char *dll, const WCHAR *alias, LPARAM lp2)
 	if (!proc)
 		proc = mod_get_proc(mod, "DriverProc@20");
 	if (!proc) {
-		vfw_set_error("%s: not a driver (no DriverProc export)", mod->name);
+		const char *real = realmedia_entry(mod);
+		if (real)
+			vfw_set_error("%s: a RealPlayer codec (it exports %s), "
+				      "which works through RealPlayer's own "
+				      "interface, not as a VfW driver, DirectShow "
+				      "filter or DMO", mod->name, real);
+		else
+			vfw_set_error("%s: not a driver (no DriverProc export)",
+				      mod->name);
 		mod_free(mod);
 		return NULL;
 	}

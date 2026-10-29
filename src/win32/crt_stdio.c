@@ -54,12 +54,17 @@ static crt_FILE crt_iob[3];	/* zero-initialised; crt_stdio_init() fills it */
 
 static void crt_stdio_init(void) __attribute__((constructor));
 
-/* _iob[0..2] map straight to the process's own stdin/stdout/stderr fds. */
+/*
+ * _iob[0..2] map to the process's own stdin and stderr fds: a DLL's stdout
+ * goes to stderr too, since the harness's own stdout can be its output
+ * ("-o -"), which a codec's chatter would corrupt (blox.dll prints
+ * "Hello world!!" when loaded).
+ */
 static void crt_stdio_init(void)
 {
 	crt_iob[0]._file = STDIN_FILENO;
 	crt_iob[0]._flag = _IOREAD;
-	crt_iob[1]._file = STDOUT_FILENO;
+	crt_iob[1]._file = STDERR_FILENO;
 	crt_iob[1]._flag = _IOWRT;
 	crt_iob[2]._file = STDERR_FILENO;
 	crt_iob[2]._flag = _IOWRT;
@@ -389,8 +394,9 @@ CRTFN(int) crt__fileno(crt_FILE *f) { return f->_file; }
 #define _ALPHA  0x0100
 
 static unsigned short ctype_table[257];	/* [0] is EOF's entry */
-static const unsigned short *pctype_ptr = ctype_table + 1;
-static int mb_cur_max = 1;
+/* Also crtdll.dll's _pctype_dll and __mb_cur_max_dll (msvcrt.c). */
+const unsigned short *crt_pctype_ptr = ctype_table + 1;
+int crt_mb_cur_max = 1;
 static unsigned lc_codepage;	/* the "C" locale has no code page */
 
 static void ctype_init(void) __attribute__((constructor));
@@ -445,14 +451,14 @@ CRTFN(int) crt__ctype(int c)
 }
 
 CRTFN(crt_FILE *) crt___p__iob(void) { return crt_iob; }
-CRTFN(int *) crt___p___mb_cur_max(void) { return &mb_cur_max; }
+CRTFN(int *) crt___p___mb_cur_max(void) { return &crt_mb_cur_max; }
 
 #define E(name) { #name, 0, (void *)crt_##name }
 
 const struct builtin_export crt_stdio_exports[] = {
 	{ "_iob", 0, crt_iob },
-	{ "_pctype", 0, (void *)&pctype_ptr },
-	{ "__mb_cur_max", 0, &mb_cur_max },
+	{ "_pctype", 0, (void *)&crt_pctype_ptr },
+	{ "__mb_cur_max", 0, &crt_mb_cur_max },
 	{ "__lc_codepage", 0, &lc_codepage },
 	E(fopen), E(_wfopen), E(fclose), E(fread), E(fwrite), E(fputc), E(fgetc),
 	E(_fdopen), E(_filbuf), E(_flsbuf), E(ungetc), E(fgetpos), E(fsetpos),

@@ -26,6 +26,7 @@
  * unwind, which takes each frame off the chain once its handler is done
  * with it, as Windows does, so the new exception doesn't meet them again.
  */
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/ucontext.h>
@@ -368,8 +369,7 @@ void WINAPI seh_RaiseException(DWORD code, DWORD flags, DWORD nargs,
 		return;
 
 	report_unhandled_exception(&rec);
-	raise(SIGABRT);
-	_exit(134);
+	crash_exit(SIGABRT);
 }
 
 void WINAPI seh_RtlUnwind(PEXCEPTION_REGISTRATION_RECORD target_frame,

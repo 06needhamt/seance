@@ -99,7 +99,8 @@ CRTFN(int) crt__read(int fd, void *buf, unsigned count)
 }
 CRTFN(int) crt__write(int fd, const void *buf, unsigned count)
 {
-	ssize_t n = write(fd, buf, count); return n < 0 ? -1 : (int)n;
+	/* A DLL's stdout is our stderr (see crt_stdio.c). */
+	ssize_t n = write(fd == STDOUT_FILENO ? STDERR_FILENO : fd, buf, count); return n < 0 ? -1 : (int)n;
 }
 CRTFN(long) crt__lseek(int fd, long off, int origin)
 {
@@ -203,7 +204,8 @@ CRTFN(void) crt__assert(const char *expr, const char *file, unsigned line)
 {
 	fprintf(stderr, "Assertion failed: %s, file %s, line %u\n",
 		expr ? expr : "", file ? file : "", line);
-	abort();
+	fflush(stderr);
+	_exit(3);	/* as msvcrt's assert, by way of abort, exits */
 }
 
 __attribute__((naked)) static void STUB_CDECL crt__EH_prolog(void)

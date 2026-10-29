@@ -108,8 +108,9 @@ HANDLE file_std_handle(DWORD which)
 		return INVALID_HANDLE_VALUE;
 	}
 	pthread_mutex_lock(&std_lock);
+	/* A DLL's output goes to stderr, keeping ours clean (crt_stdio.c). */
 	if (!std_handles[i])
-		std_handles[i] = file_handle_new(i, 1, NULL);
+		std_handles[i] = file_handle_new(i == 1 ? 2 : i, 1, NULL);
 	h = std_handles[i];
 	pthread_mutex_unlock(&std_lock);
 	return h;

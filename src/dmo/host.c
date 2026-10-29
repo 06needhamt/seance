@@ -179,6 +179,52 @@ static HRESULT private_data(struct dmo_host *h, const DMO_MEDIA_TYPE *out)
 	return S_OK;
 }
 
+/* Under VFW_TRACE, what a video type holds that a DMO may refuse it for. */
+static void trace_type(const char *what, const DMO_MEDIA_TYPE *mt)
+{
+	if (!vfw_trace_enabled || !mt->pbFormat)
+		return;
+	const VIDEOINFOHEADER *v = (const VIDEOINFOHEADER *)mt->pbFormat;
+	if (memcmp(&mt->formattype, &FORMAT_VideoInfo, sizeof(GUID)) ||
+	    mt->cbFormat < sizeof(*v)) {
+		TRACE("dmo: %s: %lu bytes of format", what,
+		      (unsigned long)mt->cbFormat);
+		return;
+	}
+	TRACE("dmo: %s: VIDEOINFOHEADER (%lu bytes), %ldx%ld, '%.4s', %u bits, "
+	      "%lu bit/s, %lld per frame, source %ldx%ld, target %ldx%ld", what,
+	      (unsigned long)mt->cbFormat, (long)v->bmiHeader.biWidth,
+	      (long)v->bmiHeader.biHeight, (const char *)&v->bmiHeader.biCompression,
+	      v->bmiHeader.biBitCount, (unsigned long)v->dwBitRate,
+	      (long long)v->AvgTimePerFrame,
+	      (long)(v->rcSource.right - v->rcSource.left),
+	      (long)(v->rcSource.bottom - v->rcSource.top),
+	      (long)(v->rcTarget.right - v->rcTarget.left),
+	      (long)(v->rcTarget.bottom - v->rcTarget.top));
+}
+
+/*
+ * What a compressed video type the DMO offers leaves out, and an encoder
+ * may insist on (the WMV encoder refuses a bit rate of 0): a bit rate, and
+ * source and target rectangles of the whole picture.
+ */
+static void fill_video_output(DMO_MEDIA_TYPE *mt)
+{
+	if (memcmp(&mt->formattype, &FORMAT_VideoInfo, sizeof(GUID)) ||
+	    mt->cbFormat < sizeof(VIDEOINFOHEADER))
+		return;
+	VIDEOINFOHEADER *v = (VIDEOINFOHEADER *)mt->pbFormat;
+	LONG w = v->bmiHeader.biWidth;
+	LONG h = v->bmiHeader.biHeight < 0 ? -v->bmiHeader.biHeight :
+		 v->bmiHeader.biHeight;
+	if (!v->dwBitRate)
+		v->dwBitRate = 1000000;
+	if (v->rcSource.right <= v->rcSource.left)
+		v->rcSource = (RECT){ 0, 0, w, h };
+	if (v->rcTarget.right <= v->rcTarget.left)
+		v->rcTarget = (RECT){ 0, 0, w, h };
+}
+
 /*
  * A partial output type (a major type, perhaps a subtype, no format): the
  * first of the types the DMO offers for its input that fits it, as a
@@ -201,8 +247,15 @@ static HRESULT complete_output(struct dmo_host *h, const DMO_MEDIA_TYPE *out,
 		if (!memcmp(&full->majortype, &out->majortype, sizeof(GUID)) &&
 		    (!memcmp(&out->subtype, &none, sizeof(GUID)) ||
 		     !memcmp(&full->subtype, &out->subtype, sizeof(GUID))) &&
-		    full->cbFormat && full->pbFormat)
+		    full->cbFormat && full->pbFormat) {
+			/* Preserve the DMO's own type if it already accepts it. */
+			if (!memcmp(&full->formattype, &FORMAT_VideoInfo,
+				    sizeof(GUID)) &&
+			    FAILED(MO(h->mo, SetOutputType, 0, full,
+				      DMO_SET_TYPEF_TEST_ONLY)))
+				fill_video_output(full);
 			return S_OK;
+		}
 		dshow_free_media_type(full);
 	}
 }
@@ -237,6 +290,8 @@ HRESULT dmo_host_create(IMediaObject *mo, const DMO_MEDIA_TYPE *input,
 			   DMO_SET_TYPEF_TEST_ONLY)) ||
 	    FAILED(hr = MO(mo, SetInputType, 0, &h->input, 0)) ||
 	    FAILED(hr = complete_output(h, output, &h->scratch)) ||
+	    (trace_type("input", &h->input), 0) ||
+	    (trace_type("output offered", &h->scratch), 0) ||
 	    FAILED(hr = private_data(h, &h->scratch)) ||
 	    FAILED(hr = MO(mo, SetOutputType, 0, &h->output,
 			   DMO_SET_TYPEF_TEST_ONLY)) ||

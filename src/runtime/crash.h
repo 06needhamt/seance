@@ -54,6 +54,15 @@ void crash_leave(const struct crash_frame *saved);
 int crash_try(void (*fn)(void *arg), void *arg);
 
 /*
+ * Ends the process after a crash (or a trap) reported as sig: with exit
+ * status 128 + sig, as a shell reports a process killed by it, but without
+ * the signal, so there is no core dump (nor qemu's "core dumped"). With
+ * VFW_CORE=1, by the signal itself, for a core to debug. Safe in a signal
+ * handler once crash_install has run.
+ */
+void crash_exit(int sig) __attribute__((noreturn));
+
+/*
  * Prints the same report a fault reaching on_fault would, for pc/fault_addr
  * on the calling thread, then dies of sig as it would without the handler.
  * seh.c calls this once its dispatch of a hardware fault finds no handler

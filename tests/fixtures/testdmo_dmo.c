@@ -20,6 +20,9 @@
  *   TESTDMO_PRIVATE      the encoder has IWMCodecPrivateData, giving four
  *                        bytes of codec data for the stream header
  *   TESTDMO_STRICT       every pointer handed in must be below 2 GB
+ *   TESTDMO_BITRATE      the encoder refuses an output type with no bit
+ *                        rate or source rectangle, though it offers one
+ *                        (wmvdmoe2.dll, the WMV encoder)
  */
 #include "fixture.h"
 #include <dmoreg.h>
@@ -85,7 +88,7 @@ struct dmo {
 	IWMCodecPrivateData pd;
 	LONG refs;
 	BOOL encoder;
-	BOOL delay, burst, refuse, switching, private_data, strict;
+	BOOL delay, burst, refuse, switching, private_data, strict, bitrate;
 	DMO_MEDIA_TYPE in, out;
 	BOOL in_set, out_set;
 	BYTE *picture;			/* the previous picture */
@@ -495,6 +498,12 @@ static HRESULT WINAPI dmo_set_output(IMediaObject *p, DWORD stream,
 		return DMO_E_TYPE_NOT_ACCEPTED;
 	if (d->encoder ? b->biCompression != TST0 : raw_index(b) < 0)
 		return DMO_E_TYPE_NOT_ACCEPTED;
+	if (d->encoder && d->bitrate) {
+		const VIDEOINFOHEADER *v = (const VIDEOINFOHEADER *)mt->pbFormat;
+		if (!eq(&mt->formattype, &format_video_info) || !v->dwBitRate ||
+		    v->rcSource.right - v->rcSource.left != b->biWidth)
+			return DMO_E_TYPE_NOT_ACCEPTED;
+	}
 	if (flags & DMO_SET_TYPEF_TEST_ONLY)
 		return S_OK;
 	free_type(&d->out);
@@ -1072,6 +1081,7 @@ HRESULT testdmo_create(BOOL encoder, REFIID iid, void **out)
 	d->switching = env_on("TESTDMO_SWITCH");
 	d->private_data = env_on("TESTDMO_PRIVATE");
 	d->strict = env_on("TESTDMO_STRICT");
+	d->bitrate = env_on("TESTDMO_BITRATE");
 	InterlockedIncrement(&objects);
 	HRESULT hr = dmo_qi(&d->iface, iid, out);
 	dmo_release(&d->iface);

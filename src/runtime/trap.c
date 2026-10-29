@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #include <pthread.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +9,7 @@
 
 #include "loader/modules.h"
 #include "runtime/builtin.h"
+#include "runtime/crash.h"
 #include "runtime/trap.h"
 
 #define THUNK_SIZE  16
@@ -50,7 +52,7 @@ void vfw_trap_report(const struct trap_record *r, const void *ret)
 		fprintf(stderr, "seance: unimplemented function %s called "
 			"from %s\n", r->what, where);
 	fflush(stderr);
-	abort();
+	crash_exit(SIGABRT);
 }
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;

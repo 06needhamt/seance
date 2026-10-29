@@ -13,7 +13,10 @@
  *            rawvideo are)
  *
  * Each gives frames in its own format, a BITMAPINFOHEADER (plus palette or
- * masks) that stays the same for the whole source.
+ * masks) that stays the same for the whole source. Asked to pad or crop
+ * the picture to a multiple of N, a source gives I420 (YUV sources) or
+ * RGB24 bottom-up frames of the new size instead: padding repeats the last
+ * row and column, cropping drops rows and columns from the bottom right.
  */
 #ifndef VFW_IN_SOURCE_H
 #define VFW_IN_SOURCE_H
@@ -35,6 +38,7 @@ struct source_options {
 	const char *raw_format;	/* raw: "I420", "BGR24", ... (vfw_std_format) */
 	int width, height;	/* raw: the frame size */
 	int stream;		/* AVI: the stream, or -1 for the first video */
+	int pad, crop;		/* a multiple (2 to 256) to pad or crop to; 0 */
 };
 
 struct source;

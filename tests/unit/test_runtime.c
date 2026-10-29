@@ -130,12 +130,14 @@ static void test_builtin_tables(void)
 		int unique = 1;
 
 		/*
-		 * Every DLL has exports. fallback (msvcrt.dll's) governs
-		 * precedence (a real DLL of that name on the search path
-		 * still wins), not whether there's anything behind it.
+		 * Every DLL has exports. fallback (the C runtimes', msvcrt.dll
+		 * and crtdll.dll) governs precedence (a real DLL of that name
+		 * on the search path still wins), not whether there's anything
+		 * behind it.
 		 */
 		CHECK(n > 0);
-		CHECK(!dll->fallback || !strcmp(dll->name, "msvcrt.dll"));
+		CHECK(!dll->fallback || !strcmp(dll->name, "msvcrt.dll") ||
+		      !strcmp(dll->name, "crtdll.dll"));
 		for (size_t i = 0; i < n; i++) {
 			const struct builtin_export *e = builtin_entry(dll, i);
 			const struct builtin_export *prev =
@@ -311,7 +313,7 @@ static void test_fixture(void)
 	close(pipefd[0]);
 	int status;
 	waitpid(pid, &status, 0);
-	CHECK(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 128 + SIGABRT);
 	CHECK(strstr(msg, "unimplemented function kernel32.dll!SeanceTestMissing") ||
 	      strstr(msg, "unimplemented function KERNEL32.dll!SeanceTestMissing"));
 	CHECK(strstr(msg, "called from pe_runtime.dll+0x") != NULL);
@@ -324,6 +326,8 @@ static void test_fixture(void)
 
 int main(void)
 {
+	/* Crashes and traps exit 128 + the signal, whatever we inherit. */
+	unsetenv("VFW_CORE");
 	test_teb();
 	test_threads_and_tls();
 	test_builtin_tables();

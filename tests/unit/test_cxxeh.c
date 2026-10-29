@@ -93,7 +93,7 @@ static void test_fixture(void)
 
 	char err[1024];
 	int st = run_child(dll, "cxx_unhandled", err, sizeof(err), 0);
-	CHECK(WIFSIGNALED(st) || (WIFEXITED(st) && WEXITSTATUS(st) == 134));
+	CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 134);
 	CHECK(strstr(err, "unhandled exception 0xE06D7363") != NULL);
 
 	st = run_child(dll, "cxx_noexcept", err, sizeof(err), 0);
@@ -745,6 +745,8 @@ static void test_misc(void)
 
 int main(void)
 {
+	/* Crashes and traps exit 128 + the signal, whatever we inherit. */
+	unsetenv("VFW_CORE");
 	CHECK_EQ(runtime_enter(), 0);
 	crt = mod_load("msvcrt.dll", NULL);
 	CHECK(crt && crt->builtin);

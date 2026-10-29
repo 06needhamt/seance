@@ -20,7 +20,7 @@ Work is split into phases; see [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION
 |---|---|---|
 | 0 | Build skeleton, Win32 headers, ABI cross-check, CLI skeleton | done |
 | 1 | PE loader and `info` | done |
-| 2 | Win32 runtime (TEB, SEH, threads, stub DLLs) | done: TEB, built-in DLLs, kernel32 (including SRW locks, condition variables, `InitOnce`, interlocked lists and thread-pool timers, waits and work), ntdll, SEH dispatch, delay-load binding, the msvcrt-family CRT (math, string, stdio, low-level I/O, `_findfirst`, `_stat`, startup, 64-bit helpers, `__try`/`__except`, setjmp/longjmp, C++ exceptions and RTTI, printf dialect), headless user32, gdi32 and advapi32 (registry, security), version, ole32, oleaut32, shell32, comctl32, comdlg32, and offline ws2_32, bcrypt, ncrypt, crypt32, d3d9, dxva2, d3d11 and dxgi |
+| 2 | Win32 runtime (TEB, SEH, threads, stub DLLs) | done: TEB, built-in DLLs, kernel32 (including SRW locks, condition variables, `InitOnce`, interlocked lists and thread-pool timers, waits and work), ntdll, SEH dispatch, delay-load binding, the msvcrt-family CRT (math, string, stdio, low-level I/O, `_findfirst`, `_stat`, startup, 64-bit helpers, `__try`/`__except`, setjmp/longjmp, C++ exceptions and RTTI, printf dialect), headless user32, gdi32 and advapi32 (registry, security), version, ole32, oleaut32, shell32, comctl32, comdlg32, and offline ws2_32, crtdll, psapi, bcrypt, ncrypt, crypt32, d3d9, dxva2, d3d11 and dxgi |
 | 3 | VfW layer and `probe` | done: driver lifecycle, ICM API (including ICSeqCompressFrame*, ICImageCompress/ICImageDecompress and DrawDib*), winmm/msvfw32 built-ins, `probe`, `list` |
 | 4 | AVI / Y4M I/O, `decode` and `encode` | done: AVI reader and writer, Y4M/BMP/raw input and output, `avi`, `convert`, `decode`, `encode` |
 | 5 | Hardening and CI | done: DLL memory below 2 GB, crash and hang reports, SSE/FPU fixture, fuzzing, samples run, CI |
@@ -420,6 +420,13 @@ comdlg32 are built in too, headless:
   converts byte order and address text, and resolves numeric addresses, but
   `socket` fails as if the network were down and names don't resolve.
 - **ncrypt:** bcrypt's random numbers; there is no key storage provider.
+- **crtdll:** the C runtime of Windows NT 3.x and 4.0 (msvidc32.dll and
+  mcmjpg32.dll use it): msvcrt's functions, and its data under crtdll's own
+  `_dll` names. A real crtdll.dll on the search path wins, as for msvcrt.
+- **psapi:** the one process's modules (`EnumProcessModules`,
+  `GetModuleBaseName`, `GetModuleFileNameEx`, `GetModuleInformation`) and
+  memory (`GetProcessMemoryInfo`, from the host's); kernel32 has them too,
+  as `K32EnumProcessModules` and so on.
 - **dxva2, d3d11, dxgi:** no adapter, like d3d9, so decoders fall back to
   software.
 - **kernel32, newer calls:** slim reader/writer locks, condition variables,
@@ -599,6 +606,13 @@ which the harness also exports to codecs. It reads:
   RGB565, RGB555) and `--size`; raw RGB is top-down with unpadded rows,
   as FFmpeg's `rawvideo` and our `.bgr` output are.
 
+Many codecs only take sizes that are multiples of 8 or 16, which 640x360
+isn't. When a codec takes no format at the input's size, `encode` says
+which nearby size it does take, and `--pad <n>` (repeating the last row
+and column) or `--crop <n>` (dropping the bottom and right edges) makes
+the picture a multiple of n wide and high (2, 4, ... 256). For a codec
+that only takes certain sizes it names one to resize to.
+
 Frames go to the codec as they are if it takes them
 (`ICM_COMPRESS_QUERY`); otherwise they are converted to the first standard
 format it takes, or to `--codec-input`. PAL8, the last tried, gets each
@@ -607,7 +621,8 @@ that palette, else of the grey ramp, by brightness. `--keyint` (default: the cod
 `ICM_GETDEFAULTKEYFRAMERATE`), `--quality` (0 to 10000) and `--bitrate`
 (kbit/s, for codecs that can aim for one) set the sequence, and
 `ICM_COMPRESS_FRAMES_INFO` tells the codec about them and the frame rate.
-The keyframe flags in the AVI index are the codec's. `--state` sets a
+The keyframe flags in the AVI index are the codec's, except that the
+first frame is always one (some codecs flag none). `--state` sets a
 codec state saved earlier with `--save-state` (`ICM_SETSTATE` /
 `ICM_GETSTATE`), and `--odml` writes OpenDML indexes even for small
 files; files over 1 GB always get them.
@@ -771,7 +786,8 @@ decodes below 40 dB.
   more.
 - **Buffer overruns.** Each buffer a codec compresses or decompresses into
   has its own pages, with an inaccessible page after the last one (the
-  rest of that page is slack, as heap blocks have on Windows). A codec
+  rest of that page, and at least 32 bytes, is slack, as heap blocks have
+  on Windows). A codec
   that writes past it faults there, and the crash report says which
   buffer and how far past its end, instead of the heap being found
   corrupt later.
@@ -780,6 +796,13 @@ decodes below 40 dB.
   zeroed bytes, as FFmpeg does, for codecs whose bit readers read ahead.
 - **Hangs.** With `VFW_TIMEOUT=<seconds>`, a single call into a DLL that
   takes longer is reported the same way, and the harness exits with 124.
+- **Exit status.** After a crash report, or an unimplemented function's,
+  the harness exits with 128 + the signal (139 for SIGSEGV, 134 for a
+  trap), the status a shell gives a process the signal killed, but no core
+  is dumped (`VFW_CORE=1` dies by the signal instead). A crash while a DLL
+  is unloaded (`DLL_PROCESS_DETACH`) is reported and survived.
+- **Console output.** What a DLL writes to its standard output goes to
+  stderr, so it can't mix with the harness's own output on stdout.
 - **Code in data.** Windows ran programs without DEP (data execution
   prevention) unless they opted in, and some codecs build or unpack code in
   heap memory or on the stack and run it there (`pvwv220.dll` has its own PE
@@ -802,6 +825,7 @@ decodes below 40 dB.
 | `VFW_REGISTRY` | The Windows registry file (default `$VFW_ROOT/registry.reg`); empty keeps it in memory only |
 | `VFW_TRACE=1` | Log calls into the built-in DLLs and every driver message to stderr |
 | `VFW_TIMEOUT=<s>` | Report and stop (exit 124) when one call into a DLL takes longer |
+| `VFW_CORE=1` | End a crash or an unimplemented-function trap by its signal (dumping core where enabled) rather than with exit status 128 + the signal |
 | `VFW_CWD` | The current directory DLLs start in, a Windows (`C:\work`) or Unix directory (default `C:\`) |
 | `VFW_DATE` | The date and time (UTC) DLLs see at startup, `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM[:SS]`; the clock runs on from there (default: the host's) |
 | `VFW_COMPRESSOR` | What `ICCompressorChoose` answers: a FOURCC (`TST0`), `uncompressed` or `cancel` |

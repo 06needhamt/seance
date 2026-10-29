@@ -15,6 +15,7 @@
 #include "common/error.h"
 #include "common/log.h"
 #include "loader/modules.h"
+#include "runtime/crash.h"
 #include "runtime/runtime.h"
 #include "runtime/teb.h"
 #include "runtime/trap.h"
@@ -437,12 +438,26 @@ static void unload(struct module *m)
 }
 
 /* TLS callbacks run before DllMain, for detach as well as attach. */
+static void detach_calls(void *arg)
+{
+	struct module *m = arg;
+
+	pe_tls_notify(m->img, DLL_PROCESS_DETACH);
+	pe_call_entry(m->img, DLL_PROCESS_DETACH);
+}
+
+/*
+ * A DLL that crashes as it is unloaded (packed.dll, whose unpacker jumps
+ * into memory gone by then) has done its work: the crash is reported,
+ * then let go.
+ */
 static void detach(struct module *m)
 {
 	if (!m->img)
 		return;
-	pe_tls_notify(m->img, DLL_PROCESS_DETACH);
-	pe_call_entry(m->img, DLL_PROCESS_DETACH);
+	if (crash_try(detach_calls, m))
+		vfw_warn("%s crashed while being unloaded; carrying on",
+			 m->name);
 }
 
 void mod_thread_notify(DWORD reason)
@@ -614,6 +629,21 @@ struct module *mod_main(void)
 	}
 	UNLOCK();
 	return main_module;
+}
+
+size_t mod_list(HMODULE *out, size_t max)
+{
+	struct module *main = mod_main();
+	size_t n = 0;
+
+	LOCK();
+	if (main && n++ < max)
+		out[0] = (HMODULE)main->base;
+	for (struct module *m = modules; m; m = m->next)
+		if (m != main && n++ < max)
+			out[n - 1] = (HMODULE)m->base;
+	UNLOCK();
+	return n;
 }
 
 void mod_addref(struct module *mod)

@@ -78,4 +78,8 @@ int crt_guarded(void (*fn)(void *), void *arg);
  */
 void crt_finally_abandon(const void *ebp);
 
+/* Data msvcrt exports, which crtdll.dll exports again under other names. */
+extern const unsigned short *crt_pctype_ptr;
+extern int crt_mb_cur_max, crt_fmode, crt_commode;
+
 #endif /* VFW_WIN32_CRT_H */

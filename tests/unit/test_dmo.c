@@ -215,6 +215,49 @@ static void test_types(void)
 	CHECK(unloadable());
 }
 
+/* A partial request keeps the offered format unless the DMO rejects it. */
+static void test_partial_output(int encoder, int filled)
+{
+	struct dmo_object *obj = NULL;
+	IMediaObject *mo = open_dmo(encoder ? &clsid_encoder : &clsid_decoder, &obj);
+	AM_MEDIA_TYPE in = { 0 }, out = { 0 }, offered = { 0 };
+	struct dmo_host *host = NULL;
+	struct got g = { 0 };
+	FOURCC raw = mmioFOURCC('I', '4', '2', '0');
+	FOURCC compressed = mmioFOURCC('T', 'S', 'T', '0');
+
+	if (!mo)
+		return;
+	make_types(&in, &out, encoder ? raw : compressed,
+		   encoder ? compressed : raw, 12);
+	CHECK_EQ(mo->lpVtbl->SetInputType(mo, 0, &in, 0), S_OK);
+	CHECK_EQ(mo->lpVtbl->GetOutputType(mo, 0, 0, &offered), S_OK);
+	AM_MEDIA_TYPE partial = {
+		.majortype = out.majortype, .subtype = out.subtype,
+	};
+	CHECK_EQ(dmo_host_create(mo, &in, &partial, collect, &g, &host), S_OK);
+	if (host) {
+		const DMO_MEDIA_TYPE *actual = dmo_host_output_type(host);
+		CHECK_EQ(actual->cbFormat, offered.cbFormat);
+		if (filled && actual->cbFormat >= sizeof(VIDEOINFOHEADER)) {
+			const VIDEOINFOHEADER *v = (const VIDEOINFOHEADER *)actual->pbFormat;
+			CHECK(v->dwBitRate > 0);
+			CHECK_EQ(v->rcSource.right - v->rcSource.left, W);
+			CHECK_EQ(v->rcSource.bottom - v->rcSource.top, H);
+			CHECK_EQ(v->rcTarget.right - v->rcTarget.left, W);
+			CHECK_EQ(v->rcTarget.bottom - v->rcTarget.top, H);
+		} else if (!filled && actual->cbFormat == offered.cbFormat) {
+			CHECK(!memcmp(actual->pbFormat, offered.pbFormat, offered.cbFormat));
+		}
+	}
+	dmo_host_destroy(host);
+	dmo_object_close(obj, mo);
+	dshow_free_media_type(&in);
+	dshow_free_media_type(&out);
+	dshow_free_media_type(&offered);
+	CHECK(unloadable());
+}
+
 /* Encodes every picture; returns the outputs. */
 static void encode_all(struct got *g, LONG key_interval, AM_MEDIA_TYPE *final)
 {
@@ -408,6 +451,11 @@ static void mode_strict(void)
 	check_round_trip(&g);
 }
 
+static void mode_bitrate(void)
+{
+	test_partial_output(1, 1);
+}
+
 static const struct {
 	const char *name, *variable;
 	void (*run)(void);
@@ -418,6 +466,7 @@ static const struct {
 	{ "switch", "TESTDMO_SWITCH", mode_switch },
 	{ "private", "TESTDMO_PRIVATE", mode_private },
 	{ "strict", "TESTDMO_STRICT", mode_strict },
+	{ "bitrate", "TESTDMO_BITRATE", mode_bitrate },
 };
 #define NMODES (sizeof(modes) / sizeof(*modes))
 
@@ -446,6 +495,8 @@ int main(int argc, char **argv)
 	}
 
 	test_types();
+	test_partial_output(0, 0);
+	test_partial_output(1, 0);
 	test_decode();
 	test_encode();
 	test_state();

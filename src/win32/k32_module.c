@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 
 #include "common/error.h"
 #include "loader/modules.h"
@@ -467,7 +468,195 @@ WINFN(DWORD) k32_SizeofResource(HMODULE h, HRSRC hrsrc)
 
 #define E(name) { #name, 0, (void *)k32_##name }
 
+/*
+ * psapi.dll, and kernel32's K32* copies of it: modules and memory of the
+ * one process there is (cinevfw3.dll imports psapi). A process handle is
+ * the pseudo-handle GetCurrentProcess and OpenProcess give.
+ */
+#define THIS_PROCESS ((HANDLE)(LONG_PTR)-1)
+
+static int this_process(HANDLE h)
+{
+	if (h == THIS_PROCESS)
+		return 1;
+	win_set_error(ERROR_INVALID_HANDLE);
+	return 0;
+}
+
+WINFN(BOOL) ps_EnumProcesses(DWORD *ids, DWORD cb, DWORD *needed)
+{
+	if (!needed || (cb && !ids)) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	*needed = cb >= sizeof(DWORD) ? sizeof(DWORD) : 0;
+	if (cb >= sizeof(DWORD))
+		ids[0] = (DWORD)getpid();
+	return TRUE;
+}
+
+WINFN(BOOL) ps_EnumProcessModules(HANDLE process, HMODULE *mods, DWORD cb,
+				  DWORD *needed)
+{
+	if (!this_process(process))
+		return FALSE;
+	if (!needed || (cb && !mods)) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	size_t n = mod_list(mods, cb / sizeof(HMODULE));
+	*needed = (DWORD)(n * sizeof(HMODULE));
+	return TRUE;
+}
+
+WINFN(BOOL) ps_EnumProcessModulesEx(HANDLE process, HMODULE *mods, DWORD cb,
+				    DWORD *needed, DWORD filter)
+{
+	return ps_EnumProcessModules(process, mods, cb, needed);
+}
+
+WINFN(DWORD) ps_GetModuleFileNameExA(HANDLE process, HMODULE h, LPSTR buf,
+				     DWORD size)
+{
+	return this_process(process) ? module_file_name(h, buf, size, 0) : 0;
+}
+
+WINFN(DWORD) ps_GetModuleFileNameExW(HANDLE process, HMODULE h, LPWSTR buf,
+				     DWORD size)
+{
+	return this_process(process) ? module_file_name(h, buf, size, 1) : 0;
+}
+
+/* The file name alone, cut short to fit. */
+static DWORD module_base_name(HANDLE process, HMODULE h, void *buf,
+			      DWORD size, int wide)
+{
+	struct module *m;
+
+	if (!this_process(process) || !(m = module_of(h)) || !buf || !size)
+		return 0;
+	/* Names are ASCII; the count copied, without the terminator. */
+	size_t len = strlen(m->name), n = len < size - 1 ? len : size - 1;
+	for (size_t i = 0; i <= n; i++) {
+		char c = i < n ? m->name[i] : 0;
+		if (wide)
+			((WCHAR *)buf)[i] = (BYTE)c;
+		else
+			((char *)buf)[i] = c;
+	}
+	return (DWORD)n;
+}
+
+WINFN(DWORD) ps_GetModuleBaseNameA(HANDLE process, HMODULE h, LPSTR buf,
+				   DWORD size)
+{
+	return module_base_name(process, h, buf, size, 0);
+}
+
+WINFN(DWORD) ps_GetModuleBaseNameW(HANDLE process, HMODULE h, LPWSTR buf,
+				   DWORD size)
+{
+	return module_base_name(process, h, buf, size, 1);
+}
+
+/* From the headers at the module's base, built-in modules' included. */
+WINFN(BOOL) ps_GetModuleInformation(HANDLE process, HMODULE h,
+				    LPMODULEINFO info, DWORD cb)
+{
+	struct module *m;
+
+	if (!this_process(process) || !(m = module_of(h)))
+		return FALSE;
+	if (!info || cb < sizeof(*info)) {
+		win_set_error(ERROR_INSUFFICIENT_BUFFER);
+		return FALSE;
+	}
+	const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)m->base;
+	const IMAGE_NT_HEADERS32 *nt =
+		(const IMAGE_NT_HEADERS32 *)(m->base + dos->e_lfanew);
+	info->lpBaseOfDll = m->base;
+	info->SizeOfImage = nt->OptionalHeader.SizeOfImage;
+	info->EntryPoint = nt->OptionalHeader.AddressOfEntryPoint ?
+			   m->base + nt->OptionalHeader.AddressOfEntryPoint :
+			   NULL;
+	return TRUE;
+}
+
+/* The host's resident and peak sizes, as the working set. */
+WINFN(BOOL) ps_GetProcessMemoryInfo(HANDLE process,
+				    PPROCESS_MEMORY_COUNTERS pmc, DWORD cb)
+{
+	if (!this_process(process))
+		return FALSE;
+	if (!pmc || cb < sizeof(*pmc)) {
+		win_set_error(ERROR_INSUFFICIENT_BUFFER);
+		return FALSE;
+	}
+	memset(pmc, 0, sizeof(*pmc));
+	pmc->cb = sizeof(*pmc);
+	FILE *f = fopen("/proc/self/status", "r");
+	char line[128];
+	while (f && fgets(line, sizeof(line), f)) {
+		unsigned long kb;
+		if (sscanf(line, "VmRSS: %lu", &kb) == 1)
+			pmc->WorkingSetSize = (SIZE_T)kb * 1024;
+		else if (sscanf(line, "VmHWM: %lu", &kb) == 1)
+			pmc->PeakWorkingSetSize = (SIZE_T)kb * 1024;
+		else if (sscanf(line, "VmSize: %lu", &kb) == 1)
+			pmc->PagefileUsage = (SIZE_T)kb * 1024;
+		else if (sscanf(line, "VmPeak: %lu", &kb) == 1)
+			pmc->PeakPagefileUsage = (SIZE_T)kb * 1024;
+	}
+	if (f)
+		fclose(f);
+	return TRUE;
+}
+
+/* The main module's path, as GetModuleFileNameEx gives it. */
+WINFN(DWORD) ps_GetProcessImageFileNameA(HANDLE process, LPSTR buf, DWORD size)
+{
+	return this_process(process) ? module_file_name(NULL, buf, size, 0) : 0;
+}
+
+WINFN(DWORD) ps_GetProcessImageFileNameW(HANDLE process, LPWSTR buf, DWORD size)
+{
+	return this_process(process) ? module_file_name(NULL, buf, size, 1) : 0;
+}
+
+#define PS(name) { #name, 0, (void *)ps_##name }
+#define K32(name) { "K32" #name, 0, (void *)ps_##name }
+
+const struct builtin_export psapi_exports[] = {
+	PS(EnumProcessModules),
+	PS(EnumProcessModulesEx),
+	PS(EnumProcesses),
+	PS(GetModuleBaseNameA),
+	PS(GetModuleBaseNameW),
+	PS(GetModuleFileNameExA),
+	PS(GetModuleFileNameExW),
+	PS(GetModuleInformation),
+	PS(GetProcessImageFileNameA),
+	PS(GetProcessImageFileNameW),
+	PS(GetProcessMemoryInfo),
+	BUILTIN_END
+};
+
+static const struct builtin_export *const psapi_tables[] = { psapi_exports, NULL };
+
+const struct builtin_dll builtin_psapi = { "psapi.dll", NULL, psapi_tables, 0 };
+
 const struct builtin_export k32_module_exports[] = {
+	K32(EnumProcessModules),
+	K32(EnumProcessModulesEx),
+	K32(EnumProcesses),
+	K32(GetModuleBaseNameA),
+	K32(GetModuleBaseNameW),
+	K32(GetModuleFileNameExA),
+	K32(GetModuleFileNameExW),
+	K32(GetModuleInformation),
+	K32(GetProcessImageFileNameA),
+	K32(GetProcessImageFileNameW),
+	K32(GetProcessMemoryInfo),
 	E(DisableThreadLibraryCalls),
 	E(EnumResourceLanguagesA),
 	E(FindResourceA),

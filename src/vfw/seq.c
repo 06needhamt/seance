@@ -129,6 +129,15 @@ BOOL ic_seq_start_ex(COMPVARS *pc, const BITMAPINFO *in, DWORD rate,
 	}
 	pc->lpbiOut = (BITMAPINFO *)out;
 	/*
+	 * A codec that answers without writing a format (kdvyuv8.dll,
+	 * wnvplay1.dll) leaves it 0x0: there is nothing to compress to.
+	 */
+	if (out->biWidth == 0 || out->biHeight == 0) {
+		vfw_set_error("the codec gives no output format (0x0) for "
+			      "this input; it may only decompress or convert");
+		goto fail;
+	}
+	/*
 	 * Some codecs refuse their own output format when asked about it with
 	 * the input (vsslight.dll, ICERR_BADFORMAT) yet compress to it: the
 	 * format is the codec's, so only ICM_COMPRESS_BEGIN refusing it counts.
