@@ -298,10 +298,12 @@ static HRESULT com_write_encoded(void *opaque, const struct xform_output *o,
 		return VFW_E_WRONG_STATE;
 	if (dynamic && !com_same_format(out, dynamic))
 		return VFW_E_INVALIDMEDIATYPE;
-	if (avi_writer_add(out->writer, o->data, (DWORD)o->size, o->sync))
+	/* The first frame is a keyframe, as for ICM codecs above. */
+	int sync = o->sync || !out->written;
+	if (avi_writer_add(out->writer, o->data, (DWORD)o->size, sync))
 		return E_FAIL;
 	out->written++;
-	out->keys += o->sync;
+	out->keys += sync;
 	out->bytes += o->size;
 	return S_OK;
 }
@@ -943,6 +945,13 @@ int cmd_encode(int argc, char **argv)
 			fprintf(stderr, "seance: %s\n", vfw_error());
 			goto done;
 		}
+		/*
+		 * The first frame is decoded from nothing, so it is a keyframe
+		 * whatever the codec says (WavCWAIP.dll and icmw_32.dll flag
+		 * none, which leaves a file nothing can seek in).
+		 */
+		if (!written)
+			key = TRUE;
 		if (avi_writer_add(w, data, (DWORD)size, key)) {
 			fprintf(stderr, "seance: %s\n", vfw_error());
 			goto done;

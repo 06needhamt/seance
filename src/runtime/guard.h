@@ -13,10 +13,11 @@
 
 /*
  * n zeroed bytes (at least 1) at the start of a page, with the guard page
- * after the last page they touch: what is left of that page is slack, as
- * the Windows heap and glibc give big blocks, and some codecs need it
- * (aslcodec_vfw.dll's BGR24 output writes a little past the frame;
- * Sif1_vfw.dll refused BGR24 into a buffer flush against the guard). what
+ * after the page that n + 32 bytes reach: the rest is slack, as the Windows
+ * heap (whose block header is about 32 bytes) and glibc give big blocks,
+ * and some codecs need it (aslcodec_vfw.dll's BGR24 output writes a little
+ * past the frame; Sif1_vfw.dll refused BGR24 into a buffer flush against
+ * the guard; avimszh.dll writes just past a buffer of whole pages). what
  * names the buffer in crash reports ("output buffer"). NULL when out of
  * memory.
  */

@@ -10,6 +10,7 @@
 
 #include "common/sanitizer.h"
 #include "runtime/crash.h"
+#include "runtime/guard.h"
 #include "runtime/runtime.h"
 #include "test.h"
 #include "vfw/icm.h"
@@ -160,8 +161,41 @@ static int run_try(char *err, size_t size)
 	return status;
 }
 
+/*
+ * A guarded buffer of whole pages still has the slack the Windows heap's
+ * 32-byte block header leaves (avimszh.dll writes there), and the guard
+ * page right after.
+ */
+static void test_guard(void)
+{
+	long page = sysconf(_SC_PAGESIZE);
+	char *p = guard_alloc((size_t)page * 2, "test buffer");
+	char what[128];
+
+	CHECK(p != NULL);
+	if (!p)
+		return;
+	memset(p + page * 2, 0xab, 32);		/* doesn't fault */
+	CHECK(guard_describe(p + page * 3, what, sizeof(what)));
+	char want[128];
+	snprintf(want, sizeof(want), "%ld bytes past the end of the %ld-byte "
+		 "test buffer", page, page * 2);
+	CHECK_STR(what, want);
+	guard_free(p);
+
+	/* A size short of a page by less than the header gets the next one. */
+	p = guard_alloc((size_t)page - 8, "test buffer");
+	CHECK(p != NULL);
+	if (p) {
+		memset(p + page - 8, 0xab, 32);
+		CHECK(guard_describe(p + page * 2, what, sizeof(what)));
+		guard_free(p);
+	}
+}
+
 int main(void)
 {
+	test_guard();
 	const char *codec = fixture("testcodec.dll");
 	char err[4096];
 

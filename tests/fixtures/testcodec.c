@@ -42,11 +42,17 @@
  *   TESTCODEC_DECODE_ONLY it refuses DRV_OPEN to compress, though it answers
  *                         ICM_COMPRESS_QUERY when opened otherwise
  *                         (vgpix32d.dll)
- *   TESTCODEC_OVERRUN     it writes a page past the end of its largest
+ *   TESTCODEC_OVERRUN     it writes on past the end of its largest
  *                         frame when compressing (SN4Codec.dll)
  *   TESTCODEC_END_CRASH   it divides by zero in ICM_COMPRESS_END and
  *                         ICM_DECOMPRESS_END (WavCWAIP.dll, by a byte count
  *                         it never kept)
+ *   TESTCODEC_EMPTY_FORMAT it answers ICM_COMPRESS_GET_FORMAT without
+ *                         writing a format (kdvyuv8.dll, wnvplay1.dll)
+ *   TESTCODEC_NO_KEYS     it never flags a frame AVIIF_KEYFRAME
+ *                         (WavCWAIP.dll, icmw_32.dll)
+ *   TESTCODEC_ALIGN16     it takes only inputs whose height is a multiple
+ *                         of 16 (SN4Codec.dll, vsslight.dll, ...)
  * With TESTCODEC_LATESIZE=1 it only knows how big a frame can get once
  * ICM_COMPRESS_BEGIN has been sent, and says 16 bytes before (in
  * ICM_COMPRESS_GET_SIZE and the output format), as wtvc.dll does.
@@ -116,6 +122,7 @@ static int pair_named(DWORD h)
 }
 static int end_crash;
 static int overrun;
+static int empty_format, no_keys, align16;
 static volatile int zero;
 #define EARLY_SIZE 16	/* what it says before ICM_COMPRESS_BEGIN */
 static DWORD last_quality = 0xffffffff;	/* of the last ICM_COMPRESS */
@@ -246,6 +253,8 @@ static int ok_yuv(const BITMAPINFOHEADER *b)
 /* An input the compressor takes. */
 static int ok_input(const BITMAPINFOHEADER *b)
 {
+	if (align16 && b && abs_height(b) % 16)
+		return 0;
 	return ok_rgb(b) || ok_yuv(b);
 }
 
@@ -368,6 +377,8 @@ static LRESULT compress_get_format(const BITMAPINFOHEADER *in,
 		return ICERR_BADFORMAT;
 	if (!out)
 		return sizeof(BITMAPINFOHEADER);
+	if (empty_format)
+		return ICERR_OK;
 	*out = *in;
 	out->biSize = sizeof(*out);
 	out->biCompression = TST0;
@@ -406,7 +417,7 @@ static LRESULT compress(struct instance *inst, ICCOMPRESS *c)
 	for (i = 0; i < n; i++)
 		inst->cprev[i] = src[i];
 	if (c->lpdwFlags)
-		*c->lpdwFlags = key ? AVIIF_KEYFRAME : 0;
+		*c->lpdwFlags = key && !no_keys ? AVIIF_KEYFRAME : 0;
 	if (c->lpckid)
 		*c->lpckid = mmioFOURCC('d', 'c', 0, 0);
 	inst->cframe++;
@@ -603,6 +614,12 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 						    sizeof(v)) == 1 && v[0] == '1';
 		overrun = GetEnvironmentVariableA("TESTCODEC_OVERRUN", v,
 						  sizeof(v)) == 1 && v[0] == '1';
+		empty_format = GetEnvironmentVariableA("TESTCODEC_EMPTY_FORMAT", v,
+						       sizeof(v)) == 1 && v[0] == '1';
+		no_keys = GetEnvironmentVariableA("TESTCODEC_NO_KEYS", v,
+						  sizeof(v)) == 1 && v[0] == '1';
+		align16 = GetEnvironmentVariableA("TESTCODEC_ALIGN16", v,
+						  sizeof(v)) == 1 && v[0] == '1';
 		log_msg(msg);
 		check_module(hdrvr);
 		return DefDriverProc(id, hdrvr, msg, l1, l2);
@@ -753,9 +770,12 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 						 ICSTATUS_STATUS, 0))
 			return ICERR_ABORT;
 		if (overrun) {
+			/* On past the end, a byte at a time, as an overrun goes. */
 			ICCOMPRESS *c = (ICCOMPRESS *)l1;
-			((volatile BYTE *)c->lpOutput)[max_size(c->lpbiInput) +
-						       4096] = 0;
+			volatile BYTE *end = (volatile BYTE *)c->lpOutput +
+					     max_size(c->lpbiInput);
+			for (DWORD i = 0; i < 2 * 4096 + 64; i++)
+				end[i] = 0;
 		}
 		return compress(inst, (ICCOMPRESS *)l1);
 	case ICM_COMPRESS_END:
