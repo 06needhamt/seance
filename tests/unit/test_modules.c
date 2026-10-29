@@ -360,6 +360,8 @@ static void test_delay_load(void)
 
 int main(void)
 {
+	/* Crashes and traps exit 128 + the signal, whatever we inherit. */
+	unsetenv("VFW_CORE");
 	test_dependencies();
 	test_tls();
 	test_load_failures();

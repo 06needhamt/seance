@@ -64,7 +64,15 @@ void crash_exit(int sig)
 		keep_core = c && !strcmp(c, "1");
 	}
 	if (keep_core) {
+		/*
+		 * In a signal handler sig is blocked: unblock it, or raise()
+		 * only queues it and _exit() wins (no core).
+		 */
+		sigset_t set;
+		sigemptyset(&set);
+		sigaddset(&set, sig);
 		signal(sig, SIG_DFL);
+		pthread_sigmask(SIG_UNBLOCK, &set, NULL);
 		raise(sig);
 	}
 	_exit(128 + sig);

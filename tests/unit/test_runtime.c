@@ -326,6 +326,8 @@ static void test_fixture(void)
 
 int main(void)
 {
+	/* Crashes and traps exit 128 + the signal, whatever we inherit. */
+	unsetenv("VFW_CORE");
 	test_teb();
 	test_threads_and_tls();
 	test_builtin_tables();

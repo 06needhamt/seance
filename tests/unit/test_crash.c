@@ -196,6 +196,8 @@ static void test_guard(void)
 
 int main(void)
 {
+	/* Crashes and traps exit 128 + the signal, whatever we inherit. */
+	unsetenv("VFW_CORE");
 	test_guard();
 	const char *codec = fixture("testcodec.dll");
 	char err[4096];

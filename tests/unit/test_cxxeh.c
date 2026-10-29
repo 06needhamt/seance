@@ -745,6 +745,8 @@ static void test_misc(void)
 
 int main(void)
 {
+	/* Crashes and traps exit 128 + the signal, whatever we inherit. */
+	unsetenv("VFW_CORE");
 	CHECK_EQ(runtime_enter(), 0);
 	crt = mod_load("msvcrt.dll", NULL);
 	CHECK(crt && crt->builtin);

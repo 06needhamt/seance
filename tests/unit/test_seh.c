@@ -69,6 +69,8 @@ static int run_unhandled(const char *dll, char *err, size_t size)
 
 int main(void)
 {
+	/* Crashes and traps exit 128 + the signal, whatever we inherit. */
+	unsetenv("VFW_CORE");
 	const char *dll = fixture("pe_seh.dll");
 
 	CHECK_EQ(runtime_enter(), 0);
