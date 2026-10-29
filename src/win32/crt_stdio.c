@@ -54,12 +54,17 @@ static crt_FILE crt_iob[3];	/* zero-initialised; crt_stdio_init() fills it */
 
 static void crt_stdio_init(void) __attribute__((constructor));
 
-/* _iob[0..2] map straight to the process's own stdin/stdout/stderr fds. */
+/*
+ * _iob[0..2] map to the process's own stdin and stderr fds: a DLL's stdout
+ * goes to stderr too, since the harness's own stdout can be its output
+ * ("-o -"), which a codec's chatter would corrupt (blox.dll prints
+ * "Hello world!!" when loaded).
+ */
 static void crt_stdio_init(void)
 {
 	crt_iob[0]._file = STDIN_FILENO;
 	crt_iob[0]._flag = _IOREAD;
-	crt_iob[1]._file = STDOUT_FILENO;
+	crt_iob[1]._file = STDERR_FILENO;
 	crt_iob[1]._flag = _IOWRT;
 	crt_iob[2]._file = STDERR_FILENO;
 	crt_iob[2]._flag = _IOWRT;

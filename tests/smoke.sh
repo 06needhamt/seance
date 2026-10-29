@@ -302,6 +302,11 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	# Its FOURCC kept as an upper and lower case pair in data.
 	VFW_INI=/dev/null VFW_ENV_TESTCODEC_NAMED_ONLY=2 $emu "$harness" probe \
 		"$fixtures/testcodec.dll" 2>&1 | grep -q "opened as 'TSTP', found"
+	# A DLL that doesn't load isn't loaded again for each FOURCC or mode
+	# to try (Mvicod32.dll showed a message box each time): once to see
+	# whether it is an ACM driver, once as a codec.
+	[ "$(VFW_TRACE=1 $emu "$harness" probe "$fixtures/pe_fail.dll" 2>&1 |
+		grep -c "loaded .*pe_fail.dll at")" = 2 ]
 	# One that won't open to compress is probed as encode would use it.
 	VFW_ENV_TESTCODEC_DECODE_ONLY=1 $emu "$harness" probe \
 		"$fixtures/testcodec.dll" | grep -q "won't open to compress"
@@ -319,6 +324,12 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	$emu "$harness" decode "$fixtures/testcodec.dll" "$work/late.avi" \
 		-o "$work/late.y4m" 2>/dev/null
 	cmp "$work/noise.y4m" "$work/late.y4m"
+	# What a codec writes to its standard output goes to our stderr, not
+	# into ours, where the output can be.
+	VFW_ENV_TESTCODEC_CHATTY=1 $emu "$harness" decode \
+		"$fixtures/testcodec.dll" "$work/late.avi" -o - --format y4m \
+		2>"$work/chat.err" | cmp - "$work/late.y4m"
+	grep -q "testcodec: hello" "$work/chat.err"
 	# Codecs as fussy as some real ones: one calls a status callback it
 	# never checked it was given and refuses its own format with the input
 	# (encoding), one reads past its input and decodes nothing unless asked
@@ -373,6 +384,12 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 			"$fixtures/testcodec.dll" "$work/end.avi" \
 			-o "$work/end.y4m" 2>/dev/null
 		cmp "$work/noise.y4m" "$work/end.y4m"
+		# One that crashes as it is unloaded has done its work by then.
+		VFW_ENV_TESTCODEC_DETACH_CRASH=1 $emu "$harness" probe \
+			"$fixtures/testcodec.dll" 2>&1 >/dev/null |
+			grep -q "crashed while being unloaded; carrying on"
+		VFW_ENV_TESTCODEC_DETACH_CRASH=1 $emu "$harness" probe \
+			"$fixtures/testcodec.dll" >/dev/null 2>&1
 		# One that writes past its output buffer faults right there.
 		VFW_ENV_TESTCODEC_OVERRUN=1 $emu "$harness" encode \
 			"$fixtures/testcodec.dll" "$work/noise.y4m" \

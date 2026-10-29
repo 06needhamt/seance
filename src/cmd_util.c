@@ -253,10 +253,14 @@ static HIC try_open(const struct cli_codec *c, FOURCC handler,
 {
 	HIC hic = NULL;
 
-	for (size_t i = 0; i < nmodes && !hic; i++)
+	/* Another mode, as another handler, helps only past DRV_LOAD. */
+	for (size_t i = 0; i < nmodes && !hic; i++) {
 		hic = c->is_dll ?
 		      ic_open_dll(c->target, ICTYPE_VIDEO, handler, modes[i]) :
 		      ic_open(ICTYPE_VIDEO, handler, modes[i]);
+		if (!hic && !strstr(vfw_error(), "refused DRV_OPEN"))
+			break;
+	}
 	return hic;
 }
 
@@ -320,12 +324,21 @@ int cli_open_codec(const char *arg, const char *fourcc, FOURCC guess,
 	} else {
 		tries[ntries++] = handler;
 	}
+	/*
+	 * Another handler helps only a driver that refused DRV_OPEN; one that
+	 * didn't load (DllMain failed, an import missing) would just load and
+	 * fail again, each time showing whatever it shows (Mvicod32.dll: a
+	 * message box per try).
+	 */
 	char first_error[512] = "";
-	for (size_t i = 0; i < ntries && !c->hic; i++) {
+	int retry = 1;
+	for (size_t i = 0; i < ntries && !c->hic && retry; i++) {
 		c->hic = try_open(c, tries[i], modes, nmodes);
 		c->handler = tries[i];
 		if (!c->hic && !i)
 			snprintf(first_error, sizeof(first_error), "%s", vfw_error());
+		if (!c->hic)
+			retry = strstr(vfw_error(), "refused DRV_OPEN") != NULL;
 	}
 	if (c->hic)
 		c->have_info = ic_get_info(c->hic, &c->info, sizeof(c->info)) != 0;
@@ -333,7 +346,7 @@ int cli_open_codec(const char *arg, const char *fourcc, FOURCC guess,
 	 * Some codecs open, or answer, only under a FOURCC of their own, and a
 	 * DLL named alone gives none: look for one in the DLL itself.
 	 */
-	if (c->is_dll && !named && (!c->hic || !c->have_info)) {
+	if (c->is_dll && !named && retry && (!c->hic || !c->have_info)) {
 		FOURCC found[64];
 		size_t nfound = vfw_dll_handlers(c->target, found, 64);
 		for (size_t i = 0; i < nfound; i++) {

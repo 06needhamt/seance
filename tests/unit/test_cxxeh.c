@@ -93,7 +93,7 @@ static void test_fixture(void)
 
 	char err[1024];
 	int st = run_child(dll, "cxx_unhandled", err, sizeof(err), 0);
-	CHECK(WIFSIGNALED(st) || (WIFEXITED(st) && WEXITSTATUS(st) == 134));
+	CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 134);
 	CHECK(strstr(err, "unhandled exception 0xE06D7363") != NULL);
 
 	st = run_child(dll, "cxx_noexcept", err, sizeof(err), 0);

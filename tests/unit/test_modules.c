@@ -341,12 +341,12 @@ static void test_delay_load(void)
 	/* What can't be had is a trap that says why. */
 	{
 		int st = run_trapping(m, "delay_nosuch", err, sizeof(err));
-		CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGABRT);
+		CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 128 + SIGABRT);
 		CHECK(strstr(err, "zz_nosuch.dll!nosuch_function called from "
 			      "pe_delay.dll+0x"));
 		CHECK(strstr(err, "but that delay-loaded DLL could not be loaded"));
 		st = run_trapping(m, "delay_gone", err, sizeof(err));
-		CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGABRT);
+		CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 128 + SIGABRT);
 		CHECK(strstr(err, "pe_basic.dll!basic_gone called from pe_delay.dll"));
 		CHECK(strstr(err, "but pe_basic.dll doesn't export it"));
 	}

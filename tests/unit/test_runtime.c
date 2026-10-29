@@ -311,7 +311,7 @@ static void test_fixture(void)
 	close(pipefd[0]);
 	int status;
 	waitpid(pid, &status, 0);
-	CHECK(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 128 + SIGABRT);
 	CHECK(strstr(msg, "unimplemented function kernel32.dll!SeanceTestMissing") ||
 	      strstr(msg, "unimplemented function KERNEL32.dll!SeanceTestMissing"));
 	CHECK(strstr(msg, "called from pe_runtime.dll+0x") != NULL);

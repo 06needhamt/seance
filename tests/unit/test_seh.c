@@ -112,7 +112,7 @@ int main(void)
 	} else {
 		char err[4096];
 		int st = run_unhandled(dll, err, sizeof(err));
-		CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV);
+		CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 128 + SIGSEGV);
 		CHECK(strstr(err, "seance: crash: SIGSEGV at pe_seh.dll+0x"));
 		CHECK(strstr(err, "accessing (nil)") || strstr(err, "accessing 0x0"));
 		if (test_failures)

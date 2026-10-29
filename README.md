@@ -779,7 +779,8 @@ decodes below 40 dB.
   more.
 - **Buffer overruns.** Each buffer a codec compresses or decompresses into
   has its own pages, with an inaccessible page after the last one (the
-  rest of that page is slack, as heap blocks have on Windows). A codec
+  rest of that page, and at least 32 bytes, is slack, as heap blocks have
+  on Windows). A codec
   that writes past it faults there, and the crash report says which
   buffer and how far past its end, instead of the heap being found
   corrupt later.
@@ -788,6 +789,13 @@ decodes below 40 dB.
   zeroed bytes, as FFmpeg does, for codecs whose bit readers read ahead.
 - **Hangs.** With `VFW_TIMEOUT=<seconds>`, a single call into a DLL that
   takes longer is reported the same way, and the harness exits with 124.
+- **Exit status.** After a crash report, or an unimplemented function's,
+  the harness exits with 128 + the signal (139 for SIGSEGV, 134 for a
+  trap), the status a shell gives a process the signal killed, but no core
+  is dumped (`VFW_CORE=1` dies by the signal instead). A crash while a DLL
+  is unloaded (`DLL_PROCESS_DETACH`) is reported and survived.
+- **Console output.** What a DLL writes to its standard output goes to
+  stderr, so it can't mix with the harness's own output on stdout.
 - **Code in data.** Windows ran programs without DEP (data execution
   prevention) unless they opted in, and some codecs build or unpack code in
   heap memory or on the stack and run it there (`pvwv220.dll` has its own PE
@@ -810,6 +818,7 @@ decodes below 40 dB.
 | `VFW_REGISTRY` | The Windows registry file (default `$VFW_ROOT/registry.reg`); empty keeps it in memory only |
 | `VFW_TRACE=1` | Log calls into the built-in DLLs and every driver message to stderr |
 | `VFW_TIMEOUT=<s>` | Report and stop (exit 124) when one call into a DLL takes longer |
+| `VFW_CORE=1` | End a crash or an unimplemented-function trap by its signal (dumping core where enabled) rather than with exit status 128 + the signal |
 | `VFW_CWD` | The current directory DLLs start in, a Windows (`C:\work`) or Unix directory (default `C:\`) |
 | `VFW_DATE` | The date and time (UTC) DLLs see at startup, `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM[:SS]`; the clock runs on from there (default: the host's) |
 | `VFW_COMPRESSOR` | What `ICCompressorChoose` answers: a FOURCC (`TST0`), `uncompressed` or `cancel` |

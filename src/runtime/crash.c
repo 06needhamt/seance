@@ -55,6 +55,20 @@ static struct slot slots[MAX_THREADS];
 static pthread_mutex_t slots_lock = PTHREAD_MUTEX_INITIALIZER;
 static _Thread_local struct slot *mine;
 static int timeout_secs;
+static int keep_core = -1;	/* VFW_CORE=1; -1 until crash_install */
+
+void crash_exit(int sig)
+{
+	if (keep_core < 0) {
+		const char *c = getenv("VFW_CORE");
+		keep_core = c && !strcmp(c, "1");
+	}
+	if (keep_core) {
+		signal(sig, SIG_DFL);
+		raise(sig);
+	}
+	_exit(128 + sig);
+}
 
 static void put(const char *s)
 {
@@ -146,9 +160,7 @@ void crash_report_and_die(int sig, const void *pc, const void *fault_addr)
 {
 	report_fault(sig, pc, fault_addr);
 	recover(sig);
-	signal(sig, SIG_DFL);
-	raise(sig);
-	_exit(128 + sig);	/* raise() should not return */
+	crash_exit(sig);
 }
 
 /* x86 page fault error code bits, in the context's REG_ERR. */
@@ -243,8 +255,10 @@ static void on_fault(int sig, siginfo_t *si, void *ctx)
 		return;
 
 	report_fault(sig, pc, si->si_addr);
-	if (si->si_code > 0)		/* a fault, not a signal sent */
+	if (si->si_code > 0) {		/* a fault, not a signal sent */
 		recover(sig);
+		crash_exit(sig);
+	}
 
 	/* Die of the signal, as without the handler. */
 	signal(sig, SIG_DFL);
@@ -282,6 +296,9 @@ static void *watchdog(void *arg)
 
 int crash_install(void)
 {
+	const char *c = getenv("VFW_CORE");
+	keep_core = c && !strcmp(c, "1");
+
 	const char *t = getenv("VFW_TIMEOUT");
 	if (t && *t) {
 		char *end;

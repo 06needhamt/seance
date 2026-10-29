@@ -53,6 +53,10 @@
  *                         (WavCWAIP.dll, icmw_32.dll)
  *   TESTCODEC_ALIGN16     it takes only inputs whose height is a multiple
  *                         of 16 (SN4Codec.dll, vsslight.dll, ...)
+ *   TESTCODEC_CHATTY      it writes a line to its standard output when
+ *                         loaded (blox.dll)
+ *   TESTCODEC_DETACH_CRASH its DllMain faults in DLL_PROCESS_DETACH
+ *                         (packed.dll)
  * With TESTCODEC_LATESIZE=1 it only knows how big a frame can get once
  * ICM_COMPRESS_BEGIN has been sent, and says 16 bytes before (in
  * ICM_COMPRESS_GET_SIZE and the output format), as wtvc.dll does.
@@ -620,6 +624,13 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 						  sizeof(v)) == 1 && v[0] == '1';
 		align16 = GetEnvironmentVariableA("TESTCODEC_ALIGN16", v,
 						  sizeof(v)) == 1 && v[0] == '1';
+		if (GetEnvironmentVariableA("TESTCODEC_CHATTY", v, sizeof(v)) == 1 &&
+		    v[0] == '1') {
+			static const char hello[] = "testcodec: hello\n";
+			DWORD put;
+			WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), hello,
+				  sizeof(hello) - 1, &put, NULL);
+		}
 		log_msg(msg);
 		check_module(hdrvr);
 		return DefDriverProc(id, hdrvr, msg, l1, l2);
@@ -884,7 +895,13 @@ EXPORT int testcodec_selftest(void)
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
 {
+	char v[8];
+
 	if (reason == DLL_PROCESS_ATTACH)
 		self = inst;
+	if (reason == DLL_PROCESS_DETACH &&
+	    GetEnvironmentVariableA("TESTCODEC_DETACH_CRASH", v, sizeof(v)) == 1 &&
+	    v[0] == '1')
+		*(volatile DWORD *)(DWORD_PTR)zero = 1;	/* zero is 0 */
 	return TRUE;
 }

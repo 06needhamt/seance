@@ -6,6 +6,7 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 
 #include "common/sanitizer.h"
@@ -204,12 +205,24 @@ int main(void)
 		printf("sanitizer build: checking the timeout only\n");
 	} else {
 		int st = run_child(codec, TESTCODEC_CRASH, NULL, err, sizeof(err));
-		CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV);
+		CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 128 + SIGSEGV);
 		CHECK(strstr(err, "seance: crash: SIGSEGV at testcodec.dll+0x"));
 		CHECK(strstr(err, "accessing (nil)") || strstr(err, "accessing 0x0"));
 		CHECK(strstr(err, "in DriverProc(DRV_USER+0x") &&
 		      strstr(err, ") of testcodec.dll"));
 		printf("crash report:\n%s", err);
+
+		/*
+		 * The crash ends the process with 128 + the signal, not by it
+		 * (no core dump), unless VFW_CORE=1 asks for that.
+		 */
+		struct rlimit none = { 0, 0 };
+		setrlimit(RLIMIT_CORE, &none);
+		setenv("VFW_CORE", "1", 1);
+		st = run_child(codec, TESTCODEC_CRASH, NULL, err, sizeof(err));
+		unsetenv("VFW_CORE");
+		CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV);
+		CHECK(strstr(err, "seance: crash: SIGSEGV at testcodec.dll+0x"));
 
 		/*
 		 * Code in the heap or on the stack runs, as on Windows without
@@ -220,7 +233,7 @@ int main(void)
 		st = run_from(1, err, sizeof(err));
 		CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 42);
 		st = run_from(2, err, sizeof(err));
-		CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV);
+		CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 128 + SIGSEGV);
 		CHECK(strstr(err, "seance: crash: SIGSEGV"));
 
 		/* A fault under crash_try is reported, and survived. */
