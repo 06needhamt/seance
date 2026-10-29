@@ -484,8 +484,28 @@ static int encode_com(const char *target, const CLSID *selected,
 
 	HRESULT hr = xform_find(target, selected, 0, 1, &found);
 	if (FAILED(hr)) {
-		fprintf(stderr, "seance: %s: no unique DirectShow or DMO video "
-			"encoder\n", target);
+		struct xform_class other;
+		if (hr == VFW_E_DUPLICATE_NAME)
+			fprintf(stderr, "seance: %s has several video encoders; "
+				"choose one with --clsid (probe lists them)\n",
+				target);
+		else if (SUCCEEDED(xform_find(target, selected, 1, 1, &other)))
+			fprintf(stderr, "seance: %s%s is an audio encoder, not a "
+				"video one; give it audio (WAV, raw PCM or an "
+				"AVI's audio)\n", selected ? "the class chosen in " :
+				"", target);
+		else if (SUCCEEDED(xform_find(target, selected, 0, 0, &other)) ||
+			 SUCCEEDED(xform_find(target, selected, 1, 0, &other)))
+			fprintf(stderr, "seance: %s%s %s decoder, not an encoder "
+				"(decode with it)\n", selected ?
+				"the class chosen in " : "", target,
+				SUCCEEDED(xform_find(target, selected, 0, 0,
+						     &other)) ? "has only a video" :
+				"has only an audio");
+		else
+			fprintf(stderr, "seance: %s has no DirectShow filter or "
+				"DMO that encodes or decodes audio or video%s\n",
+				target, selected ? " with that CLSID" : "");
 		goto done;
 	}
 	compression = found.compression;

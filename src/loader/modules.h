@@ -64,6 +64,12 @@ struct module *mod_from_address(const void *addr);
 struct module *mod_main(void);
 
 /*
+ * The loaded modules' handles, the main module's first, as many as fit in
+ * out[max]; returns how many there are.
+ */
+size_t mod_list(HMODULE *out, size_t max);
+
+/*
  * Exported addresses, following forwarders; GetProcAddress semantics, so
  * an unimplemented built-in function is NULL (with vfw_error()).
  */

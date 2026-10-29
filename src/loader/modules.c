@@ -631,6 +631,21 @@ struct module *mod_main(void)
 	return main_module;
 }
 
+size_t mod_list(HMODULE *out, size_t max)
+{
+	struct module *main = mod_main();
+	size_t n = 0;
+
+	LOCK();
+	if (main && n++ < max)
+		out[0] = (HMODULE)main->base;
+	for (struct module *m = modules; m; m = m->next)
+		if (m != main && n++ < max)
+			out[n - 1] = (HMODULE)m->base;
+	UNLOCK();
+	return n;
+}
+
 void mod_addref(struct module *mod)
 {
 	if (!mod || mod == main_module)

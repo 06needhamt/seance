@@ -16,6 +16,7 @@
 #include "win32/oleauto.h"
 #include "win32/shellapi.h"
 #include "win32/shlwapi.h"
+#include "win32/psapi.h"
 #include "win32/shlobj.h"
 #include "win32/commctrl.h"
 #include "win32/commdlg.h"

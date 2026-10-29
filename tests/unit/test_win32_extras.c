@@ -768,6 +768,84 @@ static void test_zeroed_allocation(void)
 	mod_free(c);
 }
 
+/* crtdll.dll: msvcrt's functions, and its data under its own names. */
+static void test_crtdll(void)
+{
+	struct module *c = mod_load("crtdll.dll", NULL);
+	struct module *v = mod_load("msvcrt.dll", NULL);
+	CHECK(c && v);
+	if (!c || !v)
+		return;
+	CHECK(get(c, "memcpy") == get(v, "memcpy"));
+	CHECK(get(c, "_stricmp") == get(v, "_stricmp"));
+	CHECK(get(c, "_pctype_dll") == get(v, "_pctype"));
+	CHECK(get(c, "__mb_cur_max_dll") == get(v, "__mb_cur_max"));
+	CHECK_EQ(*(unsigned *)get(c, "_winver_dll"), 0x0501);
+	CHECK_EQ(*(unsigned *)get(c, "_osver_dll"), 2600);
+	CHECK(**(char ***)get(c, "_environ_dll") == NULL);
+	mod_free(v);
+	mod_free(c);
+}
+
+/* psapi.dll, and kernel32's K32 copies: the one process's modules. */
+static void test_psapi(void)
+{
+	struct module *p = mod_load("psapi.dll", NULL);
+	struct module *k = mod_load("kernel32.dll", NULL);
+	CHECK(p && k);
+	if (!p || !k)
+		return;
+	FN(p, BOOL, EnumProcessModules, HANDLE, HMODULE *, DWORD, DWORD *);
+	FN(p, DWORD, GetModuleBaseNameA, HANDLE, HMODULE, LPSTR, DWORD);
+	FN(p, DWORD, GetModuleBaseNameW, HANDLE, HMODULE, LPWSTR, DWORD);
+	FN(p, DWORD, GetModuleFileNameExA, HANDLE, HMODULE, LPSTR, DWORD);
+	FN(p, BOOL, GetModuleInformation, HANDLE, HMODULE, LPMODULEINFO, DWORD);
+	FN(p, BOOL, GetProcessMemoryInfo, HANDLE, PPROCESS_MEMORY_COUNTERS, DWORD);
+	FN(p, BOOL, EnumProcesses, DWORD *, DWORD, DWORD *);
+	FN(k, HANDLE, GetCurrentProcess, void);
+	HANDLE self = GetCurrentProcess();
+	HMODULE mods[256];
+	DWORD needed = 0;
+
+	CHECK(EnumProcessModules(self, mods, sizeof(mods), &needed));
+	CHECK(needed >= 3 * sizeof(HMODULE) && needed <= sizeof(mods));
+	int found = 0;
+	for (DWORD i = 0; i < needed / sizeof(HMODULE); i++)
+		found += mods[i] == (HMODULE)k->base;
+	CHECK_EQ(found, 1);
+	/* Asked with no room, it says how much. */
+	DWORD again = 0;
+	CHECK(EnumProcessModules(self, NULL, 0, &again) && again == needed);
+	CHECK(!EnumProcessModules((HANDLE)0x1234, mods, sizeof(mods), &needed));
+
+	char name[64];
+	WCHAR wname[64];
+	CHECK_EQ(GetModuleBaseNameA(self, (HMODULE)k->base, name, sizeof(name)), 12);
+	CHECK_STR(name, "kernel32.dll");
+	CHECK_EQ(GetModuleBaseNameW(self, (HMODULE)k->base, wname, 64), 12);
+	CHECK(wname[0] == 'k' && wname[12] == 0);
+	CHECK_EQ(GetModuleBaseNameA(self, (HMODULE)k->base, name, 5), 4);
+	CHECK_STR(name, "kern");
+	char path[300];
+	CHECK(GetModuleFileNameExA(self, (HMODULE)k->base, path, sizeof(path)) > 12);
+	CHECK(strstr(path, "kernel32.dll") != NULL);
+
+	MODULEINFO mi;
+	CHECK(GetModuleInformation(self, (HMODULE)k->base, &mi, sizeof(mi)));
+	CHECK(mi.lpBaseOfDll == k->base && mi.SizeOfImage >= 0x1000);
+	PROCESS_MEMORY_COUNTERS pmc;
+	CHECK(GetProcessMemoryInfo(self, &pmc, sizeof(pmc)));
+	CHECK(pmc.cb == sizeof(pmc) && pmc.WorkingSetSize > 0);
+	DWORD pids[4];
+	CHECK(EnumProcesses(pids, sizeof(pids), &needed) && needed == 4 &&
+	      pids[0] == (DWORD)getpid());
+
+	CHECK(get(k, "K32EnumProcessModules") == (void *)EnumProcessModules);
+	CHECK(get(k, "K32GetModuleInformation") == (void *)GetModuleInformation);
+	mod_free(k);
+	mod_free(p);
+}
+
 int main(void)
 {
 	char root[256];
@@ -790,6 +868,8 @@ int main(void)
 	test_winsock();
 	test_zeroed_allocation();
 	test_ncrypt_and_graphics();
+	test_crtdll();
+	test_psapi();
 
 	char cmd[512];
 	snprintf(cmd, sizeof(cmd), "rm -rf '%s'", root);

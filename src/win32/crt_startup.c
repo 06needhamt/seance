@@ -12,6 +12,7 @@
 #include "loader/modules.h"
 #include "runtime/builtin.h"
 #include "runtime/seh.h"
+#include "win32/crt.h"
 #include "win32/internal.h"
 
 #define CRTFN(ret) static ret STUB_CDECL
@@ -161,7 +162,7 @@ CRTFN(void) crt__unlock(int locknum)
 CRTFN(void) crt___set_app_type(int type) { (void)type; }
 CRTFN(int) crt__set_error_mode(int mode) { (void)mode; return 0; }
 
-static int crt_fmode, crt_commode = 1;	/* _O_TEXT, and full buffering */
+int crt_fmode, crt_commode = 1;	/* _O_TEXT, and full buffering */
 
 /* A fatal CRT-detected error ("out of memory", historically "R6002" and
  * friends): report it and stop, as msvcrt's own _amsg_exit does. */

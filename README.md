@@ -20,7 +20,7 @@ Work is split into phases; see [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION
 |---|---|---|
 | 0 | Build skeleton, Win32 headers, ABI cross-check, CLI skeleton | done |
 | 1 | PE loader and `info` | done |
-| 2 | Win32 runtime (TEB, SEH, threads, stub DLLs) | done: TEB, built-in DLLs, kernel32 (including SRW locks, condition variables, `InitOnce`, interlocked lists and thread-pool timers, waits and work), ntdll, SEH dispatch, delay-load binding, the msvcrt-family CRT (math, string, stdio, low-level I/O, `_findfirst`, `_stat`, startup, 64-bit helpers, `__try`/`__except`, setjmp/longjmp, C++ exceptions and RTTI, printf dialect), headless user32, gdi32 and advapi32 (registry, security), version, ole32, oleaut32, shell32, comctl32, comdlg32, and offline ws2_32, bcrypt, ncrypt, crypt32, d3d9, dxva2, d3d11 and dxgi |
+| 2 | Win32 runtime (TEB, SEH, threads, stub DLLs) | done: TEB, built-in DLLs, kernel32 (including SRW locks, condition variables, `InitOnce`, interlocked lists and thread-pool timers, waits and work), ntdll, SEH dispatch, delay-load binding, the msvcrt-family CRT (math, string, stdio, low-level I/O, `_findfirst`, `_stat`, startup, 64-bit helpers, `__try`/`__except`, setjmp/longjmp, C++ exceptions and RTTI, printf dialect), headless user32, gdi32 and advapi32 (registry, security), version, ole32, oleaut32, shell32, comctl32, comdlg32, and offline ws2_32, crtdll, psapi, bcrypt, ncrypt, crypt32, d3d9, dxva2, d3d11 and dxgi |
 | 3 | VfW layer and `probe` | done: driver lifecycle, ICM API (including ICSeqCompressFrame*, ICImageCompress/ICImageDecompress and DrawDib*), winmm/msvfw32 built-ins, `probe`, `list` |
 | 4 | AVI / Y4M I/O, `decode` and `encode` | done: AVI reader and writer, Y4M/BMP/raw input and output, `avi`, `convert`, `decode`, `encode` |
 | 5 | Hardening and CI | done: DLL memory below 2 GB, crash and hang reports, SSE/FPU fixture, fuzzing, samples run, CI |
@@ -420,6 +420,13 @@ comdlg32 are built in too, headless:
   converts byte order and address text, and resolves numeric addresses, but
   `socket` fails as if the network were down and names don't resolve.
 - **ncrypt:** bcrypt's random numbers; there is no key storage provider.
+- **crtdll:** the C runtime of Windows NT 3.x and 4.0 (msvidc32.dll and
+  mcmjpg32.dll use it): msvcrt's functions, and its data under crtdll's own
+  `_dll` names. A real crtdll.dll on the search path wins, as for msvcrt.
+- **psapi:** the one process's modules (`EnumProcessModules`,
+  `GetModuleBaseName`, `GetModuleFileNameEx`, `GetModuleInformation`) and
+  memory (`GetProcessMemoryInfo`, from the host's); kernel32 has them too,
+  as `K32EnumProcessModules` and so on.
 - **dxva2, d3d11, dxgi:** no adapter, like d3d9, so decoders fall back to
   software.
 - **kernel32, newer calls:** slim reader/writer locks, condition variables,

@@ -307,7 +307,17 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	# whether it is an ACM driver, once as a codec.
 	[ "$(VFW_TRACE=1 $emu "$harness" probe "$fixtures/pe_fail.dll" 2>&1 |
 		grep -c "loaded .*pe_fail.dll at")" = 2 ]
+	# A DMO server's decoder isn't taken for a missing encoder.
+	$emu "$harness" encode "$fixtures/testdmo.dll" "$work/v.y4m" \
+		-o "$work/x.avi" --clsid '{5E6C9B41-3A7D-4F0E-9C11-0D2B7A6E4F80}' \
+		2>&1 | grep -q "has only a video decoder, not an encoder"
+	# RealPlayer's codecs (rv203260.dll) are said to be what they are.
+	$emu "$harness" encode "$fixtures/pe_realcodec.dll" "$work/v.y4m" \
+		-o "$work/x.avi" 2>&1 | grep -q "a RealPlayer codec (it exports RV20"
 	# One that won't open to compress is probed as encode would use it.
+	VFW_ENV_TESTCODEC_DECODE_ONLY=1 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/v.y4m" -o "$work/x.avi" 2>&1 |
+		grep -q "only decompresses: it opens to decompress, not to compress"
 	VFW_ENV_TESTCODEC_DECODE_ONLY=1 $emu "$harness" probe \
 		"$fixtures/testcodec.dll" | grep -q "won't open to compress"
 	VFW_ENV_TESTCODEC_PICKY=1 $emu "$harness" probe \

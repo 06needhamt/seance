@@ -50,6 +50,20 @@ static void test_bad_input(void)
 	buf[61] = 0x01;
 	CHECK(!pe_parse(buf, sizeof(buf)));
 	CHECK(strstr(vfw_error(), "out of range") != NULL);
+
+	/* A 16-bit (NE) DLL, and a VxD (LE), say what they are. */
+	buf[60] = 0x40;
+	buf[61] = 0;
+	buf[0x40] = 'N';
+	buf[0x41] = 'E';
+	CHECK(!pe_parse(buf, sizeof(buf)));
+	CHECK(strstr(vfw_error(), "16-bit Windows (NE)") != NULL);
+	buf[0x40] = 'L';
+	CHECK(!pe_parse(buf, sizeof(buf)));
+	CHECK(strstr(vfw_error(), "VxD or OS/2 (LE)") != NULL);
+	buf[0x40] = 'X';
+	CHECK(!pe_parse(buf, sizeof(buf)));
+	CHECK(strstr(vfw_error(), "no PE signature") != NULL);
 }
 
 static void test_machine_and_magic(void)
