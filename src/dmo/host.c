@@ -248,7 +248,12 @@ static HRESULT complete_output(struct dmo_host *h, const DMO_MEDIA_TYPE *out,
 		    (!memcmp(&out->subtype, &none, sizeof(GUID)) ||
 		     !memcmp(&full->subtype, &out->subtype, sizeof(GUID))) &&
 		    full->cbFormat && full->pbFormat) {
-			fill_video_output(full);
+			/* Preserve the DMO's own type if it already accepts it. */
+			if (!memcmp(&full->formattype, &FORMAT_VideoInfo,
+				    sizeof(GUID)) &&
+			    FAILED(MO(h->mo, SetOutputType, 0, full,
+				      DMO_SET_TYPEF_TEST_ONLY)))
+				fill_video_output(full);
 			return S_OK;
 		}
 		dshow_free_media_type(full);

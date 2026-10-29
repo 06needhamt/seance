@@ -665,9 +665,8 @@ static int encode_com(const char *target, const CLSID *selected,
 			 * through IWMGetSecureChannel, which seance doesn't.
 			 */
 			if (!pushed && found.keyed)
-				fprintf(stderr, "seance: the DMO is keyed: it works "
-					"only for applications that unlock it with "
-					"Microsoft's key, which seance doesn't\n");
+				fprintf(stderr, "seance: the keyed DMO may require "
+					"an unlock key that seance doesn't provide\n");
 			goto done;
 		}
 		pushed++;
