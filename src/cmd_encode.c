@@ -55,6 +55,10 @@ static int usage(void)
 		"  --codec-input <f>    convert frames to this format for the codec\n"
 		"                       (default: as they are if it takes them, else\n"
 		"                       the first standard format it takes)\n"
+		"  --pad <n>            pad the picture to a multiple of n (2, 4,\n"
+		"                       ... 256) wide and high, repeating its last\n"
+		"                       row and column, for codecs that want that\n"
+		"  --crop <n>           crop it to a multiple of n instead\n"
 		"  --start <pos>        first input frame, or a time (2.5s)\n"
 		"  --frames <n>         number of frames (default: all)\n"
 		"  --duration <len>     how much to encode, as frames or a time\n"
@@ -157,6 +161,65 @@ struct feed {
 	BYTE *tmp, *packed;
 };
 
+/* Whether the codec takes any standard format at w x h. */
+static int takes_size(HIC hic, LONG w, LONG h)
+{
+	struct vfw_format t;
+
+	for (unsigned i = 0; vfw_std_format(i, w, h, &t); i++)
+		if (ic_send(hic, ICM_COMPRESS_QUERY, (DWORD_PTR)&t.bih, 0) ==
+		    ICERR_OK)
+			return 1;
+	return 0;
+}
+
+/*
+ * For a codec that takes nothing at w x h: the sizes it does take, as
+ * advice. Most want a multiple of 16 or so (360 lines aren't one): the
+ * smallest such multiple padded or cropped to, as --pad or --crop give,
+ * else a common size to resize to. "" if it takes none of them.
+ */
+static void size_hint(HIC hic, LONG w, LONG h, char *out, size_t size)
+{
+	static const LONG common[][2] = {
+		{ 320, 240 }, { 352, 288 }, { 640, 480 }, { 720, 480 },
+		{ 720, 576 }, { 1280, 720 }, { 1920, 1080 },
+	};
+
+	out[0] = 0;
+	for (LONG n = 2; n <= 64; n *= 2) {
+		LONG pw = (w + n - 1) / n * n, ph = (h + n - 1) / n * n;
+		LONG cw = w / n * n, ch = h / n * n;
+		if (pw == w && ph == h)
+			continue;	/* the size itself: refused */
+		int pad = takes_size(hic, pw, ph);
+		int crop = cw && ch && takes_size(hic, cw, ch);
+		if (pad && crop)
+			snprintf(out, size, ", but takes %ldx%ld and %ldx%ld: "
+				 "add --pad %ld or --crop %ld", (long)pw, (long)ph,
+				 (long)cw, (long)ch, (long)n, (long)n);
+		else if (pad || crop)
+			snprintf(out, size, ", but takes %ldx%ld: add --%s %ld",
+				 pad ? (long)pw : (long)cw, pad ? (long)ph : (long)ch,
+				 pad ? "pad" : "crop", (long)n);
+		if (pad || crop)
+			return;
+	}
+	/* The smallest that holds the picture, else the largest that doesn't. */
+	size_t n = sizeof(common) / sizeof(common[0]);
+	for (int fits = 1; fits >= 0; fits--)
+		for (size_t k = 0; k < n; k++) {
+			size_t i = fits ? k : n - 1 - k;
+			LONG cw = common[i][0], ch = common[i][1];
+			if ((cw >= w && ch >= h) != fits || (cw == w && ch == h) ||
+			    !takes_size(hic, cw, ch))
+				continue;
+			snprintf(out, size, ", but takes %ldx%ld: resize the input "
+				 "to that", (long)cw, (long)ch);
+			return;
+		}
+}
+
 static int choose_input(HIC hic, const struct source *src, const char *forced,
 			struct feed *f)
 {
@@ -230,9 +293,13 @@ static int choose_input(HIC hic, const struct source *src, const char *forced,
 			      "with ICERR_UNSUPPORTED for %s and every standard "
 			      "format, so it only decompresses",
 			      source_format_name(src));
-	else
+	else {
+		char hint[200];
+		size_hint(hic, w, h, hint, sizeof(hint));
 		vfw_set_error("the codec takes neither %s nor any standard format "
-			      "at %ldx%ld", source_format_name(src), (long)w, (long)h);
+			      "at %ldx%ld%s", source_format_name(src), (long)w,
+			      (long)h, hint);
+	}
 	return -1;
 }
 
@@ -673,6 +740,19 @@ int cmd_encode(int argc, char **argv)
 				return 2;
 			so.width = (int)w;
 			so.height = (int)h;
+		} else if ((!strcmp(a, "--pad") || !strcmp(a, "--crop")) && v) {
+			unsigned long n;
+			if (cli_parse_count(a, argv[++i], &n))
+				return 2;
+			if (n < 2 || n > 256 || (n & (n - 1))) {
+				fprintf(stderr, "seance: %s takes 2, 4, 8, ... 256\n",
+					a);
+				return 2;
+			}
+			if (a[2] == 'p')
+				so.pad = (int)n;
+			else
+				so.crop = (int)n;
 		} else if (!strcmp(a, "--rate") && v) {
 			if (cli_parse_rate(a, argv[++i], &rate, &scale))
 				return 2;
@@ -743,10 +823,11 @@ int cmd_encode(int argc, char **argv)
 	if (raw || cli_wants_audio(path, so.stream, want_audio, NULL, out_path,
 				   audio_only_kinds, target, clsid_arg, 1)) {
 		if (fourcc || forced || keyint != (unsigned long)-1 || rate ||
-		    count != (unsigned long)-1 || so.raw_format || wo.force_odml) {
+		    count != (unsigned long)-1 || so.raw_format || wo.force_odml ||
+		    so.pad || so.crop) {
 			fprintf(stderr, "seance: --fourcc, --codec-input, --keyint, "
-				"--rate, --frames, --input-format and --odml are "
-				"for video\n");
+				"--rate, --frames, --input-format, --odml, --pad "
+				"and --crop are for video\n");
 			return 2;
 		}
 		if (clsid_arg && parse_clsid(clsid_arg, &job.clsid_value)) {

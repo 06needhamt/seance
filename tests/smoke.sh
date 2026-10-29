@@ -330,6 +330,28 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/fussy.avi" \
 		-o "$work/fussy.y4m" --output-format I420 2>/dev/null
 	cmp "$work/noise.y4m" "$work/fussy.y4m"
+	# One that wants heights in 16s says so, and --pad or --crop give it
+	# them (repeating the last row, or dropping rows), from YUV or RGB.
+	{
+		printf 'YUV4MPEG2 W16 H24 F25:1 Ip A1:1 C420jpeg\nFRAME\n'
+		head -c 576 /dev/urandom
+	} >"$work/h24.y4m"
+	head -c 2304 /dev/urandom >"$work/h24.bgr"
+	VFW_ENV_TESTCODEC_ALIGN16=1 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/h24.y4m" -o "$work/x.avi" 2>&1 |
+		grep -q "at 16x24, but takes 16x32 and 16x16: add --pad 16 or --crop 16"
+	VFW_ENV_TESTCODEC_ALIGN16=1 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/h24.y4m" -o "$work/pad.avi" \
+		--pad 16 2>/dev/null
+	$emu "$harness" decode "$fixtures/testcodec.dll" "$work/pad.avi" \
+		-o "$work/pad.y4m" 2>/dev/null
+	head -1 "$work/pad.y4m" | grep -q "W16 H32 "
+	VFW_ENV_TESTCODEC_ALIGN16=1 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/h24.bgr" --input-format BGR24 \
+		--size 16x24 -o "$work/crop.avi" --crop 16 2>/dev/null
+	$emu "$harness" avi "$work/crop.avi" | grep -q "16x16, 24 bits, 'TST0'"
+	fails $emu "$harness" encode "$fixtures/testcodec.dll" "$work/h24.y4m" \
+		-o "$work/x.avi" --pad 3
 	# One that writes no output format is refused, not written as 0x0;
 	# one that flags no keyframes still gets its first frame as one.
 	VFW_ENV_TESTCODEC_EMPTY_FORMAT=1 $emu "$harness" encode \

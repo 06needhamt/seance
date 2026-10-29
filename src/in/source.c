@@ -50,6 +50,13 @@ struct source {
 	/* BMP */
 	int pattern;
 	unsigned long first;
+
+	/* Padding or cropping: frames read, decoded, resized and packed. */
+	struct image_conv *adj_from;	/* the frames as read */
+	struct image_conv *adj_to;	/* the new size's format */
+	int adj_i420, in_w, in_h, out_w, out_h;
+	BYTE *adj_pic, *adj_mid, *adj_out;	/* decoded, resized, packed */
+	size_t adj_size;
 };
 
 const char *source_kind_name(enum source_kind kind)
@@ -546,6 +553,57 @@ static int read_avi(struct source *s)
 	return 0;
 }
 
+/* Sets a source up to pad (or crop) its frames to multiples of n. */
+static int adjust_open(struct source *s, int n, int pad)
+{
+	const BITMAPINFOHEADER *b = &s->fmt.bih;
+	DWORD c = b->biCompression;
+	int w = b->biWidth, h = b->biHeight < 0 ? -b->biHeight : b->biHeight;
+
+	if (n < 2 || n > 256 || (n & (n - 1))) {
+		vfw_set_error("--%s takes 2, 4, 8, ... 256, not %d",
+			      pad ? "pad" : "crop", n);
+		return -1;
+	}
+	s->in_w = w;
+	s->in_h = h;
+	s->out_w = pad ? (w + n - 1) / n * n : w / n * n;
+	s->out_h = pad ? (h + n - 1) / n * n : h / n * n;
+	if (!s->out_w || !s->out_h) {
+		vfw_set_error("%s: %dx%d is smaller than %d: nothing is left to "
+			      "crop to", s->path, w, h, n);
+		return -1;
+	}
+	/* YUV stays YUV; RGB, palettes and RLE become RGB24. */
+	s->adj_i420 = c != BI_RGB && c != BI_BITFIELDS && c != BI_RLE8 &&
+		      c != BI_RLE4;
+	struct vfw_format t;
+	const char *name, *want = s->adj_i420 ? "I420" : "BGR24";
+	unsigned i = 0;
+	while ((name = vfw_std_format(i++, s->out_w, s->out_h, &t)) &&
+	       strcmp(name, want))
+		;
+	if (!name) {
+		vfw_set_error("no %s format at %dx%d", want, s->out_w, s->out_h);
+		return -1;
+	}
+	if (!(s->adj_from = image_conv_new(&s->fmt.bih, s->fmt_size)) ||
+	    !(s->adj_to = image_conv_new(&t.bih, vfw_format_size(&t.bih))))
+		return -1;
+	size_t in = s->adj_i420 ? image_i420_size(w, h) : image_bgr24_size(w, h);
+	size_t mid = s->adj_i420 ? image_i420_size(s->out_w, s->out_h) :
+		     image_bgr24_size(s->out_w, s->out_h);
+	s->adj_size = image_frame_size(s->adj_to);
+	if (!(s->adj_pic = malloc(in)) || !(s->adj_mid = malloc(mid)) ||
+	    !(s->adj_out = calloc(1, s->adj_size))) {
+		vfw_set_error("out of memory");
+		return -1;
+	}
+	s->fmt = t;
+	s->fmt_size = vfw_format_size(&t.bih);
+	return 0;
+}
+
 struct source *source_open(const char *path, const struct source_options *o)
 {
 	struct source_options def = { .stream = -1 };
@@ -618,6 +676,8 @@ struct source *source_open(const char *path, const struct source_options *o)
 		r = -1;
 	if (!r && s->kind != SOURCE_BMP && grow(&s->buf, &s->cap, s->frame_size))
 		r = -1;
+	if (!r && (o->pad || o->crop))
+		r = adjust_open(s, o->pad ? o->pad : o->crop, !!o->pad);
 	if (r) {
 		source_close(s);
 		return NULL;
@@ -634,6 +694,11 @@ void source_close(struct source *s)
 	avi_close(s->avi);
 	image_conv_free(s->conv);
 	image_conv_free(s->out);
+	image_conv_free(s->adj_from);
+	image_conv_free(s->adj_to);
+	free(s->adj_pic);
+	free(s->adj_mid);
+	free(s->adj_out);
 	free(s->buf);
 	free(s->raw);
 	free(s);
@@ -648,6 +713,8 @@ const BITMAPINFOHEADER *source_format(const struct source *s, size_t *size)
 
 const char *source_format_name(const struct source *s)
 {
+	if (s->adj_to)
+		return image_format_name(s->adj_to);
 	return s->convert ? image_format_name(s->out) : image_format_name(s->conv);
 }
 
@@ -667,7 +734,67 @@ long source_frames(const struct source *s)
 	return s->frames;
 }
 
+static int read_frame(struct source *s, const BYTE **frame, size_t *len);
+
+/*
+ * Each frame decoded to I420 or BGR24 at the size read, then each pixel
+ * of the new size taken from the nearest one there is (so padding repeats
+ * the last row and column), then packed in the new size's format.
+ */
 int source_read(struct source *s, const BYTE **frame, size_t *len)
+{
+	int r = read_frame(s, frame, len);
+
+	if (r != 1 || !s->adj_to)
+		return r;
+	int ok = s->adj_i420 ?
+		 image_to_i420(s->adj_from, *frame, *len, s->adj_pic) :
+		 image_to_bgr24(s->adj_from, *frame, *len, s->adj_pic);
+	if (ok)
+		return -1;
+	BYTE *dst = s->adj_mid;
+	const BYTE *src = s->adj_pic;
+	if (s->adj_i420) {
+		/* Y, then U and V at half size (rounded up). */
+		int planes[3][4] = {
+			{ s->in_w, s->in_h, s->out_w, s->out_h },
+			{ (s->in_w + 1) / 2, (s->in_h + 1) / 2,
+			  (s->out_w + 1) / 2, (s->out_h + 1) / 2 },
+			{ (s->in_w + 1) / 2, (s->in_h + 1) / 2,
+			  (s->out_w + 1) / 2, (s->out_h + 1) / 2 },
+		};
+		BYTE *d = dst;
+		for (int p = 0; p < 3; p++) {
+			int iw = planes[p][0], ih = planes[p][1];
+			int ow = planes[p][2], oh = planes[p][3];
+			for (int y = 0; y < oh; y++) {
+				const BYTE *row = src + (size_t)(y < ih ? y : ih - 1) * iw;
+				for (int x = 0; x < ow; x++)
+					*d++ = row[x < iw ? x : iw - 1];
+			}
+			src += (size_t)iw * ih;
+		}
+	} else {
+		BYTE *d = dst;
+		for (int y = 0; y < s->out_h; y++) {
+			const BYTE *row = src + (size_t)(y < s->in_h ? y : s->in_h - 1) *
+					  s->in_w * 3;
+			for (int x = 0; x < s->out_w; x++) {
+				const BYTE *px = row + (size_t)(x < s->in_w ? x : s->in_w - 1) * 3;
+				*d++ = px[0];
+				*d++ = px[1];
+				*d++ = px[2];
+			}
+		}
+	}
+	if (image_pack(s->adj_to, dst, s->adj_out))
+		return -1;
+	*frame = s->adj_out;
+	*len = s->adj_size;
+	return 1;
+}
+
+static int read_frame(struct source *s, const BYTE **frame, size_t *len)
 {
 	size_t n = s->frame_size;
 	int r;

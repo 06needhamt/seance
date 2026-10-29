@@ -599,6 +599,13 @@ which the harness also exports to codecs. It reads:
   RGB565, RGB555) and `--size`; raw RGB is top-down with unpadded rows,
   as FFmpeg's `rawvideo` and our `.bgr` output are.
 
+Many codecs only take sizes that are multiples of 8 or 16, which 640x360
+isn't. When a codec takes no format at the input's size, `encode` says
+which nearby size it does take, and `--pad <n>` (repeating the last row
+and column) or `--crop <n>` (dropping the bottom and right edges) makes
+the picture a multiple of n wide and high (2, 4, ... 256). For a codec
+that only takes certain sizes it names one to resize to.
+
 Frames go to the codec as they are if it takes them
 (`ICM_COMPRESS_QUERY`); otherwise they are converted to the first standard
 format it takes, or to `--codec-input`. PAL8, the last tried, gets each
@@ -607,7 +614,8 @@ that palette, else of the grey ramp, by brightness. `--keyint` (default: the cod
 `ICM_GETDEFAULTKEYFRAMERATE`), `--quality` (0 to 10000) and `--bitrate`
 (kbit/s, for codecs that can aim for one) set the sequence, and
 `ICM_COMPRESS_FRAMES_INFO` tells the codec about them and the frame rate.
-The keyframe flags in the AVI index are the codec's. `--state` sets a
+The keyframe flags in the AVI index are the codec's, except that the
+first frame is always one (some codecs flag none). `--state` sets a
 codec state saved earlier with `--save-state` (`ICM_SETSTATE` /
 `ICM_GETSTATE`), and `--odml` writes OpenDML indexes even for small
 files; files over 1 GB always get them.
