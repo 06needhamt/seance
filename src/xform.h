@@ -18,6 +18,7 @@ struct xform_class {
 	CLSID clsid;		/* GUID_NULL for an ACM driver */
 	int dmo;		/* a DMO */
 	int acm;		/* an ACM driver; neither: a DirectShow filter */
+	int keyed;		/* a DMO registered as keyed (DMO_REGISTERF_IS_KEYED) */
 	/* An encoder's output: a FOURCC for video, a format tag for audio. */
 	DWORD compression;
 };

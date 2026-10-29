@@ -172,6 +172,7 @@ HRESULT xform_find_output(const char *path, const CLSID *selected, int audio,
 			continue;
 		found->clsid = d->clsid;
 		found->dmo = 1;
+		found->keyed = !!(d->flags & DMO_REGISTERF_IS_KEYED);
 		found->compression = c;
 		matches++;
 	}

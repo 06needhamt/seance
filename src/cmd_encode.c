@@ -659,6 +659,15 @@ static int encode_com(const char *target, const CLSID *selected,
 		if (FAILED(hr)) {
 			fprintf(stderr, "seance: frame %lu: %s\n", read - 1,
 				dshow_hr_name(hr, error));
+			/*
+			 * A keyed DMO (wmvdmoe2.dll, the WMV encoder) takes data
+			 * only once an application Microsoft licensed unlocks it
+			 * through IWMGetSecureChannel, which seance doesn't.
+			 */
+			if (!pushed && found.keyed)
+				fprintf(stderr, "seance: the DMO is keyed: it works "
+					"only for applications that unlock it with "
+					"Microsoft's key, which seance doesn't\n");
 			goto done;
 		}
 		pushed++;

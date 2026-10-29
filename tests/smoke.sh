@@ -658,7 +658,7 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 			echo "smoke: DMO decode from --start differs" >&2
 			exit 1
 		}
-		for mode in "" NOTACCEPTING PRIVATE; do
+		for mode in "" NOTACCEPTING PRIVATE BITRATE; do
 			env ${mode:+VFW_ENV_TESTDMO_$mode=1} $emu "$harness" encode \
 				"$fixtures/testdmo.dll" "$work/in.y4m" \
 				-o "$work/dmo.avi" --keyint 2 2>/dev/null
