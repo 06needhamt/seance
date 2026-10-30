@@ -886,6 +886,62 @@ static void test_oledlg_dbghelp(void)
 	CHECK_EQ(SymGetOptions(), 0x16);
 }
 
+/* netapi32.dll shares nothing (siaviref.dll lists the shares). */
+static void test_netapi32(void)
+{
+	struct module *m = mod_load("netapi32.dll", NULL);
+	CHECK(m != NULL);
+	if (!m)
+		return;
+	FN(m, DWORD, NetShareEnum, LPWSTR, DWORD, BYTE **, DWORD, DWORD *,
+	   DWORD *, DWORD *);
+	FN(m, DWORD, NetApiBufferAllocate, DWORD, void **);
+	FN(m, DWORD, NetApiBufferFree, void *);
+	BYTE *buf = (BYTE *)1;
+	DWORD read = 9, total = 9, resume = 9;
+	CHECK_EQ(NetShareEnum(NULL, 2, &buf, (DWORD)-1, &read, &total, &resume), 0);
+	CHECK(buf == NULL && !read && !total && !resume);
+	CHECK_EQ(NetApiBufferFree(buf), 0);
+	void *p = NULL;
+	CHECK_EQ(NetApiBufferAllocate(16, &p), 0);
+	CHECK(p != NULL);
+	CHECK_EQ(NetApiBufferFree(p), 0);
+}
+
+/* _splitpath and _wsplitpath (siaviref.dll). */
+static void test_splitpath(void)
+{
+	struct module *m = mod_load("msvcrt.dll", NULL);
+	CHECK(m != NULL);
+	if (!m)
+		return;
+	CFN(m, void, _splitpath, const char *, char *, char *, char *, char *);
+	CFN(m, void, _wsplitpath, const WCHAR *, WCHAR *, WCHAR *, WCHAR *,
+	    WCHAR *);
+	char drive[8], dir[64], name[64], ext[16];
+
+	_splitpath("C:\\dir\\sub/file.tar.gz", drive, dir, name, ext);
+	CHECK_STR(drive, "C:");
+	CHECK_STR(dir, "\\dir\\sub/");
+	CHECK_STR(name, "file.tar");
+	CHECK_STR(ext, ".gz");
+	_splitpath("dir.d\\noext", drive, dir, name, ext);
+	CHECK_STR(drive, "");
+	CHECK_STR(dir, "dir.d\\");
+	CHECK_STR(name, "noext");
+	CHECK_STR(ext, "");
+	_splitpath("a.avi", NULL, NULL, name, NULL);
+	CHECK_STR(name, "a");
+
+	static const WCHAR wpath[] = { 'D', ':', 'x', '\\', 'y', '.', 'z', 0 };
+	WCHAR wd[8], wdir[16], wn[16], we[16];
+	_wsplitpath(wpath, wd, wdir, wn, we);
+	CHECK(wd[0] == 'D' && wd[1] == ':' && !wd[2]);
+	CHECK(wdir[0] == 'x' && wdir[1] == '\\' && !wdir[2]);
+	CHECK(wn[0] == 'y' && !wn[1]);
+	CHECK(we[0] == '.' && we[1] == 'z' && !we[2]);
+}
+
 int main(void)
 {
 	char root[256];
@@ -911,6 +967,8 @@ int main(void)
 	test_crtdll();
 	test_psapi();
 	test_oledlg_dbghelp();
+	test_netapi32();
+	test_splitpath();
 
 	char cmd[512];
 	snprintf(cmd, sizeof(cmd), "rm -rf '%s'", root);

@@ -180,6 +180,51 @@ CRTFN(WCHAR *) crt__wcsdup(const WCHAR *s)
 		memcpy(p, s, n);
 	return p;
 }
+/*
+ * _splitpath and _wsplitpath: a path's drive ("C:"), directory (up to and
+ * with its last slash of either kind), name, and extension (from its last
+ * dot). Any part may be NULL; each is copied whole, unbounded, as
+ * Windows' are.
+ */
+#define SPLITPATH(name, T) \
+CRTFN(void) crt_##name(const T *path, T *drive, T *dir, T *fname, T *ext) \
+{ \
+	const T *p = path, *slash = NULL, *dot = NULL, *e; \
+	\
+	if (p[0] && p[1] == ':') { \
+		if (drive) { \
+			drive[0] = p[0]; \
+			drive[1] = ':'; \
+			drive[2] = 0; \
+		} \
+		p += 2; \
+	} else if (drive) { \
+		drive[0] = 0; \
+	} \
+	for (e = p; *e; e++) { \
+		if (*e == '/' || *e == '\\') \
+			slash = e + 1; \
+		else if (*e == '.') \
+			dot = e; \
+	} \
+	const T *base = slash ? slash : p; \
+	if (!dot || dot < base) \
+		dot = e; \
+	if (dir) { \
+		memcpy(dir, p, (size_t)(base - p) * sizeof(T)); \
+		dir[base - p] = 0; \
+	} \
+	if (fname) { \
+		memcpy(fname, base, (size_t)(dot - base) * sizeof(T)); \
+		fname[dot - base] = 0; \
+	} \
+	if (ext) { \
+		memcpy(ext, dot, (size_t)(e - dot) * sizeof(T)); \
+		ext[e - dot] = 0; \
+	} \
+}
+SPLITPATH(_splitpath, char)
+SPLITPATH(_wsplitpath, WCHAR)
 /* Case folds ASCII only, as the C locale does (and _stricmp here). */
 static WCHAR wlower(WCHAR c)
 {
@@ -354,6 +399,7 @@ const struct builtin_export crt_string_exports[] = {
 	E(_msize), E(wcslen), E(wcsrchr), E(wcscpy), E(wcscat), E(wcscmp), E(wcsncmp),
 	E(wcschr), E(wcsstr), E(wcsncpy), E(wcsncat), E(wcsspn), E(wcscspn),
 	E(wcspbrk), E(_wcsdup), E(_wcsicmp), E(_wcsnicmp), E(_wcslwr), E(_wcsupr),
+	E(_splitpath), E(_wsplitpath),
 	E(strcoll), E(strxfrm),
 	E(atoi), E(atol), E(atof), E(strtol), E(strtoul), E(strtod),
 	E(_itoa), E(_ltoa), E(_ultoa),
