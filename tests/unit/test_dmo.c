@@ -238,6 +238,9 @@ static void test_partial_output(int encoder, int filled)
 	CHECK_EQ(dmo_host_create(mo, &in, &partial, collect, &g, &host), S_OK);
 	if (host) {
 		const DMO_MEDIA_TYPE *actual = dmo_host_output_type(host);
+		CHECK(!memcmp(&actual->majortype, &offered.majortype, sizeof(GUID)));
+		CHECK(!memcmp(&actual->subtype, &offered.subtype, sizeof(GUID)));
+		CHECK(!memcmp(&actual->formattype, &offered.formattype, sizeof(GUID)));
 		CHECK_EQ(actual->cbFormat, offered.cbFormat);
 		if (filled && actual->cbFormat >= sizeof(VIDEOINFOHEADER)) {
 			const VIDEOINFOHEADER *v = (const VIDEOINFOHEADER *)actual->pbFormat;
