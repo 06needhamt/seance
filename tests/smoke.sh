@@ -314,6 +314,17 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	$emu "$harness" encode "$fixtures/testdmo.dll" "$work/v.y4m" \
 		-o "$work/x.avi" --clsid '{5E6C9B41-3A7D-4F0E-9C11-0D2B7A6E4F80}' \
 		2>&1 | grep -q "has only a video decoder, not an encoder"
+	# A Windows 9x DLL that thunks to a 16-bit one (Mvicod32.dll) is said
+	# to be one, and its DllMain isn't run.
+	out=$($emu "$harness" encode "$fixtures/pe_thunk.dll" "$work/v.y4m" \
+		-o "$work/x.avi" 2>&1 || true)
+	echo "$out" | grep -q "a Windows 9x DLL that runs through a 16-bit one (it imports ThunkConnect32"
+	if echo "$out" | grep -q "not implemented"; then
+		echo "pe_thunk.dll's DllMain ran" >&2
+		exit 1
+	fi
+	$emu "$harness" info "$fixtures/pe_thunk.dll" |
+		grep -q "ThunkConnect32: a Windows 9x DLL that thunks"
 	# RealPlayer's codecs (rv203260.dll) are said to be what they are.
 	$emu "$harness" encode "$fixtures/pe_realcodec.dll" "$work/v.y4m" \
 		-o "$work/x.avi" 2>&1 | grep -q "a RealPlayer codec (it exports RV20"

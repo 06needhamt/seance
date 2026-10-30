@@ -232,6 +232,10 @@ static void print_imports(const struct pe_image *img, int delayed)
 	else if (st.missing)
 		printf("  %d of %d not implemented by the harness\n",
 		       st.missing, st.count);
+	const char *thunk = delayed ? NULL : pe_win9x_thunk(img);
+	if (thunk)
+		printf("  %s: a Windows 9x DLL that thunks to 16-bit code, "
+		       "which doesn't run here\n", thunk);
 }
 
 static int print_tls_callback(void *ctx, DWORD rva)

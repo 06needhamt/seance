@@ -89,6 +89,12 @@ int pe_foreach_delay_import(const struct pe_image *img, pe_import_fn fn,
 			    void *ctx);
 
 /*
+ * The kernel32 import that marks a Windows 9x DLL built on thunks to a
+ * 16-bit DLL (ThunkConnect32, QT_Thunk, ...), or NULL for any other.
+ */
+const char *pe_win9x_thunk(const struct pe_image *img);
+
+/*
  * Resolves every (non-delayed) import of a mapped image through resolve and
  * writes the results into the IAT. resolve returns NULL after calling
  * vfw_set_error() to fail the bind.

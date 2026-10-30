@@ -534,6 +534,20 @@ static struct module *load_pe(const char *path)
 		return NULL;
 	}
 
+	/*
+	 * Its work is done by a 16-bit DLL it thunks to (Mvicod32.dll, to
+	 * MVICOD16.DLL), which can't run here; DllMain would only fail, or
+	 * say "Wrong OS" first.
+	 */
+	const char *thunk = pe_win9x_thunk(img);
+	if (thunk) {
+		vfw_set_error("%s: a Windows 9x DLL that runs through a 16-bit "
+			      "one (it imports %s, for thunks); only 32-bit code "
+			      "runs here", base_name(path), thunk);
+		pe_free(img);
+		return NULL;
+	}
+
 	struct module *m = new_module(base_name(path), path);
 	if (!m) {
 		pe_free(img);
