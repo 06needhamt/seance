@@ -846,6 +846,46 @@ static void test_psapi(void)
 	mod_free(p);
 }
 
+/*
+ * oledlg.dll's dialogs are cancelled, and found by Windows' ordinals
+ * (vp7vfw.dll imports OleUIBusyA as #8); dbghelp.dll gives names back as
+ * they are and has no symbols.
+ */
+static void test_oledlg_dbghelp(void)
+{
+	struct module *o = mod_load("oledlg.dll", NULL);
+	struct module *d = mod_load("dbghelp.dll", NULL);
+	CHECK(o && d);
+	if (!o || !d)
+		return;
+	FN(o, UINT, OleUIBusyA, void *);
+	FN(o, UINT, OleUIInsertObjectW, void *);
+	FN(o, BOOL, OleUIAddVerbMenuA, void *, LPCSTR, HMENU, UINT, UINT, UINT,
+	   BOOL, UINT, HMENU *);
+	CHECK(mod_get_ordinal(o, 8) == (void *)OleUIBusyA);
+	CHECK(mod_get_ordinal(o, 1) == (void *)OleUIAddVerbMenuA);
+	CHECK(mod_get_ordinal(o, 12) == get(o, "OleUIChangeSourceA"));
+	CHECK_EQ(OleUIBusyA(NULL), 2);			/* OLEUI_CANCEL */
+	CHECK_EQ(OleUIInsertObjectW(NULL), 2);
+	HMENU popup = (HMENU)1;
+	CHECK(!OleUIAddVerbMenuA(NULL, NULL, NULL, 0, 0, 0, FALSE, 0, &popup));
+	CHECK(popup == NULL);
+
+	FN(d, DWORD, UnDecorateSymbolName, PCSTR, PSTR, DWORD, DWORD);
+	FN(d, BOOL, SymInitialize, HANDLE, PCSTR, BOOL);
+	FN(d, DWORD, SymSetOptions, DWORD);
+	FN(d, DWORD, SymGetOptions, void);
+	char out[8];
+	CHECK_EQ(UnDecorateSymbolName("?f@@YAXXZ", out, sizeof(out), 0), 7);
+	CHECK_STR(out, "?f@@YAX");
+	CHECK_EQ(UnDecorateSymbolName("main", out, sizeof(out), 0), 4);
+	CHECK_STR(out, "main");
+	CHECK_EQ(UnDecorateSymbolName("main", out, 0, 0), 0);
+	CHECK(!SymInitialize((HANDLE)-1, NULL, TRUE));
+	CHECK_EQ(SymSetOptions(0x16), 0x16);
+	CHECK_EQ(SymGetOptions(), 0x16);
+}
+
 int main(void)
 {
 	char root[256];
@@ -870,6 +910,7 @@ int main(void)
 	test_ncrypt_and_graphics();
 	test_crtdll();
 	test_psapi();
+	test_oledlg_dbghelp();
 
 	char cmd[512];
 	snprintf(cmd, sizeof(cmd), "rm -rf '%s'", root);

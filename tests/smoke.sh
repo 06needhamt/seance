@@ -302,6 +302,9 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	# Its FOURCC kept as an upper and lower case pair in data.
 	VFW_INI=/dev/null VFW_ENV_TESTCODEC_NAMED_ONLY=2 $emu "$harness" probe \
 		"$fixtures/testcodec.dll" 2>&1 | grep -q "opened as 'TSTP', found"
+	# One that opens without its FOURCC but then gives none, nor a name.
+	VFW_INI=/dev/null VFW_ENV_TESTCODEC_NAMED_ONLY=3 $emu "$harness" probe \
+		"$fixtures/testcodec.dll" 2>&1 | grep -q "opened as 'TST0', found"
 	# A DLL that doesn't load isn't loaded again for each FOURCC or mode
 	# to try (Mvicod32.dll showed a message box each time): once to see
 	# whether it is an ACM driver, once as a codec.

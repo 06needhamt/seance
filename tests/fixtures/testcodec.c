@@ -38,7 +38,9 @@
  *   TESTCODEC_NAMED_ONLY  it answers ICM_GETINFO only when opened as 'TST0'
  *                         (wnvwinx.dll, as 'WINX'); set to 2, only when
  *                         opened as 'TSTP' or 'tstp', a pair it keeps in
- *                         its data (VFCodec.dll, as 'VIFP' or 'vifp')
+ *                         its data (VFCodec.dll, as 'VIFP' or 'vifp'); set
+ *                         to 3, it answers otherwise too, but with no
+ *                         FOURCC nor name (vp7vfw.dll)
  *   TESTCODEC_DECODE_ONLY it refuses DRV_OPEN to compress, though it answers
  *                         ICM_COMPRESS_QUERY when opened otherwise
  *                         (vgpix32d.dll)
@@ -113,7 +115,7 @@ static int strict;	/* TESTCODEC_STRICT */
 static int nocompress;	/* TESTCODEC_NOCOMPRESS */
 static int latesize;	/* TESTCODEC_LATESIZE */
 static int needs_status, needs_padding, ask_format, picky, decode_only;
-static int named_only;	/* 1: as 'TST0'; 2: as its pair */
+static int named_only;	/* 1, 3: as 'TST0'; 2: as its pair */
 /* NAMED_ONLY=2's handlers, read from data rather than compared as
  * immediates, and standing alone in it. */
 static volatile const DWORD pair_name[4] __attribute__((aligned(16))) = {
@@ -613,7 +615,7 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 						      sizeof(v)) == 1 && v[0] == '1';
 		named_only = GetEnvironmentVariableA("TESTCODEC_NAMED_ONLY", v,
 						     sizeof(v)) == 1 &&
-			     (v[0] == '1' || v[0] == '2') ? v[0] - '0' : 0;
+			     v[0] >= '1' && v[0] <= '3' ? v[0] - '0' : 0;
 		end_crash = GetEnvironmentVariableA("TESTCODEC_END_CRASH", v,
 						    sizeof(v)) == 1 && v[0] == '1';
 		overrun = GetEnvironmentVariableA("TESTCODEC_OVERRUN", v,
@@ -696,6 +698,15 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		for (;;)
 			*(volatile DWORD *)&inst->magic;
 	case ICM_GETINFO:
+		if (named_only == 3 && !inst->named) {
+			ICINFO *info = (ICINFO *)l1;
+			LRESULT r = get_info(info, (DWORD)l2);
+			if (r) {
+				info->fccHandler = 0;
+				info->szName[0] = info->szDescription[0] = 0;
+			}
+			return r;
+		}
 		if (named_only && !inst->named)
 			return 0;
 		return get_info((ICINFO *)l1, (DWORD)l2);

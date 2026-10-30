@@ -344,15 +344,21 @@ int cli_open_codec(const char *arg, const char *fourcc, FOURCC guess,
 		c->have_info = ic_get_info(c->hic, &c->info, sizeof(c->info)) != 0;
 	/*
 	 * Some codecs open, or answer, only under a FOURCC of their own, and a
-	 * DLL named alone gives none: look for one in the DLL itself.
+	 * DLL named alone gives none: look for one in the DLL itself. One
+	 * that opens without but then says nothing of itself, no FOURCC nor
+	 * name (vp7vfw.dll, whose output is then 'BI_RGB' at 12 bits), is
+	 * asked again under each until one does.
 	 */
-	if (c->is_dll && !named && retry && (!c->hic || !c->have_info)) {
+	int nameless = c->hic && c->have_info && !c->info.fccHandler;
+	if (c->is_dll && !named && retry &&
+	    (!c->hic || !c->have_info || nameless)) {
 		FOURCC found[64];
 		size_t nfound = vfw_dll_handlers(c->target, found, 64);
 		for (size_t i = 0; i < nfound; i++) {
 			HIC h = try_open(c, found[i], modes, nmodes);
 			ICINFO info;
-			if (h && ic_get_info(h, &info, sizeof(info))) {
+			if (h && ic_get_info(h, &info, sizeof(info)) &&
+			    (!nameless || info.fccHandler)) {
 				char fcc[FOURCC_STR_SIZE];
 				fprintf(stderr, "seance: %s answers only under a "
 					"FOURCC of its own; opened as '%s', found in "
