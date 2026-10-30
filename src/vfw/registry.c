@@ -327,6 +327,94 @@ int vfw_register(FOURCC type, FOURCC handler, const char *path)
 	return r;
 }
 
+/* Whether line (a key = value line or not) sets key. */
+static int sets_key(const char *line, const char *key)
+{
+	while (isspace((unsigned char)*line))
+		line++;
+	size_t n = strlen(key);
+	if (strncasecmp(line, key, n))
+		return 0;
+	line += n;
+	while (*line == ' ' || *line == '\t')
+		line++;
+	return *line == '=';
+}
+
+int vfw_ini_remember(FOURCC type, FOURCC handler, const char *path)
+{
+	char key[16], fcc[5], tmp[PATH_MAX + 8], line[1024];
+	struct stat st;
+
+	pthread_mutex_lock(&lock);
+	ensure_loaded();
+	pthread_mutex_unlock(&lock);
+	/* Only a file: VFW_INI=/dev/null keeps nothing. */
+	if (!stat(ini_path, &st) && !S_ISREG(st.st_mode)) {
+		vfw_set_error("%s is not a file", ini_path);
+		return -1;
+	}
+	for (int i = 0; i < 4; i++) {
+		fcc[i] = (char)(handler >> (8 * i));
+		if (!isalnum((unsigned char)fcc[i]) && fcc[i] != ' ') {
+			vfw_set_error("'%.4s' can't be a key", fcc);
+			return -1;
+		}
+	}
+	fcc[4] = 0;
+	snprintf(key, sizeof(key), "%.4s.%s", (const char *)&type, trim(fcc));
+	char *dir = strdup(ini_path), *slash = dir ? strrchr(dir, '/') : NULL;
+	if (slash && slash != dir) {
+		*slash = 0;
+		mkdir(dir, 0755);	/* ~/.seance the first time */
+	}
+	free(dir);
+
+	FILE *in = fopen(ini_path, "r");
+	snprintf(tmp, sizeof(tmp), "%s.new", ini_path);
+	FILE *out = fopen(tmp, "w");
+	if (!out) {
+		vfw_set_error("%s: cannot write it", ini_path);
+		if (in)
+			fclose(in);
+		return -1;
+	}
+	/* The entry replaces one of the same key, else ends the section. */
+	int in_section = 0, done = 0;
+	while (in && fgets(line, sizeof(line), in)) {
+		const char *t = line;
+		while (isspace((unsigned char)*t))
+			t++;
+		if (*t == '[') {
+			if (in_section && !done) {
+				fprintf(out, "%s=%s\n", key, path);
+				done = 1;
+			}
+			in_section = !strncasecmp(t, "[drivers32]", 11);
+		} else if (in_section && !done && sets_key(t, key)) {
+			fprintf(out, "%s=%s\n", key, path);
+			done = 1;
+			continue;
+		} else if (in_section && done && sets_key(t, key)) {
+			continue;
+		}
+		fputs(line, out);
+		if (!strchr(line, '\n'))
+			fputc('\n', out);
+	}
+	if (!done)
+		fprintf(out, "%s%s=%s\n", in_section ? "" : "[drivers32]\n",
+			key, path);
+	if (in)
+		fclose(in);
+	if (fclose(out) || rename(tmp, ini_path)) {
+		unlink(tmp);
+		vfw_set_error("%s: cannot write it", ini_path);
+		return -1;
+	}
+	return 0;
+}
+
 int vfw_register_proc(FOURCC type, FOURCC handler, DRIVERPROC proc)
 {
 	pthread_mutex_lock(&lock);

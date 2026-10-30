@@ -305,6 +305,31 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	# One that opens without its FOURCC but then gives none, nor a name.
 	VFW_INI=/dev/null VFW_ENV_TESTCODEC_NAMED_ONLY=3 $emu "$harness" probe \
 		"$fixtures/testcodec.dll" 2>&1 | grep -q "opened as 'TST0', found"
+	# One that opens and answers under any handler but takes formats only
+	# under its own: found by what it takes, and kept in vfw.ini so the
+	# next run opens it so at once.
+	rm -f "$work/remember.ini" "$work/none.ini"
+	VFW_INI="$work/remember.ini" VFW_ENV_TESTCODEC_NAMED_ONLY=4 $emu \
+		"$harness" encode "$fixtures/testcodec.dll" "$work/v.y4m" \
+		-o "$work/n4.avi" 2>&1 | grep -q "but does as 'TST0', found in it"
+	grep -q "^vidc.TST0=.*testcodec.dll" "$work/remember.ini"
+	if VFW_INI="$work/remember.ini" VFW_ENV_TESTCODEC_NAMED_ONLY=4 $emu \
+		"$harness" encode "$fixtures/testcodec.dll" "$work/v.y4m" \
+		-o "$work/n4.avi" 2>&1 | grep -q "found in it"; then
+		echo "smoke: a remembered FOURCC was looked for again" >&2
+		exit 1
+	fi
+	# Decoding too; VFW_REMEMBER=0 keeps nothing.
+	VFW_INI="$work/none.ini" VFW_REMEMBER=0 VFW_ENV_TESTCODEC_NAMED_ONLY=4 \
+		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/n4.avi" \
+		-o "$work/n4.y4m" 2>&1 | grep -q "but does as 'TST0', found in it"
+	[ ! -e "$work/none.ini" ]
+	# What a DLL is under each FOURCC found in it.
+	VFW_INI=/dev/null VFW_ENV_TESTCODEC_NAMED_ONLY=4 $emu "$harness" probe \
+		"$fixtures/testcodec.dll" --fourccs >"$work/fourccs.txt"
+	grep -q "^  'TST0' (compared with in its code):" "$work/fourccs.txt"
+	grep -q "compresses at 320x240: nothing" "$work/fourccs.txt"
+	grep -q "compresses at 320x240: I420" "$work/fourccs.txt"
 	# A DLL that doesn't load isn't loaded again for each FOURCC or mode
 	# to try (Mvicod32.dll showed a message box each time): once to see
 	# whether it is an ACM driver, once as a codec.

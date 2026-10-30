@@ -1624,6 +1624,105 @@ static void test_info_text(void)
 	CHECK_EQ(utf16_field_to_utf8(field, 16, out, sizeof(out)), 16);
 }
 
+/* A file's text, in a static buffer. */
+static const char *text_of(const char *path)
+{
+	static char buf[8192];
+	size_t n = 0;
+	char *p = slurp(path, &n);
+
+	if (n >= sizeof(buf))
+		n = sizeof(buf) - 1;
+	if (p)
+		memcpy(buf, p, n);
+	buf[n] = 0;
+	free(p);
+	return buf;
+}
+
+/*
+ * A FOURCC found in a DLL is kept in its own ini file's [drivers32]: an
+ * entry of that key replaced, other sections and entries left as they
+ * are, and a file without the section given one.
+ */
+static void test_ini_remember(void)
+{
+	char ini[4200];
+	FOURCC vp70 = FCC('V', 'P', '7', '0');
+
+	snprintf(ini, sizeof(ini), "%s/remember.ini", root);
+	setenv("VFW_INI", ini, 1);
+	write_file(ini, "; mine\n[drivers32]\nvidc.ABCD=a.dll\nVIDC.vp70 = old.dll\n"
+		   "[other]\nvidc.VP70=keep.dll\n");
+	vfw_registry_reload();
+	CHECK_EQ(vfw_ini_remember(ICTYPE_VIDEO, vp70, "/x/vp7vfw.dll"), 0);
+	CHECK_STR(text_of(ini), "; mine\n[drivers32]\nvidc.ABCD=a.dll\n"
+		  "vidc.VP70=/x/vp7vfw.dll\n[other]\nvidc.VP70=keep.dll\n");
+	vfw_registry_reload();
+	const struct vfw_codec *c = vfw_find(ICTYPE_VIDEO, vp70);
+	CHECK(c && !strcmp(c->path, "/x/vp7vfw.dll"));
+
+	/* No [drivers32]: one is added. No file: one is made. */
+	write_file(ini, "[other]\nx=1");
+	CHECK_EQ(vfw_ini_remember(ICTYPE_VIDEO, FCC('T', 'S', 'T', ' '), "/t.dll"), 0);
+	CHECK_STR(text_of(ini), "[other]\nx=1\n[drivers32]\nvidc.TST=/t.dll\n");
+	unlink(ini);
+	vfw_registry_reload();
+	CHECK_EQ(vfw_ini_remember(ICTYPE_VIDEO, vp70, "/y.dll"), 0);
+	CHECK_STR(text_of(ini), "[drivers32]\nvidc.VP70=/y.dll\n");
+	unlink(ini);
+
+	/* Not a file: nothing is written. */
+	setenv("VFW_INI", "/dev/null", 1);
+	vfw_registry_reload();
+	CHECK_EQ(vfw_ini_remember(ICTYPE_VIDEO, vp70, "/y.dll"), -1);
+
+	unsetenv("VFW_INI");
+	vfw_registry_reload();
+}
+
+/* Where the search of a DLL for FOURCCs finds them, and in what order. */
+static void test_dll_handlers(void)
+{
+	FOURCC found[64];
+	unsigned char where[64];
+	size_t n = vfw_dll_handlers(fixture("pe_fourccs.dll"), found, where, 64);
+	static const struct { FOURCC f; unsigned from; } want[] = {
+		{ FCC('C', 'M', 'P', 'A'), VFW_FOURCC_FROM_CMP },
+		{ FCC('V', 'E', 'R', 'D'), VFW_FOURCC_FROM_VERSION },
+		{ FCC('S', 'T', 'R', 'C'), VFW_FOURCC_FROM_STRING },
+		{ FCC('M', 'O', 'V', 'B'), VFW_FOURCC_FROM_MOV },
+	};
+	size_t at[4];
+
+	for (size_t k = 0; k < 4; k++) {
+		at[k] = n;
+		for (size_t i = 0; i < n; i++)
+			if (found[i] == want[k].f) {
+				at[k] = i;
+				break;
+			}
+		CHECK(at[k] < n);
+		if (at[k] < n)
+			CHECK_EQ(where[at[k]], want[k].from);
+		if (k && at[k] < n && at[k - 1] < n)
+			CHECK(at[k - 1] < at[k]);	/* the likelier first */
+	}
+	CHECK(strstr(vfw_fourcc_from_name(VFW_FOURCC_FROM_MOV), "stored"));
+
+	/* Raw formats a codec checks its input against come last. */
+	n = vfw_dll_handlers(fixture("testcodec.dll"), found, NULL, 64);
+	CHECK(n > 0 && found[0] == TST0);
+	size_t i420 = n, others = 0;
+	for (size_t i = 0; i < n; i++) {
+		if (found[i] == FCC('I', '4', '2', '0'))
+			i420 = i;
+		else if (found[i] == FCC('T', 'S', 'T', 'P'))
+			others = i;
+	}
+	CHECK(i420 < n && others < i420);
+}
+
 int main(void)
 {
 	char codec[4096];
@@ -1636,6 +1735,8 @@ int main(void)
 
 	test_info_text();
 	test_registry();
+	test_ini_remember();
+	test_dll_handlers();
 	test_names();
 	test_stretch_dib();
 	test_driver_proc();

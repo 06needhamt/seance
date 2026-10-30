@@ -48,9 +48,28 @@ const struct vfw_codec *vfw_find_path(const char *path);
 
 /*
  * handlers.c: up to max FOURCCs the DLL at path may want to be opened
- * under, read from its code and data, the likelier first.
+ * under, read from its code, data and version resource, the likelier
+ * first. where, if not NULL, gets each one's VFW_FOURCC_FROM_*.
  */
-size_t vfw_dll_handlers(const char *path, FOURCC *out, size_t max);
+enum {
+	VFW_FOURCC_FROM_CMP,		/* compared with in code */
+	VFW_FOURCC_FROM_TABLE,		/* a word alone in data */
+	VFW_FOURCC_FROM_PAIR,		/* an upper and lower case pair */
+	VFW_FOURCC_FROM_VERSION,	/* a word of the version resource */
+	VFW_FOURCC_FROM_STRING,		/* a string or its first word */
+	VFW_FOURCC_FROM_MOV,		/* stored or pushed in code */
+};
+size_t vfw_dll_handlers(const char *path, FOURCC *out, unsigned char *where,
+			size_t max);
+/* What VFW_FOURCC_FROM_* says, e.g. "compared with in its code". */
+const char *vfw_fourcc_from_name(unsigned from);
+
+/*
+ * Adds type.handler=path to the ini file's [drivers32], or replaces the
+ * entry it has, creating the file if need be. Returns 0, or -1 with
+ * vfw_error(). The table in memory is not reloaded.
+ */
+int vfw_ini_remember(FOURCC type, FOURCC handler, const char *path);
 
 /* Adds or replaces a run-time entry. Returns 0 or -1. */
 int vfw_register(FOURCC type, FOURCC handler, const char *path);

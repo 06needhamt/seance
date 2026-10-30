@@ -4,6 +4,7 @@
  */
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,6 +16,7 @@
 #include "cmd_util.h"
 #include "common/error.h"
 #include "common/fourcc.h"
+#include "common/log.h"
 #include "in/audio.h"
 #include "runtime/runtime.h"
 #include "vfw/icm.h"
@@ -264,6 +266,74 @@ static HIC try_open(const struct cli_codec *c, FOURCC handler,
 	return hic;
 }
 
+/*
+ * Keeps a FOURCC found in a DLL in vfw.ini, so the next run opens it so
+ * at once (VFW_REMEMBER=0 keeps nothing).
+ */
+static void remember(const struct cli_codec *c)
+{
+	const char *v = getenv("VFW_REMEMBER");
+	char path[PATH_MAX], fcc[FOURCC_STR_SIZE];
+
+	if (v && !strcmp(v, "0"))
+		return;
+	if (!realpath(c->target, path) ||
+	    vfw_ini_remember(ICTYPE_VIDEO, c->handler, path)) {
+		TRACE("not remembering '%s' for %s: %s",
+		      fourcc_str(c->handler, fcc), c->target, vfw_error());
+		return;
+	}
+	fprintf(stderr, "seance: remembered in %s as vidc.%s "
+		"(VFW_REMEMBER=0 not to)\n", vfw_ini_path(),
+		fourcc_str(c->handler, fcc));
+}
+
+int cli_takes_size(HIC hic, LONG w, LONG h)
+{
+	struct vfw_format t;
+
+	for (unsigned i = 0; vfw_std_format(i, w, h, &t); i++)
+		if (ic_send(hic, ICM_COMPRESS_QUERY, (DWORD_PTR)&t.bih, 0) ==
+		    ICERR_OK)
+			return 1;
+	return 0;
+}
+
+int cli_codec_try_fourccs(struct cli_codec *c,
+			  int (*accepts)(HIC hic, void *ctx), void *ctx)
+{
+	FOURCC found[64];
+	char fcc[FOURCC_STR_SIZE];
+
+	if (!c->may_discover)
+		return 0;
+	size_t nfound = vfw_dll_handlers(c->target, found, NULL, 64);
+	for (size_t i = 0; i < nfound; i++) {
+		if (found[i] == c->handler)
+			continue;
+		HIC h = try_open(c, found[i], c->modes, c->nmodes);
+		if (!h)
+			continue;
+		if (!accepts(h, ctx)) {
+			ic_close(h);
+			continue;
+		}
+		fprintf(stderr, "seance: %s takes nothing when opened without "
+			"a FOURCC of its own, but does as '%s', found in it "
+			"(--fourcc names another)\n", c->target,
+			fourcc_str(found[i], fcc));
+		ic_close(c->hic);
+		c->hic = h;
+		c->handler = found[i];
+		c->have_info = ic_get_info(h, &c->info, sizeof(c->info)) != 0;
+		if (!vfw_find(ICTYPE_VIDEO, c->handler))
+			vfw_register(ICTYPE_VIDEO, c->handler, c->target);
+		remember(c);
+		return 1;
+	}
+	return 0;
+}
+
 int cli_open_codec(const char *arg, const char *fourcc, FOURCC guess,
 		   const UINT *modes, size_t nmodes, struct cli_codec *c)
 {
@@ -314,6 +384,10 @@ int cli_open_codec(const char *arg, const char *fourcc, FOURCC guess,
 		}
 	}
 
+	c->may_discover = c->is_dll && !named;
+	c->modes = modes;
+	c->nmodes = nmodes;
+
 	/* The handlers to try, in order. */
 	FOURCC tries[2];
 	size_t ntries = 0;
@@ -353,7 +427,7 @@ int cli_open_codec(const char *arg, const char *fourcc, FOURCC guess,
 	if (c->is_dll && !named && retry &&
 	    (!c->hic || !c->have_info || nameless)) {
 		FOURCC found[64];
-		size_t nfound = vfw_dll_handlers(c->target, found, 64);
+		size_t nfound = vfw_dll_handlers(c->target, found, NULL, 64);
 		for (size_t i = 0; i < nfound; i++) {
 			HIC h = try_open(c, found[i], modes, nmodes);
 			ICINFO info;
@@ -370,6 +444,7 @@ int cli_open_codec(const char *arg, const char *fourcc, FOURCC guess,
 				c->handler = found[i];
 				c->info = info;
 				c->have_info = 1;
+				remember(c);
 				break;
 			}
 			if (h)

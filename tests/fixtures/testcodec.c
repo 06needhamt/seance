@@ -40,7 +40,10 @@
  *                         opened as 'TSTP' or 'tstp', a pair it keeps in
  *                         its data (VFCodec.dll, as 'VIFP' or 'vifp'); set
  *                         to 3, it answers otherwise too, but with no
- *                         FOURCC nor name (vp7vfw.dll)
+ *                         FOURCC nor name (vp7vfw.dll); set to 4, it opens
+ *                         and answers under any handler, giving 'TSTX'
+ *                         (which it won't open as), but takes formats only
+ *                         as 'TST0'
  *   TESTCODEC_DECODE_ONLY it refuses DRV_OPEN to compress, though it answers
  *                         ICM_COMPRESS_QUERY when opened otherwise
  *                         (vgpix32d.dll)
@@ -115,7 +118,7 @@ static int strict;	/* TESTCODEC_STRICT */
 static int nocompress;	/* TESTCODEC_NOCOMPRESS */
 static int latesize;	/* TESTCODEC_LATESIZE */
 static int needs_status, needs_padding, ask_format, picky, decode_only;
-static int named_only;	/* 1, 3: as 'TST0'; 2: as its pair */
+static int named_only;	/* 1, 3, 4: as 'TST0'; 2: as its pair */
 /* NAMED_ONLY=2's handlers, read from data rather than compared as
  * immediates, and standing alone in it. */
 static volatile const DWORD pair_name[4] __attribute__((aligned(16))) = {
@@ -615,7 +618,7 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 						      sizeof(v)) == 1 && v[0] == '1';
 		named_only = GetEnvironmentVariableA("TESTCODEC_NAMED_ONLY", v,
 						     sizeof(v)) == 1 &&
-			     v[0] >= '1' && v[0] <= '3' ? v[0] - '0' : 0;
+			     v[0] >= '1' && v[0] <= '4' ? v[0] - '0' : 0;
 		end_crash = GetEnvironmentVariableA("TESTCODEC_END_CRASH", v,
 						    sizeof(v)) == 1 && v[0] == '1';
 		overrun = GetEnvironmentVariableA("TESTCODEC_OVERRUN", v,
@@ -698,6 +701,13 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		for (;;)
 			*(volatile DWORD *)&inst->magic;
 	case ICM_GETINFO:
+		if (named_only == 4) {
+			ICINFO *info = (ICINFO *)l1;
+			LRESULT r = get_info(info, (DWORD)l2);
+			if (r)
+				info->fccHandler = mmioFOURCC('T', 'S', 'T', 'X');
+			return r;
+		}
 		if (named_only == 3 && !inst->named) {
 			ICINFO *info = (ICINFO *)l1;
 			LRESULT r = get_info(info, (DWORD)l2);
@@ -747,6 +757,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		if (nocompress)
 			return ICERR_UNSUPPORTED;
 		if (picky && l2)
+			return ICERR_BADFORMAT;
+		if (named_only == 4 && !inst->named)
 			return ICERR_BADFORMAT;
 		return compress_query((BITMAPINFOHEADER *)l1, (BITMAPINFOHEADER *)l2);
 	case ICM_COMPRESS_GET_FORMAT:
@@ -806,6 +818,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		return end_crash ? (LRESULT)inst->magic / zero : ICERR_OK;
 
 	case ICM_DECOMPRESS_QUERY:
+		if (named_only == 4 && !inst->named)
+			return ICERR_BADFORMAT;
 		return decompress_query((BITMAPINFOHEADER *)l1,
 					(BITMAPINFOHEADER *)l2);
 	case ICM_DECOMPRESS_GET_FORMAT:

@@ -606,6 +606,12 @@ done:
 	return status;
 }
 
+/* Whether the codec decompresses the format ctx. */
+static int decompresses(HIC hic, void *ctx)
+{
+	return ic_send(hic, ICM_DECOMPRESS_QUERY, (DWORD_PTR)ctx, 0) == ICERR_OK;
+}
+
 int cmd_decode(int argc, char **argv)
 {
 	static const UINT modes[] = { ICMODE_DECOMPRESS };
@@ -812,6 +818,9 @@ int cmd_decode(int argc, char **argv)
 		}
 	}
 	LRESULT r = ic_send(codec.hic, ICM_DECOMPRESS_QUERY, (DWORD_PTR)in, 0);
+	if (r != ICERR_OK &&
+	    cli_codec_try_fourccs(&codec, decompresses, (void *)in))
+		r = ICERR_OK;
 	if (r != ICERR_OK) {
 		fprintf(stderr, "seance: the codec doesn't decompress %s (%s)\n",
 			cli_format_desc(in, desc, sizeof(desc)), icerr_name(r, err));

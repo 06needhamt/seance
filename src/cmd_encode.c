@@ -161,18 +161,6 @@ struct feed {
 	BYTE *tmp, *packed;
 };
 
-/* Whether the codec takes any standard format at w x h. */
-static int takes_size(HIC hic, LONG w, LONG h)
-{
-	struct vfw_format t;
-
-	for (unsigned i = 0; vfw_std_format(i, w, h, &t); i++)
-		if (ic_send(hic, ICM_COMPRESS_QUERY, (DWORD_PTR)&t.bih, 0) ==
-		    ICERR_OK)
-			return 1;
-	return 0;
-}
-
 /*
  * For a codec that takes nothing at w x h: the sizes it does take, as
  * advice. Most want a multiple of 16 or so (360 lines aren't one): the
@@ -192,8 +180,8 @@ static void size_hint(HIC hic, LONG w, LONG h, char *out, size_t size)
 		LONG cw = w / n * n, ch = h / n * n;
 		if (pw == w && ph == h)
 			continue;	/* the size itself: refused */
-		int pad = takes_size(hic, pw, ph);
-		int crop = cw && ch && takes_size(hic, cw, ch);
+		int pad = cli_takes_size(hic, pw, ph);
+		int crop = cw && ch && cli_takes_size(hic, cw, ch);
 		if (pad && crop)
 			snprintf(out, size, ", but takes %ldx%ld and %ldx%ld: "
 				 "add --pad %ld or --crop %ld", (long)pw, (long)ph,
@@ -212,12 +200,24 @@ static void size_hint(HIC hic, LONG w, LONG h, char *out, size_t size)
 			size_t i = fits ? k : n - 1 - k;
 			LONG cw = common[i][0], ch = common[i][1];
 			if ((cw >= w && ch >= h) != fits || (cw == w && ch == h) ||
-			    !takes_size(hic, cw, ch))
+			    !cli_takes_size(hic, cw, ch))
 				continue;
 			snprintf(out, size, ", but takes %ldx%ld: resize the input "
 				 "to that", (long)cw, (long)ch);
 			return;
 		}
+}
+
+/* Whether the codec takes the source's frames, or a standard format of them. */
+static int takes_input(HIC hic, void *ctx)
+{
+	const struct source *src = ctx;
+	size_t n;
+	const BITMAPINFOHEADER *native = source_format(src, &n);
+	LONG h = native->biHeight < 0 ? -native->biHeight : native->biHeight;
+
+	return ic_send(hic, ICM_COMPRESS_QUERY, (DWORD_PTR)native, 0) ==
+	       ICERR_OK || cli_takes_size(hic, native->biWidth, h);
 }
 
 static int choose_input(HIC hic, const struct source *src, const char *forced,
@@ -959,8 +959,17 @@ int cmd_encode(int argc, char **argv)
 		goto done;
 	}
 	if (choose_input(codec.hic, src, forced, &feed)) {
-		fprintf(stderr, "seance: %s\n", vfw_error());
-		goto done;
+		/* Under a FOURCC found in it, if any helps; else why not as is. */
+		char why[1024];
+		snprintf(why, sizeof(why), "%s", vfw_error());
+		if (forced || !cli_codec_try_fourccs(&codec, takes_input, src)) {
+			fprintf(stderr, "seance: %s\n", why);
+			goto done;
+		}
+		if (choose_input(codec.hic, src, forced, &feed)) {
+			fprintf(stderr, "seance: %s\n", vfw_error());
+			goto done;
+		}
 	}
 
 	/* The sequence: keyframes, quality, data rate and state. */

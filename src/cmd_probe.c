@@ -21,6 +21,7 @@
 #include "loader/pe.h"
 #include "runtime/runtime.h"
 #include "vfw/icm.h"
+#include "vfw/registry.h"
 #include "win32/codepage.h"
 #include "win32/msacm32.h"
 #include "win32/ole.h"
@@ -42,7 +43,9 @@ static int usage(void)
 		"                     vfw.ini, else 0, then what the codec reports)\n"
 		"  --clsid <{GUID}>   the filter or DMO when a DLL has several\n"
 		"  --size <WxH>       frame size for the format checks (default\n"
-		"                     320x240, or the AVI's)\n");
+		"                     320x240, or the AVI's)\n"
+		"  --fourccs          list the FOURCCs found in a VfW codec DLL,\n"
+		"                     and what it does when opened under each\n");
 	return 2;
 }
 
@@ -539,6 +542,96 @@ static void probe_compress(HIC hic, HIC dhic, LONG w, LONG h)
 		printf("  no standard input format accepted\n");
 }
 
+/* What the codec does opened under handler: one candidate's lines. */
+static void probe_candidate(const char *path, FOURCC handler, LONG w, LONG h)
+{
+	static const struct { UINT mode; const char *name; } modes[] = {
+		{ ICMODE_QUERY, "query" },
+		{ ICMODE_COMPRESS, "compress" },
+		{ ICMODE_DECOMPRESS, "decompress" },
+	};
+	HIC open[3] = { NULL, NULL, NULL };
+	char line[256], why[256] = "";
+	size_t len = 0;
+
+	for (size_t i = 0; i < 3; i++) {
+		open[i] = ic_open_dll(path, ICTYPE_VIDEO, handler, modes[i].mode);
+		if (open[i])
+			len += snprintf(line + len, sizeof(line) - len, "%s%s",
+					len ? ", " : "", modes[i].name);
+		else if (!why[0])
+			snprintf(why, sizeof(why), "%s", vfw_error());
+	}
+	if (!len) {
+		printf("    doesn't open: %s\n", why);
+		return;
+	}
+	printf("    opens to %s\n", line);
+	HIC any = open[0] ? open[0] : open[1] ? open[1] : open[2];
+	ICINFO info;
+	char a[FOURCC_STR_SIZE], name[64];
+	if (ic_get_info(any, &info, sizeof(info)))
+		printf("    names itself '%s', \"%s\"\n",
+		       fourcc_str(info.fccHandler, a),
+		       wide(info.szName, 16, name, sizeof(name)));
+	else
+		printf("    ICM_GETINFO: no answer\n");
+	if (open[1]) {
+		struct vfw_format t;
+		const char *f;
+		len = 0;
+		for (unsigned i = 0; (f = vfw_std_format(i, w, h, &t)); i++)
+			if (ic_send(open[1], ICM_COMPRESS_QUERY, (DWORD_PTR)&t.bih,
+				    0) == ICERR_OK)
+				len += snprintf(line + len, sizeof(line) - len,
+						"%s%s", len ? ", " : "", f);
+		printf("    compresses at %ldx%ld: %s\n", (long)w, (long)h,
+		       len ? line : "nothing");
+	}
+	if (open[2] && handler) {
+		BITMAPINFOHEADER b = {
+			.biSize = sizeof(b), .biWidth = w, .biHeight = h,
+			.biPlanes = 1, .biBitCount = 24, .biCompression = handler,
+			.biSizeImage = (DWORD)(w * h * 3),
+		};
+		char err[24];
+		LRESULT r = ic_send(open[2], ICM_DECOMPRESS_QUERY, (DWORD_PTR)&b, 0);
+		printf("    decompresses '%s': %s\n", fourcc_str(handler, a),
+		       r == ICERR_OK ? "yes" : icerr_name(r, err));
+	}
+	for (size_t i = 0; i < 3; i++)
+		if (open[i])
+			ic_close(open[i]);
+}
+
+/* The FOURCCs a DLL may want, and how it does under each. */
+static int probe_fourccs(const char *path, LONG w, LONG h)
+{
+	FOURCC found[64];
+	unsigned char where[64];
+	char a[FOURCC_STR_SIZE];
+
+	if (runtime_enter()) {
+		fprintf(stderr, "seance: %s\n", vfw_error());
+		return 1;
+	}
+	size_t n = vfw_dll_handlers(path, found, where, 64);
+	printf("Codec: %s\n", path);
+	printf("  with no FOURCC:\n");
+	probe_candidate(path, 0, w, h);
+	if (!n)
+		printf("\nNo FOURCCs found in it.\n");
+	else
+		printf("\nFOURCCs found in it, in the order encode and decode "
+		       "try them:\n");
+	for (size_t i = 0; i < n; i++) {
+		printf("  '%s' (%s):\n", fourcc_str(found[i], a),
+		       vfw_fourcc_from_name(where[i]));
+		probe_candidate(path, found[i], w, h);
+	}
+	return 0;
+}
+
 int cmd_probe(int argc, char **argv)
 {
 	static const UINT modes[] = { ICMODE_QUERY, ICMODE_DECOMPRESS,
@@ -546,12 +639,14 @@ int cmd_probe(int argc, char **argv)
 	const char *target = NULL, *avi_path = NULL, *fourcc = NULL;
 	const char *clsid = NULL;
 	LONG w = 320, h = 240;
-	int have_size = 0;
+	int have_size = 0, fourccs = 0;
 
 	for (int i = 1; i < argc; i++) {
 		const char *a = argv[i];
 		if (!strcmp(a, "--fourcc") && i + 1 < argc) {
 			fourcc = argv[++i];
+		} else if (!strcmp(a, "--fourccs")) {
+			fourccs = 1;
 		} else if (!strcmp(a, "--clsid") && i + 1 < argc) {
 			clsid = argv[++i];
 		} else if (!strcmp(a, "--size") && i + 1 < argc) {
@@ -568,6 +663,14 @@ int cmd_probe(int argc, char **argv)
 	}
 	if (!target)
 		return usage();
+	if (fourccs) {
+		if (fourcc || clsid || avi_path) {
+			fprintf(stderr, "seance: --fourccs takes only a DLL "
+				"(and --size)\n");
+			return 2;
+		}
+		return probe_fourccs(target, w, h);
+	}
 
 	struct pe_image *image = pe_open(target);
 	if (image) {
