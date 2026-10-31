@@ -663,10 +663,12 @@ static void flip_yuv(const BITMAPINFOHEADER *b, BYTE *p)
 		planes[0].base = p;
 		planes[0].stride = w;
 		planes[0].rows = h;
+		/* Chroma rounded up, as image_i420_size has it. */
+		LONG cw = (w + 1) / 2, ch = (h + 1) / 2;
 		planes[1].base = p + w * h;
-		planes[2].base = planes[1].base + (w / 2) * (h / 2);
-		planes[1].stride = planes[2].stride = w / 2;
-		planes[1].rows = planes[2].rows = h / 2;
+		planes[2].base = planes[1].base + cw * ch;
+		planes[1].stride = planes[2].stride = cw;
+		planes[1].rows = planes[2].rows = ch;
 		n = 3;
 	} else {
 		planes[0].base = p;
@@ -771,7 +773,9 @@ static int first_key_frame(struct avi_file *avi, const struct avi_stream *s,
 		if (!avi_chunk_is_frame(k) || !k->size ||
 		    (has_keys && !(k->flags & AVIIF_KEYFRAME)))
 			continue;
-		if (!(*buf = malloc(k->size)) || avi_read_chunk(avi, k, *buf)) {
+		/* With the zeros after it that decoding gives every frame. */
+		if (!(*buf = calloc(1, k->size + VFW_INPUT_PADDING)) ||
+		    avi_read_chunk(avi, k, *buf)) {
 			free(*buf);
 			*buf = NULL;
 			return -1;

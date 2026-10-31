@@ -370,9 +370,24 @@ int vfw_ini_remember(FOURCC type, FOURCC handler, const char *path)
 	}
 	free(dir);
 
+	/*
+	 * Written to a file of its own next to it, then put in its place:
+	 * mkstemp's, so no one else's file or link is written through, with
+	 * the old file's permissions (else mkstemp's, the owner's only).
+	 */
 	FILE *in = fopen(ini_path, "r");
-	snprintf(tmp, sizeof(tmp), "%s.new", ini_path);
-	FILE *out = fopen(tmp, "w");
+	mode_t mode = in && !fstat(fileno(in), &st) ? st.st_mode & 07777 : 0600;
+	snprintf(tmp, sizeof(tmp), "%s.XXXXXX", ini_path);
+	int fd = mkstemp(tmp);
+	FILE *out = fd < 0 ? NULL : fdopen(fd, "w");
+	if (fd >= 0 && (!out || fchmod(fd, mode))) {
+		if (out)
+			fclose(out);
+		else
+			close(fd);
+		unlink(tmp);
+		out = NULL;
+	}
 	if (!out) {
 		vfw_set_error("%s: cannot write it", ini_path);
 		if (in)

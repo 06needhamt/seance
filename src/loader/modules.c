@@ -672,6 +672,8 @@ struct module *mod_load(const char *name, struct module *importer)
 			}
 			vfw_set_error("%s: not found (searched %s$VFW_PATH and the current directory)",
 				      want, importer ? "the importer's directory, " : "");
+			/* The DLL missing, not one that imports it. */
+			mod_note_missing(want);
 			goto out;
 		}
 	}

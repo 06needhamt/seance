@@ -67,7 +67,9 @@
  *   TESTCODEC_YUV_UPSIDE  it writes I420 bottom-up, and decodes 12-bit
  *                         frames to grey BGR24 too (vp4vfw.dll)
  *   TESTCODEC_NEEDS_DLL   DRV_LOAD fails unless it can load
- *                         zz_companion.dll (CUVCcodc.dll: cseuvec.dll)
+ *                         zz_companion.dll (CUVCcodc.dll: cseuvec.dll);
+ *                         set to 2, pe_missing.dll, whose import
+ *                         zz_nosuch.dll is what's missing
  * TESTCODEC_ALIGN16=2 takes any height when asked, but begins only with
  * a multiple of 16 (vp31vfw.dll, vp4vfw.dll). TESTCODEC_DECODE_ONLY=2
  * opens only as 'TST0', and only to decompress (xanlib.dll, as 'XXAN').
@@ -676,7 +678,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		yuv_upside = GetEnvironmentVariableA("TESTCODEC_YUV_UPSIDE", v,
 						     sizeof(v)) == 1 && v[0] == '1';
 		needs_dll = GetEnvironmentVariableA("TESTCODEC_NEEDS_DLL", v,
-						    sizeof(v)) == 1 && v[0] == '1';
+						    sizeof(v)) == 1 &&
+			    (v[0] == '1' || v[0] == '2') ? v[0] - '0' : 0;
 		if (GetEnvironmentVariableA("TESTCODEC_CHATTY", v, sizeof(v)) == 1 &&
 		    v[0] == '1') {
 			static const char hello[] = "testcodec: hello\n";
@@ -686,7 +689,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		}
 		log_msg(msg);
 		check_module(hdrvr);
-		if (needs_dll && !LoadLibraryA("zz_companion.dll"))
+		if (needs_dll && !LoadLibraryA(needs_dll == 2 ? "pe_missing.dll" :
+					       "zz_companion.dll"))
 			return 0;
 		return DefDriverProc(id, hdrvr, msg, l1, l2);
 	}
