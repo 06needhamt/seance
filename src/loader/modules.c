@@ -600,9 +600,12 @@ fail:
 
 #define MAX_MISSING 16
 
-static char *missing[MAX_MISSING];	/* a ring of the last ones */
-static unsigned nmissing;		/* how many ever noted */
-static pthread_mutex_t missing_lock = PTHREAD_MUTEX_INITIALIZER;
+/*
+ * Per thread, so a message names only what that thread's open looked for
+ * (a DllMain or DRV_LOAD runs on the thread that opens the driver).
+ */
+static __thread char *missing[MAX_MISSING];	/* a ring of the last ones */
+static __thread unsigned nmissing;		/* how many ever noted */
 
 void mod_note_missing(const char *name)
 {
@@ -610,18 +613,13 @@ void mod_note_missing(const char *name)
 
 	if (!copy)
 		return;
-	pthread_mutex_lock(&missing_lock);
 	free(missing[nmissing % MAX_MISSING]);
 	missing[nmissing++ % MAX_MISSING] = copy;
-	pthread_mutex_unlock(&missing_lock);
 }
 
 unsigned mod_missing_mark(void)
 {
-	pthread_mutex_lock(&missing_lock);
-	unsigned n = nmissing;
-	pthread_mutex_unlock(&missing_lock);
-	return n;
+	return nmissing;
 }
 
 void mod_missing_since(unsigned mark, char *buf, size_t size)
@@ -629,7 +627,6 @@ void mod_missing_since(unsigned mark, char *buf, size_t size)
 	size_t len = 0;
 
 	buf[0] = 0;
-	pthread_mutex_lock(&missing_lock);
 	if (nmissing - mark > MAX_MISSING)
 		mark = nmissing - MAX_MISSING;
 	for (unsigned i = mark; i < nmissing; i++) {
@@ -641,7 +638,6 @@ void mod_missing_since(unsigned mark, char *buf, size_t size)
 			len += snprintf(buf + len, size - len, "%s%s",
 					len ? ", " : "", name);
 	}
-	pthread_mutex_unlock(&missing_lock);
 }
 
 struct module *mod_load(const char *name, struct module *importer)

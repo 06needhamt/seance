@@ -1003,8 +1003,6 @@ int cmd_decode(int argc, char **argv)
 	if (r != ICERR_OK &&
 	    cli_codec_try_fourccs(&codec, decompresses, (void *)in))
 		r = ICERR_OK;
-	if (r == ICERR_OK)
-		cli_remember_codec(&codec);
 	if (r != ICERR_OK) {
 		fprintf(stderr, "seance: the codec doesn't decompress %s (%s)\n",
 			cli_format_desc(in, desc, sizeof(desc)), icerr_name(r, err));
@@ -1159,6 +1157,9 @@ int cmd_decode(int argc, char **argv)
 		if (flip && dr >= 0 && dr != ICERR_DONTDRAW)
 			flip_yuv(out, pic);
 
+		/* A FOURCC found in it is kept once a frame has decoded. */
+		if (dr >= 0 && dr != ICERR_GOTOKEYFRAME)
+			cli_remember_codec(&codec);
 		if (dr < 0 || dr == ICERR_GOTOKEYFRAME) {
 			errors++;
 			fprintf(stderr, "seance: frame %lu: %s\n", frame,

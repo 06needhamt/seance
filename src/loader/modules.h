@@ -44,7 +44,8 @@ struct module *mod_load(const char *name, struct module *importer);
 
 /*
  * DLLs a DLL looked for with LoadLibrary and didn't find, as companions it
- * can't work without may be (CUVCcodc.dll: cseuvec.dll, csehqa.dll).
+ * can't work without may be (CUVCcodc.dll: cseuvec.dll, csehqa.dll), kept
+ * for each thread.
  * mod_missing_mark() is where the record stands; mod_missing_since()
  * writes the names looked for since a mark, ", "-separated ("" if none).
  */
