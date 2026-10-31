@@ -1033,11 +1033,13 @@ int cmd_decode(int argc, char **argv)
 	}
 	/*
 	 * YUV the codec writes upside down: RGB instead, which it gets right
-	 * (vp4vfw.dll, whose I420 is also a row out), else turned over.
+	 * (vp4vfw.dll, whose I420 is also a row out), else turned over. Not
+	 * for .raw, which is the codec's output exactly as it gives it.
 	 */
 	void *key_buf = NULL;
 	size_t key_size;
-	if (yuv_kind(out) && !first_key_frame(avi, s, &key_buf, &key_size)) {
+	if (kind != OUT_RAW && yuv_kind(out) &&
+	    !first_key_frame(avi, s, &key_buf, &key_size)) {
 		DWORD was = in->biSizeImage;
 		in->biSizeImage = (DWORD)key_size;
 		/* A codec that faults here (in a second instance) isn't checked. */

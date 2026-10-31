@@ -349,6 +349,13 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		"$fixtures/testcodec.dll" "$work/up.avi" -o "$work/up2.y4m" \
 		--output-format I420 2>&1 | grep -q "writes I420 upside down; turned over"
 	cmp "$work/up.y4m" "$work/up2.y4m"
+	# Raw output is the codec's own, untouched.
+	VFW_ENV_TESTCODEC_YUV_UPSIDE=1 $emu "$harness" decode \
+		"$fixtures/testcodec.dll" "$work/up.avi" -o "$work/up.raw" \
+		--format raw 2>&1 | grep -q "upside down" && {
+		echo "smoke: raw output was turned over" >&2
+		exit 1
+	}
 	# One that opens and answers under any handler but takes formats only
 	# under its own: found by what it takes, and kept in vfw.ini so the
 	# next run opens it so at once.
