@@ -252,6 +252,7 @@ every stream's duration; with `--chunks`, each chunk's time.
 build/seance probe codec.dll         # what the codec is and accepts
 build/seance probe codec.dll clip.avi # can it decode this file, and to what
 build/seance probe XVID              # a codec registered in vfw.ini
+build/seance probe codec.dll --fourccs # the FOURCCs in it, and what it does under each
 build/seance list
 ```
 
@@ -274,12 +275,36 @@ input it shows the compressed format (flagged if it isn't compressed at
 all), whether the codec takes that format back with the input, the largest
 frame size, and whether the codec decodes that format again.
 
-Some codecs only open under their own FOURCC. `probe` retries with the
-handler the codec reports. A DLL that answers nothing when opened by its
-file name is tried under the FOURCCs found in its code and data, and the
-first that answers is used, with a note. `--fourcc XXXX` sets it
-explicitly. Names and descriptions a codec writes into `ICINFO` as ANSI,
-not UTF-16, are read as such.
+Some codecs only open under their own FOURCC. `probe`, `encode` and
+`decode` find it for a DLL named by its file alone:
+
+- They retry with the handler the codec reports.
+- A DLL that answers nothing, or reports no FOURCC, is tried under the
+  FOURCCs found in it. The first under which it names itself is used, with
+  a note.
+- So is a DLL that opens but takes nothing: no input format to compress,
+  or not the file's format to decompress. The first FOURCC under which it
+  does is used.
+
+The FOURCCs are looked for in these places, the likelier first:
+
+1. those its code compares with;
+2. words standing alone in its data, and upper and lower case pairs;
+3. four-character words in its version resource;
+4. strings, or the first word of one;
+5. those its code stores or pushes.
+
+Uncompressed formats it checks its input against (`YUY2`, `I420`, ...)
+come last. `probe <dll> --fourccs` lists them all, where each was found,
+and what the codec does under each. A FOURCC found this way is remembered
+in `vfw.ini` (`vidc.XXXX=<the DLL>`) once `encode` or `decode` has used it,
+so the next run opens the codec at once; an entry the file has for that
+FOURCC and another DLL is left as it is, and `VFW_REMEMBER=0` keeps
+nothing. `--fourcc XXXX` sets the FOURCC
+explicitly.
+
+Names and descriptions a codec writes into `ICINFO` as ANSI, not UTF-16,
+are read as such.
 `VFW_TRACE=1` logs every driver message and its result.
 
 Codecs are registered for opening by FOURCC (and for codecs that open other
@@ -573,9 +598,12 @@ frames with the same writers as `convert`. The codec is a DLL, a FOURCC
 from `vfw.ini`, or `auto` for whichever registered codec accepts the
 stream (`ICLocate`). A DLL is opened as the stream's handler unless
 `--fourcc` says otherwise. The output format is `--output-format` if
-given; otherwise I420 for Y4M and YUV output and BGR24 for BMP and BGR, if
-the codec offers them, then what the codec suggests, then the first
-standard format it accepts. `--start` begins decoding at the keyframe
+given; otherwise YUV for Y4M and YUV output (I420, YV12, then YUY2 or
+UYVY) and BGR24 for BMP and BGR, if the codec offers them, then what the
+codec suggests, then the first standard format it accepts. YUV output is
+checked against the same first frame decoded to BGR24: a codec that writes
+it upside down (vp4vfw.dll) is decoded to BGR24 instead, or, with
+`--output-format`, its pictures are turned over. `--start` begins decoding at the keyframe
 before that frame, feeding the frames in between with
 `ICDECOMPRESS_PREROLL`; frames that aren't keyframes get
 `ICDECOMPRESS_NOTKEYFRAME`. A frame the codec rejects stops the decode,
@@ -615,7 +643,10 @@ that only takes certain sizes it names one to resize to.
 
 Frames go to the codec as they are if it takes them
 (`ICM_COMPRESS_QUERY`); otherwise they are converted to the first standard
-format it takes, or to `--codec-input`. PAL8, the last tried, gets each
+format it takes, or to `--codec-input`. A codec that takes an input when
+asked but won't begin with it (`ICM_COMPRESS_BEGIN`) is given another it
+takes, RGB first; one that begins with none at the picture's size is said
+to, with the `--pad` or `--crop` that helps. PAL8, the last tried, gets each
 pixel's nearest colour of a 6x6x6 cube (and 40 greys) if the codec takes
 that palette, else of the grey ramp, by brightness. `--keyint` (default: the codec's
 `ICM_GETDEFAULTKEYFRAMERATE`), `--quality` (0 to 10000) and `--bitrate`
@@ -822,6 +853,7 @@ decodes below 40 dB.
 | `VFW_FORCE_RELOC=1` | Load every image away from its preferred base, to exercise relocations |
 | `VFW_ROOT` | The harness's Windows world: `drive_c`, `vfw.ini` and `registry.reg` (default `~/.seance`) |
 | `VFW_INI` | The codec registry file (default `$VFW_ROOT/vfw.ini`) |
+| `VFW_REMEMBER=0` | Don't add a FOURCC found in a codec DLL to `vfw.ini` |
 | `VFW_REGISTRY` | The Windows registry file (default `$VFW_ROOT/registry.reg`); empty keeps it in memory only |
 | `VFW_TRACE=1` | Log calls into the built-in DLLs and every driver message to stderr |
 | `VFW_TIMEOUT=<s>` | Report and stop (exit 124) when one call into a DLL takes longer |

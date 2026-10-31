@@ -4,6 +4,7 @@
  */
 #include <dirent.h>
 #include <limits.h>
+#include <errno.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -534,6 +535,20 @@ static struct module *load_pe(const char *path)
 		return NULL;
 	}
 
+	/*
+	 * Its work is done by a 16-bit DLL it thunks to (Mvicod32.dll, to
+	 * MVICOD16.DLL), which can't run here; DllMain would only fail, or
+	 * say "Wrong OS" first.
+	 */
+	const char *thunk = pe_win9x_thunk(img);
+	if (thunk) {
+		vfw_set_error("%s: a Windows 9x DLL that runs through a 16-bit "
+			      "one (it imports %s, for thunks); only 32-bit code "
+			      "runs here", base_name(path), thunk);
+		pe_free(img);
+		return NULL;
+	}
+
 	struct module *m = new_module(base_name(path), path);
 	if (!m) {
 		pe_free(img);
@@ -559,9 +574,18 @@ static struct module *load_pe(const char *path)
 	}
 	TRACE("loaded %s at %p%s", path, (void *)m->base,
 	      img->relocated ? " (relocated)" : "");
+	/* From before its TLS callbacks, which may load DLLs too. */
+	unsigned mark = mod_missing_mark();
 	pe_tls_notify(img, DLL_PROCESS_ATTACH);
 	if (!pe_call_entry(img, DLL_PROCESS_ATTACH)) {
-		vfw_set_error("%s: DllMain(DLL_PROCESS_ATTACH) failed", m->name);
+		char looked[512];
+		mod_missing_since(mark, looked, sizeof(looked));
+		int one = !strchr(looked, ',');
+		vfw_set_error("%s: DllMain(DLL_PROCESS_ATTACH) failed%s%s%s%s%s",
+			      m->name, looked[0] ? "; it looked for " : "", looked,
+			      !looked[0] ? "" : one ? ", which isn't here (add its" :
+			      ", which aren't here (add their",
+			      looked[0] ? " directory to VFW_PATH)" : "", "");
 		/* Windows tells a DLL that refused to attach that it is detaching. */
 		detach(m);
 		goto fail;
@@ -572,6 +596,48 @@ static struct module *load_pe(const char *path)
 fail:
 	unload(m);
 	return NULL;
+}
+
+#define MAX_MISSING 16
+
+/*
+ * Per thread, so a message names only what that thread's open looked for
+ * (a DllMain or DRV_LOAD runs on the thread that opens the driver).
+ */
+static __thread char *missing[MAX_MISSING];	/* a ring of the last ones */
+static __thread unsigned nmissing;		/* how many ever noted */
+
+void mod_note_missing(const char *name)
+{
+	char *copy = strdup(name);
+
+	if (!copy)
+		return;
+	free(missing[nmissing % MAX_MISSING]);
+	missing[nmissing++ % MAX_MISSING] = copy;
+}
+
+unsigned mod_missing_mark(void)
+{
+	return nmissing;
+}
+
+void mod_missing_since(unsigned mark, char *buf, size_t size)
+{
+	size_t len = 0;
+
+	buf[0] = 0;
+	if (nmissing - mark > MAX_MISSING)
+		mark = nmissing - MAX_MISSING;
+	for (unsigned i = mark; i < nmissing; i++) {
+		const char *name = missing[i % MAX_MISSING];
+		int seen = 0;
+		for (unsigned k = mark; k < i && !seen; k++)
+			seen = !strcasecmp(missing[k % MAX_MISSING], name);
+		if (!seen && len < size)
+			len += snprintf(buf + len, size - len, "%s%s",
+					len ? ", " : "", name);
+	}
 }
 
 struct module *mod_load(const char *name, struct module *importer)
@@ -604,10 +670,15 @@ struct module *mod_load(const char *name, struct module *importer)
 			}
 			vfw_set_error("%s: not found (searched %s$VFW_PATH and the current directory)",
 				      want, importer ? "the importer's directory, " : "");
+			/* The DLL missing, not one that imports it. */
+			mod_note_missing(want);
 			goto out;
 		}
 	}
 	m = load_pe(path);
+	/* A path to no file is a DLL missing too; one that won't load isn't. */
+	if (!m && access(path, F_OK) && (errno == ENOENT || errno == ENOTDIR))
+		mod_note_missing(base_name(path));
 out:
 	UNLOCK();
 	return m;

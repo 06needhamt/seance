@@ -290,6 +290,74 @@ PAL8 input, guarded output buffers, surviving a crash in `*_END`, and
 drivers' module handles), the faults that are the codecs' own, and the
 companion DLLs that are missing.
 
+### A batch of about 150 DLLs, late October 2026
+
+`seance encode` was run over about 150 DLLs with 640x360 input. Most of
+the failures it showed are fixed. Below are the codecs that now work, and
+what keeps the others from working.
+
+**Now working:**
+
+| Codec | Result | What it needed |
+|---|---|---|
+| `SN4Codec.dll`, `Sif1_vfw.dll`, `vsslight.dll`, `frwd.dll`, `frwt.dll` | encode with `--pad 16` | they take only heights that are a multiple of 16; `encode` names the nearest size a codec takes, and `--pad N` / `--crop N` reach it |
+| `ADV601.dll` | encodes at 640x480 only | `encode` names that size |
+| `icmw_32.dll`, `WavCWAIP.dll` | frame 0 is now a keyframe | they flag no keyframes; frame 0 is always written as one |
+| `avimszh.dll` | should no longer overrun (not yet re-run) | the slack Windows' heap leaves after a block (its 32-byte header), now kept after guarded output buffers |
+| `msvidc32.dll` (Microsoft Video 1), `mcmjpg32.dll` and other NT 4 codecs | load | built-in `crtdll.dll` |
+| `cinevfw3.dll` | loads | built-in `psapi.dll` |
+| Morgan `M3JP2K322.dll` | round-trips with `VFW_DATE=2001-06-01` | an expired trial build |
+| On2 `vp7vfw.dll` (VP70) | round-trips 640x360, 37.6 dB | built-in `oledlg.dll` and `dbghelp.dll` (it is built with MFC); it reports no FOURCC until opened as `VP70`, which is now found in the DLL |
+| Softimage `siaviref.dll` (SIRF) | loads; decodes only | built-in `netapi32.dll` (`NetShareEnum`) and `_wsplitpath`; a reference codec, whose frames point into other media |
+| On2 `vp31vfw.dll` (VP31) | round-trips with `--pad 16`, 45.7 dB | it takes 640x360 when asked but begins only at a multiple of 16; `encode` now says so and names `--pad 16` / `--crop 16` |
+| On2 `vp4vfw.dll` (VP40) | round-trips with `--pad 16`, 47.2 dB | as `vp31vfw.dll`; and it writes I420 upside down (and a row out), so `decode` now checks the first picture against BGR24 and decodes to BGR24 instead |
+| innoheim `iscc.dll` (ISCC) | round-trips, 26.9 dB (an evaluation build: it draws a watermark, and decodes to RGB555 only) | it takes I420 and YV12 when asked but won't begin with them, and takes YUY2 as 16-bit RGB: `encode` now tries another input, RGB first, when a codec won't begin |
+| ASUS `asusasvd.dll` (ASV1), `asusasv2.dll` (ASV2) | decode only; FFmpeg's ASV1 and ASV2 files decode at 46.4 and 51.6 dB | their RGB is a poor conversion (28-29 dB): `decode` now prefers packed YUV (YUY2, UYVY) to a codec's RGB for Y4M |
+
+**Partly working, because of faults in the codecs:**
+
+- `m3jp2k32.dll` encodes but fails to decode frame 1.
+- `m3jpeg32.dll`'s own decoder gets chroma and RGB wrong. FFmpeg decodes
+  its files correctly.
+
+**Can't work in seance:**
+
+- **Win9x thunk codec:** `Mvicod32.dll` (Motion Pixels) calls a 16-bit DLL,
+  `MVICOD16.DLL`, through `ThunkConnect32`. Such DLLs are now refused, with
+  that reason, before their `DllMain` runs.
+- **16-bit and 64-bit DLLs:** 16-bit NE DLLs (`vp5r*`, `ativcr1`,
+  `mvicod16`, ...) and 64-bit `cinevf2w.dll`.
+- **RealPlayer codecs:** `*3260.dll`.
+- **Locked, or needs setup:**
+  - `wmvdmoe2.dll` is a keyed DMO and needs an unlock key.
+  - `tsccvid.dll` and `tsc2_codec32.dll` (Camtasia) need a licence.
+  - `vp5vfw.dll` needs a WIBU dongle.
+  - `raylightCodec.dll` needs an output folder set up.
+- **Locked to its vendor's software:** `fjht264.dll` (HTC H.264) begins
+  compressing only after a private message (`ICM_USER+0x6B`) carrying a
+  key that its own checks; it isn't worked around.
+- **Decoders only, under every FOURCC:** Canopus `CLLCcodc.dll` (CLLC) and
+  `cdvccodc.dll` (CDVC), and `xanlib.dll`, which opens only as `XXAN` or
+  `Xxan`; `encode` now says so (and, for `xanlib.dll`, as what). There are
+  no files here to decode with them.
+- **Missing companion DLLs:** the user supplies these through `VFW_PATH`.
+  They are `MFC42.DLL`, SImageLib, `pthreadVC2.dll`, VTACCESS, DecFrame,
+  ENC263, `vssh264enc.dll`, `vsswltconf.dll` and DSOUND, and Canopus's
+  `cseuvec.dll` and `csehqa.dll` for `CUVCcodc.dll`. A driver that refuses
+  to load or open, or a DLL whose `DllMain` fails, after looking for a DLL
+  that isn't there, now names it.
+
+**Still open, waiting for a re-run on the current build:**
+
+- **Refuse `DRV_LOAD`:** `rricm` and `cvpcdvc`; the message may now name
+  a companion DLL they look for.
+- **Fail in `ICM_COMPRESS`:**
+  - `BMDCodecLib`, opened as `HDYC`, returns `ICERR_ERROR`.
+  - `AvidAVICodec` returns `ICERR_INTERNAL`, probably because DNxHD
+    supports only fixed frame sizes.
+- **Unload:** `packed.dll`'s detach jumps to a bad address. It is now
+  survived, but the cause is not known.
+
 ## In-repository baseline
 
 For comparison, the same command over `build/fixtures` examined 23 fixture

@@ -159,18 +159,18 @@ struct feed {
 	struct image_conv *from;	/* NULL when frames go as they are */
 	struct image_conv *to;
 	BYTE *tmp, *packed;
+	/* What choose_input gave: bit i for standard format i, NATIVE. */
+	unsigned tried;
 };
 
-/* Whether the codec takes any standard format at w x h. */
-static int takes_size(HIC hic, LONG w, LONG h)
+static void feed_free(struct feed *f)
 {
-	struct vfw_format t;
-
-	for (unsigned i = 0; vfw_std_format(i, w, h, &t); i++)
-		if (ic_send(hic, ICM_COMPRESS_QUERY, (DWORD_PTR)&t.bih, 0) ==
-		    ICERR_OK)
-			return 1;
-	return 0;
+	image_conv_free(f->from);
+	image_conv_free(f->to);
+	free(f->tmp);
+	free(f->packed);
+	f->from = f->to = NULL;
+	f->tmp = f->packed = NULL;
 }
 
 /*
@@ -179,7 +179,8 @@ static int takes_size(HIC hic, LONG w, LONG h)
  * smallest such multiple padded or cropped to, as --pad or --crop give,
  * else a common size to resize to. "" if it takes none of them.
  */
-static void size_hint(HIC hic, LONG w, LONG h, char *out, size_t size)
+static void size_hint(HIC hic, int (*takes)(HIC, LONG, LONG), LONG w, LONG h,
+		      char *out, size_t size)
 {
 	static const LONG common[][2] = {
 		{ 320, 240 }, { 352, 288 }, { 640, 480 }, { 720, 480 },
@@ -192,8 +193,8 @@ static void size_hint(HIC hic, LONG w, LONG h, char *out, size_t size)
 		LONG cw = w / n * n, ch = h / n * n;
 		if (pw == w && ph == h)
 			continue;	/* the size itself: refused */
-		int pad = takes_size(hic, pw, ph);
-		int crop = cw && ch && takes_size(hic, cw, ch);
+		int pad = takes(hic, pw, ph);
+		int crop = cw && ch && takes(hic, cw, ch);
 		if (pad && crop)
 			snprintf(out, size, ", but takes %ldx%ld and %ldx%ld: "
 				 "add --pad %ld or --crop %ld", (long)pw, (long)ph,
@@ -212,7 +213,7 @@ static void size_hint(HIC hic, LONG w, LONG h, char *out, size_t size)
 			size_t i = fits ? k : n - 1 - k;
 			LONG cw = common[i][0], ch = common[i][1];
 			if ((cw >= w && ch >= h) != fits || (cw == w && ch == h) ||
-			    !takes_size(hic, cw, ch))
+			    !takes(hic, cw, ch))
 				continue;
 			snprintf(out, size, ", but takes %ldx%ld: resize the input "
 				 "to that", (long)cw, (long)ch);
@@ -220,8 +221,65 @@ static void size_hint(HIC hic, LONG w, LONG h, char *out, size_t size)
 		}
 }
 
+/*
+ * Whether the codec begins compressing some standard format at w x h, as
+ * one that takes any size when asked but begins only at some (vp31vfw.dll,
+ * vp4vfw.dll: multiples of 16) does.
+ */
+static int begins_at(HIC hic, LONG w, LONG h)
+{
+	struct vfw_format t;
+	BYTE out[4096];
+
+	for (unsigned i = 0; vfw_std_format(i, w, h, &t); i++) {
+		LRESULT n = ic_send(hic, ICM_COMPRESS_GET_FORMAT,
+				    (DWORD_PTR)&t.bih, 0);
+		if (ic_send(hic, ICM_COMPRESS_QUERY, (DWORD_PTR)&t.bih, 0) !=
+		    ICERR_OK || n < (LRESULT)sizeof(BITMAPINFOHEADER) ||
+		    n > (LRESULT)sizeof(out))
+			continue;
+		memset(out, 0, sizeof(out));
+		if (ic_send(hic, ICM_COMPRESS_GET_FORMAT, (DWORD_PTR)&t.bih,
+			    (DWORD_PTR)out) != ICERR_OK)
+			continue;
+		if (ic_send(hic, ICM_COMPRESS_BEGIN, (DWORD_PTR)&t.bih,
+			    (DWORD_PTR)out) == ICERR_OK) {
+			ic_send(hic, ICM_COMPRESS_END, 0, 0);
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/* Whether the codec takes the source's frames, or a standard format of them. */
+static int takes_input(HIC hic, void *ctx)
+{
+	const struct source *src = ctx;
+	size_t n;
+	const BITMAPINFOHEADER *native = source_format(src, &n);
+	LONG h = native->biHeight < 0 ? -native->biHeight : native->biHeight;
+
+	return ic_send(hic, ICM_COMPRESS_QUERY, (DWORD_PTR)native, 0) ==
+	       ICERR_OK || cli_takes_size(hic, native->biWidth, h);
+}
+
+#define NATIVE (1u << 31)
+
+/* Whether a standard format is RGB of 24 or 32 bits. */
+static int is_rgb(const BITMAPINFOHEADER *b)
+{
+	return b->biCompression == BI_RGB && b->biBitCount >= 24;
+}
+
+/*
+ * The input the codec gets: the source's format if it takes it, else the
+ * first standard one it does. Given again, for a codec that wouldn't
+ * begin with the one given (retry), it goes on past those f->tried, RGB
+ * first: one that takes YUV when asked but won't begin with it may take it
+ * in name only (iscc.dll reads YUY2 as 16-bit RGB).
+ */
 static int choose_input(HIC hic, const struct source *src, const char *forced,
-			struct feed *f)
+			struct feed *f, int retry)
 {
 	size_t n;
 	const BITMAPINFOHEADER *native = source_format(src, &n);
@@ -234,17 +292,26 @@ static int choose_input(HIC hic, const struct source *src, const char *forced,
 	int unsupported = 1;
 	LRESULT r;
 
-	if (!forced) {
+	if (!forced && !retry) {
 		r = ic_send(hic, ICM_COMPRESS_QUERY, (DWORD_PTR)native, 0);
 		if (r == ICERR_OK) {
 			memcpy(&f->fmt, native, n);
 			f->fmt_size = n;
 			f->name = source_format_name(src);
+			f->tried |= NATIVE;
 			return 0;
 		}
 		unsupported = r == ICERR_UNSUPPORTED;
 	}
+	for (int pass = retry ? 0 : 1; pass < 2; pass++)
 	for (unsigned i = 0; (name = vfw_std_format(i, w, h, &t)); i++) {
+		if (retry && ((f->tried & (1u << i)) ||
+			      (!pass && !is_rgb(&t.bih))))
+			continue;
+		/* The source's own format, tried first, isn't tried again. */
+		if ((f->tried & NATIVE) && !forced &&
+		    vfw_format_size(&t.bih) == n && !memcmp(&t.bih, native, n))
+			continue;
 		/*
 		 * 8 bits (the last tried): a colour cube's palette if the codec
 		 * takes it, else the grey ramp (pvwv220.dll takes only that).
@@ -274,6 +341,7 @@ static int choose_input(HIC hic, const struct source *src, const char *forced,
 		f->fmt = t;
 		f->fmt_size = vfw_format_size(&t.bih);
 		f->name = name;
+		f->tried |= 1u << i;
 		if (!(f->from = image_conv_new(native, n)) ||
 		    !(f->to = image_conv_new(&t.bih, f->fmt_size)))
 			return -1;
@@ -295,7 +363,7 @@ static int choose_input(HIC hic, const struct source *src, const char *forced,
 			      source_format_name(src));
 	else {
 		char hint[200];
-		size_hint(hic, w, h, hint, sizeof(hint));
+		size_hint(hic, cli_takes_size, w, h, hint, sizeof(hint));
 		vfw_set_error("the codec takes neither %s nor any standard format "
 			      "at %ldx%ld%s", source_format_name(src), (long)w,
 			      (long)h, hint);
@@ -958,9 +1026,18 @@ int cmd_encode(int argc, char **argv)
 		status = r;
 		goto done;
 	}
-	if (choose_input(codec.hic, src, forced, &feed)) {
-		fprintf(stderr, "seance: %s\n", vfw_error());
-		goto done;
+	if (choose_input(codec.hic, src, forced, &feed, 0)) {
+		/* Under a FOURCC found in it, if any helps; else why not as is. */
+		char why[1024];
+		snprintf(why, sizeof(why), "%s", vfw_error());
+		if (forced || !cli_codec_try_fourccs(&codec, takes_input, src)) {
+			fprintf(stderr, "seance: %s\n", why);
+			goto done;
+		}
+		if (choose_input(codec.hic, src, forced, &feed, 0)) {
+			fprintf(stderr, "seance: %s\n", vfw_error());
+			goto done;
+		}
 	}
 
 	/* The sequence: keyframes, quality, data rate and state. */
@@ -997,11 +1074,40 @@ int cmd_encode(int argc, char **argv)
 	long frames = total < 0 ? 0 : total > (long)start ? total - (long)start : 0;
 	if (count != (unsigned long)-1 && (total < 0 || (unsigned long)frames > count))
 		frames = (long)count;
-	if (!ic_seq_start_ex(&cv, (BITMAPINFO *)&feed.fmt, rate, scale, frames)) {
-		fprintf(stderr, "seance: %s\n", vfw_error());
-		goto done;
+	/*
+	 * A codec may take an input when asked and then not begin with it
+	 * (iscc.dll: I420 and YV12): another it takes, then. One that
+	 * begins with none may only want another size.
+	 */
+	char why[1024] = "";
+	const char *refused = NULL;
+	while (!ic_seq_start_ex(&cv, (BITMAPINFO *)&feed.fmt, rate, scale,
+				frames)) {
+		if (!why[0]) {
+			snprintf(why, sizeof(why), "%s", vfw_error());
+			refused = feed.name;
+		}
+		feed_free(&feed);
+		if (forced || choose_input(codec.hic, src, NULL, &feed, 1)) {
+			size_t n;
+			const BITMAPINFOHEADER *native = source_format(src, &n);
+			LONG h = native->biHeight < 0 ? -native->biHeight :
+				 native->biHeight;
+			char hint[200] = "";
+			if (!forced)
+				size_hint(codec.hic, begins_at, native->biWidth, h,
+					  hint, sizeof(hint));
+			fprintf(stderr, "seance: %s%s%s\n", why, hint[0] ?
+				"; the codec begins with no input at this size" : "",
+				hint);
+			goto done;
+		}
 	}
+	if (refused)
+		fprintf(stderr, "seance: the codec takes %s but won't begin with "
+			"it; giving it %s\n", refused, feed.name);
 	started = 1;
+	cli_remember_codec(&codec);
 
 	const BITMAPINFOHEADER *ofmt = &cv.lpbiOut->bmiHeader;
 	FOURCC handler = codec.have_info && codec.info.fccHandler ?

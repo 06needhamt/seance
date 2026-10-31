@@ -3,6 +3,7 @@
  * The installed codecs.
  */
 #include <ctype.h>
+#include <errno.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -325,6 +326,150 @@ int vfw_register(FOURCC type, FOURCC handler, const char *path)
 	if (r)
 		vfw_set_error("out of memory");
 	return r;
+}
+
+/* Whether line (a key = value line or not) sets key. */
+static int sets_key(const char *line, const char *key)
+{
+	while (isspace((unsigned char)*line))
+		line++;
+	size_t n = strlen(key);
+	if (strncasecmp(line, key, n))
+		return 0;
+	line += n;
+	while (*line == ' ' || *line == '\t')
+		line++;
+	return *line == '=';
+}
+
+/* Whether an ini value names the DLL at real (a resolved path). */
+static int names_dll(const char *value, const char *real)
+{
+	char buf[1024], resolved[PATH_MAX];
+	snprintf(buf, sizeof(buf), "%s", value);
+	char *v = trim(buf);
+	size_t n = strlen(v);
+	if (n >= 2 && v[0] == '"' && v[n - 1] == '"') {
+		v[n - 1] = 0;
+		v++;
+	}
+	char *p = resolve(v);
+	int same = p && realpath(p, resolved) && !strcmp(resolved, real);
+	free(p);
+	return same;
+}
+
+int vfw_ini_remember(FOURCC type, FOURCC handler, const char *path)
+{
+	char key[16], fcc[5], tmp[PATH_MAX + 8], real[PATH_MAX];
+	struct stat st;
+
+	pthread_mutex_lock(&lock);
+	ensure_loaded();
+	pthread_mutex_unlock(&lock);
+	/* Only a file: VFW_INI=/dev/null keeps nothing. */
+	if (!stat(ini_path, &st) && !S_ISREG(st.st_mode)) {
+		vfw_set_error("%s is not a file", ini_path);
+		return -1;
+	}
+	for (int i = 0; i < 4; i++) {
+		fcc[i] = (char)(handler >> (8 * i));
+		if (!isalnum((unsigned char)fcc[i]) && fcc[i] != ' ') {
+			vfw_set_error("'%.4s' can't be a key", fcc);
+			return -1;
+		}
+	}
+	fcc[4] = 0;
+	snprintf(key, sizeof(key), "%.4s.%s", (const char *)&type, trim(fcc));
+	if (!realpath(path, real))
+		snprintf(real, sizeof(real), "%s", path);
+	char *dir = strdup(ini_path), *slash = dir ? strrchr(dir, '/') : NULL;
+	if (slash && slash != dir) {
+		*slash = 0;
+		mkdir(dir, 0755);	/* ~/.seance the first time */
+	}
+	free(dir);
+
+	/* One there but unreadable isn't replaced by the one entry. */
+	FILE *in = fopen(ini_path, "r");
+	if (!in && errno != ENOENT) {
+		vfw_set_error("%s: cannot read it", ini_path);
+		return -1;
+	}
+	/*
+	 * Written to a file of its own next to it, then put in its place:
+	 * mkstemp's, so no one else's file or link is written through, with
+	 * the old file's permissions (else mkstemp's, the owner's only).
+	 */
+	mode_t mode = in && !fstat(fileno(in), &st) ? st.st_mode & 07777 : 0600;
+	snprintf(tmp, sizeof(tmp), "%s.XXXXXX", ini_path);
+	int fd = mkstemp(tmp);
+	FILE *out = fd < 0 ? NULL : fdopen(fd, "w");
+	if (fd >= 0 && (!out || fchmod(fd, mode))) {
+		if (out)
+			fclose(out);
+		else
+			close(fd);
+		unlink(tmp);
+		out = NULL;
+	}
+	if (!out) {
+		vfw_set_error("%s: cannot write it", ini_path);
+		if (in)
+			fclose(in);
+		return -1;
+	}
+	/*
+	 * The entry replaces one of the same key for the same DLL, else ends
+	 * the section; one for another DLL is the user's, and stays. Lines
+	 * are copied whole, however long.
+	 */
+	int in_section = 0, done = 0, theirs = 0;
+	char *line = NULL;
+	size_t cap = 0;
+	ssize_t len;
+	while (in && !theirs && (len = getline(&line, &cap, in)) > 0) {
+		const char *t = line;
+		while (isspace((unsigned char)*t))
+			t++;
+		if (*t == '[') {
+			if (in_section && !done) {
+				fprintf(out, "%s=%s\n", key, path);
+				done = 1;
+			}
+			in_section = !strncasecmp(t, "[drivers32]", 11);
+		} else if (in_section && sets_key(t, key)) {
+			if (!names_dll(strchr(t, '=') + 1, real)) {
+				theirs = 1;
+				break;
+			}
+			if (!done)
+				fprintf(out, "%s=%s\n", key, path);
+			done = 1;
+			continue;
+		}
+		fwrite(line, 1, (size_t)len, out);
+		if (line[len - 1] != '\n')
+			fputc('\n', out);
+	}
+	free(line);
+	if (!done && !theirs)
+		fprintf(out, "%s%s=%s\n", in_section ? "" : "[drivers32]\n",
+			key, path);
+	if (in)
+		fclose(in);
+	if (theirs) {
+		fclose(out);
+		unlink(tmp);
+		vfw_set_error("%s already has %s, for another DLL", ini_path, key);
+		return -1;
+	}
+	if (fclose(out) || rename(tmp, ini_path)) {
+		unlink(tmp);
+		vfw_set_error("%s: cannot write it", ini_path);
+		return -1;
+	}
+	return 0;
 }
 
 int vfw_register_proc(FOURCC type, FOURCC handler, DRIVERPROC proc)

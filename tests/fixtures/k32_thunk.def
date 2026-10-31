@@ -1,0 +1,5 @@
+; SPDX-License-Identifier: GPL-2.0-only
+; Windows 9x kernel32's flat thunk entry, which mingw's kernel32 lacks.
+LIBRARY kernel32.dll
+EXPORTS
+	ThunkConnect32@24

@@ -205,9 +205,25 @@ static void unload(struct drv_module *dm, HDRVR h)
  * Opens an instance of mod / proc. Takes over the module reference the
  * caller holds.
  */
-static HDRVR open_instance(struct module *mod, DRIVERPROC proc,
-			   const WCHAR *alias, LPARAM lp2)
+/* ", it looked for ..., which aren't here", or "", for a refusal. */
+static const char *looked_for(unsigned mark, char *buf, size_t size)
 {
+	char names[400];
+
+	mod_missing_since(mark, names, sizeof(names));
+	if (!names[0])
+		return "";
+	int one = !strchr(names, ',');
+	snprintf(buf, size, "; it looked for %s, which %s here (add %s "
+		 "directory to VFW_PATH)", names, one ? "isn't" : "aren't",
+		 one ? "its" : "their");
+	return buf;
+}
+
+static HDRVR open_instance(struct module *mod, DRIVERPROC proc,
+			   const WCHAR *alias, LPARAM lp2, unsigned mark)
+{
+	char looked[512];
 	struct drv_module *dm;
 	int slot = -1, extra_ref = 0;
 
@@ -252,8 +268,9 @@ static HDRVR open_instance(struct module *mod, DRIVERPROC proc,
 	int first = dm->opens == 0, loaded = 0;
 	if (first) {
 		if (!drv_call(proc, 0, h, DRV_LOAD, 0, 0)) {
-			vfw_set_error("%s: the driver refused DRV_LOAD",
-				      mod ? mod->name : "driver procedure");
+			vfw_set_error("%s: the driver refused DRV_LOAD%s",
+				      mod ? mod->name : "driver procedure",
+				      looked_for(mark, looked, sizeof(looked)));
 			goto fail;
 		}
 		loaded = 1;
@@ -261,8 +278,9 @@ static HDRVR open_instance(struct module *mod, DRIVERPROC proc,
 	}
 	DWORD_PTR id = drv_call(proc, 0, h, DRV_OPEN, (LPARAM)alias, lp2);
 	if (!id) {
-		vfw_set_error("%s: the driver refused DRV_OPEN",
-			      mod ? mod->name : "driver procedure");
+		vfw_set_error("%s: the driver refused DRV_OPEN%s",
+			      mod ? mod->name : "driver procedure",
+			      looked_for(mark, looked, sizeof(looked)));
 		goto fail;
 	}
 
@@ -333,6 +351,7 @@ HDRVR drv_open(const char *dll, const WCHAR *alias, LPARAM lp2)
 	if (runtime_enter())
 		return NULL;
 
+	unsigned mark = mod_missing_mark();
 	struct module *mod = mod_load(dll, NULL);
 	if (!mod)
 		return NULL;	/* vfw_error() names the DLL */
@@ -354,7 +373,7 @@ HDRVR drv_open(const char *dll, const WCHAR *alias, LPARAM lp2)
 		mod_free(mod);
 		return NULL;
 	}
-	return open_instance(mod, proc, alias, lp2);
+	return open_instance(mod, proc, alias, lp2, mark);
 }
 
 HDRVR drv_open_proc(DRIVERPROC proc, const WCHAR *alias, LPARAM lp2)
@@ -365,7 +384,7 @@ HDRVR drv_open_proc(DRIVERPROC proc, const WCHAR *alias, LPARAM lp2)
 	}
 	if (runtime_enter())
 		return NULL;
-	return open_instance(NULL, proc, alias, lp2);
+	return open_instance(NULL, proc, alias, lp2, mod_missing_mark());
 }
 
 LRESULT drv_send(HDRVR h, UINT msg, LPARAM l1, LPARAM l2)

@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -587,6 +588,32 @@ int pe_foreach_import(const struct pe_image *img, pe_import_fn fn, void *ctx)
 		if (walk_thunks(img, dll, lookup, desc.FirstThunk, 0, 0, fn, ctx))
 			return -1;
 	}
+}
+
+static int find_thunk(void *ctx, const struct pe_import *imp)
+{
+	/* Flat and universal thunks: Windows 9x's ways into 16-bit code. */
+	static const char *const names[] = {
+		"ThunkConnect32", "QT_Thunk", "FT_Thunk", "FT_Prolog",
+		"K32Thk1632Prolog", "UTRegister",
+	};
+
+	if (!imp->name || strncasecmp(imp->dll, "kernel32", 8))
+		return 0;
+	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+		if (!strcmp(imp->name, names[i])) {
+			*(const char **)ctx = names[i];
+			return -1;
+		}
+	return 0;
+}
+
+const char *pe_win9x_thunk(const struct pe_image *img)
+{
+	const char *found = NULL;
+
+	pe_foreach_import(img, find_thunk, &found);
+	return found;
 }
 
 int pe_foreach_delay_import(const struct pe_image *img, pe_import_fn fn,

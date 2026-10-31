@@ -63,6 +63,12 @@ struct cli_codec {
 	HIC hic;
 	ICINFO info;		/* valid if have_info */
 	int have_info;
+	/* A DLL given no FOURCC (none named or registered): may look for one. */
+	int may_discover;
+	/* Opened as a FOURCC found in it, to keep once it does the job. */
+	int found;
+	const UINT *modes;	/* the modes it was opened in */
+	size_t nmodes;
 };
 
 /*
@@ -77,6 +83,24 @@ struct cli_codec {
  */
 int cli_open_codec(const char *arg, const char *fourcc, FOURCC guess,
 		   const UINT *modes, size_t nmodes, struct cli_codec *c);
+
+/* Whether the codec takes any standard format to compress at w x h. */
+int cli_takes_size(HIC hic, LONG w, LONG h);
+
+/*
+ * For a DLL that opened, without a FOURCC of its own, but won't do the
+ * job: tries the FOURCCs found in it until accepts() says it does under
+ * one, and keeps that. Returns 1 if it did, else 0 (the codec as it was).
+ */
+int cli_codec_try_fourccs(struct cli_codec *c,
+			  int (*accepts)(HIC hic, void *ctx), void *ctx);
+
+/*
+ * Keeps the FOURCC a DLL was opened as, when it was found in the DLL, in
+ * vfw.ini, once the codec has taken the job: so a FOURCC under which it
+ * named itself but took nothing isn't kept over one it then took.
+ */
+void cli_remember_codec(struct cli_codec *c);
 
 /* Another instance of the codec, opened in mode under its handler; NULL if refused. */
 HIC cli_reopen_codec(const struct cli_codec *c, UINT mode);

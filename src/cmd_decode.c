@@ -27,6 +27,7 @@
 #include "out/image.h"
 #include "out/output.h"
 #include "runtime/guard.h"
+#include "runtime/crash.h"
 #include "runtime/runtime.h"
 #include "vfw/icm.h"
 #include "win32/codepage.h"
@@ -135,13 +136,15 @@ static int std_format(const char *name, LONG w, LONG h, struct vfw_format *f)
 
 /*
  * The output format: the one asked for, or one that suits the output kind
- * (I420 for Y4M, BGR24 for BMP) if the codec takes it, else what it
- * suggests or the first standard one it accepts.
+ * (YUV for Y4M, planar 4:2:0 first, then packed 4:2:2, which spares the
+ * codec's own conversion to RGB, as the ASUS ASV decoders' is a poor one;
+ * BGR24 for BMP) if the codec takes it, else what it suggests or the first
+ * standard one it accepts.
  */
 static BITMAPINFOHEADER *choose_output(HIC hic, const BITMAPINFOHEADER *in,
 				       const char *forced, enum output_kind kind)
 {
-	static const char *const yuv[] = { "I420", "YV12", NULL };
+	static const char *const yuv[] = { "I420", "YV12", "YUY2", "UYVY", NULL };
 	static const char *const rgb[] = { "BGR24", NULL };
 	const char *const *prefer = kind == OUT_Y4M || kind == OUT_YUV ? yuv :
 				    kind == OUT_BMP || kind == OUT_BGR ? rgb : NULL;
@@ -606,6 +609,191 @@ done:
 	return status;
 }
 
+/*
+ * Some codecs write YUV bottom-up, as if it were RGB (vp4vfw.dll's I420),
+ * where YUV is top-down. Checked on the first picture against the same
+ * frame decoded to BGR24, whose orientation is known, by comparing luma.
+ */
+
+/* Whether b is a YUV layout these know: planar 4:2:0 or packed 4:2:2. */
+static int yuv_kind(const BITMAPINFOHEADER *b)
+{
+	switch (b->biCompression) {
+	case mmioFOURCC('I', '4', '2', '0'):
+	case mmioFOURCC('I', 'Y', 'U', 'V'):
+	case mmioFOURCC('Y', 'V', '1', '2'):
+		return 1;
+	case mmioFOURCC('Y', 'U', 'Y', '2'):
+	case mmioFOURCC('Y', 'U', 'Y', 'V'):
+	case mmioFOURCC('Y', 'V', 'Y', 'U'):
+		return 2;
+	case mmioFOURCC('U', 'Y', 'V', 'Y'):
+		return 3;
+	}
+	return 0;
+}
+
+/* The luma at x of memory row y. */
+static int luma_at(const BITMAPINFOHEADER *b, const BYTE *p, LONG x, LONG y)
+{
+	LONG w = b->biWidth;
+
+	switch (yuv_kind(b)) {
+	case 1:
+		return p[y * w + x];
+	case 2:
+		return p[y * w * 2 + x * 2];
+	case 3:
+		return p[y * w * 2 + x * 2 + 1];
+	}
+	/* BGR24, to limited-range luma as YUV has it (BT.601). */
+	const BYTE *q = p + y * ((w * 3 + 3) & ~3) + x * 3;
+	return ((q[0] * 25 + q[1] * 129 + q[2] * 66 + 128) >> 8) + 16;
+}
+
+/* Turns a YUV picture of yuv_kind over. */
+static void flip_yuv(const BITMAPINFOHEADER *b, BYTE *p)
+{
+	LONG w = b->biWidth, h = b->biHeight < 0 ? -b->biHeight : b->biHeight;
+	BYTE tmp[16384];
+	struct { BYTE *base; LONG stride, rows; } planes[3];
+	int n = 1;
+
+	if (yuv_kind(b) == 1) {
+		planes[0].base = p;
+		planes[0].stride = w;
+		planes[0].rows = h;
+		/* Chroma rounded up, as image_i420_size has it. */
+		LONG cw = (w + 1) / 2, ch = (h + 1) / 2;
+		planes[1].base = p + w * h;
+		planes[2].base = planes[1].base + cw * ch;
+		planes[1].stride = planes[2].stride = cw;
+		planes[1].rows = planes[2].rows = ch;
+		n = 3;
+	} else {
+		planes[0].base = p;
+		planes[0].stride = w * 2;
+		planes[0].rows = h;
+	}
+	for (int k = 0; k < n; k++) {
+		LONG s = planes[k].stride;
+		if (s > (LONG)sizeof(tmp))
+			return;
+		for (LONG y = 0; y < planes[k].rows / 2; y++) {
+			BYTE *a = planes[k].base + y * s;
+			BYTE *z = planes[k].base + (planes[k].rows - 1 - y) * s;
+			memcpy(tmp, a, s);
+			memcpy(a, z, s);
+			memcpy(z, tmp, s);
+		}
+	}
+}
+
+/*
+ * Whether the codec writes its YUV output out upside down: frame buf,
+ * which decodes on its own, decoded to out and to BGR24 by another
+ * instance matches only when one is turned over.
+ */
+struct orientation {
+	const struct cli_codec *codec;
+	BITMAPINFOHEADER *in;
+	const void *buf;
+	const BITMAPINFOHEADER *out;
+	int upside_down;
+};
+
+static int yuv_upside_down(const struct cli_codec *codec,
+			   BITMAPINFOHEADER *in, const void *buf,
+			   const BITMAPINFOHEADER *out);
+
+static void check_orientation(void *arg)
+{
+	struct orientation *o = arg;
+
+	o->upside_down = yuv_upside_down(o->codec, o->in, o->buf, o->out);
+}
+
+static int yuv_upside_down(const struct cli_codec *codec,
+			   BITMAPINFOHEADER *in, const void *buf,
+			   const BITMAPINFOHEADER *out)
+{
+	LONG w = out->biWidth, h = out->biHeight;
+	/* Packed 4:2:2 pairs pixels; planar 4:2:0 rounds its chroma up. */
+	if (!yuv_kind(out) || h <= 1 || w <= 0 ||
+	    (yuv_kind(out) != 1 && (w & 1)) || !codec->target[0])
+		return 0;
+	BITMAPINFOHEADER rgb = {
+		.biSize = sizeof(rgb), .biWidth = w, .biHeight = h,
+		.biPlanes = 1, .biBitCount = 24, .biCompression = BI_RGB,
+		.biSizeImage = (DWORD)(((w * 3 + 3) & ~3) * h),
+	};
+	const BITMAPINFOHEADER *as[2] = { out, &rgb };
+	BYTE *pic[2] = { calloc(1, out->biSizeImage + (size_t)w * h * 2),
+			 malloc(rgb.biSizeImage) };
+	int ok = pic[0] && pic[1];
+
+	for (int k = 0; k < 2 && ok; k++) {
+		HIC hic = cli_reopen_codec(codec, ICMODE_DECOMPRESS);
+		ok = hic && ic_send(hic, ICM_DECOMPRESS_QUERY, (DWORD_PTR)in,
+				    (DWORD_PTR)as[k]) == ICERR_OK &&
+		     ic_decompress_begin(hic, in, as[k]) == ICERR_OK;
+		/*
+		 * Closed without ICM_DECOMPRESS_END, as programs often do: one
+		 * that ends badly (WavCWAIP.dll) is then spared it once more.
+		 */
+		if (ok)
+			ok = (LONG)ic_decompress(hic, 0, in, (void *)buf,
+						 (BITMAPINFOHEADER *)as[k],
+						 pic[k]) >= 0;
+		if (hic)
+			ic_close(hic);
+	}
+	unsigned long same = 0, flipped = 0;
+	if (ok) {
+		/* BGR24's memory rows run from the bottom. */
+		for (LONG y = 0; y < h; y += 4)
+			for (LONG x = 0; x < w; x += 4) {
+				int v = luma_at(out, pic[0], x, y);
+				same += abs(v - luma_at(&rgb, pic[1], x, h - 1 - y));
+				flipped += abs(v - luma_at(&rgb, pic[1], x, y));
+			}
+	}
+	free(pic[0]);
+	free(pic[1]);
+	return ok && flipped * 2 < same;
+}
+
+/* The first frame of the stream that decodes on its own, read into *buf. */
+static int first_key_frame(struct avi_file *avi, const struct avi_stream *s,
+			   void **buf, size_t *size)
+{
+	int has_keys = 0;
+	for (size_t c = 0; c < s->nchunks && !has_keys; c++)
+		has_keys = (s->chunks[c].flags & AVIIF_KEYFRAME) != 0;
+	for (size_t c = 0; c < s->nchunks; c++) {
+		const struct avi_chunk *k = &s->chunks[c];
+		if (!avi_chunk_is_frame(k) || !k->size ||
+		    (has_keys && !(k->flags & AVIIF_KEYFRAME)))
+			continue;
+		/* With the zeros after it that decoding gives every frame. */
+		if (!(*buf = calloc(1, k->size + VFW_INPUT_PADDING)) ||
+		    avi_read_chunk(avi, k, *buf)) {
+			free(*buf);
+			*buf = NULL;
+			return -1;
+		}
+		*size = k->size;
+		return 0;
+	}
+	return -1;
+}
+
+/* Whether the codec decompresses the format ctx. */
+static int decompresses(HIC hic, void *ctx)
+{
+	return ic_send(hic, ICM_DECOMPRESS_QUERY, (DWORD_PTR)ctx, 0) == ICERR_OK;
+}
+
 int cmd_decode(int argc, char **argv)
 {
 	static const UINT modes[] = { ICMODE_DECOMPRESS };
@@ -706,7 +894,7 @@ int cmd_decode(int argc, char **argv)
 		return 1;
 	}
 
-	int status = 1, begun = 0;
+	int status = 1, begun = 0, flip = 0;
 	struct cli_codec codec = { 0 };
 	BITMAPINFOHEADER *in = NULL, *out = NULL;
 	struct image_conv *conv = NULL;
@@ -812,6 +1000,9 @@ int cmd_decode(int argc, char **argv)
 		}
 	}
 	LRESULT r = ic_send(codec.hic, ICM_DECOMPRESS_QUERY, (DWORD_PTR)in, 0);
+	if (r != ICERR_OK &&
+	    cli_codec_try_fourccs(&codec, decompresses, (void *)in))
+		r = ICERR_OK;
 	if (r != ICERR_OK) {
 		fprintf(stderr, "seance: the codec doesn't decompress %s (%s)\n",
 			cli_format_desc(in, desc, sizeof(desc)), icerr_name(r, err));
@@ -837,6 +1028,37 @@ int cmd_decode(int argc, char **argv)
 	if (!(out = choose_output(codec.hic, in, forced, kind))) {
 		fprintf(stderr, "seance: %s\n", vfw_error());
 		goto done;
+	}
+	/*
+	 * YUV the codec writes upside down: RGB instead, which it gets right
+	 * (vp4vfw.dll, whose I420 is also a row out), else turned over. Not
+	 * for .raw, which is the codec's output exactly as it gives it.
+	 */
+	void *key_buf = NULL;
+	size_t key_size;
+	if (kind != OUT_RAW && yuv_kind(out) &&
+	    !first_key_frame(avi, s, &key_buf, &key_size)) {
+		DWORD was = in->biSizeImage;
+		in->biSizeImage = (DWORD)key_size;
+		/* A codec that faults here (in a second instance) isn't checked. */
+		struct orientation chk = { &codec, in, key_buf, out, 0 };
+		int upside = !crash_try(check_orientation, &chk) &&
+			     chk.upside_down;
+		in->biSizeImage = was;
+		free(key_buf);
+		BITMAPINFOHEADER *rgb = upside && !forced ?
+			choose_output(codec.hic, in, "BGR24", kind) : NULL;
+		if (rgb) {
+			fprintf(stderr, "seance: the codec writes %s upside down; "
+				"decoding to BGR24 instead\n",
+				fourcc_str(out->biCompression, fcc));
+			free(out);
+			out = rgb;
+		} else if (upside) {
+			fprintf(stderr, "seance: the codec writes %s upside down; "
+				"turned over\n", fourcc_str(out->biCompression, fcc));
+			flip = 1;
+		}
 	}
 	r = ic_decompress_begin(codec.hic, in, out);
 	if (r != ICERR_OK) {
@@ -932,7 +1154,12 @@ int cmd_decode(int argc, char **argv)
 		LRESULT dr = (LONG)ic_decompress(codec.hic, flags, in, buf, out, pic);
 		busy += now() - t;
 		decoded++;
+		if (flip && dr >= 0 && dr != ICERR_DONTDRAW)
+			flip_yuv(out, pic);
 
+		/* A FOURCC found in it is kept once a frame has decoded. */
+		if (dr >= 0 && dr != ICERR_GOTOKEYFRAME)
+			cli_remember_codec(&codec);
 		if (dr < 0 || dr == ICERR_GOTOKEYFRAME) {
 			errors++;
 			fprintf(stderr, "seance: frame %lu: %s\n", frame,

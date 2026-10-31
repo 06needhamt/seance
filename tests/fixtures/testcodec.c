@@ -38,7 +38,12 @@
  *   TESTCODEC_NAMED_ONLY  it answers ICM_GETINFO only when opened as 'TST0'
  *                         (wnvwinx.dll, as 'WINX'); set to 2, only when
  *                         opened as 'TSTP' or 'tstp', a pair it keeps in
- *                         its data (VFCodec.dll, as 'VIFP' or 'vifp')
+ *                         its data (VFCodec.dll, as 'VIFP' or 'vifp'); set
+ *                         to 3, it answers otherwise too, but with no
+ *                         FOURCC nor name (vp7vfw.dll); set to 4, it opens
+ *                         and answers under any handler, giving 'TSTX'
+ *                         (which it won't open as), but takes formats only
+ *                         as 'TST0'
  *   TESTCODEC_DECODE_ONLY it refuses DRV_OPEN to compress, though it answers
  *                         ICM_COMPRESS_QUERY when opened otherwise
  *                         (vgpix32d.dll)
@@ -57,6 +62,18 @@
  *                         loaded (blox.dll)
  *   TESTCODEC_DETACH_CRASH its DllMain faults in DLL_PROCESS_DETACH
  *                         (packed.dll)
+ *   TESTCODEC_BEGIN_RGB   it takes YUV when asked, but begins only with
+ *                         RGB (iscc.dll)
+ *   TESTCODEC_YUV_UPSIDE  it writes I420 bottom-up, and decodes 12-bit
+ *                         frames to grey BGR24 too (vp4vfw.dll)
+ *   TESTCODEC_NEEDS_DLL   DRV_LOAD fails unless it can load
+ *                         zz_companion.dll (CUVCcodc.dll: cseuvec.dll);
+ *                         set to 2, pe_missing.dll, whose import
+ *                         zz_nosuch.dll is what's missing; set to 3, by
+ *                         a full path to no file (C:\nowhere\zz_path.dll)
+ * TESTCODEC_ALIGN16=2 takes any height when asked, but begins only with
+ * a multiple of 16 (vp31vfw.dll, vp4vfw.dll). TESTCODEC_DECODE_ONLY=2
+ * opens only as 'TST0', and only to decompress (xanlib.dll, as 'XXAN').
  * With TESTCODEC_LATESIZE=1 it only knows how big a frame can get once
  * ICM_COMPRESS_BEGIN has been sent, and says 16 bytes before (in
  * ICM_COMPRESS_GET_SIZE and the output format), as wtvc.dll does.
@@ -113,7 +130,7 @@ static int strict;	/* TESTCODEC_STRICT */
 static int nocompress;	/* TESTCODEC_NOCOMPRESS */
 static int latesize;	/* TESTCODEC_LATESIZE */
 static int needs_status, needs_padding, ask_format, picky, decode_only;
-static int named_only;	/* 1: as 'TST0'; 2: as its pair */
+static int named_only;	/* 1, 3, 4: as 'TST0'; 2: as its pair */
 /* NAMED_ONLY=2's handlers, read from data rather than compared as
  * immediates, and standing alone in it. */
 static volatile const DWORD pair_name[4] __attribute__((aligned(16))) = {
@@ -127,6 +144,7 @@ static int pair_named(DWORD h)
 static int end_crash;
 static int overrun;
 static int empty_format, no_keys, align16;
+static int begin_rgb, yuv_upside, needs_dll;
 static volatile int zero;
 #define EARLY_SIZE 16	/* what it says before ICM_COMPRESS_BEGIN */
 static DWORD last_quality = 0xffffffff;	/* of the last ICM_COMPRESS */
@@ -257,7 +275,7 @@ static int ok_yuv(const BITMAPINFOHEADER *b)
 /* An input the compressor takes. */
 static int ok_input(const BITMAPINFOHEADER *b)
 {
-	if (align16 && b && abs_height(b) % 16)
+	if (align16 == 1 && b && abs_height(b) % 16)
 		return 0;
 	return ok_rgb(b) || ok_yuv(b);
 }
@@ -433,7 +451,10 @@ static LRESULT decompress_query(const BITMAPINFOHEADER *in,
 {
 	if (!ok_tst0(in))
 		return ICERR_BADFORMAT;
-	if (out && (in->biBitCount == 12 ? !ok_yuv(out) : !ok_rgb(out)))
+	if (out && (in->biBitCount == 12 ?
+		    !ok_yuv(out) && !(yuv_upside && ok_rgb(out) &&
+				      out->biBitCount == 24) :
+		    !ok_rgb(out)))
 		return ICERR_BADFORMAT;
 	if (out && !same_size(in, out))
 		return ICERR_BADFORMAT;
@@ -489,8 +510,35 @@ static LRESULT decompress(struct instance *inst, ICDECOMPRESS *d)
 		inst->dvalid = 1;
 	}
 
+	if (in->biBitCount == 12 && out->biCompression == BI_RGB) {
+		/* Grey from luma, full range, rows as the output has them. */
+		LONG st = stride(w, 24);
+		for (y = 0; y < h; y++) {
+			BYTE *d = dst + (out->biHeight > 0 ? h - 1 - y : y) * st;
+			for (x = 0; x < w; x++) {
+				int l = (inst->dcur[y * w + x] - 16) * 255 / 219;
+				l = l < 0 ? 0 : l > 255 ? 255 : l;
+				d[3 * x] = d[3 * x + 1] = d[3 * x + 2] = (BYTE)l;
+			}
+		}
+		return ICERR_OK;
+	}
 	if (in->biBitCount == 12) {
 		DWORD n = frame_bytes(in), i;
+		if (yuv_upside) {
+			/* Each plane's rows bottom-up, as RGB's are. */
+			const BYTE *p = inst->dcur;
+			BYTE *q = dst;
+			for (int k = 0; k < 3; k++) {
+				LONG pw = k ? w / 2 : w, ph = k ? h / 2 : h;
+				for (y = 0; y < ph; y++)
+					for (x = 0; x < pw; x++)
+						q[(ph - 1 - y) * pw + x] = p[y * pw + x];
+				p += pw * ph;
+				q += pw * ph;
+			}
+			return ICERR_OK;
+		}
 		for (i = 0; i < n; i++)
 			dst[i] = inst->dcur[i];
 		return ICERR_OK;
@@ -610,10 +658,11 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		picky = GetEnvironmentVariableA("TESTCODEC_PICKY", v,
 						sizeof(v)) == 1 && v[0] == '1';
 		decode_only = GetEnvironmentVariableA("TESTCODEC_DECODE_ONLY", v,
-						      sizeof(v)) == 1 && v[0] == '1';
+						      sizeof(v)) == 1 &&
+			      (v[0] == '1' || v[0] == '2') ? v[0] - '0' : 0;
 		named_only = GetEnvironmentVariableA("TESTCODEC_NAMED_ONLY", v,
 						     sizeof(v)) == 1 &&
-			     (v[0] == '1' || v[0] == '2') ? v[0] - '0' : 0;
+			     v[0] >= '1' && v[0] <= '4' ? v[0] - '0' : 0;
 		end_crash = GetEnvironmentVariableA("TESTCODEC_END_CRASH", v,
 						    sizeof(v)) == 1 && v[0] == '1';
 		overrun = GetEnvironmentVariableA("TESTCODEC_OVERRUN", v,
@@ -623,7 +672,15 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		no_keys = GetEnvironmentVariableA("TESTCODEC_NO_KEYS", v,
 						  sizeof(v)) == 1 && v[0] == '1';
 		align16 = GetEnvironmentVariableA("TESTCODEC_ALIGN16", v,
-						  sizeof(v)) == 1 && v[0] == '1';
+						  sizeof(v)) == 1 &&
+			  (v[0] == '1' || v[0] == '2') ? v[0] - '0' : 0;
+		begin_rgb = GetEnvironmentVariableA("TESTCODEC_BEGIN_RGB", v,
+						    sizeof(v)) == 1 && v[0] == '1';
+		yuv_upside = GetEnvironmentVariableA("TESTCODEC_YUV_UPSIDE", v,
+						     sizeof(v)) == 1 && v[0] == '1';
+		needs_dll = GetEnvironmentVariableA("TESTCODEC_NEEDS_DLL", v,
+						    sizeof(v)) == 1 &&
+			    v[0] >= '1' && v[0] <= '3' ? v[0] - '0' : 0;
 		if (GetEnvironmentVariableA("TESTCODEC_CHATTY", v, sizeof(v)) == 1 &&
 		    v[0] == '1') {
 			static const char hello[] = "testcodec: hello\n";
@@ -633,6 +690,11 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		}
 		log_msg(msg);
 		check_module(hdrvr);
+		if (needs_dll && !LoadLibraryA(needs_dll == 3 ?
+					       "C:\\nowhere\\zz_path.dll" :
+					       needs_dll == 2 ? "pe_missing.dll" :
+					       "zz_companion.dll"))
+			return 0;
 		return DefDriverProc(id, hdrvr, msg, l1, l2);
 	}
 	case DRV_FREE:
@@ -654,7 +716,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 			    (op->fccHandler && hnd != (TST0 & ~0x20202020) &&
 			     !pair_named(op->fccHandler)) ||
 			    (decode_only && (op->dwFlags == ICMODE_COMPRESS ||
-					     op->dwFlags == ICMODE_FASTCOMPRESS))) {
+					     op->dwFlags == ICMODE_FASTCOMPRESS)) ||
+			    (decode_only == 2 && op->fccHandler != TST0)) {
 				op->dwError = ICERR_UNSUPPORTED;
 				return 0;
 			}
@@ -696,6 +759,22 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		for (;;)
 			*(volatile DWORD *)&inst->magic;
 	case ICM_GETINFO:
+		if (named_only == 4) {
+			ICINFO *info = (ICINFO *)l1;
+			LRESULT r = get_info(info, (DWORD)l2);
+			if (r)
+				info->fccHandler = mmioFOURCC('T', 'S', 'T', 'X');
+			return r;
+		}
+		if (named_only == 3 && !inst->named) {
+			ICINFO *info = (ICINFO *)l1;
+			LRESULT r = get_info(info, (DWORD)l2);
+			if (r) {
+				info->fccHandler = 0;
+				info->szName[0] = info->szDescription[0] = 0;
+			}
+			return r;
+		}
 		if (named_only && !inst->named)
 			return 0;
 		return get_info((ICINFO *)l1, (DWORD)l2);
@@ -737,6 +816,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 			return ICERR_UNSUPPORTED;
 		if (picky && l2)
 			return ICERR_BADFORMAT;
+		if (named_only == 4 && !inst->named)
+			return ICERR_BADFORMAT;
 		return compress_query((BITMAPINFOHEADER *)l1, (BITMAPINFOHEADER *)l2);
 	case ICM_COMPRESS_GET_FORMAT:
 		return compress_get_format((BITMAPINFOHEADER *)l1,
@@ -761,6 +842,9 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		LRESULT r = compress_query(in, (BITMAPINFOHEADER *)l2);
 		if (r != ICERR_OK)
 			return r;
+		if ((align16 == 2 && abs_height(in) % 16) ||
+		    (begin_rgb && !ok_rgb(in)))
+			return ICERR_BADFORMAT;
 		release(inst->cprev);
 		if (!(inst->cprev = alloc(frame_bytes(in))))
 			return ICERR_MEMORY;
@@ -795,6 +879,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		return end_crash ? (LRESULT)inst->magic / zero : ICERR_OK;
 
 	case ICM_DECOMPRESS_QUERY:
+		if (named_only == 4 && !inst->named)
+			return ICERR_BADFORMAT;
 		return decompress_query((BITMAPINFOHEADER *)l1,
 					(BITMAPINFOHEADER *)l2);
 	case ICM_DECOMPRESS_GET_FORMAT:

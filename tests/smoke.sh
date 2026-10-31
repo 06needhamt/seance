@@ -302,6 +302,92 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	# Its FOURCC kept as an upper and lower case pair in data.
 	VFW_INI=/dev/null VFW_ENV_TESTCODEC_NAMED_ONLY=2 $emu "$harness" probe \
 		"$fixtures/testcodec.dll" 2>&1 | grep -q "opened as 'TSTP', found"
+	# One that opens without its FOURCC but then gives none, nor a name.
+	VFW_INI=/dev/null VFW_ENV_TESTCODEC_NAMED_ONLY=3 $emu "$harness" probe \
+		"$fixtures/testcodec.dll" 2>&1 | grep -q "opened as 'TST0', found"
+	# One that takes YUV when asked but begins only with RGB is given RGB.
+	VFW_ENV_TESTCODEC_BEGIN_RGB=1 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/v.y4m" -o "$work/x.avi" 2>&1 |
+		grep -q "takes I420 but won't begin with it; giving it BGR32"
+	# One that begins only at a multiple of 16 is said to, with --pad.
+	{
+		printf 'YUV4MPEG2 W16 H8 F25:1 Ip A1:1 C420jpeg\nFRAME\n'
+		head -c 192 /dev/zero
+	} >"$work/h8.y4m"
+	VFW_ENV_TESTCODEC_ALIGN16=2 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/h8.y4m" -o "$work/x.avi" 2>&1 |
+		grep -q "begins with no input at this size, but takes 16x16: add --pad 16"
+	# A decoder that opens only under its FOURCC is said to be one.
+	VFW_INI=/dev/null VFW_ENV_TESTCODEC_DECODE_ONLY=2 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/v.y4m" -o "$work/x.avi" 2>&1 |
+		grep -q "opens only as 'TST0' (found in it), and only to decompress"
+	# A companion DLL it looks for and can't find is named.
+	VFW_ENV_TESTCODEC_NEEDS_DLL=1 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/v.y4m" -o "$work/x.avi" 2>&1 |
+		grep -q "refused DRV_LOAD; it looked for zz_companion.dll, which isn't here"
+	# For a DLL that is there but whose import isn't, the import is named.
+	VFW_ENV_TESTCODEC_NEEDS_DLL=2 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/v.y4m" -o "$work/x.avi" 2>&1 |
+		grep -q "refused DRV_LOAD; it looked for zz_nosuch.dll, which isn't here"
+	# And one it gives a full path to.
+	VFW_ENV_TESTCODEC_NEEDS_DLL=3 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/v.y4m" -o "$work/x.avi" 2>&1 |
+		grep -q "refused DRV_LOAD; it looked for zz_path.dll, which isn't here"
+	# YUV a codec writes upside down: RGB instead, or turned over.
+	{
+		printf 'YUV4MPEG2 W16 H16 F25:1 Ip A1:1 C420jpeg\nFRAME\n'
+		head -c 384 /dev/urandom
+	} >"$work/up.y4m"
+	$emu "$harness" encode "$fixtures/testcodec.dll" "$work/up.y4m" \
+		-o "$work/up.avi" 2>/dev/null
+	$emu "$harness" decode "$fixtures/testcodec.dll" "$work/up.avi" \
+		-o "$work/up.y4m" 2>/dev/null
+	VFW_ENV_TESTCODEC_YUV_UPSIDE=1 $emu "$harness" decode \
+		"$fixtures/testcodec.dll" "$work/up.avi" -o "$work/up2.y4m" 2>&1 |
+		grep -q "writes I420 upside down; decoding to BGR24 instead"
+	VFW_ENV_TESTCODEC_YUV_UPSIDE=1 $emu "$harness" decode \
+		"$fixtures/testcodec.dll" "$work/up.avi" -o "$work/up2.y4m" \
+		--output-format I420 2>&1 | grep -q "writes I420 upside down; turned over"
+	cmp "$work/up.y4m" "$work/up2.y4m"
+	# Raw output is the codec's own, untouched: its bottom-up I420, the
+	# same size as the right way up but not the same bytes (were it turned
+	# over it would be those; were it BGR24, another size).
+	VFW_ENV_TESTCODEC_YUV_UPSIDE=1 $emu "$harness" decode \
+		"$fixtures/testcodec.dll" "$work/up.avi" -o "$work/up.raw" \
+		--format raw 2>"$work/up.err"
+	$emu "$harness" decode "$fixtures/testcodec.dll" "$work/up.avi" \
+		-o "$work/up0.raw" --format raw 2>/dev/null
+	if grep -q "upside down" "$work/up.err" ||
+	   [ "$(wc -c <"$work/up.raw")" != "$(wc -c <"$work/up0.raw")" ] ||
+	   cmp -s "$work/up.raw" "$work/up0.raw"; then
+		echo "smoke: raw output was changed" >&2
+		exit 1
+	fi
+	# One that opens and answers under any handler but takes formats only
+	# under its own: found by what it takes, and kept in vfw.ini so the
+	# next run opens it so at once.
+	rm -f "$work/remember.ini" "$work/none.ini"
+	VFW_INI="$work/remember.ini" VFW_ENV_TESTCODEC_NAMED_ONLY=4 $emu \
+		"$harness" encode "$fixtures/testcodec.dll" "$work/v.y4m" \
+		-o "$work/n4.avi" 2>&1 | grep -q "but does as 'TST0', found in it"
+	grep -q "^vidc.TST0=.*testcodec.dll" "$work/remember.ini"
+	if VFW_INI="$work/remember.ini" VFW_ENV_TESTCODEC_NAMED_ONLY=4 $emu \
+		"$harness" encode "$fixtures/testcodec.dll" "$work/v.y4m" \
+		-o "$work/n4.avi" 2>&1 | grep -q "found in it"; then
+		echo "smoke: a remembered FOURCC was looked for again" >&2
+		exit 1
+	fi
+	# Decoding too; VFW_REMEMBER=0 keeps nothing.
+	VFW_INI="$work/none.ini" VFW_REMEMBER=0 VFW_ENV_TESTCODEC_NAMED_ONLY=4 \
+		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/n4.avi" \
+		-o "$work/n4.y4m" 2>&1 | grep -q "but does as 'TST0', found in it"
+	[ ! -e "$work/none.ini" ]
+	# What a DLL is under each FOURCC found in it.
+	VFW_INI=/dev/null VFW_ENV_TESTCODEC_NAMED_ONLY=4 $emu "$harness" probe \
+		"$fixtures/testcodec.dll" --fourccs >"$work/fourccs.txt"
+	grep -q "^  'TST0' (compared with in its code):" "$work/fourccs.txt"
+	grep -q "compresses at 320x240: nothing" "$work/fourccs.txt"
+	grep -q "compresses at 320x240: I420" "$work/fourccs.txt"
 	# A DLL that doesn't load isn't loaded again for each FOURCC or mode
 	# to try (Mvicod32.dll showed a message box each time): once to see
 	# whether it is an ACM driver, once as a codec.
@@ -311,6 +397,17 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	$emu "$harness" encode "$fixtures/testdmo.dll" "$work/v.y4m" \
 		-o "$work/x.avi" --clsid '{5E6C9B41-3A7D-4F0E-9C11-0D2B7A6E4F80}' \
 		2>&1 | grep -q "has only a video decoder, not an encoder"
+	# A Windows 9x DLL that thunks to a 16-bit one (Mvicod32.dll) is said
+	# to be one, and its DllMain isn't run.
+	out=$($emu "$harness" encode "$fixtures/pe_thunk.dll" "$work/v.y4m" \
+		-o "$work/x.avi" 2>&1 || true)
+	echo "$out" | grep -q "a Windows 9x DLL that runs through a 16-bit one (it imports ThunkConnect32"
+	if echo "$out" | grep -q "not implemented"; then
+		echo "pe_thunk.dll's DllMain ran" >&2
+		exit 1
+	fi
+	$emu "$harness" info "$fixtures/pe_thunk.dll" |
+		grep -q "ThunkConnect32: a Windows 9x DLL that thunks"
 	# RealPlayer's codecs (rv203260.dll) are said to be what they are.
 	$emu "$harness" encode "$fixtures/pe_realcodec.dll" "$work/v.y4m" \
 		-o "$work/x.avi" 2>&1 | grep -q "a RealPlayer codec (it exports RV20"

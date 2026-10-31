@@ -18,7 +18,8 @@ extern const struct builtin_dll builtin_user32, builtin_gdi32, builtin_advapi32,
 	builtin_shell32,
 	builtin_comctl32, builtin_comdlg32, builtin_winspool, builtin_setupapi,
 	builtin_avifil32, builtin_quartz, builtin_msdmo, builtin_msacm32,
-	builtin_msvcrt, builtin_crtdll, builtin_psapi;
+	builtin_msvcrt, builtin_crtdll, builtin_psapi, builtin_oledlg,
+	builtin_dbghelp, builtin_netapi32;
 extern const struct builtin_dll builtin_shlwapi;
 extern const struct builtin_dll builtin_bcrypt, builtin_crypt32, builtin_d3d9,
 	builtin_dxva2, builtin_d3d11, builtin_dxgi, builtin_ncrypt, builtin_ws2_32,
@@ -59,6 +60,9 @@ const struct builtin_dll *const builtin_dlls[] = {
 	&builtin_msvcrt,
 	&builtin_crtdll,
 	&builtin_psapi,
+	&builtin_oledlg,
+	&builtin_dbghelp,
+	&builtin_netapi32,
 	NULL
 };
 
