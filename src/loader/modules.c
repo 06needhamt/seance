@@ -574,8 +574,16 @@ static struct module *load_pe(const char *path)
 	TRACE("loaded %s at %p%s", path, (void *)m->base,
 	      img->relocated ? " (relocated)" : "");
 	pe_tls_notify(img, DLL_PROCESS_ATTACH);
+	unsigned mark = mod_missing_mark();
 	if (!pe_call_entry(img, DLL_PROCESS_ATTACH)) {
-		vfw_set_error("%s: DllMain(DLL_PROCESS_ATTACH) failed", m->name);
+		char looked[512];
+		mod_missing_since(mark, looked, sizeof(looked));
+		int one = !strchr(looked, ',');
+		vfw_set_error("%s: DllMain(DLL_PROCESS_ATTACH) failed%s%s%s%s%s",
+			      m->name, looked[0] ? "; it looked for " : "", looked,
+			      !looked[0] ? "" : one ? ", which isn't here (add its" :
+			      ", which aren't here (add their",
+			      looked[0] ? " directory to VFW_PATH)" : "", "");
 		/* Windows tells a DLL that refused to attach that it is detaching. */
 		detach(m);
 		goto fail;
@@ -586,6 +594,52 @@ static struct module *load_pe(const char *path)
 fail:
 	unload(m);
 	return NULL;
+}
+
+#define MAX_MISSING 16
+
+static char *missing[MAX_MISSING];	/* a ring of the last ones */
+static unsigned nmissing;		/* how many ever noted */
+static pthread_mutex_t missing_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void mod_note_missing(const char *name)
+{
+	char *copy = strdup(name);
+
+	if (!copy)
+		return;
+	pthread_mutex_lock(&missing_lock);
+	free(missing[nmissing % MAX_MISSING]);
+	missing[nmissing++ % MAX_MISSING] = copy;
+	pthread_mutex_unlock(&missing_lock);
+}
+
+unsigned mod_missing_mark(void)
+{
+	pthread_mutex_lock(&missing_lock);
+	unsigned n = nmissing;
+	pthread_mutex_unlock(&missing_lock);
+	return n;
+}
+
+void mod_missing_since(unsigned mark, char *buf, size_t size)
+{
+	size_t len = 0;
+
+	buf[0] = 0;
+	pthread_mutex_lock(&missing_lock);
+	if (nmissing - mark > MAX_MISSING)
+		mark = nmissing - MAX_MISSING;
+	for (unsigned i = mark; i < nmissing; i++) {
+		const char *name = missing[i % MAX_MISSING];
+		int seen = 0;
+		for (unsigned k = mark; k < i && !seen; k++)
+			seen = !strcasecmp(missing[k % MAX_MISSING], name);
+		if (!seen && len < size)
+			len += snprintf(buf + len, size - len, "%s%s",
+					len ? ", " : "", name);
+	}
+	pthread_mutex_unlock(&missing_lock);
 }
 
 struct module *mod_load(const char *name, struct module *importer)

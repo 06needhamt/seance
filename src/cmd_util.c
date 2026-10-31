@@ -474,6 +474,21 @@ int cli_open_codec(const char *arg, const char *fourcc, FOURCC guess,
 					c->target);
 				return 1;
 			}
+			/* Under a FOURCC of its own only (xanlib.dll: 'XXAN'). */
+			FOURCC found[64];
+			size_t nfound = c->may_discover ?
+				vfw_dll_handlers(c->target, found, NULL, 64) : 0;
+			for (size_t i = 0; i < nfound; i++) {
+				if (!(d = ic_open_dll(c->target, ICTYPE_VIDEO,
+						      found[i], ICMODE_DECOMPRESS)))
+					continue;
+				ic_close(d);
+				fprintf(stderr, "seance: %s only decompresses: it "
+					"opens only as '%s' (found in it), and only "
+					"to decompress\n", c->target,
+					fourcc_str(found[i], fcc));
+				return 1;
+			}
 		}
 		fprintf(stderr, "seance: %s\n", e);
 		if (c->is_dll && !named && strstr(e, "DRV_OPEN"))

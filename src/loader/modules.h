@@ -43,6 +43,16 @@ struct module {
 struct module *mod_load(const char *name, struct module *importer);
 
 /*
+ * DLLs a DLL looked for with LoadLibrary and didn't find, as companions it
+ * can't work without may be (CUVCcodc.dll: cseuvec.dll, csehqa.dll).
+ * mod_missing_mark() is where the record stands; mod_missing_since()
+ * writes the names looked for since a mark, ", "-separated ("" if none).
+ */
+void mod_note_missing(const char *name);
+unsigned mod_missing_mark(void);
+void mod_missing_since(unsigned mark, char *buf, size_t size);
+
+/*
  * Looks for the file name (a bare file name, matched case-insensitively)
  * where mod_load() would, without loading it: 0 with its path in out, or
  * -1 if there is none.

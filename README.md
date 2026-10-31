@@ -596,9 +596,12 @@ frames with the same writers as `convert`. The codec is a DLL, a FOURCC
 from `vfw.ini`, or `auto` for whichever registered codec accepts the
 stream (`ICLocate`). A DLL is opened as the stream's handler unless
 `--fourcc` says otherwise. The output format is `--output-format` if
-given; otherwise I420 for Y4M and YUV output and BGR24 for BMP and BGR, if
-the codec offers them, then what the codec suggests, then the first
-standard format it accepts. `--start` begins decoding at the keyframe
+given; otherwise YUV for Y4M and YUV output (I420, YV12, then YUY2 or
+UYVY) and BGR24 for BMP and BGR, if the codec offers them, then what the
+codec suggests, then the first standard format it accepts. YUV output is
+checked against the same first frame decoded to BGR24: a codec that writes
+it upside down (vp4vfw.dll) is decoded to BGR24 instead, or, with
+`--output-format`, its pictures are turned over. `--start` begins decoding at the keyframe
 before that frame, feeding the frames in between with
 `ICDECOMPRESS_PREROLL`; frames that aren't keyframes get
 `ICDECOMPRESS_NOTKEYFRAME`. A frame the codec rejects stops the decode,
@@ -638,7 +641,10 @@ that only takes certain sizes it names one to resize to.
 
 Frames go to the codec as they are if it takes them
 (`ICM_COMPRESS_QUERY`); otherwise they are converted to the first standard
-format it takes, or to `--codec-input`. PAL8, the last tried, gets each
+format it takes, or to `--codec-input`. A codec that takes an input when
+asked but won't begin with it (`ICM_COMPRESS_BEGIN`) is given another it
+takes, RGB first; one that begins with none at the picture's size is said
+to, with the `--pad` or `--crop` that helps. PAL8, the last tried, gets each
 pixel's nearest colour of a 6x6x6 cube (and 40 greys) if the codec takes
 that palette, else of the grey ramp, by brightness. `--keyint` (default: the codec's
 `ICM_GETDEFAULTKEYFRAMERATE`), `--quality` (0 to 10000) and `--bitrate`

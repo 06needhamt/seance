@@ -305,6 +305,42 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	# One that opens without its FOURCC but then gives none, nor a name.
 	VFW_INI=/dev/null VFW_ENV_TESTCODEC_NAMED_ONLY=3 $emu "$harness" probe \
 		"$fixtures/testcodec.dll" 2>&1 | grep -q "opened as 'TST0', found"
+	# One that takes YUV when asked but begins only with RGB is given RGB.
+	VFW_ENV_TESTCODEC_BEGIN_RGB=1 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/v.y4m" -o "$work/x.avi" 2>&1 |
+		grep -q "takes I420 but won't begin with it; giving it BGR32"
+	# One that begins only at a multiple of 16 is said to, with --pad.
+	{
+		printf 'YUV4MPEG2 W16 H8 F25:1 Ip A1:1 C420jpeg\nFRAME\n'
+		head -c 192 /dev/zero
+	} >"$work/h8.y4m"
+	VFW_ENV_TESTCODEC_ALIGN16=2 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/h8.y4m" -o "$work/x.avi" 2>&1 |
+		grep -q "begins with no input at this size, but takes 16x16: add --pad 16"
+	# A decoder that opens only under its FOURCC is said to be one.
+	VFW_INI=/dev/null VFW_ENV_TESTCODEC_DECODE_ONLY=2 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/v.y4m" -o "$work/x.avi" 2>&1 |
+		grep -q "opens only as 'TST0' (found in it), and only to decompress"
+	# A companion DLL it looks for and can't find is named.
+	VFW_ENV_TESTCODEC_NEEDS_DLL=1 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/v.y4m" -o "$work/x.avi" 2>&1 |
+		grep -q "refused DRV_LOAD; it looked for zz_companion.dll, which isn't here"
+	# YUV a codec writes upside down: RGB instead, or turned over.
+	{
+		printf 'YUV4MPEG2 W16 H16 F25:1 Ip A1:1 C420jpeg\nFRAME\n'
+		head -c 384 /dev/urandom
+	} >"$work/up.y4m"
+	$emu "$harness" encode "$fixtures/testcodec.dll" "$work/up.y4m" \
+		-o "$work/up.avi" 2>/dev/null
+	$emu "$harness" decode "$fixtures/testcodec.dll" "$work/up.avi" \
+		-o "$work/up.y4m" 2>/dev/null
+	VFW_ENV_TESTCODEC_YUV_UPSIDE=1 $emu "$harness" decode \
+		"$fixtures/testcodec.dll" "$work/up.avi" -o "$work/up2.y4m" 2>&1 |
+		grep -q "writes I420 upside down; decoding to BGR24 instead"
+	VFW_ENV_TESTCODEC_YUV_UPSIDE=1 $emu "$harness" decode \
+		"$fixtures/testcodec.dll" "$work/up.avi" -o "$work/up2.y4m" \
+		--output-format I420 2>&1 | grep -q "writes I420 upside down; turned over"
+	cmp "$work/up.y4m" "$work/up2.y4m"
 	# One that opens and answers under any handler but takes formats only
 	# under its own: found by what it takes, and kept in vfw.ini so the
 	# next run opens it so at once.

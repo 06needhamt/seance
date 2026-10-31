@@ -51,6 +51,8 @@ static HMODULE load(const char *name, const void *ret)
 
 	if (!m) {
 		TRACE("LoadLibrary(%s) failed: %s", name, vfw_error());
+		if (strstr(vfw_error(), "not found"))
+			mod_note_missing(base);
 		win_set_error(ERROR_MOD_NOT_FOUND);
 		return NULL;
 	}
