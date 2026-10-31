@@ -66,8 +66,10 @@ const char *vfw_fourcc_from_name(unsigned from);
 
 /*
  * Adds type.handler=path to the ini file's [drivers32], or replaces the
- * entry it has, creating the file if need be. Returns 0, or -1 with
- * vfw_error(). The table in memory is not reloaded.
+ * entry it has for the same DLL, creating the file if need be. Returns 0,
+ * or -1 with vfw_error(): when the file is there but can't be read, or
+ * already maps the key to another DLL. The table in memory is not
+ * reloaded.
  */
 int vfw_ini_remember(FOURCC type, FOURCC handler, const char *path);
 

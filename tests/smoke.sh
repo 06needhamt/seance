@@ -329,6 +329,10 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	VFW_ENV_TESTCODEC_NEEDS_DLL=2 $emu "$harness" encode \
 		"$fixtures/testcodec.dll" "$work/v.y4m" -o "$work/x.avi" 2>&1 |
 		grep -q "refused DRV_LOAD; it looked for zz_nosuch.dll, which isn't here"
+	# And one it gives a full path to.
+	VFW_ENV_TESTCODEC_NEEDS_DLL=3 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/v.y4m" -o "$work/x.avi" 2>&1 |
+		grep -q "refused DRV_LOAD; it looked for zz_path.dll, which isn't here"
 	# YUV a codec writes upside down: RGB instead, or turned over.
 	{
 		printf 'YUV4MPEG2 W16 H16 F25:1 Ip A1:1 C420jpeg\nFRAME\n'

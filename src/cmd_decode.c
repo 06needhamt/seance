@@ -718,7 +718,9 @@ static int yuv_upside_down(const struct cli_codec *codec,
 			   const BITMAPINFOHEADER *out)
 {
 	LONG w = out->biWidth, h = out->biHeight;
-	if (!yuv_kind(out) || h <= 1 || w <= 0 || (w & 1) || !codec->target[0])
+	/* Packed 4:2:2 pairs pixels; planar 4:2:0 rounds its chroma up. */
+	if (!yuv_kind(out) || h <= 1 || w <= 0 ||
+	    (yuv_kind(out) != 1 && (w & 1)) || !codec->target[0])
 		return 0;
 	BITMAPINFOHEADER rgb = {
 		.biSize = sizeof(rgb), .biWidth = w, .biHeight = h,
@@ -1001,6 +1003,8 @@ int cmd_decode(int argc, char **argv)
 	if (r != ICERR_OK &&
 	    cli_codec_try_fourccs(&codec, decompresses, (void *)in))
 		r = ICERR_OK;
+	if (r == ICERR_OK)
+		cli_remember_codec(&codec);
 	if (r != ICERR_OK) {
 		fprintf(stderr, "seance: the codec doesn't decompress %s (%s)\n",
 			cli_format_desc(in, desc, sizeof(desc)), icerr_name(r, err));

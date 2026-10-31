@@ -3,6 +3,7 @@
  * The VfW layer: the codec registry, the installable-driver lifecycle, the
  * ICM API and the winmm / msvfw32 built-ins, driven against testcodec.dll.
  */
+#include <limits.h>
 #include <sys/stat.h>
 
 #include <fcntl.h>
@@ -1627,7 +1628,7 @@ static void test_info_text(void)
 /* A file's text, in a static buffer. */
 static const char *text_of(const char *path)
 {
-	static char buf[8192];
+	static char buf[16384];
 	size_t n = 0;
 	char *p = slurp(path, &n);
 
@@ -1647,20 +1648,45 @@ static const char *text_of(const char *path)
  */
 static void test_ini_remember(void)
 {
-	char ini[4200];
+	char ini[4200], text[8192], want[8192], longline[2100], dll[PATH_MAX];
 	FOURCC vp70 = FCC('V', 'P', '7', '0');
+
+	/* As remembered: the DLL's full path. */
+	if (!realpath(fixture("testcodec.dll"), dll))
+		snprintf(dll, sizeof(dll), "%s", fixture("testcodec.dll"));
 
 	snprintf(ini, sizeof(ini), "%s/remember.ini", root);
 	setenv("VFW_INI", ini, 1);
-	write_file(ini, "; mine\n[drivers32]\nvidc.ABCD=a.dll\nVIDC.vp70 = old.dll\n"
-		   "[other]\nvidc.VP70=keep.dll\n");
+	/* The same DLL's entry is replaced; lines are kept whole, however long. */
+	memset(longline, 'x', sizeof(longline) - 1);
+	longline[0] = ';';
+	longline[sizeof(longline) - 1] = 0;
+	snprintf(text, sizeof(text), "%s\n[drivers32]\nvidc.ABCD=a.dll\n"
+		 "VIDC.vp70 = \"%s\"\n[other]\nvidc.VP70=keep.dll\n", longline, dll);
+	write_file(ini, text);
 	vfw_registry_reload();
-	CHECK_EQ(vfw_ini_remember(ICTYPE_VIDEO, vp70, "/x/vp7vfw.dll"), 0);
-	CHECK_STR(text_of(ini), "; mine\n[drivers32]\nvidc.ABCD=a.dll\n"
-		  "vidc.VP70=/x/vp7vfw.dll\n[other]\nvidc.VP70=keep.dll\n");
+	CHECK_EQ(vfw_ini_remember(ICTYPE_VIDEO, vp70, dll), 0);
+	snprintf(want, sizeof(want), "%s\n[drivers32]\nvidc.ABCD=a.dll\n"
+		 "vidc.VP70=%s\n[other]\nvidc.VP70=keep.dll\n", longline, dll);
+	CHECK_STR(text_of(ini), want);
 	vfw_registry_reload();
 	const struct vfw_codec *c = vfw_find(ICTYPE_VIDEO, vp70);
-	CHECK(c && !strcmp(c->path, "/x/vp7vfw.dll"));
+	CHECK(c && !strcmp(c->path, dll));
+
+	/* Another DLL's entry is the user's: it stays, and nothing is written. */
+	write_file(ini, "[drivers32]\nvidc.VP70=other.dll\n");
+	vfw_registry_reload();
+	CHECK_EQ(vfw_ini_remember(ICTYPE_VIDEO, vp70, dll), -1);
+	CHECK(strstr(vfw_error(), "for another DLL"));
+	CHECK_STR(text_of(ini), "[drivers32]\nvidc.VP70=other.dll\n");
+
+	/* One that can't be read isn't replaced (root reads it anyway). */
+	if (geteuid()) {
+		chmod(ini, 0);
+		CHECK_EQ(vfw_ini_remember(ICTYPE_VIDEO, vp70, dll), -1);
+		chmod(ini, 0644);
+		CHECK_STR(text_of(ini), "[drivers32]\nvidc.VP70=other.dll\n");
+	}
 
 	/* No [drivers32]: one is added. No file: one is made. */
 	write_file(ini, "[other]\nx=1");

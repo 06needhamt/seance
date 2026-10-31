@@ -297,8 +297,10 @@ The FOURCCs are looked for in these places, the likelier first:
 Uncompressed formats it checks its input against (`YUY2`, `I420`, ...)
 come last. `probe <dll> --fourccs` lists them all, where each was found,
 and what the codec does under each. A FOURCC found this way is remembered
-in `vfw.ini` (`vidc.XXXX=<the DLL>`), so the next run opens the codec at
-once; `VFW_REMEMBER=0` keeps nothing. `--fourcc XXXX` sets the FOURCC
+in `vfw.ini` (`vidc.XXXX=<the DLL>`) once `encode` or `decode` has used it,
+so the next run opens the codec at once; an entry the file has for that
+FOURCC and another DLL is left as it is, and `VFW_REMEMBER=0` keeps
+nothing. `--fourcc XXXX` sets the FOURCC
 explicitly.
 
 Names and descriptions a codec writes into `ICINFO` as ANSI, not UTF-16,

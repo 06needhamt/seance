@@ -288,6 +288,13 @@ static void remember(const struct cli_codec *c)
 		fourcc_str(c->handler, fcc));
 }
 
+void cli_remember_codec(struct cli_codec *c)
+{
+	if (c->found)
+		remember(c);
+	c->found = 0;
+}
+
 int cli_takes_size(HIC hic, LONG w, LONG h)
 {
 	struct vfw_format t;
@@ -328,7 +335,7 @@ int cli_codec_try_fourccs(struct cli_codec *c,
 		c->have_info = ic_get_info(h, &c->info, sizeof(c->info)) != 0;
 		if (!vfw_find(ICTYPE_VIDEO, c->handler))
 			vfw_register(ICTYPE_VIDEO, c->handler, c->target);
-		remember(c);
+		c->found = 1;		/* it takes the job: the caller keeps it */
 		return 1;
 	}
 	return 0;
@@ -444,7 +451,7 @@ int cli_open_codec(const char *arg, const char *fourcc, FOURCC guess,
 				c->handler = found[i];
 				c->info = info;
 				c->have_info = 1;
-				remember(c);
+				c->found = 1;
 				break;
 			}
 			if (h)

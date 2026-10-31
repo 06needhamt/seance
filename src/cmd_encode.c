@@ -1107,6 +1107,7 @@ int cmd_encode(int argc, char **argv)
 		fprintf(stderr, "seance: the codec takes %s but won't begin with "
 			"it; giving it %s\n", refused, feed.name);
 	started = 1;
+	cli_remember_codec(&codec);
 
 	const BITMAPINFOHEADER *ofmt = &cv.lpbiOut->bmiHeader;
 	FOURCC handler = codec.have_info && codec.info.fccHandler ?

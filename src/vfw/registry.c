@@ -3,6 +3,7 @@
  * The installed codecs.
  */
 #include <ctype.h>
+#include <errno.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -341,9 +342,26 @@ static int sets_key(const char *line, const char *key)
 	return *line == '=';
 }
 
+/* Whether an ini value names the DLL at real (a resolved path). */
+static int names_dll(const char *value, const char *real)
+{
+	char buf[1024], resolved[PATH_MAX];
+	snprintf(buf, sizeof(buf), "%s", value);
+	char *v = trim(buf);
+	size_t n = strlen(v);
+	if (n >= 2 && v[0] == '"' && v[n - 1] == '"') {
+		v[n - 1] = 0;
+		v++;
+	}
+	char *p = resolve(v);
+	int same = p && realpath(p, resolved) && !strcmp(resolved, real);
+	free(p);
+	return same;
+}
+
 int vfw_ini_remember(FOURCC type, FOURCC handler, const char *path)
 {
-	char key[16], fcc[5], tmp[PATH_MAX + 8], line[1024];
+	char key[16], fcc[5], tmp[PATH_MAX + 8], real[PATH_MAX];
 	struct stat st;
 
 	pthread_mutex_lock(&lock);
@@ -363,6 +381,8 @@ int vfw_ini_remember(FOURCC type, FOURCC handler, const char *path)
 	}
 	fcc[4] = 0;
 	snprintf(key, sizeof(key), "%.4s.%s", (const char *)&type, trim(fcc));
+	if (!realpath(path, real))
+		snprintf(real, sizeof(real), "%s", path);
 	char *dir = strdup(ini_path), *slash = dir ? strrchr(dir, '/') : NULL;
 	if (slash && slash != dir) {
 		*slash = 0;
@@ -370,12 +390,17 @@ int vfw_ini_remember(FOURCC type, FOURCC handler, const char *path)
 	}
 	free(dir);
 
+	/* One there but unreadable isn't replaced by the one entry. */
+	FILE *in = fopen(ini_path, "r");
+	if (!in && errno != ENOENT) {
+		vfw_set_error("%s: cannot read it", ini_path);
+		return -1;
+	}
 	/*
 	 * Written to a file of its own next to it, then put in its place:
 	 * mkstemp's, so no one else's file or link is written through, with
 	 * the old file's permissions (else mkstemp's, the owner's only).
 	 */
-	FILE *in = fopen(ini_path, "r");
 	mode_t mode = in && !fstat(fileno(in), &st) ? st.st_mode & 07777 : 0600;
 	snprintf(tmp, sizeof(tmp), "%s.XXXXXX", ini_path);
 	int fd = mkstemp(tmp);
@@ -394,9 +419,16 @@ int vfw_ini_remember(FOURCC type, FOURCC handler, const char *path)
 			fclose(in);
 		return -1;
 	}
-	/* The entry replaces one of the same key, else ends the section. */
-	int in_section = 0, done = 0;
-	while (in && fgets(line, sizeof(line), in)) {
+	/*
+	 * The entry replaces one of the same key for the same DLL, else ends
+	 * the section; one for another DLL is the user's, and stays. Lines
+	 * are copied whole, however long.
+	 */
+	int in_section = 0, done = 0, theirs = 0;
+	char *line = NULL;
+	size_t cap = 0;
+	ssize_t len;
+	while (in && !theirs && (len = getline(&line, &cap, in)) > 0) {
 		const char *t = line;
 		while (isspace((unsigned char)*t))
 			t++;
@@ -406,22 +438,32 @@ int vfw_ini_remember(FOURCC type, FOURCC handler, const char *path)
 				done = 1;
 			}
 			in_section = !strncasecmp(t, "[drivers32]", 11);
-		} else if (in_section && !done && sets_key(t, key)) {
-			fprintf(out, "%s=%s\n", key, path);
+		} else if (in_section && sets_key(t, key)) {
+			if (!names_dll(strchr(t, '=') + 1, real)) {
+				theirs = 1;
+				break;
+			}
+			if (!done)
+				fprintf(out, "%s=%s\n", key, path);
 			done = 1;
 			continue;
-		} else if (in_section && done && sets_key(t, key)) {
-			continue;
 		}
-		fputs(line, out);
-		if (!strchr(line, '\n'))
+		fwrite(line, 1, (size_t)len, out);
+		if (line[len - 1] != '\n')
 			fputc('\n', out);
 	}
-	if (!done)
+	free(line);
+	if (!done && !theirs)
 		fprintf(out, "%s%s=%s\n", in_section ? "" : "[drivers32]\n",
 			key, path);
 	if (in)
 		fclose(in);
+	if (theirs) {
+		fclose(out);
+		unlink(tmp);
+		vfw_set_error("%s already has %s, for another DLL", ini_path, key);
+		return -1;
+	}
 	if (fclose(out) || rename(tmp, ini_path)) {
 		unlink(tmp);
 		vfw_set_error("%s: cannot write it", ini_path);

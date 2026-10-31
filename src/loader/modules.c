@@ -4,6 +4,7 @@
  */
 #include <dirent.h>
 #include <limits.h>
+#include <errno.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -573,8 +574,9 @@ static struct module *load_pe(const char *path)
 	}
 	TRACE("loaded %s at %p%s", path, (void *)m->base,
 	      img->relocated ? " (relocated)" : "");
-	pe_tls_notify(img, DLL_PROCESS_ATTACH);
+	/* From before its TLS callbacks, which may load DLLs too. */
 	unsigned mark = mod_missing_mark();
+	pe_tls_notify(img, DLL_PROCESS_ATTACH);
 	if (!pe_call_entry(img, DLL_PROCESS_ATTACH)) {
 		char looked[512];
 		mod_missing_since(mark, looked, sizeof(looked));
@@ -678,6 +680,9 @@ struct module *mod_load(const char *name, struct module *importer)
 		}
 	}
 	m = load_pe(path);
+	/* A path to no file is a DLL missing too; one that won't load isn't. */
+	if (!m && access(path, F_OK) && (errno == ENOENT || errno == ENOTDIR))
+		mod_note_missing(base_name(path));
 out:
 	UNLOCK();
 	return m;
