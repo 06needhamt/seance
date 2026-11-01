@@ -991,6 +991,44 @@ static void test_crypt_unsupported(void)
 	mod_free(k);
 }
 
+/* Software keys opened and not found are noted for refusal messages. */
+static void test_missing_keys(void)
+{
+	FN(LONG, RegOpenKeyExA, HKEY, LPCSTR, DWORD, REGSAM, HKEY *);
+	FN(LONG, RegCreateKeyExA, HKEY, LPCSTR, DWORD, LPSTR, DWORD, REGSAM,
+	   LPSECURITY_ATTRIBUTES, HKEY *, LPDWORD);
+	FN(LONG, RegCloseKey, HKEY);
+	char buf[512];
+	HKEY k;
+
+	unsigned mark = reg_missing_mark();
+	reg_missing_since(mark, buf, sizeof(buf));
+	CHECK_STR(buf, "");
+	CHECK_EQ(RegOpenKeyExA(HKEY_LOCAL_MACHINE, "Software\\Vendor\\Codec",
+			       0, KEY_READ, &k), ERROR_FILE_NOT_FOUND);
+	/* Microsoft's, classes, and keys that are there aren't noted. */
+	CHECK_EQ(RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+			       "Software\\Microsoft\\Nothing", 0, KEY_READ,
+			       &k), ERROR_FILE_NOT_FOUND);
+	CHECK_EQ(RegOpenKeyExA(HKEY_CLASSES_ROOT, "CLSID\\{nothing}", 0,
+			       KEY_READ, &k), ERROR_FILE_NOT_FOUND);
+	CHECK_EQ(RegCreateKeyExA(HKEY_CURRENT_USER, "Software\\There", 0, NULL,
+				 0, KEY_ALL_ACCESS, NULL, &k, NULL), 0);
+	RegCloseKey(k);
+	CHECK_EQ(RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\There", 0,
+			       KEY_READ, &k), 0);
+	RegCloseKey(k);
+	/* Each once, whatever its case. */
+	CHECK_EQ(RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Other", 0,
+			       KEY_READ, &k), ERROR_FILE_NOT_FOUND);
+	CHECK_EQ(RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\VENDOR\\CODEC",
+			       0, KEY_READ, &k), ERROR_FILE_NOT_FOUND);
+	reg_missing_since(mark, buf, sizeof(buf));
+	CHECK_STR(buf, "HKLM\\Software\\Vendor\\Codec, HKCU\\Software\\Other");
+	reg_missing_since(reg_missing_mark(), buf, sizeof(buf));
+	CHECK_STR(buf, "");
+}
+
 int main(void)
 {
 	const char *tmpdir = getenv("TMPDIR");
@@ -1019,6 +1057,7 @@ int main(void)
 	test_notify();
 	test_key_security();
 	test_drivers32();
+	test_missing_keys();
 	test_sandbox();
 	test_memory_only();
 	test_fixture();
