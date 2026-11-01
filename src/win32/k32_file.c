@@ -1244,6 +1244,24 @@ WINFN(DWORD) k32_GetFinalPathNameByHandleW(HANDLE h, LPWSTR buf, DWORD size,
 	return n;
 }
 
+/*
+ * Overlapped I/O is never left pending: ReadFile and WriteFile finish it
+ * and leave the count in InternalHigh, which is the whole result.
+ */
+WINFN(BOOL) k32_GetOverlappedResult(HANDLE h, LPOVERLAPPED o, LPDWORD done,
+				    BOOL wait)
+{
+	(void)h;
+	(void)wait;
+	if (!o) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	if (done)
+		*done = (DWORD)o->InternalHigh;
+	return TRUE;
+}
+
 /* Overlapped I/O is never left pending, so there is nothing to cancel. */
 WINFN(BOOL) k32_CancelIoEx(HANDLE h, LPOVERLAPPED o)
 {
@@ -1553,6 +1571,7 @@ WINFN(BOOL) k32_FlushViewOfFile(LPCVOID addr, SIZE_T bytes)
 const struct builtin_export k32_file_exports[] = {
 	E(AllocConsole),
 	E(CancelIoEx),
+	E(GetOverlappedResult),
 	E(CopyFileA),
 	E(CopyFileW),
 	E(CreateDirectoryA),
