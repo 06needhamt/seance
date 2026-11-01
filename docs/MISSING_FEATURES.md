@@ -347,16 +347,28 @@ what keeps the others from working.
   to load or open, or a DLL whose `DllMain` fails, after looking for a DLL
   that isn't there, now names it.
 
-**Still open, waiting for a re-run on the current build:**
+**Re-run on the current build (November 2026):**
 
-- **Refuse `DRV_LOAD`:** `rricm` and `cvpcdvc`; the message may now name
-  a companion DLL they look for.
-- **Fail in `ICM_COMPRESS`:**
-  - `BMDCodecLib`, opened as `HDYC`, returns `ICERR_ERROR`.
-  - `AvidAVICodec` returns `ICERR_INTERNAL`, probably because DNxHD
-    supports only fixed frame sizes.
-- **Unload:** `packed.dll`'s detach jumps to a bad address. It is now
-  survived, but the cause is not known.
+| Codec | Result | What it needed |
+|---|---|---|
+| `avimszh.dll` (MSZH) | round-trips, 75 dB from RGB (lossless but for rounding) | the slack after guarded buffers; FFmpeg reads its BGR24 files (48.9 dB from YUV), but not its BGR32 ones, which its LCL decoder has no mode for |
+| `AvidAVICodec.dll` (AVRn) | round-trips at 36.7-41.6 dB (FFmpeg's AVRn decoder: 37.2) once set up | Avid's software M-JPEG codec, not DNxHD. It picks a resolution from `HKCU\Software\Avid Technology\Software M-JPEG Codec\Resolution`, which needs an Avid resolution code (0x4B-0x52, 0x97 for 720x576 or 720x486; 0x4E-0x50 for 352x288); its own default, 1, is none, so `ICM_COMPRESS` fails in its `__except` with `ICERR_INTERNAL`. Seed the value in the registry file, and give it the size with `--scale` |
+| `wnvwinx.dll` (WINX) | round-trips, 31.6 dB (was 13.6) | it reads YUY2 input bottom-up, as if it were RGB: `encode` now checks the first frame and turns the input over |
+| `SN4Codec.dll` (SN40) | encodes and decodes, but at 6 dB at every size | it says a 320x240 frame takes 230400 bytes and writes 300 KB ones: the output buffer now has room after it, as the Windows heap would, and a warning. Its frames are the same size whatever the settings, and decode to noise: a fault of its own |
+| `rricm.dll` (Matrox Rainbow Runner) | refuses `DRV_LOAD` | the board's driver: it looks for `HKLM\Software\Matrox\RRPath` and `...\RainbowRunner\ICM`, which refusals now name |
+| `cvpcdvc.dll` | refuses `DRV_LOAD` | `PAVAPI.DLL`, which the message names (supply it through `VFW_PATH`) |
+| `BMDCodecLib.dll` | doesn't load | `libguide40.dll`, Intel's OpenMP runtime (supply it through `VFW_PATH`) |
+| `packed.dll` | isn't a codec | it is `alcoholx.dll` from Alcohol 120%, packed with UPX; its `DllMain` fails without Alcohol's virtual drive. The crash on unloading it was its unpacker running on after `GetOverlappedResult`, now built in, wasn't found |
+
+**Found by `seance sweep`** (62 DLLs at 320x240, in 7 seconds), besides
+the above:
+
+- `lhacm.acm`, `lhacm2.acm` (L&H CELP and SBC) and `alf2cd.acm` (NCT
+  ALF2 CD, 44.1 kHz stereo) round-trip; they need `--format-tag` and the
+  PCM layout the sweep finds.
+- `aslcodec_dshow.dll` encodes, but has no decoder for its output
+  (`aslcodec_vfw.dll` decodes it).
+- `nsrt2432.acm` (Voxware RT24) takes none of the PCM layouts offered.
 
 ## In-repository baseline
 
