@@ -25,7 +25,9 @@
 struct seq {
 	COMPVARS *pc;		/* NULL when free */
 	size_t out_size;	/* bytes of lpbiOut */
-	DWORD max_frame;	/* capacity of lpBitsOut */
+	DWORD max_frame;	/* the most a frame takes, as the codec says */
+	DWORD headroom;		/* lpBitsOut's bytes after max_frame */
+	int overrun_said;	/* warned of writing into them */
 	DWORD in_frame;		/* bytes of an input frame */
 	DWORD budget;		/* dwFrameSize for each frame, or 0 */
 	int temporal;		/* give the codec the previous frame */
@@ -88,6 +90,35 @@ static void free_buffers(COMPVARS *pc)
 	free(pc->lpBitsPrev);
 	pc->lpbiIn = pc->lpbiOut = NULL;
 	pc->lpBitsOut = pc->lpBitsPrev = NULL;
+}
+
+/*
+ * The output buffer: the most the codec says a frame takes, and room after
+ * it, since some codecs write further (SN4Codec.dll: 83 KB past the
+ * 230400 bytes it gives for 320x240), which on Windows goes into the heap
+ * after it unnoticed. The room is filled with a pattern before each frame,
+ * so writing into it can be noticed and said.
+ */
+#define HEADROOM_FILL 0xA5
+
+static int alloc_out(COMPVARS *pc, struct seq *s, DWORD size)
+{
+	DWORD room = size / 4;
+	void *buf;
+
+	/* SN4Codec.dll writes 300 KB frames at 320x240, whatever it says. */
+	if (room < (512u << 10))
+		room = 512u << 10;
+	if (room > (4u << 20))
+		room = 4u << 20;
+	if (size > UINT32_MAX - room ||
+	    !(buf = guard_alloc((size_t)size + room, "output buffer")))
+		return -1;
+	guard_free(pc->lpBitsOut);
+	pc->lpBitsOut = buf;
+	s->max_frame = size;
+	s->headroom = room;
+	return 0;
 }
 
 BOOL ic_seq_start_ex(COMPVARS *pc, const BITMAPINFO *in, DWORD rate,
@@ -159,8 +190,7 @@ BOOL ic_seq_start_ex(COMPVARS *pc, const BITMAPINFO *in, DWORD rate,
 	/* Nor less than the output format says a frame takes. */
 	if (out->biSizeImage > s->max_frame)
 		s->max_frame = out->biSizeImage;
-	pc->lpBitsOut = guard_alloc(s->max_frame, "output buffer");
-	if (!pc->lpBitsOut)
+	if (alloc_out(pc, s, s->max_frame))
 		goto nomem;
 
 	ICINFO info;
@@ -231,15 +261,9 @@ BOOL ic_seq_start_ex(COMPVARS *pc, const BITMAPINFO *in, DWORD rate,
 	 */
 	r = ic_send(pc->hic, ICM_COMPRESS_GET_SIZE, (DWORD_PTR)pc->lpbiIn,
 		    (DWORD_PTR)out);
-	if (r > 0 && (DWORD)r > s->max_frame) {
-		void *bigger = guard_alloc((size_t)r, "output buffer");
-		if (!bigger) {
-			ic_send(pc->hic, ICM_COMPRESS_END, 0, 0);
-			goto nomem;
-		}
-		guard_free(pc->lpBitsOut);
-		pc->lpBitsOut = bigger;
-		s->max_frame = (DWORD)r;
+	if (r > 0 && (DWORD)r > s->max_frame && alloc_out(pc, s, (DWORD)r)) {
+		ic_send(pc->hic, ICM_COMPRESS_END, 0, 0);
+		goto nomem;
 	}
 	pc->lFrame = 0;
 	pc->lKeyCount = 0;
@@ -274,6 +298,8 @@ LPVOID STUB_WINAPI ic_seq_frame(COMPVARS *pc, UINT flags, LPVOID bits,
 	    (pc->lKey > 0 && pc->lKeyCount >= pc->lKey))
 		icflags = ICCOMPRESS_KEYFRAME;
 
+	BYTE *room = (BYTE *)pc->lpBitsOut + s->max_frame;
+	memset(room, HEADROOM_FILL, s->headroom);
 	out->biSizeImage = s->max_frame;
 	DWORD r = ic_compress(pc->hic, icflags, out, pc->lpBitsOut,
 			      &pc->lpbiIn->bmiHeader, bits, &ckid, &oflags,
@@ -286,12 +312,26 @@ LPVOID STUB_WINAPI ic_seq_frame(COMPVARS *pc, UINT flags, LPVOID bits,
 			      icerr_name((LRESULT)(LONG)r, err));
 		return NULL;
 	}
-	if (out->biSizeImage > s->max_frame) {
+	DWORD past = s->headroom;
+	while (past && room[past - 1] == HEADROOM_FILL)
+		past--;
+	if (out->biSizeImage > s->max_frame &&
+	    out->biSizeImage - s->max_frame > past)
+		past = out->biSizeImage - s->max_frame;
+	if (past > s->headroom) {
 		vfw_set_error("ICM_COMPRESS, frame %ld: the codec reports %lu "
 			      "bytes, more than the %lu it said it needs at most",
 			      (long)pc->lFrame, (unsigned long)out->biSizeImage,
 			      (unsigned long)s->max_frame);
 		return NULL;
+	}
+	if (past && !s->overrun_said) {
+		vfw_warn("ICM_COMPRESS, frame %ld: the codec wrote %lu bytes "
+			 "past the %lu it said a frame takes at most; there was "
+			 "room for them, as the Windows heap would have had",
+			 (long)pc->lFrame, (unsigned long)past,
+			 (unsigned long)s->max_frame);
+		s->overrun_said = 1;
 	}
 	if (s->temporal)
 		memcpy(pc->lpBitsPrev, bits, s->in_frame);

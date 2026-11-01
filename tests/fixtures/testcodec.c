@@ -47,8 +47,9 @@
  *   TESTCODEC_DECODE_ONLY it refuses DRV_OPEN to compress, though it answers
  *                         ICM_COMPRESS_QUERY when opened otherwise
  *                         (vgpix32d.dll)
- *   TESTCODEC_OVERRUN     it writes on past the end of its largest
- *                         frame when compressing (SN4Codec.dll)
+ *   TESTCODEC_OVERRUN     it writes 8 KB on past the end of its largest
+ *                         frame when compressing (SN4Codec.dll); set to
+ *                         2, 1 MB
  *   TESTCODEC_END_CRASH   it divides by zero in ICM_COMPRESS_END and
  *                         ICM_DECOMPRESS_END (WavCWAIP.dll, by a byte count
  *                         it never kept)
@@ -673,7 +674,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		end_crash = GetEnvironmentVariableA("TESTCODEC_END_CRASH", v,
 						    sizeof(v)) == 1 && v[0] == '1';
 		overrun = GetEnvironmentVariableA("TESTCODEC_OVERRUN", v,
-						  sizeof(v)) == 1 && v[0] == '1';
+						  sizeof(v)) == 1 &&
+			  (v[0] == '1' || v[0] == '2') ? v[0] - '0' : 0;
 		empty_format = GetEnvironmentVariableA("TESTCODEC_EMPTY_FORMAT", v,
 						       sizeof(v)) == 1 && v[0] == '1';
 		no_keys = GetEnvironmentVariableA("TESTCODEC_NO_KEYS", v,
@@ -883,7 +885,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 			ICCOMPRESS *c = (ICCOMPRESS *)l1;
 			volatile BYTE *end = (volatile BYTE *)c->lpOutput +
 					     max_size(c->lpbiInput);
-			for (DWORD i = 0; i < 2 * 4096 + 64; i++)
+			DWORD n = overrun == 2 ? (1u << 20) + 64 : 2 * 4096 + 64;
+			for (DWORD i = 0; i < n; i++)
 				end[i] = 0;
 		}
 		return compress(inst, (ICCOMPRESS *)l1);

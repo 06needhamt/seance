@@ -541,8 +541,14 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 			grep -q "crashed while being unloaded; carrying on"
 		VFW_ENV_TESTCODEC_DETACH_CRASH=1 $emu "$harness" probe \
 			"$fixtures/testcodec.dll" >/dev/null 2>&1
-		# One that writes past its output buffer faults right there.
+		# One that writes a little past the most it said a frame takes
+		# has room for it, as the Windows heap would give, and is
+		# warned of; one that writes far past faults right there.
 		VFW_ENV_TESTCODEC_OVERRUN=1 $emu "$harness" encode \
+			"$fixtures/testcodec.dll" "$work/noise.y4m" \
+			-o "$work/over.avi" 2>&1 |
+			grep -q "the codec wrote 8256 bytes past the [0-9]* it said a frame takes at most"
+		VFW_ENV_TESTCODEC_OVERRUN=2 $emu "$harness" encode \
 			"$fixtures/testcodec.dll" "$work/noise.y4m" \
 			-o "$work/over.avi" 2>&1 |
 			grep -q "bytes past the end of the [0-9]*-byte output buffer"
