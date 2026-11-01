@@ -66,7 +66,9 @@
  *   TESTCODEC_BEGIN_RGB   it takes YUV when asked, but begins only with
  *                         RGB (iscc.dll)
  *   TESTCODEC_YUV_UPSIDE  it writes I420 bottom-up, and decodes 12-bit
- *                         frames to grey BGR24 too (vp4vfw.dll)
+ *                         frames to grey BGR24 too (vp4vfw.dll); set to
+ *                         2, it reads I420 input bottom-up instead
+ *                         (wnvwinx.dll's YUY2), writing it top-down
  *   TESTCODEC_NEEDS_DLL   DRV_LOAD fails unless it can load
  *                         zz_companion.dll (CUVCcodc.dll: cseuvec.dll);
  *                         set to 2, pe_missing.dll, whose import
@@ -110,6 +112,7 @@ struct instance {
 	struct state st;
 	/* Compression: the previous input frame. */
 	BYTE *cprev;
+	BYTE *cflip;		/* TESTCODEC_YUV_UPSIDE=2: input as read */
 	DWORD cframe;
 	/* Decompression: the current picture, in the compressed layout. */
 	BYTE *dcur;
@@ -417,6 +420,27 @@ static LRESULT compress_get_format(const BITMAPINFOHEADER *in,
 	return ICERR_OK;
 }
 
+/* Each plane of I420 bottom-up, as RGB's rows are; NULL if no memory. */
+static const BYTE *read_upside_down(struct instance *inst,
+				    const BITMAPINFOHEADER *in, const BYTE *src)
+{
+	LONG w = in->biWidth, h = abs_height(in);
+	BYTE *q;
+
+	if (!inst->cflip && !(inst->cflip = alloc(frame_bytes(in))))
+		return NULL;
+	q = inst->cflip;
+	for (int k = 0; k < 3; k++) {
+		LONG pw = k ? (w + 1) / 2 : w, ph = k ? (h + 1) / 2 : h;
+		for (LONG y = 0; y < ph; y++)
+			for (LONG x = 0; x < pw; x++)
+				q[(ph - 1 - y) * pw + x] = src[y * pw + x];
+		src += pw * ph;
+		q += pw * ph;
+	}
+	return inst->cflip;
+}
+
 static LRESULT compress(struct instance *inst, ICCOMPRESS *c)
 {
 	const BITMAPINFOHEADER *in = c->lpbiInput;
@@ -424,6 +448,10 @@ static LRESULT compress(struct instance *inst, ICCOMPRESS *c)
 	BYTE *dst = c->lpOutput;
 	const BYTE *src = c->lpInput;
 	int key;
+
+	if (yuv_upside == 2 && in->biBitCount == 12 &&
+	    !(src = read_upside_down(inst, in, src)))
+		return ICERR_MEMORY;
 
 	if (high(8, inst, inst->cprev, c, c->lpbiInput, c->lpInput, c->lpbiOutput,
 		 c->lpOutput, c->lpdwFlags))
@@ -533,7 +561,7 @@ static LRESULT decompress(struct instance *inst, ICDECOMPRESS *d)
 	}
 	if (in->biBitCount == 12) {
 		DWORD n = frame_bytes(in), i;
-		if (yuv_upside) {
+		if (yuv_upside == 1) {
 			/* Each plane's rows bottom-up, as RGB's are. */
 			const BYTE *p = inst->dcur;
 			BYTE *q = dst;
@@ -686,7 +714,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		begin_rgb = GetEnvironmentVariableA("TESTCODEC_BEGIN_RGB", v,
 						    sizeof(v)) == 1 && v[0] == '1';
 		yuv_upside = GetEnvironmentVariableA("TESTCODEC_YUV_UPSIDE", v,
-						     sizeof(v)) == 1 && v[0] == '1';
+						     sizeof(v)) == 1 &&
+			     (v[0] == '1' || v[0] == '2') ? v[0] - '0' : 0;
 		needs_dll = GetEnvironmentVariableA("TESTCODEC_NEEDS_DLL", v,
 						    sizeof(v)) == 1 &&
 			    v[0] >= '1' && v[0] <= '4' ? v[0] - '0' : 0;
@@ -756,6 +785,7 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		if (inst && inst->magic == MAGIC) {
 			draw_end(inst);
 			release(inst->cprev);
+			release(inst->cflip);
 			release(inst->dcur);
 			inst->magic = 0;
 			release(inst);

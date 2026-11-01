@@ -452,6 +452,14 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/fussy.avi" \
 		-o "$work/fussy.y4m" --output-format I420 2>/dev/null
 	cmp "$work/noise.y4m" "$work/fussy.y4m"
+	# One that reads its YUV input upside down (as RGB) gets it turned
+	# over, and the round trip comes back as it went in.
+	VFW_ENV_TESTCODEC_YUV_UPSIDE=2 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/noise.y4m" -o "$work/upin.avi" \
+		2>&1 | grep -q "the codec reads I420 upside down, as if it were RGB"
+	$emu "$harness" decode "$fixtures/testcodec.dll" "$work/upin.avi" \
+		-o "$work/upin.y4m" 2>/dev/null
+	cmp "$work/noise.y4m" "$work/upin.y4m"
 	# One that wants heights in 16s says so, and --pad or --crop give it
 	# them (repeating the last row, or dropping rows), from YUV or RGB.
 	{
