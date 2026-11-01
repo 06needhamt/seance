@@ -498,6 +498,32 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		-o "$work/nokeys.avi" 2>/dev/null
 	$emu "$harness" avi --chunks "$work/nokeys.avi" |
 		grep -q "^ *0  00dc .* key$"
+	# sweep: each codec in a directory encoded, decoded and measured, a
+	# size it names taken, and what got worse since an earlier sweep.
+	mkdir "$work/sweep"
+	cp "$fixtures/testcodec.dll" "$fixtures/testacm.acm" \
+		"$fixtures/pe_basic.dll" "$work/sweep/"
+	$emu "$harness" sweep "$work/sweep" --size 64x48 --frames 3 \
+		--tsv "$work/sweep1.tsv" --markdown "$work/sweep1.md" >/dev/null
+	grep -q "^	testcodec.dll	VfW	TST0	round-trip	inf	" "$work/sweep1.tsv"
+	grep -q "^	testacm.acm	ACM	TSTA	round-trip	" "$work/sweep1.tsv"
+	grep -q "^	pe_basic.dll			not-codec	" "$work/sweep1.tsv"
+	grep -q "^| \`testcodec.dll\` | VfW | TST0 | round-trip | lossless |" \
+		"$work/sweep1.md"
+	VFW_ENV_TESTCODEC_ALIGN16=3 $emu "$harness" sweep "$work/sweep" \
+		--size 64x48 --frames 3 --tsv "$work/sweep2.tsv" >/dev/null
+	grep -q "^	testcodec.dll	VfW	TST0	round-trip	inf	.*	--scale 320x240	" \
+		"$work/sweep2.tsv"
+	if VFW_ENV_TESTCODEC_EMPTY_FORMAT=1 $emu "$harness" sweep \
+		"$work/sweep" --size 64x48 --frames 3 \
+		--compare "$work/sweep1.tsv" >"$work/sweep3.txt" 2>&1; then
+		echo "smoke: sweep --compare missed a codec that got worse" >&2
+		exit 1
+	fi
+	grep -q "WORSE   testcodec.dll: round-trip lossless -> fails" \
+		"$work/sweep3.txt"
+	$emu "$harness" sweep "$work/sweep" --size 64x48 --frames 3 \
+		--compare "$work/sweep1.tsv" | grep -q "^  none$"
 	# A codec that crashes in ICM_*_END after the last frame still gives
 	# whole files (not under a sanitizer, which takes faults itself).
 	if [ "$lowmem" = 1 ]; then
