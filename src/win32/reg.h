@@ -123,4 +123,14 @@ extern void (*reg_change_hook)(const struct reg_key *k, DWORD what);
  */
 int reg_import(const void *text, size_t len);
 
+/*
+ * Software keys a DLL opened and didn't find (its vendor's settings, as
+ * HKLM\Software\Matrox\RRPath), kept per thread as DLLs looked for are
+ * (mod_missing_mark()): a driver that then refuses to load can be said to
+ * want its own software installed. Microsoft's keys and classes aren't
+ * noted.
+ */
+unsigned reg_missing_mark(void);
+void reg_missing_since(unsigned mark, char *buf, size_t size);
+
 #endif /* VFW_WIN32_REG_H */

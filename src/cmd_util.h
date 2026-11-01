@@ -109,4 +109,19 @@ const char *cli_codec_name(const struct cli_codec *c);
 
 void cli_close_codec(struct cli_codec *c);
 
+/*
+ * YUV a codec writes or reads upside down, as if it were RGB (vp4vfw.dll's
+ * I420 output, wnvwinx.dll's YUY2 input), is checked by luma against BGR24,
+ * whose orientation is known.
+ *
+ * cli_yuv_kind: 1 for planar 4:2:0 (I420, IYUV, YV12), 2 for YUY2-ordered
+ * 4:2:2 (YUY2, YUYV, YVYU), 3 for UYVY, 0 for anything else.
+ * cli_luma_at: the luma at x of memory row y of a picture of one of those
+ * or BGR24 (as limited-range BT.601 luma).
+ * cli_flip_yuv: turns a picture of one of those over in place.
+ */
+int cli_yuv_kind(const BITMAPINFOHEADER *b);
+int cli_luma_at(const BITMAPINFOHEADER *b, const BYTE *p, LONG x, LONG y);
+void cli_flip_yuv(const BITMAPINFOHEADER *b, BYTE *p);
+
 #endif /* VFW_CMD_UTIL_H */

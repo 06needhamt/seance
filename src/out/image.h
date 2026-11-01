@@ -84,6 +84,17 @@ int image_pack(const struct image_conv *c, const BYTE *src, BYTE *dst);
  */
 void image_cube_palette(RGBQUAD pal[256]);
 
+/*
+ * Resizes a picture of iw x ih pixels of bpp interleaved bytes each (1 for
+ * a plane of I420, 3 for BGR24) to ow x oh, rows packed. Each output pixel
+ * is a weighted average of the input around its centre: linear when
+ * enlarging, and over the whole area it covers when shrinking, so a
+ * smaller picture doesn't alias. Returns 0, or -1 with vfw_error() when out
+ * of memory.
+ */
+int image_resample(const BYTE *src, int iw, int ih, BYTE *dst, int ow,
+		   int oh, int bpp);
+
 /* Direct conversions between the two output layouts. */
 void image_bgr24_to_i420(const BYTE *bgr, int width, int height, BYTE *dst);
 void image_i420_to_bgr24(const BYTE *yuv, int width, int height, BYTE *dst);

@@ -4,12 +4,16 @@
  * VfW codec, DirectShow filter or DMO into an AVI.
  */
 #include <limits.h>
+#include <poll.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/wait.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "avi/avi.h"
 #include "cmd_audio.h"
@@ -17,12 +21,14 @@
 #include "commands.h"
 #include "common/error.h"
 #include "common/fourcc.h"
+#include "common/padding.h"
 #include "common/unicode.h"
 #include "dshow/discover.h"
 #include "dshow/dshow.h"
 #include "in/source.h"
 #include "loader/pe.h"
 #include "out/image.h"
+#include "runtime/crash.h"
 #include "runtime/runtime.h"
 #include "vfw/icm.h"
 #include "win32/codepage.h"
@@ -59,6 +65,8 @@ static int usage(void)
 		"                       ... 256) wide and high, repeating its last\n"
 		"                       row and column, for codecs that want that\n"
 		"  --crop <n>           crop it to a multiple of n instead\n"
+		"  --scale <WxH>        resize the picture to W x H, for codecs\n"
+		"                       that take only certain sizes\n"
 		"  --start <pos>        first input frame, or a time (2.5s)\n"
 		"  --frames <n>         number of frames (default: all)\n"
 		"  --duration <len>     how much to encode, as frames or a time\n"
@@ -215,8 +223,8 @@ static void size_hint(HIC hic, int (*takes)(HIC, LONG, LONG), LONG w, LONG h,
 			if ((cw >= w && ch >= h) != fits || (cw == w && ch == h) ||
 			    !takes(hic, cw, ch))
 				continue;
-			snprintf(out, size, ", but takes %ldx%ld: resize the input "
-				 "to that", (long)cw, (long)ch);
+			snprintf(out, size, ", but takes %ldx%ld: add --scale "
+				 "%ldx%ld", (long)cw, (long)ch, (long)cw, (long)ch);
 			return;
 		}
 }
@@ -248,6 +256,128 @@ static int begins_at(HIC hic, LONG w, LONG h)
 			return 1;
 		}
 	}
+	return 0;
+}
+
+/*
+ * Whether the codec reads its YUV input upside down, as if it were RGB
+ * (wnvwinx.dll's YUY2): its first frame, decoded to BGR24 by another
+ * instance, matches the input only turned over. Decoded by another
+ * instance rather than compressed by one, as instances may share state
+ * (Sif1_vfw.dll's compressor fails once another has ended). Run under
+ * crash_try; any step refused leaves it at 0.
+ */
+struct input_orientation {
+	const struct cli_codec *codec;
+	const BITMAPINFOHEADER *in;
+	const void *bits;		/* the input */
+	const BITMAPINFOHEADER *fmt;	/* the frame the codec made of it */
+	size_t fmt_size;
+	const void *data;
+	size_t size;
+	int upside_down;
+};
+
+static void check_input_orientation(void *arg)
+{
+	struct input_orientation *o = arg;
+	const BITMAPINFOHEADER *in = o->in;
+	LONG w = in->biWidth, h = in->biHeight < 0 ? -in->biHeight : in->biHeight;
+	BITMAPINFOHEADER *fmt = malloc(o->fmt_size);
+	BYTE *data = calloc(1, o->size + VFW_INPUT_PADDING), *pic = NULL;
+	HIC hic = NULL;
+
+	if (!fmt || !data || h <= 1 || w <= 0 || !o->codec->target[0] ||
+	    (cli_yuv_kind(in) != 1 && (w & 1)))
+		goto out;
+	memcpy(fmt, o->fmt, o->fmt_size);
+	fmt->biSizeImage = (DWORD)o->size;
+	memcpy(data, o->data, o->size);
+	BITMAPINFOHEADER rgb = {
+		.biSize = sizeof(rgb), .biWidth = w, .biHeight = h,
+		.biPlanes = 1, .biBitCount = 24, .biCompression = BI_RGB,
+		.biSizeImage = (DWORD)(((w * 3 + 3) & ~3) * h),
+	};
+	if (!(pic = malloc(rgb.biSizeImage)) ||
+	    !(hic = cli_reopen_codec(o->codec, ICMODE_DECOMPRESS)) ||
+	    ic_send(hic, ICM_DECOMPRESS_QUERY, (DWORD_PTR)fmt,
+		    (DWORD_PTR)&rgb) != ICERR_OK ||
+	    ic_decompress_begin(hic, fmt, &rgb) != ICERR_OK ||
+	    (LONG)ic_decompress(hic, 0, fmt, data, &rgb, pic) < 0)
+		goto out;
+	/* Closed without ICM_DECOMPRESS_END, as decode's check does. */
+	unsigned long same = 0, flipped = 0;
+	for (LONG y = 0; y < h; y += 4)
+		for (LONG x = 0; x < w; x += 4) {
+			int v = cli_luma_at(in, o->bits, x, y);
+			/* BGR24's memory rows run from the bottom. */
+			same += abs(v - cli_luma_at(&rgb, pic, x, h - 1 - y));
+			flipped += abs(v - cli_luma_at(&rgb, pic, x, y));
+		}
+	o->upside_down = flipped * 2 < same;
+out:
+	if (hic)
+		ic_close(hic);
+	free(fmt);
+	free(data);
+	free(pic);
+}
+
+/*
+ * Runs check_input_orientation in a child process, which can change
+ * nothing the encoding goes on with, waiting at most 20 seconds. Whether
+ * it found the input upside down; 0 if it couldn't tell.
+ */
+static int in_child(struct input_orientation *o)
+{
+	int fds[2];
+	char answer = 0;
+
+	fflush(stdout);
+	fflush(stderr);
+	if (pipe(fds))
+		return 0;
+	pid_t pid = fork();
+	if (pid < 0) {
+		close(fds[0]);
+		close(fds[1]);
+		return 0;
+	}
+	if (!pid) {
+		close(fds[0]);
+		if (!crash_try(check_input_orientation, o))
+			answer = o->upside_down ? 'Y' : 'N';
+		if (write(fds[1], &answer, 1) < 0)
+			_exit(1);
+		_exit(0);
+	}
+	close(fds[1]);
+	struct pollfd p = { .fd = fds[0], .events = POLLIN };
+	if (poll(&p, 1, 20000) != 1 || read(fds[0], &answer, 1) != 1)
+		answer = 0;
+	close(fds[0]);
+	kill(pid, SIGKILL);
+	waitpid(pid, NULL, 0);
+	return answer == 'Y';
+}
+
+/* A copy of a YUV frame for the codec, turned over, in *buf. */
+static int turn_over(const struct feed *f, const void *bits, size_t len,
+		     BYTE **buf, size_t *cap)
+{
+	size_t n = f->to ? image_frame_size(f->to) : len;
+
+	if (n > *cap) {
+		BYTE *b = realloc(*buf, n ? n : 1);
+		if (!b) {
+			fprintf(stderr, "seance: out of memory\n");
+			return -1;
+		}
+		*buf = b;
+		*cap = n;
+	}
+	memcpy(*buf, bits, n);
+	cli_flip_yuv(&f->fmt.bih, *buf);
 	return 0;
 }
 
@@ -849,6 +979,12 @@ int cmd_encode(int argc, char **argv)
 				so.pad = (int)n;
 			else
 				so.crop = (int)n;
+		} else if (!strcmp(a, "--scale") && v) {
+			LONG w, h;
+			if (cli_parse_size(a, argv[++i], &w, &h))
+				return 2;
+			so.scale_w = (int)w;
+			so.scale_h = (int)h;
 		} else if (!strcmp(a, "--rate") && v) {
 			if (cli_parse_rate(a, argv[++i], &rate, &scale))
 				return 2;
@@ -908,6 +1044,11 @@ int cmd_encode(int argc, char **argv)
 		fprintf(stderr, "seance: --quality is 0 to %d\n", ICQUALITY_HIGH);
 		return 2;
 	}
+	if (so.scale_w && (so.pad || so.crop)) {
+		fprintf(stderr, "seance: --scale can't be given with --pad or "
+			"--crop\n");
+		return 2;
+	}
 	if (so.raw_format && !so.width) {
 		fprintf(stderr, "seance: --input-format needs --size\n");
 		return 2;
@@ -920,10 +1061,10 @@ int cmd_encode(int argc, char **argv)
 				   audio_only_kinds, target, clsid_arg, 1)) {
 		if (fourcc || forced || keyint != (unsigned long)-1 || rate ||
 		    count != (unsigned long)-1 || so.raw_format || wo.force_odml ||
-		    so.pad || so.crop) {
+		    so.pad || so.crop || so.scale_w) {
 			fprintf(stderr, "seance: --fourcc, --codec-input, --keyint, "
-				"--rate, --frames, --input-format, --odml, --pad "
-				"and --crop are for video\n");
+				"--rate, --frames, --input-format, --odml, --pad, "
+				"--crop and --scale are for video\n");
 			return 2;
 		}
 		if (clsid_arg && parse_clsid(clsid_arg, &job.clsid_value)) {
@@ -1018,6 +1159,8 @@ int cmd_encode(int argc, char **argv)
 	COMPVARS cv;
 	struct avi_writer *w = NULL;
 	void *state = NULL;
+	BYTE *flipped = NULL;	/* frames turned over for the codec */
+	size_t flipped_size = 0;
 	char fcc[FOURCC_STR_SIZE];
 
 	memset(&cv, 0, sizeof(cv));
@@ -1127,6 +1270,7 @@ int cmd_encode(int argc, char **argv)
 	unsigned long read = 0, written = 0, keys = 0;
 	uint64_t bytes = 0;
 	double busy = 0;
+	int flip_input = 0;
 	for (;;) {
 		if (count != (unsigned long)-1 && written >= count)
 			break;
@@ -1151,6 +1295,11 @@ int cmd_encode(int argc, char **argv)
 				vfw_error());
 			goto done;
 		}
+		if (flip_input) {
+			if (turn_over(&feed, bits, len, &flipped, &flipped_size))
+				goto done;
+			bits = flipped;
+		}
 		BOOL key = FALSE;
 		LONG size = 0;
 		double t = now();
@@ -1159,6 +1308,39 @@ int cmd_encode(int argc, char **argv)
 		if (!data) {
 			fprintf(stderr, "seance: %s\n", vfw_error());
 			goto done;
+		}
+		if (!written && !flip_input && cli_yuv_kind(&feed.fmt.bih)) {
+			struct input_orientation chk = {
+				&codec, &feed.fmt.bih, bits, ofmt,
+				ic_seq_format_size(&cv), data, (size_t)size, 0,
+			};
+			if (in_child(&chk)) {
+				/* Begun again, given the frame turned over. */
+				fprintf(stderr, "seance: the codec reads %s upside "
+					"down, as if it were RGB: turning it over "
+					"for it\n", feed.name);
+				flip_input = 1;
+				ic_seq_end(&cv);
+				started = 0;
+				if (!ic_seq_start_ex(&cv, (BITMAPINFO *)&feed.fmt,
+						     rate, scale, frames)) {
+					fprintf(stderr, "seance: %s\n", vfw_error());
+					goto done;
+				}
+				started = 1;
+				ofmt = &cv.lpbiOut->bmiHeader;
+				if (turn_over(&feed, bits, len, &flipped,
+					      &flipped_size))
+					goto done;
+				t = now();
+				data = ic_seq_frame(&cv, 0, flipped, &key, &size);
+				busy += now() - t;
+				if (!data) {
+					fprintf(stderr, "seance: %s\n",
+						vfw_error());
+					goto done;
+				}
+			}
 		}
 		/*
 		 * The first frame is decoded from nothing, so it is a keyframe
@@ -1212,6 +1394,7 @@ done:
 	image_conv_free(feed.to);
 	free(feed.tmp);
 	free(feed.packed);
+	free(flipped);
 	free(state);
 	source_close(src);
 	return status;

@@ -333,6 +333,10 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	VFW_ENV_TESTCODEC_NEEDS_DLL=3 $emu "$harness" encode \
 		"$fixtures/testcodec.dll" "$work/v.y4m" -o "$work/x.avi" 2>&1 |
 		grep -q "refused DRV_LOAD; it looked for zz_path.dll, which isn't here"
+	# One that wants its vendor's registry key names that.
+	VFW_ENV_TESTCODEC_NEEDS_DLL=4 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/v.y4m" -o "$work/x.avi" 2>&1 |
+		grep -q "refused DRV_LOAD; it looked for the registry key HKLM.Software.Seance Test.Codec, which isn't set"
 	# YUV a codec writes upside down: RGB instead, or turned over.
 	{
 		printf 'YUV4MPEG2 W16 H16 F25:1 Ip A1:1 C420jpeg\nFRAME\n'
@@ -448,6 +452,14 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/fussy.avi" \
 		-o "$work/fussy.y4m" --output-format I420 2>/dev/null
 	cmp "$work/noise.y4m" "$work/fussy.y4m"
+	# One that reads its YUV input upside down (as RGB) gets it turned
+	# over, and the round trip comes back as it went in.
+	VFW_ENV_TESTCODEC_YUV_UPSIDE=2 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/noise.y4m" -o "$work/upin.avi" \
+		2>&1 | grep -q "the codec reads I420 upside down, as if it were RGB"
+	$emu "$harness" decode "$fixtures/testcodec.dll" "$work/upin.avi" \
+		-o "$work/upin.y4m" 2>/dev/null
+	cmp "$work/noise.y4m" "$work/upin.y4m"
 	# One that wants heights in 16s says so, and --pad or --crop give it
 	# them (repeating the last row, or dropping rows), from YUV or RGB.
 	{
@@ -470,6 +482,20 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	$emu "$harness" avi "$work/crop.avi" | grep -q "16x16, 24 bits, 'TST0'"
 	fails $emu "$harness" encode "$fixtures/testcodec.dll" "$work/h24.y4m" \
 		-o "$work/x.avi" --pad 3
+	# One that takes a single size names it, and --scale resizes to it.
+	VFW_ENV_TESTCODEC_ALIGN16=3 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/h24.y4m" -o "$work/x.avi" 2>&1 |
+		grep -q "at 16x24, but takes 320x240: add --scale 320x240"
+	VFW_ENV_TESTCODEC_ALIGN16=3 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/h24.y4m" -o "$work/scale.avi" \
+		--scale 320x240 2>/dev/null
+	$emu "$harness" avi "$work/scale.avi" | grep -q "320x240, 12 bits, 'TST0'"
+	VFW_ENV_TESTCODEC_ALIGN16=3 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/h24.bgr" --input-format BGR24 \
+		--size 16x24 -o "$work/scale.avi" --scale 320x240 2>/dev/null
+	$emu "$harness" avi "$work/scale.avi" | grep -q "320x240, 24 bits, 'TST0'"
+	fails $emu "$harness" encode "$fixtures/testcodec.dll" "$work/h24.y4m" \
+		-o "$work/x.avi" --scale 320x240 --pad 16
 	# One that writes no output format is refused, not written as 0x0;
 	# one that flags no keyframes still gets its first frame as one.
 	VFW_ENV_TESTCODEC_EMPTY_FORMAT=1 $emu "$harness" encode \
@@ -480,6 +506,32 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		-o "$work/nokeys.avi" 2>/dev/null
 	$emu "$harness" avi --chunks "$work/nokeys.avi" |
 		grep -q "^ *0  00dc .* key$"
+	# sweep: each codec in a directory encoded, decoded and measured, a
+	# size it names taken, and what got worse since an earlier sweep.
+	mkdir "$work/sweep"
+	cp "$fixtures/testcodec.dll" "$fixtures/testacm.acm" \
+		"$fixtures/pe_basic.dll" "$work/sweep/"
+	$emu "$harness" sweep "$work/sweep" --size 64x48 --frames 3 \
+		--tsv "$work/sweep1.tsv" --markdown "$work/sweep1.md" >/dev/null
+	grep -q "^	testcodec.dll	VfW	TST0	round-trip	inf	" "$work/sweep1.tsv"
+	grep -q "^	testacm.acm	ACM	TSTA	round-trip	" "$work/sweep1.tsv"
+	grep -q "^	pe_basic.dll			not-codec	" "$work/sweep1.tsv"
+	grep -q "^| \`testcodec.dll\` | VfW | TST0 | round-trip | lossless |" \
+		"$work/sweep1.md"
+	VFW_ENV_TESTCODEC_ALIGN16=3 $emu "$harness" sweep "$work/sweep" \
+		--size 64x48 --frames 3 --tsv "$work/sweep2.tsv" >/dev/null
+	grep -q "^	testcodec.dll	VfW	TST0	round-trip	inf	.*	--scale 320x240	" \
+		"$work/sweep2.tsv"
+	if VFW_ENV_TESTCODEC_EMPTY_FORMAT=1 $emu "$harness" sweep \
+		"$work/sweep" --size 64x48 --frames 3 \
+		--compare "$work/sweep1.tsv" >"$work/sweep3.txt" 2>&1; then
+		echo "smoke: sweep --compare missed a codec that got worse" >&2
+		exit 1
+	fi
+	grep -q "WORSE   testcodec.dll: round-trip lossless -> fails" \
+		"$work/sweep3.txt"
+	$emu "$harness" sweep "$work/sweep" --size 64x48 --frames 3 \
+		--compare "$work/sweep1.tsv" | grep -q "^  none$"
 	# A codec that crashes in ICM_*_END after the last frame still gives
 	# whole files (not under a sanitizer, which takes faults itself).
 	if [ "$lowmem" = 1 ]; then
@@ -497,8 +549,14 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 			grep -q "crashed while being unloaded; carrying on"
 		VFW_ENV_TESTCODEC_DETACH_CRASH=1 $emu "$harness" probe \
 			"$fixtures/testcodec.dll" >/dev/null 2>&1
-		# One that writes past its output buffer faults right there.
+		# One that writes a little past the most it said a frame takes
+		# has room for it, as the Windows heap would give, and is
+		# warned of; one that writes far past faults right there.
 		VFW_ENV_TESTCODEC_OVERRUN=1 $emu "$harness" encode \
+			"$fixtures/testcodec.dll" "$work/noise.y4m" \
+			-o "$work/over.avi" 2>&1 |
+			grep -q "the codec wrote 8256 bytes past the [0-9]* it said a frame takes at most"
+		VFW_ENV_TESTCODEC_OVERRUN=2 $emu "$harness" encode \
 			"$fixtures/testcodec.dll" "$work/noise.y4m" \
 			-o "$work/over.avi" 2>&1 |
 			grep -q "bytes past the end of the [0-9]*-byte output buffer"

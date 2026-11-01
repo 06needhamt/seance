@@ -830,3 +830,142 @@ int image_pack(const struct image_conv *c, const BYTE *src, BYTE *dst)
 		pack_yuv(c, src, dst);
 	return 0;
 }
+
+/*
+ * Resampling. For each output position along one axis, the input pixels
+ * it takes and their weights (summing to 1 << 14): a tent filter centred
+ * on the output pixel's centre, as wide as one output pixel is in the
+ * input when shrinking, else one input pixel. Positions past the edges
+ * take the edge pixel.
+ */
+struct taps {
+	int n;		/* taps per output position */
+	int *first;	/* per position: its first input index */
+	int *weight;	/* per position: n weights */
+};
+
+static void taps_free(struct taps *t)
+{
+	free(t->first);
+	free(t->weight);
+	t->first = NULL;
+	t->weight = NULL;
+}
+
+static int taps_make(struct taps *t, int in, int out)
+{
+	double scale = (double)in / out;
+	double support = scale > 1 ? scale : 1;
+
+	t->n = (int)(2 * support) + 3;
+	t->first = malloc(sizeof(int) * (size_t)out);
+	t->weight = calloc((size_t)out * (size_t)t->n, sizeof(int));
+	if (!t->first || !t->weight) {
+		taps_free(t);
+		vfw_set_error("out of memory");
+		return -1;
+	}
+	for (int i = 0; i < out; i++) {
+		double centre = (i + 0.5) * scale;
+		int lo = (int)(centre - support) - 1;
+		int *w = t->weight + (size_t)i * t->n;
+		double f[64 + 3], sum = 0;
+		int n = t->n < 64 + 3 ? t->n : 64 + 3;
+
+		/* Indices outside 0..in-1 fold onto the edge, so the run starts
+		 * at the first in range and later taps add to the last. */
+		int first = lo < 0 ? 0 : lo;
+		if (first > in - 1)
+			first = in - 1;
+		t->first[i] = first;
+		for (int k = 0; k < n; k++)
+			f[k] = 0;
+		for (int k = 0; k < t->n; k++) {
+			int x = lo + k;
+			double d = (x + 0.5 - centre) / support;
+			double v = d < 0 ? 1 + d : 1 - d;
+			if (v <= 0)
+				continue;
+			int at = (x < 0 ? 0 : x > in - 1 ? in - 1 : x) - first;
+			if (at < 0)
+				at = 0;
+			if (at > n - 1)
+				at = n - 1;
+			f[at] += v;
+			sum += v;
+		}
+		int total = 0, big = 0;
+		for (int k = 0; k < n; k++) {
+			w[k] = sum > 0 ? (int)(f[k] / sum * (1 << 14) + 0.5) : 0;
+			total += w[k];
+			if (w[k] > w[big])
+				big = k;
+		}
+		w[big] += (1 << 14) - total;	/* rounding: sum exactly */
+	}
+	return 0;
+}
+
+int image_resample(const BYTE *src, int iw, int ih, BYTE *dst, int ow,
+		   int oh, int bpp)
+{
+	struct taps tx = { 0 }, ty = { 0 };
+	BYTE *mid = NULL;
+	int r = -1;
+
+	if (iw <= 0 || ih <= 0 || ow <= 0 || oh <= 0 || bpp <= 0) {
+		vfw_set_error("can't resize %dx%d to %dx%d", iw, ih, ow, oh);
+		return -1;
+	}
+	if (iw == ow && ih == oh) {
+		memcpy(dst, src, (size_t)iw * ih * bpp);
+		return 0;
+	}
+	/* Very large shrinks would want very many taps: cap them. */
+	if (iw / ow > 30 || ih / oh > 30) {
+		vfw_set_error("can't shrink %dx%d to %dx%d (more than 30 times)",
+			      iw, ih, ow, oh);
+		return -1;
+	}
+	if (taps_make(&tx, iw, ow) || taps_make(&ty, ih, oh) ||
+	    !(mid = malloc((size_t)ow * ih * bpp))) {
+		if (!mid)
+			vfw_set_error("out of memory");
+		goto out;
+	}
+	/* Across, into mid (ow x ih); then down, into dst. */
+	for (int y = 0; y < ih; y++) {
+		const BYTE *row = src + (size_t)y * iw * bpp;
+		BYTE *m = mid + (size_t)y * ow * bpp;
+		for (int x = 0; x < ow; x++) {
+			const int *w = tx.weight + (size_t)x * tx.n;
+			int f = tx.first[x];
+			for (int c = 0; c < bpp; c++) {
+				long acc = 0;
+				for (int k = 0; k < tx.n && f + k < iw; k++)
+					acc += (long)w[k] * row[(size_t)(f + k) * bpp + c];
+				acc = (acc + (1 << 13)) >> 14;
+				*m++ = (BYTE)(acc < 0 ? 0 : acc > 255 ? 255 : acc);
+			}
+		}
+	}
+	size_t stride = (size_t)ow * bpp;
+	for (int y = 0; y < oh; y++) {
+		const int *w = ty.weight + (size_t)y * ty.n;
+		int f = ty.first[y];
+		BYTE *d = dst + (size_t)y * stride;
+		for (size_t x = 0; x < stride; x++) {
+			long acc = 0;
+			for (int k = 0; k < ty.n && f + k < ih; k++)
+				acc += (long)w[k] * mid[(size_t)(f + k) * stride + x];
+			acc = (acc + (1 << 13)) >> 14;
+			d[x] = (BYTE)(acc < 0 ? 0 : acc > 255 ? 255 : acc);
+		}
+	}
+	r = 0;
+out:
+	taps_free(&tx);
+	taps_free(&ty);
+	free(mid);
+	return r;
+}

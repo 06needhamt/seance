@@ -615,80 +615,6 @@ done:
  * frame decoded to BGR24, whose orientation is known, by comparing luma.
  */
 
-/* Whether b is a YUV layout these know: planar 4:2:0 or packed 4:2:2. */
-static int yuv_kind(const BITMAPINFOHEADER *b)
-{
-	switch (b->biCompression) {
-	case mmioFOURCC('I', '4', '2', '0'):
-	case mmioFOURCC('I', 'Y', 'U', 'V'):
-	case mmioFOURCC('Y', 'V', '1', '2'):
-		return 1;
-	case mmioFOURCC('Y', 'U', 'Y', '2'):
-	case mmioFOURCC('Y', 'U', 'Y', 'V'):
-	case mmioFOURCC('Y', 'V', 'Y', 'U'):
-		return 2;
-	case mmioFOURCC('U', 'Y', 'V', 'Y'):
-		return 3;
-	}
-	return 0;
-}
-
-/* The luma at x of memory row y. */
-static int luma_at(const BITMAPINFOHEADER *b, const BYTE *p, LONG x, LONG y)
-{
-	LONG w = b->biWidth;
-
-	switch (yuv_kind(b)) {
-	case 1:
-		return p[y * w + x];
-	case 2:
-		return p[y * w * 2 + x * 2];
-	case 3:
-		return p[y * w * 2 + x * 2 + 1];
-	}
-	/* BGR24, to limited-range luma as YUV has it (BT.601). */
-	const BYTE *q = p + y * ((w * 3 + 3) & ~3) + x * 3;
-	return ((q[0] * 25 + q[1] * 129 + q[2] * 66 + 128) >> 8) + 16;
-}
-
-/* Turns a YUV picture of yuv_kind over. */
-static void flip_yuv(const BITMAPINFOHEADER *b, BYTE *p)
-{
-	LONG w = b->biWidth, h = b->biHeight < 0 ? -b->biHeight : b->biHeight;
-	BYTE tmp[16384];
-	struct { BYTE *base; LONG stride, rows; } planes[3];
-	int n = 1;
-
-	if (yuv_kind(b) == 1) {
-		planes[0].base = p;
-		planes[0].stride = w;
-		planes[0].rows = h;
-		/* Chroma rounded up, as image_i420_size has it. */
-		LONG cw = (w + 1) / 2, ch = (h + 1) / 2;
-		planes[1].base = p + w * h;
-		planes[2].base = planes[1].base + cw * ch;
-		planes[1].stride = planes[2].stride = cw;
-		planes[1].rows = planes[2].rows = ch;
-		n = 3;
-	} else {
-		planes[0].base = p;
-		planes[0].stride = w * 2;
-		planes[0].rows = h;
-	}
-	for (int k = 0; k < n; k++) {
-		LONG s = planes[k].stride;
-		if (s > (LONG)sizeof(tmp))
-			return;
-		for (LONG y = 0; y < planes[k].rows / 2; y++) {
-			BYTE *a = planes[k].base + y * s;
-			BYTE *z = planes[k].base + (planes[k].rows - 1 - y) * s;
-			memcpy(tmp, a, s);
-			memcpy(a, z, s);
-			memcpy(z, tmp, s);
-		}
-	}
-}
-
 /*
  * Whether the codec writes its YUV output out upside down: frame buf,
  * which decodes on its own, decoded to out and to BGR24 by another
@@ -719,8 +645,8 @@ static int yuv_upside_down(const struct cli_codec *codec,
 {
 	LONG w = out->biWidth, h = out->biHeight;
 	/* Packed 4:2:2 pairs pixels; planar 4:2:0 rounds its chroma up. */
-	if (!yuv_kind(out) || h <= 1 || w <= 0 ||
-	    (yuv_kind(out) != 1 && (w & 1)) || !codec->target[0])
+	if (!cli_yuv_kind(out) || h <= 1 || w <= 0 ||
+	    (cli_yuv_kind(out) != 1 && (w & 1)) || !codec->target[0])
 		return 0;
 	BITMAPINFOHEADER rgb = {
 		.biSize = sizeof(rgb), .biWidth = w, .biHeight = h,
@@ -753,9 +679,9 @@ static int yuv_upside_down(const struct cli_codec *codec,
 		/* BGR24's memory rows run from the bottom. */
 		for (LONG y = 0; y < h; y += 4)
 			for (LONG x = 0; x < w; x += 4) {
-				int v = luma_at(out, pic[0], x, y);
-				same += abs(v - luma_at(&rgb, pic[1], x, h - 1 - y));
-				flipped += abs(v - luma_at(&rgb, pic[1], x, y));
+				int v = cli_luma_at(out, pic[0], x, y);
+				same += abs(v - cli_luma_at(&rgb, pic[1], x, h - 1 - y));
+				flipped += abs(v - cli_luma_at(&rgb, pic[1], x, y));
 			}
 	}
 	free(pic[0]);
@@ -1036,7 +962,7 @@ int cmd_decode(int argc, char **argv)
 	 */
 	void *key_buf = NULL;
 	size_t key_size;
-	if (kind != OUT_RAW && yuv_kind(out) &&
+	if (kind != OUT_RAW && cli_yuv_kind(out) &&
 	    !first_key_frame(avi, s, &key_buf, &key_size)) {
 		DWORD was = in->biSizeImage;
 		in->biSizeImage = (DWORD)key_size;
@@ -1155,7 +1081,7 @@ int cmd_decode(int argc, char **argv)
 		busy += now() - t;
 		decoded++;
 		if (flip && dr >= 0 && dr != ICERR_DONTDRAW)
-			flip_yuv(out, pic);
+			cli_flip_yuv(out, pic);
 
 		/* A FOURCC found in it is kept once a frame has decoded. */
 		if (dr >= 0 && dr != ICERR_GOTOKEYFRAME)

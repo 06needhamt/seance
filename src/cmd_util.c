@@ -538,3 +538,77 @@ void cli_close_codec(struct cli_codec *c)
 		ic_close(c->hic);
 	c->hic = NULL;
 }
+
+/* Whether b is a YUV layout these know: planar 4:2:0 or packed 4:2:2. */
+int cli_yuv_kind(const BITMAPINFOHEADER *b)
+{
+	switch (b->biCompression) {
+	case mmioFOURCC('I', '4', '2', '0'):
+	case mmioFOURCC('I', 'Y', 'U', 'V'):
+	case mmioFOURCC('Y', 'V', '1', '2'):
+		return 1;
+	case mmioFOURCC('Y', 'U', 'Y', '2'):
+	case mmioFOURCC('Y', 'U', 'Y', 'V'):
+	case mmioFOURCC('Y', 'V', 'Y', 'U'):
+		return 2;
+	case mmioFOURCC('U', 'Y', 'V', 'Y'):
+		return 3;
+	}
+	return 0;
+}
+
+/* The luma at x of memory row y. */
+int cli_luma_at(const BITMAPINFOHEADER *b, const BYTE *p, LONG x, LONG y)
+{
+	LONG w = b->biWidth;
+
+	switch (cli_yuv_kind(b)) {
+	case 1:
+		return p[y * w + x];
+	case 2:
+		return p[y * w * 2 + x * 2];
+	case 3:
+		return p[y * w * 2 + x * 2 + 1];
+	}
+	/* BGR24, to limited-range luma as YUV has it (BT.601). */
+	const BYTE *q = p + y * ((w * 3 + 3) & ~3) + x * 3;
+	return ((q[0] * 25 + q[1] * 129 + q[2] * 66 + 128) >> 8) + 16;
+}
+
+/* Turns a YUV picture of yuv_kind over. */
+void cli_flip_yuv(const BITMAPINFOHEADER *b, BYTE *p)
+{
+	LONG w = b->biWidth, h = b->biHeight < 0 ? -b->biHeight : b->biHeight;
+	BYTE tmp[16384];
+	struct { BYTE *base; LONG stride, rows; } planes[3];
+	int n = 1;
+
+	if (cli_yuv_kind(b) == 1) {
+		planes[0].base = p;
+		planes[0].stride = w;
+		planes[0].rows = h;
+		/* Chroma rounded up, as image_i420_size has it. */
+		LONG cw = (w + 1) / 2, ch = (h + 1) / 2;
+		planes[1].base = p + w * h;
+		planes[2].base = planes[1].base + cw * ch;
+		planes[1].stride = planes[2].stride = cw;
+		planes[1].rows = planes[2].rows = ch;
+		n = 3;
+	} else {
+		planes[0].base = p;
+		planes[0].stride = w * 2;
+		planes[0].rows = h;
+	}
+	for (int k = 0; k < n; k++) {
+		LONG s = planes[k].stride;
+		if (s > (LONG)sizeof(tmp))
+			return;
+		for (LONG y = 0; y < planes[k].rows / 2; y++) {
+			BYTE *a = planes[k].base + y * s;
+			BYTE *z = planes[k].base + (planes[k].rows - 1 - y) * s;
+			memcpy(tmp, a, s);
+			memcpy(a, z, s);
+			memcpy(z, tmp, s);
+		}
+	}
+}

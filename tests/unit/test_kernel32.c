@@ -733,6 +733,7 @@ static void test_files(void)
 	   DWORD, DWORD, HANDLE);
 	FN(BOOL, WriteFile, HANDLE, LPCVOID, DWORD, LPDWORD, LPOVERLAPPED);
 	FN(BOOL, ReadFile, HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
+	FN(BOOL, GetOverlappedResult, HANDLE, LPOVERLAPPED, LPDWORD, BOOL);
 	FN(DWORD, SetFilePointer, HANDLE, LONG, PLONG, DWORD);
 	FN(DWORD, GetFileSize, HANDLE, LPDWORD);
 	FN(DWORD, GetFileType, HANDLE);
@@ -794,6 +795,11 @@ static void test_files(void)
 	OVERLAPPED ov = { .Offset = 2 };
 	CHECK(ReadFile(h, buf, 3, &n, &ov));
 	CHECK(n == 3 && !memcmp(buf, "llo", 3));
+	/* It never left the read pending: the result is there at once. */
+	n = 0;
+	CHECK(GetOverlappedResult(h, &ov, &n, FALSE));
+	CHECK_EQ(n, 3);
+	CHECK(!GetOverlappedResult(h, NULL, &n, TRUE));
 	CloseHandle(h);
 
 	CHECK_EQ(GetFileAttributesA(name), FILE_ATTRIBUTE_ARCHIVE);

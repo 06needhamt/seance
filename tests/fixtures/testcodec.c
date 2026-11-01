@@ -47,8 +47,9 @@
  *   TESTCODEC_DECODE_ONLY it refuses DRV_OPEN to compress, though it answers
  *                         ICM_COMPRESS_QUERY when opened otherwise
  *                         (vgpix32d.dll)
- *   TESTCODEC_OVERRUN     it writes on past the end of its largest
- *                         frame when compressing (SN4Codec.dll)
+ *   TESTCODEC_OVERRUN     it writes 8 KB on past the end of its largest
+ *                         frame when compressing (SN4Codec.dll); set to
+ *                         2, 1 MB
  *   TESTCODEC_END_CRASH   it divides by zero in ICM_COMPRESS_END and
  *                         ICM_DECOMPRESS_END (WavCWAIP.dll, by a byte count
  *                         it never kept)
@@ -65,14 +66,21 @@
  *   TESTCODEC_BEGIN_RGB   it takes YUV when asked, but begins only with
  *                         RGB (iscc.dll)
  *   TESTCODEC_YUV_UPSIDE  it writes I420 bottom-up, and decodes 12-bit
- *                         frames to grey BGR24 too (vp4vfw.dll)
+ *                         frames to grey BGR24 too (vp4vfw.dll); set to
+ *                         2, it reads I420 input bottom-up instead
+ *                         (wnvwinx.dll's YUY2), writing it top-down
  *   TESTCODEC_NEEDS_DLL   DRV_LOAD fails unless it can load
  *                         zz_companion.dll (CUVCcodc.dll: cseuvec.dll);
  *                         set to 2, pe_missing.dll, whose import
  *                         zz_nosuch.dll is what's missing; set to 3, by
- *                         a full path to no file (C:\nowhere\zz_path.dll)
+ *                         a full path to no file (C:\nowhere\zz_path.dll);
+ *                         set to 4, unless its vendor's registry key
+ *                         HKLM\Software\Seance Test\Codec is there
+ *                         (rricm.dll: Matrox's)
  * TESTCODEC_ALIGN16=2 takes any height when asked, but begins only with
- * a multiple of 16 (vp31vfw.dll, vp4vfw.dll). TESTCODEC_DECODE_ONLY=2
+ * a multiple of 16 (vp31vfw.dll, vp4vfw.dll); TESTCODEC_ALIGN16=3 takes
+ * only 320x240, as ones that take a few fixed sizes (ADV601.dll at 640x480,
+ * DNxHD) do. TESTCODEC_DECODE_ONLY=2
  * opens only as 'TST0', and only to decompress (xanlib.dll, as 'XXAN').
  * With TESTCODEC_LATESIZE=1 it only knows how big a frame can get once
  * ICM_COMPRESS_BEGIN has been sent, and says 16 bytes before (in
@@ -104,6 +112,7 @@ struct instance {
 	struct state st;
 	/* Compression: the previous input frame. */
 	BYTE *cprev;
+	BYTE *cflip;		/* TESTCODEC_YUV_UPSIDE=2: input as read */
 	DWORD cframe;
 	/* Decompression: the current picture, in the compressed layout. */
 	BYTE *dcur;
@@ -277,6 +286,8 @@ static int ok_input(const BITMAPINFOHEADER *b)
 {
 	if (align16 == 1 && b && abs_height(b) % 16)
 		return 0;
+	if (align16 == 3 && b && (b->biWidth != 320 || abs_height(b) != 240))
+		return 0;
 	return ok_rgb(b) || ok_yuv(b);
 }
 
@@ -409,6 +420,27 @@ static LRESULT compress_get_format(const BITMAPINFOHEADER *in,
 	return ICERR_OK;
 }
 
+/* Each plane of I420 bottom-up, as RGB's rows are; NULL if no memory. */
+static const BYTE *read_upside_down(struct instance *inst,
+				    const BITMAPINFOHEADER *in, const BYTE *src)
+{
+	LONG w = in->biWidth, h = abs_height(in);
+	BYTE *q;
+
+	if (!inst->cflip && !(inst->cflip = alloc(frame_bytes(in))))
+		return NULL;
+	q = inst->cflip;
+	for (int k = 0; k < 3; k++) {
+		LONG pw = k ? (w + 1) / 2 : w, ph = k ? (h + 1) / 2 : h;
+		for (LONG y = 0; y < ph; y++)
+			for (LONG x = 0; x < pw; x++)
+				q[(ph - 1 - y) * pw + x] = src[y * pw + x];
+		src += pw * ph;
+		q += pw * ph;
+	}
+	return inst->cflip;
+}
+
 static LRESULT compress(struct instance *inst, ICCOMPRESS *c)
 {
 	const BITMAPINFOHEADER *in = c->lpbiInput;
@@ -416,6 +448,10 @@ static LRESULT compress(struct instance *inst, ICCOMPRESS *c)
 	BYTE *dst = c->lpOutput;
 	const BYTE *src = c->lpInput;
 	int key;
+
+	if (yuv_upside == 2 && in->biBitCount == 12 &&
+	    !(src = read_upside_down(inst, in, src)))
+		return ICERR_MEMORY;
 
 	if (high(8, inst, inst->cprev, c, c->lpbiInput, c->lpInput, c->lpbiOutput,
 		 c->lpOutput, c->lpdwFlags))
@@ -525,7 +561,7 @@ static LRESULT decompress(struct instance *inst, ICDECOMPRESS *d)
 	}
 	if (in->biBitCount == 12) {
 		DWORD n = frame_bytes(in), i;
-		if (yuv_upside) {
+		if (yuv_upside == 1) {
 			/* Each plane's rows bottom-up, as RGB's are. */
 			const BYTE *p = inst->dcur;
 			BYTE *q = dst;
@@ -666,21 +702,23 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		end_crash = GetEnvironmentVariableA("TESTCODEC_END_CRASH", v,
 						    sizeof(v)) == 1 && v[0] == '1';
 		overrun = GetEnvironmentVariableA("TESTCODEC_OVERRUN", v,
-						  sizeof(v)) == 1 && v[0] == '1';
+						  sizeof(v)) == 1 &&
+			  (v[0] == '1' || v[0] == '2') ? v[0] - '0' : 0;
 		empty_format = GetEnvironmentVariableA("TESTCODEC_EMPTY_FORMAT", v,
 						       sizeof(v)) == 1 && v[0] == '1';
 		no_keys = GetEnvironmentVariableA("TESTCODEC_NO_KEYS", v,
 						  sizeof(v)) == 1 && v[0] == '1';
 		align16 = GetEnvironmentVariableA("TESTCODEC_ALIGN16", v,
 						  sizeof(v)) == 1 &&
-			  (v[0] == '1' || v[0] == '2') ? v[0] - '0' : 0;
+			  v[0] >= '1' && v[0] <= '3' ? v[0] - '0' : 0;
 		begin_rgb = GetEnvironmentVariableA("TESTCODEC_BEGIN_RGB", v,
 						    sizeof(v)) == 1 && v[0] == '1';
 		yuv_upside = GetEnvironmentVariableA("TESTCODEC_YUV_UPSIDE", v,
-						     sizeof(v)) == 1 && v[0] == '1';
+						     sizeof(v)) == 1 &&
+			     (v[0] == '1' || v[0] == '2') ? v[0] - '0' : 0;
 		needs_dll = GetEnvironmentVariableA("TESTCODEC_NEEDS_DLL", v,
 						    sizeof(v)) == 1 &&
-			    v[0] >= '1' && v[0] <= '3' ? v[0] - '0' : 0;
+			    v[0] >= '1' && v[0] <= '4' ? v[0] - '0' : 0;
 		if (GetEnvironmentVariableA("TESTCODEC_CHATTY", v, sizeof(v)) == 1 &&
 		    v[0] == '1') {
 			static const char hello[] = "testcodec: hello\n";
@@ -690,7 +728,14 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		}
 		log_msg(msg);
 		check_module(hdrvr);
-		if (needs_dll && !LoadLibraryA(needs_dll == 3 ?
+		HKEY key;
+		if (needs_dll == 4) {
+			if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+					  "Software\\Seance Test\\Codec", 0,
+					  KEY_READ, &key))
+				return 0;
+			RegCloseKey(key);
+		} else if (needs_dll && !LoadLibraryA(needs_dll == 3 ?
 					       "C:\\nowhere\\zz_path.dll" :
 					       needs_dll == 2 ? "pe_missing.dll" :
 					       "zz_companion.dll"))
@@ -740,6 +785,7 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		if (inst && inst->magic == MAGIC) {
 			draw_end(inst);
 			release(inst->cprev);
+			release(inst->cflip);
 			release(inst->dcur);
 			inst->magic = 0;
 			release(inst);
@@ -869,7 +915,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 			ICCOMPRESS *c = (ICCOMPRESS *)l1;
 			volatile BYTE *end = (volatile BYTE *)c->lpOutput +
 					     max_size(c->lpbiInput);
-			for (DWORD i = 0; i < 2 * 4096 + 64; i++)
+			DWORD n = overrun == 2 ? (1u << 20) + 64 : 2 * 4096 + 64;
+			for (DWORD i = 0; i < n; i++)
 				end[i] = 0;
 		}
 		return compress(inst, (ICCOMPRESS *)l1);

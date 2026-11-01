@@ -15,6 +15,7 @@
 
 #include "common/error.h"
 #include "common/log.h"
+#include "common/noted.h"
 #include "loader/modules.h"
 #include "runtime/crash.h"
 #include "runtime/runtime.h"
@@ -598,46 +599,25 @@ fail:
 	return NULL;
 }
 
-#define MAX_MISSING 16
-
 /*
  * Per thread, so a message names only what that thread's open looked for
  * (a DllMain or DRV_LOAD runs on the thread that opens the driver).
  */
-static __thread char *missing[MAX_MISSING];	/* a ring of the last ones */
-static __thread unsigned nmissing;		/* how many ever noted */
+static __thread struct noted missing;
 
 void mod_note_missing(const char *name)
 {
-	char *copy = strdup(name);
-
-	if (!copy)
-		return;
-	free(missing[nmissing % MAX_MISSING]);
-	missing[nmissing++ % MAX_MISSING] = copy;
+	noted_add(&missing, name);
 }
 
 unsigned mod_missing_mark(void)
 {
-	return nmissing;
+	return noted_mark(&missing);
 }
 
 void mod_missing_since(unsigned mark, char *buf, size_t size)
 {
-	size_t len = 0;
-
-	buf[0] = 0;
-	if (nmissing - mark > MAX_MISSING)
-		mark = nmissing - MAX_MISSING;
-	for (unsigned i = mark; i < nmissing; i++) {
-		const char *name = missing[i % MAX_MISSING];
-		int seen = 0;
-		for (unsigned k = mark; k < i && !seen; k++)
-			seen = !strcasecmp(missing[k % MAX_MISSING], name);
-		if (!seen && len < size)
-			len += snprintf(buf + len, size - len, "%s%s",
-					len ? ", " : "", name);
-	}
+	noted_since(&missing, mark, buf, size);
 }
 
 struct module *mod_load(const char *name, struct module *importer)

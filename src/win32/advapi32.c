@@ -25,6 +25,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "common/noted.h"
 #include "vfw/registry.h"
 #include "win32/codepage.h"
 #include "win32/handle.h"
@@ -274,6 +275,56 @@ static HKEY new_handle(const char *path)
 
 /* Opening, creating, closing and deleting keys. */
 
+static __thread struct noted missing_keys;
+
+/*
+ * A software key that wasn't found, as "HKLM\Software\Vendor\Key", for
+ * reg_missing_since(); not Microsoft's own, or classes.
+ */
+static void note_missing_key(const char *path)
+{
+	static const struct {
+		const char *hive, *abbrev;
+	} hives[] = {
+		{ "HKEY_LOCAL_MACHINE\\Software\\", "HKLM" },
+		{ "HKEY_CURRENT_USER\\Software\\", "HKCU" },
+	};
+	static const char *const skip[] = {
+		"Microsoft\\", "Microsoft", "Classes\\", "Classes",
+		"Policies\\", "Policies", "Wow6432Node\\", "Wow6432Node",
+	};
+
+	for (size_t i = 0; i < sizeof(hives) / sizeof(hives[0]); i++) {
+		size_t n = strlen(hives[i].hive);
+		if (strncasecmp(path, hives[i].hive, n))
+			continue;
+		const char *rest = path + n;
+		for (size_t k = 0; k < sizeof(skip) / sizeof(skip[0]); k++) {
+			size_t m = strlen(skip[k]);
+			if (!strncasecmp(rest, skip[k], m) &&
+			    (skip[k][m - 1] == '\\' || !rest[m]))
+				return;
+		}
+		if (!*rest)
+			return;
+		char name[512];
+		snprintf(name, sizeof(name), "%s\\Software\\%s",
+			 hives[i].abbrev, rest);
+		noted_add(&missing_keys, name);
+		return;
+	}
+}
+
+unsigned reg_missing_mark(void)
+{
+	return noted_mark(&missing_keys);
+}
+
+void reg_missing_since(unsigned mark, char *buf, size_t size)
+{
+	noted_since(&missing_keys, mark, buf, size);
+}
+
 static LONG open_key(HKEY h, const char *sub, int create, DWORD options,
 		     HKEY *out, DWORD *disposition)
 {
@@ -305,6 +356,8 @@ static LONG open_key(HKEY h, const char *sub, int create, DWORD options,
 	if (!err && disposition)
 		*disposition = created ? REG_CREATED_NEW_KEY : REG_OPENED_EXISTING_KEY;
 	TRACE("Reg%sKey(%s) = %ld", create ? "Create" : "Open", path, (long)err);
+	if (err == ERROR_FILE_NOT_FOUND)
+		note_missing_key(path);
 	free(base);
 	free(path);
 	return err;

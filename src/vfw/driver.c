@@ -14,6 +14,7 @@
 #include "runtime/runtime.h"
 #include "runtime/crash.h"
 #include "vfw/driver.h"
+#include "win32/reg.h"
 
 #define MAX_DRIVERS 256
 #define HANDLE_TAG  0x5d000000u
@@ -201,29 +202,55 @@ static void unload(struct drv_module *dm, HDRVR h)
 	free(dm);
 }
 
+/* Where the records of what was looked for stand (see looked_for()). */
+struct looked_mark {
+	unsigned dlls, keys;
+};
+
+static struct looked_mark looked_mark(void)
+{
+	return (struct looked_mark){ mod_missing_mark(), reg_missing_mark() };
+}
+
+/*
+ * "; it looked for ..., which aren't here", naming the DLLs and software
+ * registry keys looked for and not found since mark, or "", for a refusal.
+ */
+static const char *looked_for(struct looked_mark mark, char *buf, size_t size)
+{
+	char names[400], keys[400];
+	size_t len = 0;
+
+	buf[0] = 0;
+	mod_missing_since(mark.dlls, names, sizeof(names));
+	reg_missing_since(mark.keys, keys, sizeof(keys));
+	if (names[0]) {
+		int one = !strchr(names, ',');
+		len = (size_t)snprintf(buf, size, "; it looked for %s, which %s "
+				       "here (add %s directory to VFW_PATH)",
+				       names, one ? "isn't" : "aren't",
+				       one ? "its" : "their");
+	}
+	if (keys[0] && len < size) {
+		int one = !strchr(keys, ',');
+		snprintf(buf + len, size - len, "; it looked for the registry "
+			 "key%s %s, which %s set: its own software (or "
+			 "hardware's) may need to be installed, or the key%s "
+			 "seeded in the registry file", one ? "" : "s", keys,
+			 one ? "isn't" : "aren't", one ? "" : "s");
+	}
+	return buf;
+}
+
 /*
  * Opens an instance of mod / proc. Takes over the module reference the
  * caller holds.
  */
-/* ", it looked for ..., which aren't here", or "", for a refusal. */
-static const char *looked_for(unsigned mark, char *buf, size_t size)
-{
-	char names[400];
-
-	mod_missing_since(mark, names, sizeof(names));
-	if (!names[0])
-		return "";
-	int one = !strchr(names, ',');
-	snprintf(buf, size, "; it looked for %s, which %s here (add %s "
-		 "directory to VFW_PATH)", names, one ? "isn't" : "aren't",
-		 one ? "its" : "their");
-	return buf;
-}
-
 static HDRVR open_instance(struct module *mod, DRIVERPROC proc,
-			   const WCHAR *alias, LPARAM lp2, unsigned mark)
+			   const WCHAR *alias, LPARAM lp2,
+			   struct looked_mark mark)
 {
-	char looked[512];
+	char looked[1024];
 	struct drv_module *dm;
 	int slot = -1, extra_ref = 0;
 
@@ -351,7 +378,7 @@ HDRVR drv_open(const char *dll, const WCHAR *alias, LPARAM lp2)
 	if (runtime_enter())
 		return NULL;
 
-	unsigned mark = mod_missing_mark();
+	struct looked_mark mark = looked_mark();
 	struct module *mod = mod_load(dll, NULL);
 	if (!mod)
 		return NULL;	/* vfw_error() names the DLL */
@@ -384,7 +411,7 @@ HDRVR drv_open_proc(DRIVERPROC proc, const WCHAR *alias, LPARAM lp2)
 	}
 	if (runtime_enter())
 		return NULL;
-	return open_instance(NULL, proc, alias, lp2, mod_missing_mark());
+	return open_instance(NULL, proc, alias, lp2, looked_mark());
 }
 
 LRESULT drv_send(HDRVR h, UINT msg, LPARAM l1, LPARAM l2)

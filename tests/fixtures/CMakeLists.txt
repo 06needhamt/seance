@@ -140,7 +140,7 @@ fixture(pe_crt pe_crt.c LIBS msvcrt OPTIONS -Wl,--disable-auto-import)
 # A small VfW codec. -fno-builtin and no loop-to-memset rewriting keep it
 # free of calls into a C runtime it doesn't link.
 fixture(testcodec testcodec.c testcodec.def testcodec.rc
-	LIBS kernel32 winmm msvfw32
+	LIBS kernel32 winmm msvfw32 advapi32
 	OPTIONS -mpreferred-stack-boundary=2 -fno-builtin
 		-fno-tree-loop-distribute-patterns)
 

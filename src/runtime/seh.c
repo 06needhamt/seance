@@ -31,6 +31,7 @@
 #include <string.h>
 #include <sys/ucontext.h>
 
+#include "common/log.h"
 #include "loader/modules.h"
 #include "runtime/crash.h"
 #include "runtime/seh.h"
@@ -228,6 +229,31 @@ static void walk_chain(struct win_teb *teb, EXCEPTION_RECORD *rec, CONTEXT *ctx,
 	}
 }
 
+/*
+ * With VFW_TRACE: each exception as it is dispatched, so one a DLL catches
+ * itself (and turns into an error code) can be seen.
+ */
+static void trace_exception(const EXCEPTION_RECORD *rec, const char *how)
+{
+	char where[160];
+
+	if (!vfw_trace_enabled)
+		return;
+	/* Not waiting for the loader lock: its holder may wait on us. */
+	if (!mod_describe_address_try(rec->ExceptionAddress, where,
+				      sizeof(where)))
+		snprintf(where, sizeof(where), "%p", rec->ExceptionAddress);
+	if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
+	    rec->NumberParameters >= 2)
+		TRACE("exception 0x%08lX (%s) at %s: %s %#lx",
+		      (unsigned long)rec->ExceptionCode, how, where,
+		      rec->ExceptionInformation[0] ? "writing" : "reading",
+		      (unsigned long)rec->ExceptionInformation[1]);
+	else
+		TRACE("exception 0x%08lX (%s) at %s",
+		      (unsigned long)rec->ExceptionCode, how, where);
+}
+
 static void report_unhandled_exception(const EXCEPTION_RECORD *rec)
 {
 	char where[160], line[256];
@@ -251,6 +277,7 @@ static void __attribute__((noreturn)) seh_run_chain(void)
 	CONTEXT ctx = pending.ctx;
 	int level = dispatch_begin((uintptr_t)__builtin_frame_address(0));
 
+	trace_exception(&rec, "fault");
 	if (level >= 0) {
 		walk_chain(teb, &rec, &ctx, level);
 		nlive = level;
@@ -346,6 +373,7 @@ void WINAPI seh_RaiseException(DWORD code, DWORD flags, DWORD nargs,
 
 	capture_context(&ctx);
 	ctx.Eip = (DWORD)(uintptr_t)rec.ExceptionAddress;
+	trace_exception(&rec, "raised");
 
 	int level = teb ? dispatch_begin((uintptr_t)__builtin_frame_address(0)) : -1;
 	if (level >= 0) {

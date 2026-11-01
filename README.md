@@ -639,7 +639,10 @@ isn't. When a codec takes no format at the input's size, `encode` says
 which nearby size it does take, and `--pad <n>` (repeating the last row
 and column) or `--crop <n>` (dropping the bottom and right edges) makes
 the picture a multiple of n wide and high (2, 4, ... 256). For a codec
-that only takes certain sizes it names one to resize to.
+that only takes certain sizes (ADV601 at 640x480, say) it names one, and
+`--scale <WxH>` resizes the picture to it: each pixel is a weighted
+average of the input around it, linear when enlarging and over the whole
+area it covers when shrinking (up to 30 times smaller).
 
 Frames go to the codec as they are if it takes them
 (`ICM_COMPRESS_QUERY`); otherwise they are converted to the first standard
@@ -783,6 +786,36 @@ It asserts nothing about any particular codec; it fails only when the
 harness can't parse a file, or crashes or hangs on one.
 
 ```sh
+build/seance sweep ~/codecs --markdown report.md --tsv today.tsv
+build/seance sweep ~/codecs --compare yesterday.tsv   # exit 1 if worse
+```
+
+`sweep` goes further: it probes each codec in the directories (or files)
+given, encodes a test clip with it and decodes the result back, each
+step in a process of its own, so a codec that crashes or hangs takes
+only that step with it. The clip is a 320x240 test pattern (`--size`,
+`--frames`) drawn in RGB, so RGB codecs can hold its colours too, or a
+video given with `-i`. It reports for each DLL what it is (VfW, DirectShow,
+DMO or ACM, and its FOURCC or roles), how far it got (`round-trip`,
+`encodes`, `decoder` for a decoder with nothing here to decode, `fails`,
+`not-codec`, `crash` or `hang`), the PSNR of the round trip against what
+the codec was given, its bit rate, and the message it stopped with:
+- A codec that names a size it takes (`add --pad 16`, `add --scale
+  640x480`) is tried again at that size, and the PSNR is measured at it.
+- An ACM driver is given 16-bit PCM, in each layout from 8 kHz mono to
+  48 kHz stereo until it takes one, for each format tag it encodes to
+  until one works.
+- An encoder whose DLL can't decode its own output is decoded by
+  whatever codec here does (`decode auto`).
+
+`--markdown` writes the results as a table and `--tsv` as tab-separated
+values; `--compare` with an earlier sweep's TSV lists what changed, and
+the sweep exits 1 if any codec got worse (a worse result, or 0.5 dB less).
+Each step gets `VFW_TIMEOUT` (`--timeout`, 30 seconds), and the rest of
+the environment (`VFW_ROOT`, the registry) as it is. `--keep <dir>` keeps
+the files made.
+
+```sh
 tests/audio_codecs.sh build/seance LAVAudio.ax /tmp/work
 ```
 
@@ -887,7 +920,7 @@ decodes below 40 dB.
 | `tests/abi/` | ABI cross-check against the mingw-w64 headers |
 | `tests/validate_media.sh` | Cross-check of the AVI and image code against FFmpeg |
 | `tests/smoke.sh` | A quick run of every CLI command |
-| `tests/samples.sh` | `info` and `probe` over a directory of codec DLLs |
+| `tests/samples.sh` | `info` and `probe` over a directory of codec DLLs (`seance sweep` also encodes and decodes) |
 | `cmake/` | The mingw-w64 toolchain file for the fixtures, and build helpers |
 | `docs/` | Implementation plan |
 
