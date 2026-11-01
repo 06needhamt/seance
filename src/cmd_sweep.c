@@ -161,7 +161,9 @@ static int run(const struct sweep *s, const char *const *args,
 					 O_WRONLY | O_CREAT | O_TRUNC, 0644);
 	posix_spawn_file_actions_addopen(&fa, 2, err,
 					 O_WRONLY | O_CREAT | O_TRUNC, 0644);
-	int r = posix_spawn(&pid, argv[0], &fa, NULL, argv, environ);
+	/* An emulator may be named bare (qemu-i386), found on PATH. */
+	int r = (s->nemu ? posix_spawnp : posix_spawn)(&pid, argv[0], &fa,
+						       NULL, argv, environ);
 	posix_spawn_file_actions_destroy(&fa);
 	if (r) {
 		fprintf(stderr, "seance: sweep: can't run %s: %s\n", argv[0],
@@ -655,10 +657,6 @@ static void sweep_video(struct sweep *s, size_t idx, const char *dll,
 	if (by_auto && !r->note[0])
 		snprintf(r->note, sizeof(r->note), "decoded by another codec "
 			 "here (decode auto): its own DLL doesn't decode it");
-	if (!s->keep) {
-		unlink(avi);
-		unlink(y4m);
-	}
 }
 
 /*
@@ -726,10 +724,6 @@ static void sweep_audio(struct sweep *s, size_t idx, const char *dll,
 	wav_describe(dec, fd, sizeof(fd));
 	r->status = ST_ROUND_TRIP;
 	snprintf(r->note, sizeof(r->note), "%s -> %s -> %s", from, fe, fd);
-	if (!s->keep) {
-		unlink(enc);
-		unlink(dec);
-	}
 }
 
 static void sweep_one(struct sweep *s, const char *dll, struct result *r)
@@ -774,11 +768,17 @@ static void sweep_one(struct sweep *s, const char *dll, struct result *r)
 		snprintf(r->note, sizeof(r->note), "no video or audio codec");
 	}
 done:
+	/* What every step made, however far it got. */
 	if (!s->keep) {
+		static const char *const made[] = {
+			"out", "avi", "y4m", "enc.wav", "dec.wav",
+		};
 		unlink(out);
 		unlink(err);
-		work_path(s, idx, "out", out, sizeof(out));
-		unlink(out);
+		for (size_t i = 0; i < sizeof(made) / sizeof(made[0]); i++) {
+			work_path(s, idx, made[i], out, sizeof(out));
+			unlink(out);
+		}
 	}
 }
 

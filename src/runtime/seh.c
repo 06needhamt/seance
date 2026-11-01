@@ -239,7 +239,10 @@ static void trace_exception(const EXCEPTION_RECORD *rec, const char *how)
 
 	if (!vfw_trace_enabled)
 		return;
-	mod_describe_address(rec->ExceptionAddress, where, sizeof(where));
+	/* Not waiting for the loader lock: its holder may wait on us. */
+	if (!mod_describe_address_try(rec->ExceptionAddress, where,
+				      sizeof(where)))
+		snprintf(where, sizeof(where), "%p", rec->ExceptionAddress);
 	if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
 	    rec->NumberParameters >= 2)
 		TRACE("exception 0x%08lX (%s) at %s: %s %#lx",

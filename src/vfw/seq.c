@@ -100,6 +100,8 @@ static void free_buffers(COMPVARS *pc)
  * so writing into it can be noticed and said.
  */
 #define HEADROOM_FILL 0xA5
+/* Watched past the room too, so a write just beyond it isn't let through. */
+#define HEADROOM_WATCH 64
 
 static int alloc_out(COMPVARS *pc, struct seq *s, DWORD size)
 {
@@ -111,8 +113,9 @@ static int alloc_out(COMPVARS *pc, struct seq *s, DWORD size)
 		room = 512u << 10;
 	if (room > (4u << 20))
 		room = 4u << 20;
-	if (size > UINT32_MAX - room ||
-	    !(buf = guard_alloc((size_t)size + room, "output buffer")))
+	if (size > UINT32_MAX - room - HEADROOM_WATCH ||
+	    !(buf = guard_alloc((size_t)size + room + HEADROOM_WATCH,
+				"output buffer")))
 		return -1;
 	guard_free(pc->lpBitsOut);
 	pc->lpBitsOut = buf;
@@ -299,7 +302,7 @@ LPVOID STUB_WINAPI ic_seq_frame(COMPVARS *pc, UINT flags, LPVOID bits,
 		icflags = ICCOMPRESS_KEYFRAME;
 
 	BYTE *room = (BYTE *)pc->lpBitsOut + s->max_frame;
-	memset(room, HEADROOM_FILL, s->headroom);
+	memset(room, HEADROOM_FILL, s->headroom + HEADROOM_WATCH);
 	out->biSizeImage = s->max_frame;
 	DWORD r = ic_compress(pc->hic, icflags, out, pc->lpBitsOut,
 			      &pc->lpbiIn->bmiHeader, bits, &ckid, &oflags,
@@ -312,7 +315,7 @@ LPVOID STUB_WINAPI ic_seq_frame(COMPVARS *pc, UINT flags, LPVOID bits,
 			      icerr_name((LRESULT)(LONG)r, err));
 		return NULL;
 	}
-	DWORD past = s->headroom;
+	DWORD past = s->headroom + HEADROOM_WATCH;
 	while (past && room[past - 1] == HEADROOM_FILL)
 		past--;
 	if (out->biSizeImage > s->max_frame &&

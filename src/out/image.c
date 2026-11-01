@@ -848,6 +848,8 @@ static void taps_free(struct taps *t)
 {
 	free(t->first);
 	free(t->weight);
+	t->first = NULL;
+	t->weight = NULL;
 }
 
 static int taps_make(struct taps *t, int in, int out)
