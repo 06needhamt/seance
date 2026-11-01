@@ -470,6 +470,20 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	$emu "$harness" avi "$work/crop.avi" | grep -q "16x16, 24 bits, 'TST0'"
 	fails $emu "$harness" encode "$fixtures/testcodec.dll" "$work/h24.y4m" \
 		-o "$work/x.avi" --pad 3
+	# One that takes a single size names it, and --scale resizes to it.
+	VFW_ENV_TESTCODEC_ALIGN16=3 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/h24.y4m" -o "$work/x.avi" 2>&1 |
+		grep -q "at 16x24, but takes 320x240: add --scale 320x240"
+	VFW_ENV_TESTCODEC_ALIGN16=3 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/h24.y4m" -o "$work/scale.avi" \
+		--scale 320x240 2>/dev/null
+	$emu "$harness" avi "$work/scale.avi" | grep -q "320x240, 12 bits, 'TST0'"
+	VFW_ENV_TESTCODEC_ALIGN16=3 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/h24.bgr" --input-format BGR24 \
+		--size 16x24 -o "$work/scale.avi" --scale 320x240 2>/dev/null
+	$emu "$harness" avi "$work/scale.avi" | grep -q "320x240, 24 bits, 'TST0'"
+	fails $emu "$harness" encode "$fixtures/testcodec.dll" "$work/h24.y4m" \
+		-o "$work/x.avi" --scale 320x240 --pad 16
 	# One that writes no output format is refused, not written as 0x0;
 	# one that flags no keyframes still gets its first frame as one.
 	VFW_ENV_TESTCODEC_EMPTY_FORMAT=1 $emu "$harness" encode \

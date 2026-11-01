@@ -51,10 +51,11 @@ struct source {
 	int pattern;
 	unsigned long first;
 
-	/* Padding or cropping: frames read, decoded, resized and packed. */
+	/* Padding, cropping or scaling: frames read, decoded, resized and
+	 * packed. */
 	struct image_conv *adj_from;	/* the frames as read */
 	struct image_conv *adj_to;	/* the new size's format */
-	int adj_i420, in_w, in_h, out_w, out_h;
+	int adj_i420, adj_scale, in_w, in_h, out_w, out_h;
 	BYTE *adj_pic, *adj_mid, *adj_out;	/* decoded, resized, packed */
 	size_t adj_size;
 };
@@ -553,26 +554,46 @@ static int read_avi(struct source *s)
 	return 0;
 }
 
-/* Sets a source up to pad (or crop) its frames to multiples of n. */
-static int adjust_open(struct source *s, int n, int pad)
+/*
+ * Sets a source up to pad (or crop) its frames to multiples of n, or, with
+ * n 0, to scale them to sw x sh.
+ */
+static int adjust_open(struct source *s, int n, int pad, int sw, int sh)
 {
 	const BITMAPINFOHEADER *b = &s->fmt.bih;
 	DWORD c = b->biCompression;
 	int w = b->biWidth, h = b->biHeight < 0 ? -b->biHeight : b->biHeight;
 
-	if (n < 2 || n > 256 || (n & (n - 1))) {
-		vfw_set_error("--%s takes 2, 4, 8, ... 256, not %d",
-			      pad ? "pad" : "crop", n);
-		return -1;
-	}
 	s->in_w = w;
 	s->in_h = h;
-	s->out_w = pad ? (w + n - 1) / n * n : w / n * n;
-	s->out_h = pad ? (h + n - 1) / n * n : h / n * n;
-	if (!s->out_w || !s->out_h) {
-		vfw_set_error("%s: %dx%d is smaller than %d: nothing is left to "
-			      "crop to", s->path, w, h, n);
-		return -1;
+	if (!n) {
+		if (sw < 1 || sh < 1 || sw > 16384 || sh > 16384) {
+			vfw_set_error("--scale takes a size from 1x1 to "
+				      "16384x16384, not %dx%d", sw, sh);
+			return -1;
+		}
+		if (w / sw > 30 || h / sh > 30) {
+			vfw_set_error("%s: can't scale %dx%d down to %dx%d (more "
+				      "than 30 times smaller)", s->path, w, h,
+				      sw, sh);
+			return -1;
+		}
+		s->adj_scale = 1;
+		s->out_w = sw;
+		s->out_h = sh;
+	} else {
+		if (n < 2 || n > 256 || (n & (n - 1))) {
+			vfw_set_error("--%s takes 2, 4, 8, ... 256, not %d",
+				      pad ? "pad" : "crop", n);
+			return -1;
+		}
+		s->out_w = pad ? (w + n - 1) / n * n : w / n * n;
+		s->out_h = pad ? (h + n - 1) / n * n : h / n * n;
+		if (!s->out_w || !s->out_h) {
+			vfw_set_error("%s: %dx%d is smaller than %d: nothing is "
+				      "left to crop to", s->path, w, h, n);
+			return -1;
+		}
 	}
 	/* YUV stays YUV; RGB, palettes and RLE become RGB24. */
 	s->adj_i420 = c != BI_RGB && c != BI_BITFIELDS && c != BI_RLE8 &&
@@ -676,8 +697,13 @@ struct source *source_open(const char *path, const struct source_options *o)
 		r = -1;
 	if (!r && s->kind != SOURCE_BMP && grow(&s->buf, &s->cap, s->frame_size))
 		r = -1;
-	if (!r && (o->pad || o->crop))
-		r = adjust_open(s, o->pad ? o->pad : o->crop, !!o->pad);
+	if (!r && (o->pad || o->crop) && (o->scale_w || o->scale_h)) {
+		vfw_set_error("--scale can't be given with --pad or --crop");
+		r = -1;
+	} else if (!r && (o->pad || o->crop))
+		r = adjust_open(s, o->pad ? o->pad : o->crop, !!o->pad, 0, 0);
+	else if (!r && (o->scale_w || o->scale_h))
+		r = adjust_open(s, 0, 0, o->scale_w, o->scale_h);
 	if (r) {
 		source_close(s);
 		return NULL;
@@ -737,9 +763,10 @@ long source_frames(const struct source *s)
 static int read_frame(struct source *s, const BYTE **frame, size_t *len);
 
 /*
- * Each frame decoded to I420 or BGR24 at the size read, then each pixel
- * of the new size taken from the nearest one there is (so padding repeats
- * the last row and column), then packed in the new size's format.
+ * Each frame decoded to I420 or BGR24 at the size read, then resized and
+ * packed in the new size's format. Padding and cropping take each pixel of
+ * the new size from the nearest one there is (so padding repeats the last
+ * row and column); scaling resamples each plane.
  */
 int source_read(struct source *s, const BYTE **frame, size_t *len)
 {
@@ -754,7 +781,22 @@ int source_read(struct source *s, const BYTE **frame, size_t *len)
 		return -1;
 	BYTE *dst = s->adj_mid;
 	const BYTE *src = s->adj_pic;
-	if (s->adj_i420) {
+	if (s->adj_scale && s->adj_i420) {
+		int icw = (s->in_w + 1) / 2, ich = (s->in_h + 1) / 2;
+		int ocw = (s->out_w + 1) / 2, och = (s->out_h + 1) / 2;
+		const BYTE *su = src + (size_t)s->in_w * s->in_h;
+		BYTE *du = dst + (size_t)s->out_w * s->out_h;
+		if (image_resample(src, s->in_w, s->in_h, dst, s->out_w,
+				   s->out_h, 1) ||
+		    image_resample(su, icw, ich, du, ocw, och, 1) ||
+		    image_resample(su + (size_t)icw * ich, icw, ich,
+				   du + (size_t)ocw * och, ocw, och, 1))
+			return -1;
+	} else if (s->adj_scale) {
+		if (image_resample(src, s->in_w, s->in_h, dst, s->out_w,
+				   s->out_h, 3))
+			return -1;
+	} else if (s->adj_i420) {
 		/* Y, then U and V at half size (rounded up). */
 		int planes[3][4] = {
 			{ s->in_w, s->in_h, s->out_w, s->out_h },

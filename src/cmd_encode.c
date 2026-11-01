@@ -59,6 +59,8 @@ static int usage(void)
 		"                       ... 256) wide and high, repeating its last\n"
 		"                       row and column, for codecs that want that\n"
 		"  --crop <n>           crop it to a multiple of n instead\n"
+		"  --scale <WxH>        resize the picture to W x H, for codecs\n"
+		"                       that take only certain sizes\n"
 		"  --start <pos>        first input frame, or a time (2.5s)\n"
 		"  --frames <n>         number of frames (default: all)\n"
 		"  --duration <len>     how much to encode, as frames or a time\n"
@@ -215,8 +217,8 @@ static void size_hint(HIC hic, int (*takes)(HIC, LONG, LONG), LONG w, LONG h,
 			if ((cw >= w && ch >= h) != fits || (cw == w && ch == h) ||
 			    !takes(hic, cw, ch))
 				continue;
-			snprintf(out, size, ", but takes %ldx%ld: resize the input "
-				 "to that", (long)cw, (long)ch);
+			snprintf(out, size, ", but takes %ldx%ld: add --scale "
+				 "%ldx%ld", (long)cw, (long)ch, (long)cw, (long)ch);
 			return;
 		}
 }
@@ -849,6 +851,12 @@ int cmd_encode(int argc, char **argv)
 				so.pad = (int)n;
 			else
 				so.crop = (int)n;
+		} else if (!strcmp(a, "--scale") && v) {
+			LONG w, h;
+			if (cli_parse_size(a, argv[++i], &w, &h))
+				return 2;
+			so.scale_w = (int)w;
+			so.scale_h = (int)h;
 		} else if (!strcmp(a, "--rate") && v) {
 			if (cli_parse_rate(a, argv[++i], &rate, &scale))
 				return 2;
@@ -908,6 +916,11 @@ int cmd_encode(int argc, char **argv)
 		fprintf(stderr, "seance: --quality is 0 to %d\n", ICQUALITY_HIGH);
 		return 2;
 	}
+	if (so.scale_w && (so.pad || so.crop)) {
+		fprintf(stderr, "seance: --scale can't be given with --pad or "
+			"--crop\n");
+		return 2;
+	}
 	if (so.raw_format && !so.width) {
 		fprintf(stderr, "seance: --input-format needs --size\n");
 		return 2;
@@ -920,10 +933,10 @@ int cmd_encode(int argc, char **argv)
 				   audio_only_kinds, target, clsid_arg, 1)) {
 		if (fourcc || forced || keyint != (unsigned long)-1 || rate ||
 		    count != (unsigned long)-1 || so.raw_format || wo.force_odml ||
-		    so.pad || so.crop) {
+		    so.pad || so.crop || so.scale_w) {
 			fprintf(stderr, "seance: --fourcc, --codec-input, --keyint, "
-				"--rate, --frames, --input-format, --odml, --pad "
-				"and --crop are for video\n");
+				"--rate, --frames, --input-format, --odml, --pad, "
+				"--crop and --scale are for video\n");
 			return 2;
 		}
 		if (clsid_arg && parse_clsid(clsid_arg, &job.clsid_value)) {

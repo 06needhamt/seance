@@ -72,7 +72,9 @@
  *                         zz_nosuch.dll is what's missing; set to 3, by
  *                         a full path to no file (C:\nowhere\zz_path.dll)
  * TESTCODEC_ALIGN16=2 takes any height when asked, but begins only with
- * a multiple of 16 (vp31vfw.dll, vp4vfw.dll). TESTCODEC_DECODE_ONLY=2
+ * a multiple of 16 (vp31vfw.dll, vp4vfw.dll); TESTCODEC_ALIGN16=3 takes
+ * only 320x240, as ones that take a few fixed sizes (ADV601.dll at 640x480,
+ * DNxHD) do. TESTCODEC_DECODE_ONLY=2
  * opens only as 'TST0', and only to decompress (xanlib.dll, as 'XXAN').
  * With TESTCODEC_LATESIZE=1 it only knows how big a frame can get once
  * ICM_COMPRESS_BEGIN has been sent, and says 16 bytes before (in
@@ -276,6 +278,8 @@ static int ok_yuv(const BITMAPINFOHEADER *b)
 static int ok_input(const BITMAPINFOHEADER *b)
 {
 	if (align16 == 1 && b && abs_height(b) % 16)
+		return 0;
+	if (align16 == 3 && b && (b->biWidth != 320 || abs_height(b) != 240))
 		return 0;
 	return ok_rgb(b) || ok_yuv(b);
 }
@@ -673,7 +677,7 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 						  sizeof(v)) == 1 && v[0] == '1';
 		align16 = GetEnvironmentVariableA("TESTCODEC_ALIGN16", v,
 						  sizeof(v)) == 1 &&
-			  (v[0] == '1' || v[0] == '2') ? v[0] - '0' : 0;
+			  v[0] >= '1' && v[0] <= '3' ? v[0] - '0' : 0;
 		begin_rgb = GetEnvironmentVariableA("TESTCODEC_BEGIN_RGB", v,
 						    sizeof(v)) == 1 && v[0] == '1';
 		yuv_upside = GetEnvironmentVariableA("TESTCODEC_YUV_UPSIDE", v,

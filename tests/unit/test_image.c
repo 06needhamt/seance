@@ -816,6 +816,55 @@ static void test_pack(void)
 	image_conv_free(c);
 }
 
+/* image_resample: flat stays flat, sizes, averaging, ramps, edges. */
+static void test_resample(void)
+{
+	BYTE src[64 * 48 * 3], dst[128 * 96 * 3];
+
+	/* A flat picture stays flat, larger and smaller, and in each channel. */
+	for (size_t i = 0; i < sizeof(src); i++)
+		src[i] = (BYTE)(i % 3 == 0 ? 10 : i % 3 == 1 ? 128 : 250);
+	int sizes[][2] = { { 128, 96 }, { 31, 17 }, { 3, 2 }, { 64, 48 },
+			   { 100, 7 } };
+	for (size_t k = 0; k < sizeof(sizes) / sizeof(sizes[0]); k++) {
+		int ow = sizes[k][0], oh = sizes[k][1], flat = 1;
+		CHECK_EQ(image_resample(src, 64, 48, dst, ow, oh, 3), 0);
+		for (int i = 0; i < ow * oh * 3; i++)
+			flat &= dst[i] == src[i % 3];
+		CHECK(flat);
+	}
+
+	/* Halving a checkerboard averages it to grey. */
+	BYTE *p = src;
+	for (int y = 0; y < 48; y++)
+		for (int x = 0; x < 64; x++)
+			*p++ = (x + y) & 1 ? 200 : 0;
+	CHECK_EQ(image_resample(src, 64, 48, dst, 32, 24, 1), 0);
+	int grey = 1;
+	for (int i = 0; i < 32 * 24; i++)
+		grey &= dst[i] >= 90 && dst[i] <= 110;
+	CHECK(grey);
+
+	/* A ramp across stays a ramp: rising, from near 0 to near 252. */
+	for (int y = 0; y < 48; y++)
+		for (int x = 0; x < 64; x++)
+			src[y * 64 + x] = (BYTE)(x * 4);
+	CHECK_EQ(image_resample(src, 64, 48, dst, 128, 10, 1), 0);
+	int rising = 1;
+	for (int y = 0; y < 10; y++)
+		for (int x = 1; x < 128; x++)
+			rising &= dst[y * 128 + x] >= dst[y * 128 + x - 1];
+	CHECK(rising);
+	CHECK(dst[0] <= 2);
+	CHECK(dst[127] >= 250);
+
+	/* The same size is a copy; nothing, or far too small, is refused. */
+	CHECK_EQ(image_resample(src, 64, 48, dst, 64, 48, 1), 0);
+	CHECK(!memcmp(src, dst, 64 * 48));
+	CHECK_EQ(image_resample(src, 64, 48, dst, 0, 48, 1), -1);
+	CHECK_EQ(image_resample(src, 64, 48, dst, 2, 1, 1), -1);
+}
+
 int main(void)
 {
 	setup_dir();
@@ -828,6 +877,7 @@ int main(void)
 	test_bmp_paths();
 	test_outputs();
 	test_pack();
+	test_resample();
 	if (!keep)
 		rmdir(dir);
 	return test_summary("test_image");

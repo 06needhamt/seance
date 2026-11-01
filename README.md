@@ -639,7 +639,10 @@ isn't. When a codec takes no format at the input's size, `encode` says
 which nearby size it does take, and `--pad <n>` (repeating the last row
 and column) or `--crop <n>` (dropping the bottom and right edges) makes
 the picture a multiple of n wide and high (2, 4, ... 256). For a codec
-that only takes certain sizes it names one to resize to.
+that only takes certain sizes (ADV601 at 640x480, say) it names one, and
+`--scale <WxH>` resizes the picture to it: each pixel is a weighted
+average of the input around it, linear when enlarging and over the whole
+area it covers when shrinking (up to 30 times smaller).
 
 Frames go to the codec as they are if it takes them
 (`ICM_COMPRESS_QUERY`); otherwise they are converted to the first standard
