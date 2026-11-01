@@ -315,16 +315,24 @@ LPVOID STUB_WINAPI ic_seq_frame(COMPVARS *pc, UINT flags, LPVOID bits,
 			      icerr_name((LRESULT)(LONG)r, err));
 		return NULL;
 	}
-	DWORD past = s->headroom + HEADROOM_WATCH;
-	while (past && room[past - 1] == HEADROOM_FILL)
-		past--;
-	if (out->biSizeImage > s->max_frame &&
-	    out->biSizeImage - s->max_frame > past)
-		past = out->biSizeImage - s->max_frame;
-	if (past > s->headroom) {
+	DWORD written = s->headroom + HEADROOM_WATCH;
+	while (written && room[written - 1] == HEADROOM_FILL)
+		written--;
+	DWORD reported = out->biSizeImage > s->max_frame ?
+			 out->biSizeImage - s->max_frame : 0;
+	DWORD past = reported > written ? reported : written;
+	if (reported > s->headroom) {
 		vfw_set_error("ICM_COMPRESS, frame %ld: the codec reports %lu "
 			      "bytes, more than the %lu it said it needs at most",
 			      (long)pc->lFrame, (unsigned long)out->biSizeImage,
+			      (unsigned long)s->max_frame);
+		return NULL;
+	}
+	if (written > s->headroom) {
+		vfw_set_error("ICM_COMPRESS, frame %ld: the codec wrote more than "
+			      "%lu bytes past the %lu it said a frame takes at "
+			      "most, beyond the room left for that",
+			      (long)pc->lFrame, (unsigned long)s->headroom,
 			      (unsigned long)s->max_frame);
 		return NULL;
 	}

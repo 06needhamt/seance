@@ -140,8 +140,49 @@ static void test_audio_or_video(void)
 	rmdir(dir);
 }
 
+/* cli_flip_yuv turns rows over whatever their width, I420 and YUY2. */
+static void test_flip_yuv(void)
+{
+	/* YUY2 rows of 18000 bytes, wider than its 16 KB of scratch. */
+	BITMAPINFOHEADER b = { .biSize = sizeof(b), .biWidth = 9000,
+			       .biHeight = 3, .biPlanes = 1, .biBitCount = 16,
+			       .biCompression = mmioFOURCC('Y', 'U', 'Y', '2') };
+	size_t row = 18000;
+	BYTE *p = malloc(row * 3);
+	CHECK(p != NULL);
+	if (!p)
+		return;
+	for (size_t i = 0; i < row * 3; i++)
+		p[i] = (BYTE)(i / row * 50 + i % row % 7);
+	cli_flip_yuv(&b, p);
+	int ok = 1;
+	for (size_t i = 0; i < row * 3; i++)
+		ok &= p[i] == (BYTE)((2 - i / row) * 50 + i % row % 7);
+	CHECK(ok);
+	free(p);
+
+	/* I420, 4x4: Y rows and each chroma plane's rows turned over. */
+	BYTE q[24], want[24];
+	BITMAPINFOHEADER c = { .biSize = sizeof(c), .biWidth = 4,
+			       .biHeight = 4, .biPlanes = 1, .biBitCount = 12,
+			       .biCompression = mmioFOURCC('I', '4', '2', '0') };
+	for (int i = 0; i < 24; i++)
+		q[i] = (BYTE)i;
+	for (int y = 0; y < 4; y++)
+		for (int x = 0; x < 4; x++)
+			want[y * 4 + x] = (BYTE)((3 - y) * 4 + x);
+	for (int k = 0; k < 2; k++)
+		for (int y = 0; y < 2; y++)
+			for (int x = 0; x < 2; x++)
+				want[16 + k * 4 + y * 2 + x] =
+					(BYTE)(16 + k * 4 + (1 - y) * 2 + x);
+	cli_flip_yuv(&c, q);
+	CHECK(!memcmp(q, want, sizeof(q)));
+}
+
 int main(void)
 {
+	test_flip_yuv();
 	test_counts_sizes_rates();
 	test_positions();
 	/* Last: it skips the rest without the fixtures. */

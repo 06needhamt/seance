@@ -600,15 +600,17 @@ void cli_flip_yuv(const BITMAPINFOHEADER *b, BYTE *p)
 		planes[0].rows = h;
 	}
 	for (int k = 0; k < n; k++) {
-		LONG s = planes[k].stride;
-		if (s > (LONG)sizeof(tmp))
-			return;
+		size_t s = (size_t)planes[k].stride;
 		for (LONG y = 0; y < planes[k].rows / 2; y++) {
 			BYTE *a = planes[k].base + y * s;
 			BYTE *z = planes[k].base + (planes[k].rows - 1 - y) * s;
-			memcpy(tmp, a, s);
-			memcpy(a, z, s);
-			memcpy(z, tmp, s);
+			/* A row at a time through tmp, in pieces if wider. */
+			for (size_t off = 0; off < s; off += sizeof(tmp)) {
+				size_t m = s - off < sizeof(tmp) ? s - off : sizeof(tmp);
+				memcpy(tmp, a + off, m);
+				memcpy(a + off, z + off, m);
+				memcpy(z + off, tmp, m);
+			}
 		}
 	}
 }
