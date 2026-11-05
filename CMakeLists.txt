@@ -13,6 +13,8 @@
 #   VFW_REQUIRE_FFMPEG  fail instead of skipping the FFmpeg checks
 #   VFW_SANITIZE        build with AddressSanitizer and UBSan
 #   VFW_MINGW_PREFIX    the mingw-w64 tool prefix (i686-w64-mingw32-)
+#   VFW_REQUIRE_MINGW64 fail instead of skipping the 64-bit fixture DLLs
+#   VFW_MINGW64_PREFIX  the 64-bit mingw-w64 prefix (x86_64-w64-mingw32-)
 #   VFW_SAMPLES_DIR     codec DLLs for the samples test (info and probe)
 #   VFW_HOST_ARCH       the host architecture, if detecting it goes wrong
 #
@@ -41,9 +43,12 @@ string(REPLACE ";" " " vfw_emulator "${CMAKE_CROSSCOMPILING_EMULATOR}")
 
 option(VFW_REQUIRE_MINGW "Fail if mingw-w64 is missing" OFF)
 option(VFW_REQUIRE_FFMPEG "Fail the media checks if FFmpeg is missing" OFF)
+option(VFW_REQUIRE_MINGW64 "Fail if the 64-bit mingw-w64 is missing" OFF)
 option(VFW_SANITIZE "Build with AddressSanitizer and UBSan" OFF)
 set(VFW_MINGW_PREFIX "i686-w64-mingw32-" CACHE STRING
 	"Prefix of the mingw-w64 cross tools")
+set(VFW_MINGW64_PREFIX "x86_64-w64-mingw32-" CACHE STRING
+	"Prefix of the 64-bit mingw-w64 cross tools")
 set(VFW_SAMPLES_DIR "" CACHE PATH
 	"A directory of codec DLLs to run info and probe over (the samples test)")
 
@@ -111,6 +116,29 @@ else()
 		"tests and the ABI check will be skipped")
 endif()
 
+# The 64-bit (x86-64, PE32+) fixture DLLs, from the same sources.
+set(VFW_FIXTURE64_DIR ${CMAKE_BINARY_DIR}/fixtures64)
+find_program(VFW_MINGW64_CC ${VFW_MINGW64_PREFIX}gcc)
+if(VFW_MINGW64_CC)
+	include(ExternalProject)
+	ExternalProject_Add(fixtures64
+		SOURCE_DIR ${PROJECT_SOURCE_DIR}/tests/fixtures
+		BINARY_DIR ${CMAKE_BINARY_DIR}/fixtures64-build
+		CMAKE_ARGS
+			-DCMAKE_TOOLCHAIN_FILE=${PROJECT_SOURCE_DIR}/cmake/mingw-x86_64.cmake
+			-DVFW_MINGW_PREFIX=${VFW_MINGW64_PREFIX}
+			-DVFW_FIXTURE_DIR=${VFW_FIXTURE64_DIR}
+		INSTALL_COMMAND ""
+		BUILD_ALWAYS ON
+		USES_TERMINAL_CONFIGURE ON
+		USES_TERMINAL_BUILD ON)
+elseif(VFW_REQUIRE_MINGW64)
+	message(FATAL_ERROR "${VFW_MINGW64_PREFIX}gcc not found (install mingw-w64)")
+else()
+	message(STATUS "${VFW_MINGW64_PREFIX}gcc not found: the 64-bit "
+		"fixture DLL tests will be skipped")
+endif()
+
 # Tests.
 
 option(BUILD_TESTING "Build the tests" ${vfw_can_run})
@@ -142,7 +170,7 @@ if(BUILD_TESTING)
 			RUNTIME_OUTPUT_DIRECTORY ${test_dir})
 		add_test(NAME ${name} COMMAND ${name})
 		set_tests_properties(${name} PROPERTIES
-			ENVIRONMENT "VFW_FIXTURES=${VFW_FIXTURE_DIR};VFW_EMULATOR=${vfw_emulator}"
+			ENVIRONMENT "VFW_FIXTURES=${VFW_FIXTURE_DIR};VFW_FIXTURES64=${VFW_FIXTURE64_DIR};VFW_EMULATOR=${vfw_emulator}"
 			LABELS unit)
 		skippable(${name} ${VFW_REQUIRE_MINGW})
 	endforeach()
@@ -212,6 +240,13 @@ if(BUILD_TESTING)
 		set_tests_properties(samples_fixtures PROPERTIES LABELS cli
 			ENVIRONMENT "VFW_EMULATOR=${vfw_emulator}")
 	endif()
+	if(VFW_MINGW64_CC)
+		add_test(NAME samples_fixtures64
+			COMMAND sh ${PROJECT_SOURCE_DIR}/tests/samples.sh
+				$<TARGET_FILE:seance> ${VFW_FIXTURE64_DIR})
+		set_tests_properties(samples_fixtures64 PROPERTIES LABELS cli
+			ENVIRONMENT "VFW_EMULATOR=${vfw_emulator}")
+	endif()
 	if(VFW_SAMPLES_DIR)
 		add_test(NAME samples
 			COMMAND sh ${PROJECT_SOURCE_DIR}/tests/samples.sh
@@ -233,6 +268,9 @@ endif()
 # running alongside the main build with their output interleaved with it.
 if(TARGET fixtures)
 	get_property(vfw_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
-	list(REMOVE_ITEM vfw_targets fixtures)
+	list(REMOVE_ITEM vfw_targets fixtures fixtures64)
 	add_dependencies(fixtures ${vfw_targets})
+	if(TARGET fixtures64)
+		add_dependencies(fixtures64 fixtures)
+	endif()
 endif()

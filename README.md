@@ -25,6 +25,10 @@ Work is split into phases; see [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION
 | 4 | AVI / Y4M I/O, `decode` and `encode` | done: AVI reader and writer, Y4M/BMP/raw input and output, `avi`, `convert`, `decode`, `encode` |
 | 5 | Hardening and CI | done: DLL memory below 2 GB, crash and hang reports, SSE/FPU fixture, fuzzing, samples run, CI |
 
+64-bit (x86-64) codecs are planned in [docs/X64_PLAN.md](docs/X64_PLAN.md).
+So far `info` reads them; running them needs the x86-64 build that plan
+describes.
+
 DirectShow video decoders and encoders (`.ax`) have phases of their own; see
 [docs/DIRECT_SHOW_PLAN.md](docs/DIRECT_SHOW_PLAN.md). They are done: the headers
 and their ABI check, a built-in quartz.dll (filter mappers, device enumerator,
@@ -75,7 +79,8 @@ most distributions enable by default.
 - CMake 3.20 or later (3.25 for the presets) and Ninja or make
 - Optional: the mingw-w64 i686 cross compiler (`mingw-w64`). It builds the
   test fixture DLLs and runs the ABI cross-check; without it those tests are
-  skipped.
+  skipped. Its x86_64 compiler (in the same Debian/Ubuntu package) builds
+  the 64-bit fixture DLLs.
 - Optional: FFmpeg (`ffmpeg`, `ffprobe`) for the media cross-checks.
 
 ```sh
@@ -126,6 +131,8 @@ Useful CMake options:
 | `VFW_REQUIRE_FFMPEG=ON` | fail instead of skipping the FFmpeg checks |
 | `VFW_SANITIZE=ON` | build with ASan and UBSan |
 | `VFW_MINGW_PREFIX=...` | the cross tools' prefix (`i686-w64-mingw32-`) |
+| `VFW_REQUIRE_MINGW64=ON` | fail instead of skipping the 64-bit fixture DLLs |
+| `VFW_MINGW64_PREFIX=...` | the 64-bit cross tools' prefix (`x86_64-w64-mingw32-`) |
 | `VFW_SAMPLES_DIR=<dir>` | add a `samples` test: `info` and `probe` over the codec DLLs in `<dir>` |
 | `VFW_HOST_ARCH=...` | the host architecture as `uname -m` spells it, if detecting it goes wrong |
 

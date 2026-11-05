@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * PE32 image format: the on-disk structures and constants the loader uses.
+ * PE32 and PE32+ image formats: the on-disk structures and constants the
+ * loader uses. The 64-bit (PE32+) structures are on-disk layouts too, so
+ * they are defined whatever the build, and an i386 harness can inspect a
+ * 64-bit image.
  */
 #ifndef VFW_WIN32_WINNT_H
 #define VFW_WIN32_WINNT_H
@@ -11,7 +14,8 @@
 #define IMAGE_DOS_SIGNATURE 0x5A4D      /* "MZ" */
 #define IMAGE_NT_SIGNATURE  0x00004550  /* "PE\0\0" */
 
-#define IMAGE_FILE_MACHINE_I386 0x014c
+#define IMAGE_FILE_MACHINE_I386  0x014c
+#define IMAGE_FILE_MACHINE_AMD64 0x8664
 
 /* IMAGE_FILE_HEADER.Characteristics. */
 #define IMAGE_FILE_RELOCS_STRIPPED     0x0001
@@ -22,6 +26,7 @@
 #define IMAGE_FILE_DLL                 0x2000
 
 #define IMAGE_NT_OPTIONAL_HDR32_MAGIC 0x10b
+#define IMAGE_NT_OPTIONAL_HDR64_MAGIC 0x20b
 
 /* IMAGE_OPTIONAL_HEADER.Subsystem. */
 #define IMAGE_SUBSYSTEM_UNKNOWN     0
@@ -30,6 +35,7 @@
 #define IMAGE_SUBSYSTEM_WINDOWS_CUI 3
 
 /* IMAGE_OPTIONAL_HEADER.DllCharacteristics. */
+#define IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA       0x0020
 #define IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE          0x0040
 #define IMAGE_DLLCHARACTERISTICS_FORCE_INTEGRITY       0x0080
 #define IMAGE_DLLCHARACTERISTICS_NX_COMPAT             0x0100
@@ -76,9 +82,12 @@
 #define IMAGE_REL_BASED_LOW      2
 #define IMAGE_REL_BASED_HIGHLOW  3
 #define IMAGE_REL_BASED_HIGHADJ  4
+#define IMAGE_REL_BASED_DIR64    10
 
 #define IMAGE_ORDINAL_FLAG32 0x80000000
 #define IMAGE_ORDINAL32(o)   ((o) & 0xffff)
+#define IMAGE_ORDINAL_FLAG64 0x8000000000000000ull
+#define IMAGE_ORDINAL64(o)   ((o) & 0xffff)
 
 #define IMAGE_RESOURCE_NAME_IS_STRING    0x80000000
 #define IMAGE_RESOURCE_DATA_IS_DIRECTORY 0x80000000
@@ -192,6 +201,52 @@ typedef struct _IMAGE_NT_HEADERS {
 	IMAGE_OPTIONAL_HEADER32 OptionalHeader;
 } IMAGE_NT_HEADERS32;
 
+/*
+ * PE32+: no BaseOfData, and ImageBase and the four stack and heap sizes are
+ * 64-bit. Windows packs these to 4 bytes (pshpack4.h), which leaves every
+ * member where natural alignment would put it but the structure 4-aligned.
+ */
+#pragma pack(push, 4)
+typedef struct _IMAGE_OPTIONAL_HEADER64 {
+	WORD Magic;
+	BYTE MajorLinkerVersion;
+	BYTE MinorLinkerVersion;
+	DWORD SizeOfCode;
+	DWORD SizeOfInitializedData;
+	DWORD SizeOfUninitializedData;
+	DWORD AddressOfEntryPoint;
+	DWORD BaseOfCode;
+	ULONGLONG ImageBase;
+	DWORD SectionAlignment;
+	DWORD FileAlignment;
+	WORD MajorOperatingSystemVersion;
+	WORD MinorOperatingSystemVersion;
+	WORD MajorImageVersion;
+	WORD MinorImageVersion;
+	WORD MajorSubsystemVersion;
+	WORD MinorSubsystemVersion;
+	DWORD Win32VersionValue;
+	DWORD SizeOfImage;
+	DWORD SizeOfHeaders;
+	DWORD CheckSum;
+	WORD Subsystem;
+	WORD DllCharacteristics;
+	ULONGLONG SizeOfStackReserve;
+	ULONGLONG SizeOfStackCommit;
+	ULONGLONG SizeOfHeapReserve;
+	ULONGLONG SizeOfHeapCommit;
+	DWORD LoaderFlags;
+	DWORD NumberOfRvaAndSizes;
+	IMAGE_DATA_DIRECTORY DataDirectory[IMAGE_NUMBEROF_DIRECTORY_ENTRIES];
+} IMAGE_OPTIONAL_HEADER64;
+
+typedef struct _IMAGE_NT_HEADERS64 {
+	DWORD Signature;
+	IMAGE_FILE_HEADER FileHeader;
+	IMAGE_OPTIONAL_HEADER64 OptionalHeader;
+} IMAGE_NT_HEADERS64;
+#pragma pack(pop)
+
 typedef struct _IMAGE_SECTION_HEADER {
 	BYTE Name[IMAGE_SIZEOF_SHORT_NAME];
 	union {
@@ -242,6 +297,15 @@ typedef struct _IMAGE_THUNK_DATA32 {
 	} u1;
 } IMAGE_THUNK_DATA32;
 
+typedef struct _IMAGE_THUNK_DATA64 {
+	union {
+		ULONGLONG ForwarderString;
+		ULONGLONG Function;
+		ULONGLONG Ordinal;
+		ULONGLONG AddressOfData;
+	} u1;
+} IMAGE_THUNK_DATA64;
+
 typedef struct _IMAGE_IMPORT_DESCRIPTOR {
 	union {
 		DWORD Characteristics;
@@ -280,6 +344,30 @@ typedef struct _IMAGE_TLS_DIRECTORY32 {
 	DWORD SizeOfZeroFill;
 	DWORD Characteristics;
 } IMAGE_TLS_DIRECTORY32;
+
+#pragma pack(push, 4)	/* as Windows declares it */
+typedef struct _IMAGE_TLS_DIRECTORY64 {
+	ULONGLONG StartAddressOfRawData;	/* VAs, as in the 32-bit one */
+	ULONGLONG EndAddressOfRawData;
+	ULONGLONG AddressOfIndex;
+	ULONGLONG AddressOfCallBacks;
+	DWORD SizeOfZeroFill;
+	DWORD Characteristics;
+} IMAGE_TLS_DIRECTORY64;
+#pragma pack(pop)
+
+/*
+ * x86-64 exception data (.pdata): one entry per non-leaf function, sorted
+ * by BeginAddress, each pointing at its UNWIND_INFO in .xdata.
+ */
+typedef struct _IMAGE_RUNTIME_FUNCTION_ENTRY {
+	DWORD BeginAddress;
+	DWORD EndAddress;
+	union {
+		DWORD UnwindInfoAddress;
+		DWORD UnwindData;
+	};
+} IMAGE_RUNTIME_FUNCTION_ENTRY, RUNTIME_FUNCTION, *PRUNTIME_FUNCTION;
 
 typedef struct _IMAGE_RESOURCE_DIRECTORY {
 	DWORD Characteristics;

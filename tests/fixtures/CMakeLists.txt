@@ -2,6 +2,8 @@
 # The test fixture DLLs, cross-compiled with mingw-w64. The top-level build
 # configures this directory as an external project with
 # cmake/mingw-i686.cmake as its toolchain; the DLLs go to VFW_FIXTURE_DIR.
+# It configures it a second time with cmake/mingw-x86_64.cmake for the
+# 64-bit (PE32+) fixtures, of which there are fewer so far: see the end.
 #
 # They are built without a C runtime, so each imports only what it names:
 # nothing, each other, or system DLLs such as kernel32, user32, gdi32,
@@ -25,6 +27,17 @@ set(common_options
 	-O2 -Wall -nostdlib -ffreestanding -fno-stack-protector
 	-mno-stack-arg-probe -fno-asynchronous-unwind-tables)
 
+if(CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
+	set(VFW_FIXTURE_64 TRUE)
+	# x64 has one calling convention, so no stdcall decoration; and an
+	# image base above 4 GB, as 64-bit DLLs usually have, so pointers
+	# that lose their top half show up.
+	set(fixture_link_options -Wl,--image-base,0x180000000 -Wl,-e,DllMain)
+else()
+	set(VFW_FIXTURE_64 FALSE)
+	set(fixture_link_options -Wl,--image-base,0x10000000 -Wl,-e,_DllMain@12)
+endif()
+
 # An import library made from a .def file (for DLLs that aren't built
 # here, or to import by the ordinals the .def gives).
 function(import_library name)
@@ -45,7 +58,7 @@ function(fixture name)
 	add_library(${name} SHARED ${F_UNPARSED_ARGUMENTS})
 	target_compile_options(${name} PRIVATE ${common_options} ${F_OPTIONS})
 	target_link_options(${name} PRIVATE ${common_options} ${F_OPTIONS}
-		-Wl,--image-base,0x10000000 -Wl,-e,_DllMain@12)
+		${fixture_link_options})
 	target_link_libraries(${name} PRIVATE ${F_LIBS})
 	set_target_properties(${name} PROPERTIES
 		PREFIX "" SUFFIX ".dll"
@@ -54,6 +67,24 @@ function(fixture name)
 endfunction()
 
 import_library(pe_basic)
+
+# The 64-bit fixtures: the loader's (PE32+ headers, DIR64 relocations,
+# 64-bit thunks and TLS). The rest follow as the x64 runtime grows.
+if(VFW_FIXTURE_64)
+	fixture(pe_basic pe_basic.c pe_basic.def pe_basic.rc)
+	fixture(pe_reloc pe_reloc.c)
+	fixture(pe_tls pe_tls.c)
+	fixture(pe_dep pe_dep.c pe_dep.def LIBS pe_basic_imports)
+	add_custom_command(OUTPUT ${VFW_FIXTURE_DIR}/pe_noreloc.dll
+		COMMAND ${VFW_OBJCOPY} --remove-section .reloc
+			$<TARGET_FILE:pe_reloc> ${VFW_FIXTURE_DIR}/pe_noreloc.dll
+		DEPENDS pe_reloc
+		VERBATIM)
+	add_custom_target(pe_noreloc ALL
+		DEPENDS ${VFW_FIXTURE_DIR}/pe_noreloc.dll)
+	return()
+endif()
+
 import_library(zz_nosuch)
 import_library(vfw_missing)
 import_library(sehcrt)

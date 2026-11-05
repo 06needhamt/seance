@@ -497,7 +497,7 @@ static DWORD exe_type(const char *unix)
 	DWORD r = 0;
 
 	if (img && !(img->nt.FileHeader.Characteristics & IMAGE_FILE_DLL)) {
-		const IMAGE_OPTIONAL_HEADER32 *o = &img->nt.OptionalHeader;
+		const struct pe_optional *o = &img->nt.OptionalHeader;
 		/* "PE", and for GUI programs the subsystem version. */
 		r = 0x4550;
 		if (o->Subsystem == IMAGE_SUBSYSTEM_WINDOWS_GUI)

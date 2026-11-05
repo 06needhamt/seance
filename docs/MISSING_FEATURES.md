@@ -325,8 +325,10 @@ what keeps the others from working.
 - **Win9x thunk codec:** `Mvicod32.dll` (Motion Pixels) calls a 16-bit DLL,
   `MVICOD16.DLL`, through `ThunkConnect32`. Such DLLs are now refused, with
   that reason, before their `DllMain` runs.
-- **16-bit and 64-bit DLLs:** 16-bit NE DLLs (`vp5r*`, `ativcr1`,
-  `mvicod16`, ...) and 64-bit `cinevf2w.dll`.
+- **16-bit DLLs:** 16-bit NE DLLs (`vp5r*`, `ativcr1`, `mvicod16`, ...).
+- **64-bit DLLs, for now:** `cinevf2w.dll`. `info` reads 64-bit (PE32+)
+  DLLs, but running them needs the x86-64 harness that
+  [X64_PLAN.md](X64_PLAN.md) describes.
 - **RealPlayer codecs:** `*3260.dll`.
 - **Locked, or needs setup:**
   - `wmvdmoe2.dll` is a keyed DMO and needs an unlock key.

@@ -28,6 +28,7 @@ static const struct flag_name file_flags[] = {
 };
 
 static const struct flag_name dll_flags[] = {
+	{ IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA, "HIGH_ENTROPY_VA" },
 	{ IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE, "DYNAMIC_BASE" },
 	{ IMAGE_DLLCHARACTERISTICS_FORCE_INTEGRITY, "FORCE_INTEGRITY" },
 	{ IMAGE_DLLCHARACTERISTICS_NX_COMPAT, "NX_COMPAT" },
@@ -90,14 +91,15 @@ static const char *subsystem_name(WORD s)
 static void print_header(const char *path, const struct pe_image *img)
 {
 	const IMAGE_FILE_HEADER *fh = &img->nt.FileHeader;
-	const IMAGE_OPTIONAL_HEADER32 *o = &img->nt.OptionalHeader;
+	const struct pe_optional *o = &img->nt.OptionalHeader;
 	time_t ts = fh->TimeDateStamp;
 	char when[64] = "";
 
 	strftime(when, sizeof(when), " (%Y-%m-%d %H:%M:%S UTC)", gmtime(&ts));
 	printf("file:            %s\n", path);
-	printf("type:            %s, i386\n",
-	       fh->Characteristics & IMAGE_FILE_DLL ? "DLL" : "executable");
+	printf("type:            %s, %s\n",
+	       fh->Characteristics & IMAGE_FILE_DLL ? "DLL" : "executable",
+	       pe_machine_name(fh->Machine));
 	struct pe_export e;
 	if (!pe_find_export(img, "DriverProc", 0, &e))
 		printf("kind:            VfW codec, ACM driver or other driver "
@@ -108,7 +110,8 @@ static void print_header(const char *path, const struct pe_image *img)
 	printf("timestamp:       0x%08x%s\n", fh->TimeDateStamp, when);
 	printf("linker:          %u.%u\n", o->MajorLinkerVersion,
 	       o->MinorLinkerVersion);
-	printf("image base:      0x%08x\n", o->ImageBase);
+	printf("image base:      0x%0*llx\n", img->pe64 ? 16 : 8,
+	       (unsigned long long)o->ImageBase);
 	printf("image size:      0x%08x\n", o->SizeOfImage);
 	printf("entry point:     0x%08x\n", o->AddressOfEntryPoint);
 	printf("subsystem:       %s (%u), OS %u.%u\n", subsystem_name(o->Subsystem),

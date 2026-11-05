@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * PE32 parsing, mapping, relocation, import/export/TLS/resource walking.
+ * PE32 and PE32+ parsing, mapping, relocation, import/export/TLS/resource
+ * walking.
  */
 #include <errno.h>
 #include <stdint.h>
@@ -41,9 +42,21 @@ static WORD rd16(const void *p)
 	return v;
 }
 
+static uint64_t rd64(const void *p)
+{
+	uint64_t v;
+	memcpy(&v, p, 8);
+	return v;
+}
+
 static void wr32(void *p, DWORD v)
 {
 	memcpy(p, &v, 4);
+}
+
+static void wr64(void *p, uint64_t v)
+{
+	memcpy(p, &v, 8);
 }
 
 static void wr16(void *p, WORD v)
@@ -68,9 +81,76 @@ static void section_name(const IMAGE_SECTION_HEADER *s, char out[9])
 	out[8] = '\0';
 }
 
-static const IMAGE_OPTIONAL_HEADER32 *opt(const struct pe_image *img)
+static const struct pe_optional *opt(const struct pe_image *img)
 {
 	return &img->nt.OptionalHeader;
+}
+
+/* The size of a VA in the image: of a thunk, an IAT slot, a TLS callback. */
+static DWORD va_size(const struct pe_image *img)
+{
+	return img->pe64 ? 8 : 4;
+}
+
+static uint64_t rd_va(const struct pe_image *img, const void *p)
+{
+	return img->pe64 ? rd64(p) : rd32(p);
+}
+
+static void wr_va(const struct pe_image *img, void *p, uint64_t v)
+{
+	if (img->pe64)
+		wr64(p, v);
+	else
+		wr32(p, (DWORD)v);
+}
+
+const char *pe_machine_name(WORD machine)
+{
+	switch (machine) {
+	case IMAGE_FILE_MACHINE_I386:  return "i386";
+	case IMAGE_FILE_MACHINE_AMD64: return "x86-64";
+	}
+	return "unknown";
+}
+
+/* Widens either on-disk optional header (len bytes of it) into *o. */
+static void read_optional(struct pe_optional *o, const BYTE *p, size_t len,
+			  int pe64)
+{
+	union {
+		IMAGE_OPTIONAL_HEADER32 h32;
+		IMAGE_OPTIONAL_HEADER64 h64;
+	} u;
+
+	memset(&u, 0, sizeof(u));
+	memcpy(&u, p, len < sizeof(u) ? len : sizeof(u));
+#define COPY(h, f) o->f = u.h.f
+#define COMMON(h) \
+	COPY(h, Magic); COPY(h, MajorLinkerVersion); \
+	COPY(h, MinorLinkerVersion); COPY(h, SizeOfCode); \
+	COPY(h, SizeOfInitializedData); COPY(h, SizeOfUninitializedData); \
+	COPY(h, AddressOfEntryPoint); COPY(h, BaseOfCode); COPY(h, ImageBase); \
+	COPY(h, SectionAlignment); COPY(h, FileAlignment); \
+	COPY(h, MajorOperatingSystemVersion); \
+	COPY(h, MinorOperatingSystemVersion); COPY(h, MajorImageVersion); \
+	COPY(h, MinorImageVersion); COPY(h, MajorSubsystemVersion); \
+	COPY(h, MinorSubsystemVersion); COPY(h, Win32VersionValue); \
+	COPY(h, SizeOfImage); COPY(h, SizeOfHeaders); COPY(h, CheckSum); \
+	COPY(h, Subsystem); COPY(h, DllCharacteristics); \
+	COPY(h, SizeOfStackReserve); COPY(h, SizeOfStackCommit); \
+	COPY(h, SizeOfHeapReserve); COPY(h, SizeOfHeapCommit); \
+	COPY(h, LoaderFlags); COPY(h, NumberOfRvaAndSizes); \
+	memcpy(o->DataDirectory, u.h.DataDirectory, sizeof(o->DataDirectory))
+	if (pe64) {
+		COMMON(h64);
+		o->BaseOfData = 0;
+	} else {
+		COMMON(h32);
+		COPY(h32, BaseOfData);
+	}
+#undef COMMON
+#undef COPY
 }
 
 struct pe_image *pe_parse(const void *buf, size_t len)
@@ -109,24 +189,39 @@ struct pe_image *pe_parse(const void *buf, size_t len)
 		return NULL;
 	}
 	memcpy(&fh, p + nt_off + 4, sizeof(fh));
-	if (fh.Machine != IMAGE_FILE_MACHINE_I386) {
-		vfw_set_error("unsupported machine type 0x%04x (only i386 is supported)",
-			      fh.Machine);
+	if (fh.Machine != IMAGE_FILE_MACHINE_I386 &&
+	    fh.Machine != IMAGE_FILE_MACHINE_AMD64) {
+		vfw_set_error("unsupported machine type 0x%04x (only i386 and "
+			      "x86-64 are supported)", fh.Machine);
 		return NULL;
 	}
+	int pe64 = fh.Machine == IMAGE_FILE_MACHINE_AMD64;
 
 	size_t opt_off = nt_off + 4 + sizeof(fh);
-	size_t opt_min = offsetof(IMAGE_OPTIONAL_HEADER32, DataDirectory);
-	if (fh.SizeOfOptionalHeader < opt_min ||
-	    !range_ok(opt_off, fh.SizeOfOptionalHeader, len)) {
+	size_t opt_min = pe64 ?
+			 offsetof(IMAGE_OPTIONAL_HEADER64, DataDirectory) :
+			 offsetof(IMAGE_OPTIONAL_HEADER32, DataDirectory);
+	if (!range_ok(opt_off, 2, len)) {
 		vfw_set_error("bad PE file: optional header truncated");
 		return NULL;
 	}
 	WORD magic = rd16(p + opt_off);
-	if (magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
-		vfw_set_error(magic == 0x20b ?
-			      "unsupported image: 64-bit (PE32+)" :
-			      "bad PE file: optional header magic 0x%x", magic);
+	WORD want = pe64 ? IMAGE_NT_OPTIONAL_HDR64_MAGIC :
+		    IMAGE_NT_OPTIONAL_HDR32_MAGIC;
+	if (magic != want) {
+		if (magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC ||
+		    magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+			vfw_set_error("bad PE file: a %s optional header for "
+				      "an %s machine type", pe64 ? "PE32" : "PE32+",
+				      pe_machine_name(fh.Machine));
+		else
+			vfw_set_error("bad PE file: optional header magic 0x%x",
+				      magic);
+		return NULL;
+	}
+	if (fh.SizeOfOptionalHeader < opt_min ||
+	    !range_ok(opt_off, fh.SizeOfOptionalHeader, len)) {
+		vfw_set_error("bad PE file: optional header truncated");
 		return NULL;
 	}
 
@@ -137,10 +232,9 @@ struct pe_image *pe_parse(const void *buf, size_t len)
 	}
 	img->nt.Signature = sig;
 	img->nt.FileHeader = fh;
-	IMAGE_OPTIONAL_HEADER32 *o = &img->nt.OptionalHeader;
-	size_t opt_copy = fh.SizeOfOptionalHeader < sizeof(*o) ?
-			  fh.SizeOfOptionalHeader : sizeof(*o);
-	memcpy(o, p + opt_off, opt_copy);
+	img->pe64 = pe64;
+	struct pe_optional *o = &img->nt.OptionalHeader;
+	read_optional(o, p + opt_off, fh.SizeOfOptionalHeader, pe64);
 
 	/* Only trust the directories the header says it has room for. */
 	size_t ndirs = (fh.SizeOfOptionalHeader - opt_min) /
@@ -234,6 +328,41 @@ struct pe_image *pe_open(const char *path)
 	return img;
 }
 
+WORD pe_peek_machine(const char *path)
+{
+	BYTE buf[sizeof(IMAGE_DOS_HEADER)];
+	IMAGE_DOS_HEADER dos;
+	BYTE nt[4 + sizeof(IMAGE_FILE_HEADER)];
+	WORD machine = 0;
+	FILE *f = fopen(path, "rb");
+
+	if (!f) {
+		vfw_set_error("%s: %s", path, strerror(errno));
+		return 0;
+	}
+	if (fread(buf, 1, sizeof(buf), f) != sizeof(buf)) {
+		vfw_set_error("%s: not a PE file: too short", path);
+		goto out;
+	}
+	memcpy(&dos, buf, sizeof(dos));
+	if (dos.e_magic != IMAGE_DOS_SIGNATURE || dos.e_lfanew < 0) {
+		vfw_set_error("%s: not a PE file: no MZ signature", path);
+		goto out;
+	}
+	if (fseek(f, dos.e_lfanew, SEEK_SET) ||
+	    fread(nt, 1, sizeof(nt), f) != sizeof(nt) ||
+	    rd32(nt) != IMAGE_NT_SIGNATURE) {
+		vfw_set_error("%s: not a PE file: no PE signature", path);
+		goto out;
+	}
+	machine = rd16(nt + 4);
+	if (!machine)
+		vfw_set_error("%s: machine type 0", path);
+out:
+	fclose(f);
+	return machine;
+}
+
 void pe_free(struct pe_image *img)
 {
 	if (!img)
@@ -305,14 +434,20 @@ const IMAGE_DATA_DIRECTORY *pe_dir(const struct pe_image *img, int index)
 }
 
 /* Current load address of the image, or its preferred one if unmapped. */
-static DWORD image_base(const struct pe_image *img)
+static uint64_t image_base(const struct pe_image *img)
 {
-	return img->base ? (DWORD)(uintptr_t)img->base : opt(img)->ImageBase;
+	return img->base ? (uint64_t)(uintptr_t)img->base : opt(img)->ImageBase;
 }
 
-static DWORD va_to_rva(const struct pe_image *img, DWORD va)
+/*
+ * An RVA from a VA. One below the base, or more than 4 GB above it, comes
+ * out as an RVA beyond any image, which pe_ptr then rejects.
+ */
+static DWORD va_to_rva(const struct pe_image *img, uint64_t va)
 {
-	return va - image_base(img);
+	uint64_t rva = va - image_base(img);
+
+	return rva > 0xffffffffu ? 0xffffffffu : (DWORD)rva;
 }
 
 /* Mapping and relocation. */
@@ -350,7 +485,7 @@ static void *map_anywhere(size_t len)
 
 int pe_map(struct pe_image *img, unsigned flags)
 {
-	const IMAGE_OPTIONAL_HEADER32 *o = opt(img);
+	const struct pe_optional *o = opt(img);
 	size_t page = sysconf(_SC_PAGESIZE);
 	size_t len = (o->SizeOfImage + page - 1) & ~(page - 1);
 	void *want = (void *)(uintptr_t)o->ImageBase;
@@ -358,6 +493,15 @@ int pe_map(struct pe_image *img, unsigned flags)
 
 	if (img->base)
 		FAIL("image is already mapped");
+	if (img->nt.FileHeader.Machine != PE_HOST_MACHINE)
+		FAIL("an %s DLL, which this %s build of seance cannot run%s",
+		     pe_machine_name(img->nt.FileHeader.Machine),
+		     pe_machine_name(PE_HOST_MACHINE),
+		     img->pe64 ? " (seance64 runs it)" :
+				 " (the i386 seance runs it)");
+	/* A preferred base the address space can't hold: relocate. */
+	if ((uint64_t)(uintptr_t)want != o->ImageBase)
+		flags |= PE_MAP_FORCE_RELOC;
 
 	if (!(flags & PE_MAP_FORCE_RELOC))
 		base = map_at(want, len);
@@ -390,7 +534,7 @@ int pe_map(struct pe_image *img, unsigned flags)
 			       img->file + s->PointerToRawData, raw);
 	}
 
-	DWORD delta = (DWORD)(uintptr_t)base - o->ImageBase;
+	uint64_t delta = (uint64_t)(uintptr_t)base - o->ImageBase;
 	if (!delta)
 		return 0;
 
@@ -399,7 +543,8 @@ int pe_map(struct pe_image *img, unsigned flags)
 	const BYTE *relocs = d ? pe_ptr(img, d->VirtualAddress, d->Size) : NULL;
 	if (!d || (img->nt.FileHeader.Characteristics & IMAGE_FILE_RELOCS_STRIPPED)) {
 		vfw_set_error("image has no relocations and cannot be loaded "
-			      "away from its preferred base 0x%08x", o->ImageBase);
+			      "away from its preferred base 0x%08llx",
+			      (unsigned long long)o->ImageBase);
 		goto fail;
 	}
 	if (!relocs) {
@@ -412,9 +557,10 @@ int pe_map(struct pe_image *img, unsigned flags)
 	/* Like Windows, record the actual base in the mapped header. */
 	size_t ib_off = ((const IMAGE_DOS_HEADER *)img->file)->e_lfanew + 4 +
 			sizeof(IMAGE_FILE_HEADER) +
-			offsetof(IMAGE_OPTIONAL_HEADER32, ImageBase);
-	if (range_ok(ib_off, 4, hdr))
-		wr32(img->base + ib_off, (DWORD)(uintptr_t)base);
+			(img->pe64 ? offsetof(IMAGE_OPTIONAL_HEADER64, ImageBase) :
+			 offsetof(IMAGE_OPTIONAL_HEADER32, ImageBase));
+	if (range_ok(ib_off, va_size(img), hdr))
+		wr_va(img, img->base + ib_off, (uintptr_t)base);
 	return 0;
 
 fail:
@@ -426,9 +572,10 @@ fail:
 }
 
 int pe_relocate(BYTE *image, size_t image_len, const BYTE *relocs,
-		size_t relocs_len, DWORD delta)
+		size_t relocs_len, uint64_t delta)
 {
 	size_t pos = 0;
+	DWORD delta32 = (DWORD)delta;
 
 	while (pos + sizeof(IMAGE_BASE_RELOCATION) <= relocs_len) {
 		IMAGE_BASE_RELOCATION blk;
@@ -446,7 +593,8 @@ int pe_relocate(BYTE *image, size_t image_len, const BYTE *relocs,
 			WORD e = rd16(ent + 2 * i);
 			unsigned type = e >> 12;
 			size_t rva = (size_t)blk.VirtualAddress + (e & 0xfff);
-			size_t width = type == IMAGE_REL_BASED_HIGHLOW ? 4 : 2;
+			size_t width = type == IMAGE_REL_BASED_DIR64 ? 8 :
+				       type == IMAGE_REL_BASED_HIGHLOW ? 4 : 2;
 
 			if (type == IMAGE_REL_BASED_ABSOLUTE)
 				continue;
@@ -455,14 +603,17 @@ int pe_relocate(BYTE *image, size_t image_len, const BYTE *relocs,
 
 			BYTE *t = image + rva;
 			switch (type) {
+			case IMAGE_REL_BASED_DIR64:
+				wr64(t, rd64(t) + delta);
+				break;
 			case IMAGE_REL_BASED_HIGHLOW:
-				wr32(t, rd32(t) + delta);
+				wr32(t, rd32(t) + delta32);
 				break;
 			case IMAGE_REL_BASED_HIGH:
-				wr16(t, rd16(t) + HIWORD(delta));
+				wr16(t, rd16(t) + HIWORD(delta32));
 				break;
 			case IMAGE_REL_BASED_LOW:
-				wr16(t, rd16(t) + LOWORD(delta));
+				wr16(t, rd16(t) + LOWORD(delta32));
 				break;
 			case IMAGE_REL_BASED_HIGHADJ: {
 				/* The next entry holds the low half of the value. */
@@ -470,7 +621,7 @@ int pe_relocate(BYTE *image, size_t image_len, const BYTE *relocs,
 					FAIL("truncated HIGHADJ relocation at 0x%zx", rva);
 				DWORD v = ((DWORD)rd16(t) << 16) +
 					  (DWORD)(int32_t)(int16_t)rd16(ent + 2 * i);
-				v += delta;
+				v += delta32;
 				wr16(t, HIWORD(v + 0x8000));
 				break;
 			}
@@ -486,7 +637,7 @@ int pe_relocate(BYTE *image, size_t image_len, const BYTE *relocs,
 
 int pe_protect(struct pe_image *img)
 {
-	const IMAGE_OPTIONAL_HEADER32 *o = opt(img);
+	const struct pe_optional *o = opt(img);
 	size_t page = sysconf(_SC_PAGESIZE);
 	int exec_data = !(o->DllCharacteristics & IMAGE_DLLCHARACTERISTICS_NX_COMPAT);
 
@@ -532,25 +683,30 @@ static int walk_thunks(const struct pe_image *img, const char *dll,
 		       DWORD lookup_rva, DWORD iat_rva, int va_based,
 		       int delayed, pe_import_fn fn, void *ctx)
 {
+	DWORD w = va_size(img);
+	uint64_t ordinal_flag = img->pe64 ? IMAGE_ORDINAL_FLAG64 :
+			       IMAGE_ORDINAL_FLAG32;
+
 	for (DWORD i = 0; ; i++) {
 		if (i >= MAX_THUNKS)
 			FAIL("%s: too many imports", dll);
-		const BYTE *t = pe_ptr(img, lookup_rva + 4 * i, 4);
+		const BYTE *t = pe_ptr(img, lookup_rva + w * i, w);
 		if (!t)
 			FAIL("%s: import table runs off the image", dll);
-		DWORD v = rd32(t);
+		uint64_t v = rd_va(img, t);
 		if (!v)
 			return 0;
 
 		struct pe_import imp = {
 			.dll = dll,
-			.iat_rva = iat_rva + 4 * i,
+			.iat_rva = iat_rva + w * i,
 			.delayed = delayed,
 		};
-		if (v & IMAGE_ORDINAL_FLAG32) {
+		if (v & ordinal_flag) {
 			imp.ordinal = IMAGE_ORDINAL32(v);
 		} else {
-			DWORD rva = va_based ? va_to_rva(img, v) : v;
+			/* A name's RVA is 31 bits, in either format. */
+			DWORD rva = va_based ? va_to_rva(img, v) : (DWORD)v;
 			const BYTE *hint = pe_ptr(img, rva, 2);
 			imp.name = pe_str(img, rva + 2);
 			if (!hint || !imp.name)
@@ -637,7 +793,7 @@ int pe_foreach_delay_import(const struct pe_image *img, pe_import_fn fn,
 
 		/* VC6-era descriptors hold VAs rather than RVAs. */
 		int va = !(desc.Attributes.AllAttributes & IMAGE_DELAYLOAD_RVA_BASED);
-		DWORD fix = va ? image_base(img) : 0;
+		DWORD fix = va ? (DWORD)image_base(img) : 0;
 		const char *dll = pe_str(img, desc.DllNameRVA - fix);
 		if (!dll)
 			FAIL("bad PE file: delay import DLL name out of range");
@@ -660,10 +816,10 @@ static int bind_one(void *c, const struct pe_import *imp)
 
 	if (!addr)
 		return -1;
-	BYTE *slot = (BYTE *)pe_ptr(b->img, imp->iat_rva, 4);
+	BYTE *slot = (BYTE *)pe_ptr(b->img, imp->iat_rva, va_size(b->img));
 	if (!slot)
 		FAIL("%s: import address table out of range", imp->dll);
-	wr32(slot, (DWORD)(uintptr_t)addr);
+	wr_va(b->img, slot, (uintptr_t)addr);
 	return 0;
 }
 
@@ -699,7 +855,7 @@ int pe_bind_delay_imports(struct pe_image *img, pe_resolve_fn resolve,
 			return 0;
 
 		int va = !(desc.Attributes.AllAttributes & IMAGE_DELAYLOAD_RVA_BASED);
-		DWORD fix = va ? image_base(img) : 0;
+		DWORD fix = va ? (DWORD)image_base(img) : 0;
 		const char *dll = pe_str(img, desc.DllNameRVA - fix);
 		if (!dll)
 			FAIL("bad PE file: delay import DLL name out of range");
@@ -707,10 +863,11 @@ int pe_bind_delay_imports(struct pe_image *img, pe_resolve_fn resolve,
 				desc.ImportAddressTableRVA - fix, va, 1, bind_one, &b))
 			return -1;
 		if (desc.ModuleHandleRVA) {
-			BYTE *slot = (BYTE *)pe_ptr(img, desc.ModuleHandleRVA - fix, 4);
+			BYTE *slot = (BYTE *)pe_ptr(img, desc.ModuleHandleRVA - fix,
+						    va_size(img));
 			if (!slot)
 				FAIL("%s: delay-load module handle out of range", dll);
-			wr32(slot, (DWORD)(uintptr_t)handle(ctx, dll));
+			wr_va(img, slot, (uintptr_t)handle(ctx, dll));
 		}
 	}
 }
@@ -892,36 +1049,59 @@ int pe_find_export_ordinal(const struct pe_image *img, WORD ordinal,
 
 /* TLS. */
 
+/* The TLS directory of either format; the first four fields are VAs. */
+struct tls_directory {
+	uint64_t StartAddressOfRawData;
+	uint64_t EndAddressOfRawData;
+	uint64_t AddressOfIndex;
+	uint64_t AddressOfCallBacks;
+	DWORD SizeOfZeroFill;
+};
+
 /* 1 and *out if the image has a TLS directory, 0 if not, -1 if malformed. */
-static int tls_dir(const struct pe_image *img, IMAGE_TLS_DIRECTORY32 *out)
+static int tls_dir(const struct pe_image *img, struct tls_directory *out)
 {
 	const IMAGE_DATA_DIRECTORY *d = pe_dir(img, IMAGE_DIRECTORY_ENTRY_TLS);
 	const void *p;
 
 	if (!d)
 		return 0;
-	p = pe_ptr(img, d->VirtualAddress, sizeof(*out));
-	if (!p)
-		FAIL("bad PE file: TLS directory out of range");
-	memcpy(out, p, sizeof(*out));
+	if (img->pe64) {
+		IMAGE_TLS_DIRECTORY64 t;
+		if (!(p = pe_ptr(img, d->VirtualAddress, sizeof(t))))
+			FAIL("bad PE file: TLS directory out of range");
+		memcpy(&t, p, sizeof(t));
+		*out = (struct tls_directory){ t.StartAddressOfRawData,
+			t.EndAddressOfRawData, t.AddressOfIndex,
+			t.AddressOfCallBacks, t.SizeOfZeroFill };
+	} else {
+		IMAGE_TLS_DIRECTORY32 t;
+		if (!(p = pe_ptr(img, d->VirtualAddress, sizeof(t))))
+			FAIL("bad PE file: TLS directory out of range");
+		memcpy(&t, p, sizeof(t));
+		*out = (struct tls_directory){ t.StartAddressOfRawData,
+			t.EndAddressOfRawData, t.AddressOfIndex,
+			t.AddressOfCallBacks, t.SizeOfZeroFill };
+	}
 	return 1;
 }
 
 int pe_foreach_tls_callback(const struct pe_image *img, pe_tls_fn fn,
 			    void *ctx)
 {
-	IMAGE_TLS_DIRECTORY32 tls;
+	struct tls_directory tls;
 	int r = tls_dir(img, &tls);
+	DWORD w = va_size(img);
 
 	if (r <= 0 || !tls.AddressOfCallBacks)
 		return r < 0 ? -1 : 0;
 
 	DWORD arr = va_to_rva(img, tls.AddressOfCallBacks);
 	for (DWORD i = 0; i < MAX_TLS_CALLBACKS; i++) {
-		const void *p = pe_ptr(img, arr + 4 * i, 4);
+		const void *p = pe_ptr(img, arr + w * i, w);
 		if (!p)
 			FAIL("bad PE file: TLS callback array out of range");
-		DWORD va = rd32(p);
+		uint64_t va = rd_va(img, p);
 		if (!va)
 			return 0;
 		DWORD rva = va_to_rva(img, va);
@@ -978,7 +1158,7 @@ void pe_tls_notify(struct pe_image *img, DWORD reason)
 
 int pe_tls_init(struct pe_image *img)
 {
-	IMAGE_TLS_DIRECTORY32 tls;
+	struct tls_directory tls;
 	int r = tls_dir(img, &tls);
 
 	if (r <= 0)
@@ -994,7 +1174,11 @@ int pe_tls_init(struct pe_image *img)
 	const void *tmpl = NULL;
 	size_t size = 0;
 	if (tls.EndAddressOfRawData > tls.StartAddressOfRawData) {
-		size = tls.EndAddressOfRawData - tls.StartAddressOfRawData;
+		uint64_t span = tls.EndAddressOfRawData -
+				tls.StartAddressOfRawData;
+		if (span > opt(img)->SizeOfImage)
+			FAIL("bad PE file: TLS data out of range");
+		size = (size_t)span;
 		tmpl = pe_ptr(img, va_to_rva(img, tls.StartAddressOfRawData), size);
 		if (!tmpl)
 			FAIL("bad PE file: TLS data out of range");

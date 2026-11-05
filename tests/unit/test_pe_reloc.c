@@ -108,6 +108,49 @@ static void test_relocate(void)
 	CHECK_EQ(pe_relocate(image, sizeof(image), relocs, n, delta), -1);
 }
 
+/* DIR64 (PE32+): a 64-bit field, moved by the whole 64-bit delta. */
+static void test_relocate_dir64(void)
+{
+	static BYTE image[0x2000];
+	BYTE relocs[64];
+	uint64_t v;
+
+	/* From 0x180000000 to 0x7f0000010000, then back down below 4 GB. */
+	const uint64_t up = 0x7f0000010000ull - 0x180000000ull;
+	const uint64_t down = 0x10000000ull - 0x7f0000010000ull;
+
+	v = 0x180001234ull;
+	memcpy(image + 0x1008, &v, 8);
+	put32(image + 0x1ff8, 0xaaaaaaaa);	/* untouched */
+	const WORD e[] = {
+		ENTRY(IMAGE_REL_BASED_DIR64, 0x008),
+		ENTRY(IMAGE_REL_BASED_ABSOLUTE, 0),
+	};
+	size_t n = block(relocs, 0x1000, e, 2);
+
+	CHECK_EQ(pe_relocate(image, sizeof(image), relocs, n, up), 0);
+	memcpy(&v, image + 0x1008, 8);
+	CHECK(v == 0x7f0000011234ull);
+	CHECK_EQ(pe_relocate(image, sizeof(image), relocs, n, down), 0);
+	memcpy(&v, image + 0x1008, 8);
+	CHECK(v == 0x10001234ull);
+	CHECK_EQ(get32(image + 0x1ff8), 0xaaaaaaaa);
+
+	/* Eight bytes must fit: one at 0xffc of the last page runs off. */
+	const WORD over[] = { ENTRY(IMAGE_REL_BASED_DIR64, 0xffc) };
+	n = block(relocs, 0x1000, over, 1);
+	CHECK_EQ(pe_relocate(image, sizeof(image), relocs, n, up), -1);
+	CHECK(strstr(vfw_error(), "outside the image") != NULL);
+
+	/* HIGHLOW wraps at 32 bits whatever the upper half of the delta. */
+	put32(image + 0x1000, 0x10001234);
+	const WORD hl[] = { ENTRY(IMAGE_REL_BASED_HIGHLOW, 0) };
+	n = block(relocs, 0x1000, hl, 1);
+	CHECK_EQ(pe_relocate(image, sizeof(image), relocs, n,
+			     0xffffffff00000010ull), 0);
+	CHECK_EQ(get32(image + 0x1000), 0x10001244);
+}
+
 typedef int (*int_fn)(void);
 typedef const char *(*str_fn)(void);
 
@@ -227,6 +270,7 @@ static void test_map(void)
 int main(void)
 {
 	test_relocate();
+	test_relocate_dir64();
 	test_map();
 	return test_summary("test_pe_reloc");
 }

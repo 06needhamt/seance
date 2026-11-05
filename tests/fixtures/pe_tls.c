@@ -34,8 +34,8 @@ __attribute__((section(".CRT$XLB"), used))
 static const PIMAGE_TLS_CALLBACK tls_callbacks[] = { tls_callback, 0 };
 
 const IMAGE_TLS_DIRECTORY _tls_used = {
-	(DWORD)&_tls_start, (DWORD)&_tls_end, (DWORD)&_tls_index,
-	(DWORD)tls_callbacks, ZERO_FILL, 0
+	(ULONG_PTR)&_tls_start, (ULONG_PTR)&_tls_end, (ULONG_PTR)&_tls_index,
+	(ULONG_PTR)tls_callbacks, ZERO_FILL, 0
 };
 
 /* This thread's TLS block, the way MSVC code finds it. */
@@ -43,7 +43,11 @@ static BYTE *tls_block(void)
 {
 	BYTE **array;
 
+#ifdef _WIN64
+	__asm__ volatile("movq %%gs:0x58, %0" : "=r"(array));
+#else
 	__asm__ volatile("movl %%fs:0x2c, %0" : "=r"(array));
+#endif
 	return array ? array[_tls_index] : 0;
 }
 

@@ -55,11 +55,11 @@ static int test_checks;
  * The path of a fixture DLL in $VFW_FIXTURES. Exits with TEST_SKIP if the
  * fixtures were not built (no mingw-w64).
  */
-static inline const char *fixture(const char *name)
+static inline const char *fixture_in(const char *var, const char *name)
 {
 	static char paths[8][4096];
 	static int next;
-	const char *dir = getenv("VFW_FIXTURES");
+	const char *dir = getenv(var);
 	char *p = paths[next++ % 8];
 
 	snprintf(p, sizeof(paths[0]), "%s/%s", dir ? dir : ".", name);
@@ -68,6 +68,20 @@ static inline const char *fixture(const char *name)
 		exit(TEST_SKIP);
 	}
 	return p;
+}
+
+static inline const char *fixture(const char *name)
+{
+	return fixture_in("VFW_FIXTURES", name);
+}
+
+/*
+ * The same for the 64-bit (x86-64, PE32+) fixtures in $VFW_FIXTURES64,
+ * which need x86_64-w64-mingw32-gcc.
+ */
+static inline const char *fixture64(const char *name)
+{
+	return fixture_in("VFW_FIXTURES64", name);
 }
 
 /*
