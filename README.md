@@ -25,8 +25,8 @@ Work is split into phases; see [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION
 | 4 | AVI / Y4M I/O, `decode` and `encode` | done: AVI reader and writer, Y4M/BMP/raw input and output, `avi`, `convert`, `decode`, `encode` |
 | 5 | Hardening and CI | done: DLL memory below 2 GB, crash and hang reports, SSE/FPU fixture, fuzzing, samples run, CI |
 
-64-bit (x86-64) codecs run in `seance64`, built from the same tree with
-`cmake -B build64 -DVFW_ARCH=x86_64` ([docs/X64_PLAN.md](docs/X64_PLAN.md)).
+64-bit (x86-64) codecs run in `seance64`, which the default build makes
+beside `seance` ([docs/X64_PLAN.md](docs/X64_PLAN.md)).
 The 64-bit test codecs (VfW, ACM, DirectShow and DMO) work there;
 exception handling (SEH and C++ exceptions) and the hand-off between the
 two binaries are still to come. `seance info` reads 64-bit DLLs in either
@@ -94,9 +94,10 @@ sudo apt install build-essential gcc-multilib cmake ninja-build mingw-w64 ffmpeg
 
 ```sh
 cmake --preset default        # configure build/ (or: cmake -B build)
-cmake --build --preset default
+cmake --build --preset default  # build/seance and build/seance64
 ctest --preset default        # unit tests, ABI cross-check, CLI smoke test,
-                              # FFmpeg media checks
+                              # FFmpeg media checks; seance64's as the
+                              # one test x86_64
 
 cmake --preset asan && cmake --build --preset asan && ctest --preset asan
                               # the same under AddressSanitizer and UBSan,
@@ -138,6 +139,8 @@ Useful CMake options:
 | `VFW_MINGW64_PREFIX=...` | the 64-bit cross tools' prefix (`x86_64-w64-mingw32-`) |
 | `VFW_SAMPLES_DIR=<dir>` | add a `samples` test: `info` and `probe` over the codec DLLs in `<dir>` |
 | `VFW_HOST_ARCH=...` | the host architecture as `uname -m` spells it, if detecting it goes wrong |
+| `VFW_BUILD_X86_64=OFF` | build only the i386 `seance`, not `seance64` too (on by default on an x86-64 host; elsewhere it needs an x86_64 Linux cross compiler) |
+| `VFW_ARCH=x86_64` | make this build directory build `seance64` alone |
 
 The `ci` preset turns on both `REQUIRE` options. Tests carry the CTest
 labels `unit`, `abi`, `cli`, `media` and `samples`, so `ctest --preset default -L unit`

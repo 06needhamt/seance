@@ -193,8 +193,9 @@ Decisions:
    architecture.
    Milestone: `seance probe` of a 64-bit codec works from the i386
    binary, and `sweep` over a mixed directory runs both.
-8. **CI and real codecs.** `test64` and `asan64` jobs, a `ci64` preset,
-   and both binaries installed side by side. Real 64-bit codecs
+8. **CI and real codecs.** (CI done: the default build makes and tests
+   both binaries, so the existing `test`, `sanitizers` and `minimal` jobs
+   cover `seance64`, and `install` puts both side by side.) Real 64-bit codecs
    (`cinevf2w.dll`, LAV Filters x64) run through `sweep` and
    `validate_media.sh`, with the results in `MISSING_FEATURES.md`.
 
@@ -219,7 +220,12 @@ Decisions:
 - `build/seance info build/fixtures64/pe_basic.dll` shows `x86-64` and
   image base `0x0000000180000000`; `build/seance probe` of it says that
   `seance64` runs it.
-- `cmake -B build64 -DVFW_ARCH=x86_64 && cmake --build build64 &&
-  ctest --test-dir build64`: the same 55 tests, run against the 64-bit
-  fixtures; those for i386-only mechanisms (`test_seh`, `test_cxxeh`,
-  `test_crt_helpers`, `test_lowmem`) skip.
+- The default build makes both: `cmake --build build` configures this
+  project again with `VFW_ARCH=x86_64` in `build/x86_64` (reusing the
+  fixture DLLs) and puts `seance64` beside `seance`; `ctest --test-dir
+  build` runs seance64's tests as the test `x86_64`. Run alone
+  (`ctest --test-dir build/x86_64`) they are the same 55 tests against
+  the 64-bit fixtures; those for i386-only mechanisms (`test_seh`,
+  `test_cxxeh`, `test_crt_helpers`, `test_lowmem`) skip.
+  `-DVFW_BUILD_X86_64=OFF` builds `seance` only; a directory configured
+  with `-DVFW_ARCH=x86_64` builds `seance64` only.
