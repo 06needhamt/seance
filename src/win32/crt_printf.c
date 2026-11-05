@@ -38,6 +38,7 @@
 #include "win32/codepage.h"
 #include "win32/crt.h"
 #include "win32/internal.h"
+#include "win32/winva.h"
 
 #define CRTFN(ret) static ret STUB_CDECL
 
@@ -340,7 +341,7 @@ static int own_kind(const struct sink *s)
 	return s->wide && !ucrt_way(s, CRT_PRINTF_LEGACY_WIDE_SPECIFIERS);
 }
 
-static void format(struct sink *s, const void *fmt, va_list *ap)
+static void format(struct sink *s, const void *fmt, win_va_list *ap)
 {
 	int wide = s->wide;
 	size_t i = 0;
@@ -372,7 +373,7 @@ static void format(struct sink *s, const void *fmt, va_list *ap)
 				break;
 		}
 		if (c == '*') {
-			sp.width = va_arg(*ap, int);
+			sp.width = win_va_arg(*ap, int);
 			if (sp.width < 0) {
 				sp.left = 1;
 				sp.width = -sp.width;
@@ -387,7 +388,7 @@ static void format(struct sink *s, const void *fmt, va_list *ap)
 			c = fmt_at(fmt, wide, ++i);
 			sp.prec = 0;
 			if (c == '*') {
-				sp.prec = va_arg(*ap, int);
+				sp.prec = win_va_arg(*ap, int);
 				if (sp.prec < 0)
 					sp.prec = -1;
 				c = fmt_at(fmt, wide, ++i);
@@ -433,9 +434,9 @@ static void format(struct sink *s, const void *fmt, va_list *ap)
 			char conv = (char)c, *a;
 			if (sp.size == SZ_64) {
 				a = host_format(&sp, "ll", conv,
-						va_arg(*ap, long long));
+						win_va_arg(*ap, long long));
 			} else {
-				int v = va_arg(*ap, int);
+				int v = win_va_arg(*ap, int);
 				int is_signed = c == 'd' || c == 'i';
 				if (sp.size == SZ_H)
 					v = is_signed ? (short)v : (unsigned short)v;
@@ -458,7 +459,7 @@ static void format(struct sink *s, const void *fmt, va_list *ap)
 			/* fall through */
 		case 'e': case 'E': case 'f': case 'g': case 'G':
 		case 'a': case 'A': {
-			double v = va_arg(*ap, double);
+			double v = win_va_arg(*ap, double);
 			if (!isfinite(v) &&
 			    ucrt_way(s, CRT_PRINTF_LEGACY_MSVCRT_COMPATIBILITY)) {
 				put_special_ucrt(s, sp, v);
@@ -484,7 +485,7 @@ static void format(struct sink *s, const void *fmt, va_list *ap)
 		case 'p': {
 			char a[16];
 			snprintf(a, sizeof(a), "%08X",
-				 (unsigned)(uintptr_t)va_arg(*ap, void *));
+				 (unsigned)(uintptr_t)win_va_arg(*ap, void *));
 			sp.zero = 0;
 			put_padded_ascii(s, &sp, a, strlen(a), 0);
 			break;
@@ -492,7 +493,7 @@ static void format(struct sink *s, const void *fmt, va_list *ap)
 		case 'c': case 'C': {
 			int w = sp.size == SZ_L || sp.size == SZ_W ? 1 :
 				sp.size == SZ_H ? 0 : (c == 'C') != own_kind(s);
-			int v = va_arg(*ap, int);
+			int v = win_va_arg(*ap, int);
 			BYTE b = (BYTE)v;
 			WCHAR u = (WCHAR)v;
 			sp.zero = 0;
@@ -502,7 +503,7 @@ static void format(struct sink *s, const void *fmt, va_list *ap)
 		case 's': case 'S': {
 			int w = sp.size == SZ_L || sp.size == SZ_W ? 1 :
 				sp.size == SZ_H ? 0 : (c == 'S') != own_kind(s);
-			const void *str = va_arg(*ap, const void *);
+			const void *str = win_va_arg(*ap, const void *);
 			static const WCHAR null_w[] = {
 				'(', 'n', 'u', 'l', 'l', ')', 0 };
 			if (!str)
@@ -519,7 +520,7 @@ static void format(struct sink *s, const void *fmt, va_list *ap)
 			const struct {
 				USHORT len, max;
 				const void *buf;
-			} *str = va_arg(*ap, const void *);
+			} *str = win_va_arg(*ap, const void *);
 			int w = sp.size == SZ_L || sp.size == SZ_W;
 			sp.zero = 0;
 			if (!str || !str->buf) {
@@ -534,7 +535,7 @@ static void format(struct sink *s, const void *fmt, va_list *ap)
 		}
 		case 'n': {
 			/* Through a pointer as wide as the size prefix says. */
-			void *p = va_arg(*ap, void *);
+			void *p = win_va_arg(*ap, void *);
 			if (sp.size == SZ_HH)
 				*(signed char *)p = (signed char)s->len;
 			else if (sp.size == SZ_H)
@@ -561,17 +562,17 @@ static void format(struct sink *s, const void *fmt, va_list *ap)
 	}
 }
 
-int crt_vformat(int wide, unsigned flags, const void *fmt, va_list ap,
+int crt_vformat(int wide, unsigned flags, const void *fmt, win_va_list ap,
 		void **out, size_t *len)
 {
 	struct sink s = { .wide = wide, .flags = flags };
-	va_list copy;
+	win_va_list copy;
 
 	if (!fmt)
 		return -1;
-	va_copy(copy, ap);
+	win_va_copy(copy, ap);
 	format(&s, fmt, &copy);
-	va_end(copy);
+	win_va_end(copy);
 	void *nul = reserve(&s, 1);
 	if (s.failed || !nul) {
 		free(s.buf);
@@ -590,7 +591,7 @@ int crt_vformat(int wide, unsigned flags, const void *fmt, va_list ap,
  * is exactly n, no terminator either.
  */
 static int to_buffer(int wide, void *buf, size_t n, int bounded,
-		     const void *fmt, va_list ap)
+		     const void *fmt, win_va_list ap)
 {
 	void *out;
 	size_t len, u = wide ? sizeof(WCHAR) : 1;
@@ -608,7 +609,7 @@ static int to_buffer(int wide, void *buf, size_t n, int bounded,
 	return !bounded || len <= n ? (int)len : -1;
 }
 
-static int count(int wide, const void *fmt, va_list ap)
+static int count(int wide, const void *fmt, win_va_list ap)
 {
 	void *out;
 	size_t len;
@@ -619,92 +620,92 @@ static int count(int wide, const void *fmt, va_list ap)
 	return (int)len;
 }
 
-CRTFN(int) crt_vsprintf(char *buf, const char *fmt, va_list ap)
+CRTFN(int) crt_vsprintf(char *buf, const char *fmt, win_va_list ap)
 {
 	return to_buffer(0, buf, 0, 0, fmt, ap);
 }
 
 CRTFN(int) crt_sprintf(char *buf, const char *fmt, ...)
 {
-	va_list ap;
-	va_start(ap, fmt);
+	win_va_list ap;
+	win_va_start(ap, fmt);
 	int r = to_buffer(0, buf, 0, 0, fmt, ap);
-	va_end(ap);
+	win_va_end(ap);
 	return r;
 }
 
-CRTFN(int) crt__vsnprintf(char *buf, size_t n, const char *fmt, va_list ap)
+CRTFN(int) crt__vsnprintf(char *buf, size_t n, const char *fmt, win_va_list ap)
 {
 	return to_buffer(0, buf, n, 1, fmt, ap);
 }
 
 CRTFN(int) crt__snprintf(char *buf, size_t n, const char *fmt, ...)
 {
-	va_list ap;
-	va_start(ap, fmt);
+	win_va_list ap;
+	win_va_start(ap, fmt);
 	int r = to_buffer(0, buf, n, 1, fmt, ap);
-	va_end(ap);
+	win_va_end(ap);
 	return r;
 }
 
-CRTFN(int) crt__vscprintf(const char *fmt, va_list ap)
+CRTFN(int) crt__vscprintf(const char *fmt, win_va_list ap)
 {
 	return count(0, fmt, ap);
 }
 
 CRTFN(int) crt__scprintf(const char *fmt, ...)
 {
-	va_list ap;
-	va_start(ap, fmt);
+	win_va_list ap;
+	win_va_start(ap, fmt);
 	int r = count(0, fmt, ap);
-	va_end(ap);
+	win_va_end(ap);
 	return r;
 }
 
 /* msvcrt.dll's swprintf and vswprintf are the old forms, with no size. */
-CRTFN(int) crt_vswprintf(WCHAR *buf, const WCHAR *fmt, va_list ap)
+CRTFN(int) crt_vswprintf(WCHAR *buf, const WCHAR *fmt, win_va_list ap)
 {
 	return to_buffer(1, buf, 0, 0, fmt, ap);
 }
 
 CRTFN(int) crt_swprintf(WCHAR *buf, const WCHAR *fmt, ...)
 {
-	va_list ap;
-	va_start(ap, fmt);
+	win_va_list ap;
+	win_va_start(ap, fmt);
 	int r = to_buffer(1, buf, 0, 0, fmt, ap);
-	va_end(ap);
+	win_va_end(ap);
 	return r;
 }
 
-CRTFN(int) crt__vsnwprintf(WCHAR *buf, size_t n, const WCHAR *fmt, va_list ap)
+CRTFN(int) crt__vsnwprintf(WCHAR *buf, size_t n, const WCHAR *fmt, win_va_list ap)
 {
 	return to_buffer(1, buf, n, 1, fmt, ap);
 }
 
 CRTFN(int) crt__snwprintf(WCHAR *buf, size_t n, const WCHAR *fmt, ...)
 {
-	va_list ap;
-	va_start(ap, fmt);
+	win_va_list ap;
+	win_va_start(ap, fmt);
 	int r = to_buffer(1, buf, n, 1, fmt, ap);
-	va_end(ap);
+	win_va_end(ap);
 	return r;
 }
 
-CRTFN(int) crt__vscwprintf(const WCHAR *fmt, va_list ap)
+CRTFN(int) crt__vscwprintf(const WCHAR *fmt, win_va_list ap)
 {
 	return count(1, fmt, ap);
 }
 
 CRTFN(int) crt__scwprintf(const WCHAR *fmt, ...)
 {
-	va_list ap;
-	va_start(ap, fmt);
+	win_va_list ap;
+	win_va_start(ap, fmt);
 	int r = count(1, fmt, ap);
-	va_end(ap);
+	win_va_end(ap);
 	return r;
 }
 
-int crt_vsnprintf(int wide, void *buf, size_t n, const void *fmt, va_list ap)
+int crt_vsnprintf(int wide, void *buf, size_t n, const void *fmt, win_va_list ap)
 {
 	return to_buffer(wide, buf, n, 1, fmt, ap);
 }
@@ -720,7 +721,7 @@ int crt_vsnprintf(int wide, void *buf, size_t n, const void *fmt, va_list ap)
  * With buf NULL, the length it would be.
  */
 static int common_sprintf(int wide, ULONGLONG options, void *buf, size_t n,
-			  const void *fmt, va_list ap)
+			  const void *fmt, win_va_list ap)
 {
 	unsigned flags = CRT_UCRT | (unsigned)(options & CRT_PRINTF_OPTIONS);
 	size_t len, u = wide ? sizeof(WCHAR) : 1;
@@ -755,7 +756,7 @@ static int common_sprintf(int wide, ULONGLONG options, void *buf, size_t n,
 #define CRT_TRUNCATE ((size_t)-1)
 
 static int common_sprintf_s(int wide, ULONGLONG options, void *buf, size_t n,
-			    size_t count, const void *fmt, va_list ap)
+			    size_t count, const void *fmt, win_va_list ap)
 {
 	unsigned flags = CRT_UCRT | (unsigned)(options & CRT_PRINTF_OPTIONS);
 	size_t len, keep, u = wide ? sizeof(WCHAR) : 1;
@@ -787,7 +788,7 @@ static int common_sprintf_s(int wide, ULONGLONG options, void *buf, size_t n,
 
 CRTFN(int) crt___stdio_common_vsprintf(ULONGLONG options, char *buf, size_t n,
 					const char *fmt, void *locale,
-					va_list ap)
+					win_va_list ap)
 {
 	(void)locale;
 	return common_sprintf(0, options, buf, n, fmt, ap);
@@ -795,7 +796,7 @@ CRTFN(int) crt___stdio_common_vsprintf(ULONGLONG options, char *buf, size_t n,
 
 CRTFN(int) crt___stdio_common_vswprintf(ULONGLONG options, WCHAR *buf,
 					 size_t n, const WCHAR *fmt,
-					 void *locale, va_list ap)
+					 void *locale, win_va_list ap)
 {
 	(void)locale;
 	return common_sprintf(1, options, buf, n, fmt, ap);
@@ -803,7 +804,7 @@ CRTFN(int) crt___stdio_common_vswprintf(ULONGLONG options, WCHAR *buf,
 
 CRTFN(int) crt___stdio_common_vsprintf_s(ULONGLONG options, char *buf,
 					  size_t n, const char *fmt,
-					  void *locale, va_list ap)
+					  void *locale, win_va_list ap)
 {
 	(void)locale;
 	return common_sprintf_s(0, options, buf, n, n, fmt, ap);
@@ -811,7 +812,7 @@ CRTFN(int) crt___stdio_common_vsprintf_s(ULONGLONG options, char *buf,
 
 CRTFN(int) crt___stdio_common_vswprintf_s(ULONGLONG options, WCHAR *buf,
 					   size_t n, const WCHAR *fmt,
-					   void *locale, va_list ap)
+					   void *locale, win_va_list ap)
 {
 	(void)locale;
 	return common_sprintf_s(1, options, buf, n, n, fmt, ap);
@@ -820,7 +821,7 @@ CRTFN(int) crt___stdio_common_vswprintf_s(ULONGLONG options, WCHAR *buf,
 CRTFN(int) crt___stdio_common_vsnprintf_s(ULONGLONG options, char *buf,
 					   size_t n, size_t count,
 					   const char *fmt, void *locale,
-					   va_list ap)
+					   win_va_list ap)
 {
 	(void)locale;
 	return common_sprintf_s(0, options, buf, n, count, fmt, ap);
@@ -829,7 +830,7 @@ CRTFN(int) crt___stdio_common_vsnprintf_s(ULONGLONG options, char *buf,
 CRTFN(int) crt___stdio_common_vsnwprintf_s(ULONGLONG options, WCHAR *buf,
 					    size_t n, size_t count,
 					    const WCHAR *fmt, void *locale,
-					    va_list ap)
+					    win_va_list ap)
 {
 	(void)locale;
 	return common_sprintf_s(1, options, buf, n, count, fmt, ap);

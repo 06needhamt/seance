@@ -569,8 +569,8 @@ static void test_fixture(void)
 	CHECK(m != NULL);
 	if (!m)
 		return;
-	int (*write)(void) = mod_get_proc(m, "reg_write");
-	int (*read)(void) = mod_get_proc(m, "reg_read");
+	int (CDECL *write)(void) = mod_get_proc(m, "reg_write");
+	int (CDECL *read)(void) = mod_get_proc(m, "reg_read");
 	CHECK(write && read);
 	if (write && read) {
 		CHECK_EQ(write(), 0);

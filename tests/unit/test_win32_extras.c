@@ -41,7 +41,7 @@ static void *get(struct module *m, const char *name)
 	ret (WINAPI *name)(__VA_ARGS__) = (ret (WINAPI *)(__VA_ARGS__))get(m, #name)
 /* The C runtime's functions are cdecl. */
 #define CFN(m, ret, name, ...) \
-	ret (*name)(__VA_ARGS__) = (ret (*)(__VA_ARGS__))get(m, #name)
+	ret (CDECL *name)(__VA_ARGS__) = (ret (CDECL *)(__VA_ARGS__))get(m, #name)
 
 static void test_bcrypt(void)
 {
@@ -520,11 +520,11 @@ static void test_ncrypt_and_graphics(void)
 	}
 }
 
-typedef void (*handler_fn)(int);
+typedef void (CDECL *handler_fn)(int);
 
 static int raised;
 
-static void raise_handler(int sig)
+static void CDECL raise_handler(int sig)	/* called as a DLL's */
 {
 	raised = sig;
 }
@@ -726,7 +726,7 @@ static void test_zeroed_allocation(void)
 		return;
 	CFN(c, void *, malloc, size_t);
 	CFN(c, void, free, void *);
-	void *(*operator_new)(size_t) = (void *(*)(size_t))get(c, "??2@YAPAXI@Z");
+	void *(CDECL *operator_new)(size_t) = (void *(CDECL *)(size_t))get(c, "??2@YAPAXI@Z");
 	FN(k, HANDLE, GetProcessHeap, void);
 	FN(k, LPVOID, HeapAlloc, HANDLE, DWORD, SIZE_T);
 	FN(k, BOOL, HeapFree, HANDLE, DWORD, LPVOID);

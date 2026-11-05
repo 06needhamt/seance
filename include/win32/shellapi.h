@@ -33,7 +33,10 @@ DECLARE_HANDLE(HDROP);
 
 typedef WORD FILEOP_FLAGS;
 
+/* Byte-packed on 32-bit Windows only; Win64 lays these out naturally. */
+#if !defined(__x86_64__)
 #pragma pack(push, 1)
+#endif
 
 typedef struct _SHFILEOPSTRUCTA {
 	HWND hwnd;
@@ -111,7 +114,9 @@ typedef struct _SHFILEINFOW {
 	WCHAR szTypeName[80];
 } SHFILEINFOW;
 
+#if !defined(__x86_64__)
 #pragma pack(pop)
+#endif
 
 #define SEE_MASK_IDLIST         0x00000004
 #define SEE_MASK_NOCLOSEPROCESS 0x00000040

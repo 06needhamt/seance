@@ -264,9 +264,9 @@ static void test_builtin_modules(void)
 	CHECK(mod_from_base(exe->base) == exe);
 }
 
-typedef DWORD (*dword_arg_fn)(DWORD);
-typedef DWORD (*dword_fn)(void);
-typedef WORD (*word_fn)(void);
+typedef DWORD (CDECL *dword_arg_fn)(DWORD);
+typedef DWORD (CDECL *dword_fn)(void);
+typedef WORD (CDECL *word_fn)(void);
 
 static void test_fixture(void)
 {

@@ -58,6 +58,13 @@
  * code, called through its native entry like DelDtor's), and
  * __CxxLongjmpUnwind.
  */
+/*
+ * The fs:[0] frames and i386 register conventions this implements don't
+ * exist on x86-64, whose exceptions are table-based (docs/X64_PLAN.md,
+ * phases 4 and 5).
+ */
+#if !defined(__x86_64__)
+
 #include <pthread.h>
 #include <setjmp.h>
 #include <signal.h>
@@ -2012,3 +2019,16 @@ const struct builtin_export crt_cxx_exports[] = {
 	E(__std_exception_destroy),
 	BUILTIN_END
 };
+
+
+#else /* __x86_64__ */
+
+#include "win32/crt.h"
+
+/* No _set_new_mode on x86-64 yet, so malloc never retries. */
+int crt_malloc_retry(size_t size)
+{
+	return 0;
+}
+
+#endif /* __x86_64__ */

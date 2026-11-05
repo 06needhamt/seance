@@ -17,9 +17,14 @@
 #include "win32/codepage.h"
 #include "win32/k32.h"
 #include "win32/path.h"
+#include "win32/winva.h"
 
 #define CRTFN(ret) static ret STUB_CDECL
+#if defined(__x86_64__)
+#define THISFN(ret) static ret __attribute__((ms_abi))	/* no thiscall on Win64 */
+#else
 #define THISFN(ret) static ret __attribute__((thiscall, force_align_arg_pointer))
+#endif
 
 typedef struct { char *_ptr; int _cnt; char *_base; int _flag, _file; } crt_FILE;
 
@@ -89,7 +94,36 @@ CRTFN(int) crt_fscanf(crt_FILE *f, const char *fmt, ...)
 	if (fd < 0) return EOF;
 	FILE *host = fdopen(fd, "r");
 	if (!host) { close(fd); return EOF; }
+#if defined(__x86_64__)
+	/*
+	 * Win64's arguments can't go to the host's vfscanf as they are, but
+	 * scanf's are all pointers: one per conversion not suppressed by '*'.
+	 */
+	void *a[32] = { 0 };
+	int n = 0;
+	for (const char *p = fmt; *p && n < 32; p++) {
+		if (*p != '%')
+			continue;
+		if (p[1] == '%') {
+			p++;
+			continue;
+		}
+		if (p[1] != '*')
+			n++;
+	}
+	win_va_list ap;
+	win_va_start(ap, fmt);
+	for (int i = 0; i < n; i++)
+		a[i] = win_va_arg(ap, void *);
+	win_va_end(ap);
+	int r = fscanf(host, fmt, a[0], a[1], a[2], a[3], a[4], a[5], a[6],
+		       a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14],
+		       a[15], a[16], a[17], a[18], a[19], a[20], a[21], a[22],
+		       a[23], a[24], a[25], a[26], a[27], a[28], a[29], a[30],
+		       a[31]);
+#else
 	va_list ap; va_start(ap, fmt); int r = vfscanf(host, fmt, ap); va_end(ap);
+#endif
 	fclose(host); return r;
 }
 CRTFN(int *) crt__errno(void) { return &errno; }
@@ -208,12 +242,14 @@ CRTFN(void) crt__assert(const char *expr, const char *file, unsigned line)
 	_exit(3);	/* as msvcrt's assert, by way of abort, exits */
 }
 
+#if !defined(__x86_64__)	/* an fs:[0] frame: i386 only */
 __attribute__((naked)) static void STUB_CDECL crt__EH_prolog(void)
 {
 	__asm__ volatile("pushl $-1; pushl %eax; pushl %fs:0; movl %esp,%fs:0; "
 		"movl 12(%esp),%eax; movl %ebp,12(%esp); leal 12(%esp),%ebp; "
 		"pushl %eax; ret");
 }
+#endif
 
 /* VC6 iostream initialisers and locks are process-wide bookkeeping only. */
 THISFN(void *) crt_ios_init_ctor(void *self) { return self; }
@@ -345,7 +381,7 @@ CRTFN(size_t) crt_mbstowcs(WCHAR *dst, const char *src, size_t n)
  * installed, or MSVCRT's default of ending the process with status 3.
  */
 
-typedef void (*crt_sighandler)(int);
+typedef void (STUB_CDECL *crt_sighandler)(int);	/* the DLL's */
 
 #define CRT_SIG_DFL ((crt_sighandler)0)
 #define CRT_SIG_IGN ((crt_sighandler)1)
@@ -401,7 +437,10 @@ CRTFN(int) crt_raise(int sig)
 #define E(n) { #n, 0, (void *)crt_##n }
 #define M(n, f) { n, 0, (void *)(f) }
 const struct builtin_export crt_legacy_exports[] = {
-	E(_EH_prolog), E(_access), E(_adjust_fdiv), E(_assert), E(_errno), E(_filelengthi64),
+#if !defined(__x86_64__)
+	E(_EH_prolog),
+#endif
+	E(_access), E(_adjust_fdiv), E(_assert), E(_errno), E(_filelengthi64),
 	E(_fstat), E(_stat), E(_wstat), E(_isctype), E(_lseek), E(_read), E(_write),
 	E(_wfullpath), E(_wgetenv), E(wcstombs), E(mbstowcs), E(signal), E(raise),
 	E(_tzset), E(__p__daylight), E(__p__dstbias), E(__p__timezone), E(gmtime),

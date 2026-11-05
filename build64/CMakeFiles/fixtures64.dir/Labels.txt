@@ -1,0 +1,13 @@
+# Target labels
+ fixtures64
+# Source files and their labels
+/home/user/libseance/build64/CMakeFiles/fixtures64
+/home/user/libseance/build64/CMakeFiles/fixtures64.rule
+/home/user/libseance/build64/CMakeFiles/fixtures64-complete.rule
+/home/user/libseance/build64/fixtures64-prefix/src/fixtures64-stamp/fixtures64-build.rule
+/home/user/libseance/build64/fixtures64-prefix/src/fixtures64-stamp/fixtures64-configure.rule
+/home/user/libseance/build64/fixtures64-prefix/src/fixtures64-stamp/fixtures64-download.rule
+/home/user/libseance/build64/fixtures64-prefix/src/fixtures64-stamp/fixtures64-install.rule
+/home/user/libseance/build64/fixtures64-prefix/src/fixtures64-stamp/fixtures64-mkdir.rule
+/home/user/libseance/build64/fixtures64-prefix/src/fixtures64-stamp/fixtures64-patch.rule
+/home/user/libseance/build64/fixtures64-prefix/src/fixtures64-stamp/fixtures64-update.rule

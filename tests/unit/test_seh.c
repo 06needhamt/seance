@@ -99,7 +99,7 @@ int main(void)
 	struct module *crt = mod_load(fixture("pe_sehcrt.dll"), NULL);
 	CHECK(crt != NULL);
 	if (crt) {
-		int (*run)(int) = (int (*)(int))mod_get_proc(crt, "sehcrt_run");
+		int (CDECL *run)(int) = (int (CDECL *)(int))mod_get_proc(crt, "sehcrt_run");
 		CHECK(run != NULL);
 		if (run) {
 			CHECK_EQ(run(1), 0);

@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Everything in include/win32 whose layout or value must match Windows.
+ * Everything in include/win32 whose layout or value must match Windows:
+ * VFW_ABI_LIST for both architectures, VFW_ABI_LIST_ARCH for the one being
+ * built (the generated checks are compiled with the mingw-w64 for it).
  *
  *   S(type)          sizeof(type)
  *   O(type, member)  offsetof(type, member)
@@ -40,7 +42,7 @@
 	A(IMAGE_OPTIONAL_HEADER64) A(IMAGE_NT_HEADERS64) \
 	A(IMAGE_THUNK_DATA64) A(IMAGE_TLS_DIRECTORY64) \
 	A(IMAGE_RUNTIME_FUNCTION_ENTRY) \
-	A(EXCEPTION_RECORD) A(FLOATING_SAVE_AREA) A(CONTEXT) \
+	A(EXCEPTION_RECORD) A(CONTEXT) \
 	A(EXCEPTION_REGISTRATION_RECORD) \
 	S(POINT) O(POINT, x) O(POINT, y) \
 	S(RECT) O(RECT, left) O(RECT, top) O(RECT, right) O(RECT, bottom) \
@@ -255,17 +257,10 @@
 	O(EXCEPTION_RECORD, ExceptionAddress) \
 	O(EXCEPTION_RECORD, NumberParameters) \
 	O(EXCEPTION_RECORD, ExceptionInformation) \
-	S(FLOATING_SAVE_AREA) O(FLOATING_SAVE_AREA, ControlWord) \
-	O(FLOATING_SAVE_AREA, StatusWord) O(FLOATING_SAVE_AREA, TagWord) \
-	O(FLOATING_SAVE_AREA, ErrorOffset) O(FLOATING_SAVE_AREA, ErrorSelector) \
-	O(FLOATING_SAVE_AREA, DataOffset) O(FLOATING_SAVE_AREA, DataSelector) \
-	O(FLOATING_SAVE_AREA, RegisterArea) O(FLOATING_SAVE_AREA, Cr0NpxState) \
 	S(CONTEXT) O(CONTEXT, ContextFlags) O(CONTEXT, Dr0) O(CONTEXT, Dr7) \
-	O(CONTEXT, FloatSave) O(CONTEXT, SegGs) O(CONTEXT, SegFs) \
-	O(CONTEXT, SegEs) O(CONTEXT, SegDs) O(CONTEXT, Edi) O(CONTEXT, Esi) \
-	O(CONTEXT, Ebx) O(CONTEXT, Edx) O(CONTEXT, Ecx) O(CONTEXT, Eax) \
-	O(CONTEXT, Ebp) O(CONTEXT, Eip) O(CONTEXT, SegCs) O(CONTEXT, EFlags) \
-	O(CONTEXT, Esp) O(CONTEXT, SegSs) O(CONTEXT, ExtendedRegisters) \
+	O(CONTEXT, SegGs) O(CONTEXT, SegFs) O(CONTEXT, SegEs) \
+	O(CONTEXT, SegDs) O(CONTEXT, SegCs) O(CONTEXT, EFlags) \
+	O(CONTEXT, SegSs) \
 	S(EXCEPTION_REGISTRATION_RECORD) \
 	O(EXCEPTION_REGISTRATION_RECORD, Next) \
 	O(EXCEPTION_REGISTRATION_RECORD, Handler) \
@@ -306,7 +301,7 @@
 	O(CRITICAL_SECTION, LockSemaphore) O(CRITICAL_SECTION, SpinCount) \
 	S(SRWLOCK) A(SRWLOCK) S(CONDITION_VARIABLE) A(CONDITION_VARIABLE) \
 	S(INIT_ONCE) A(INIT_ONCE) S(SLIST_ENTRY) S(SLIST_HEADER) \
-	O(SLIST_HEADER, Depth) O(SLIST_HEADER, Sequence) A(SLIST_HEADER) \
+	A(SLIST_ENTRY) A(SLIST_HEADER) \
 	S(GROUP_AFFINITY) O(GROUP_AFFINITY, Group) A(GROUP_AFFINITY) \
 	S(PROCESSOR_NUMBER) O(PROCESSOR_NUMBER, Number) \
 	S(BY_HANDLE_FILE_INFORMATION) \
@@ -1136,6 +1131,40 @@
 	O(IDMOVideoOutputOptimizationsVtbl, SetOperationMode) \
 	O(IDMOVideoOutputOptimizationsVtbl, GetCurrentOperationMode) \
 	O(IDMOVideoOutputOptimizationsVtbl, GetCurrentSampleRequirements)
+
+/* What differs between the i386 and x86-64 (Win64) headers. */
+#if defined(__x86_64__)
+#define VFW_ABI_LIST_ARCH(S, O, C, A) \
+	A(M128A) A(XMM_SAVE_AREA32) \
+	S(M128A) O(M128A, Low) O(M128A, High) \
+	S(XMM_SAVE_AREA32) O(XMM_SAVE_AREA32, ControlWord) \
+	O(XMM_SAVE_AREA32, TagWord) O(XMM_SAVE_AREA32, ErrorOpcode) \
+	O(XMM_SAVE_AREA32, ErrorOffset) O(XMM_SAVE_AREA32, DataOffset) \
+	O(XMM_SAVE_AREA32, MxCsr) O(XMM_SAVE_AREA32, MxCsr_Mask) \
+	O(XMM_SAVE_AREA32, FloatRegisters) O(XMM_SAVE_AREA32, XmmRegisters) \
+	O(CONTEXT, P1Home) O(CONTEXT, P6Home) O(CONTEXT, MxCsr) \
+	O(CONTEXT, Dr6) O(CONTEXT, Rax) O(CONTEXT, Rcx) O(CONTEXT, Rdx) \
+	O(CONTEXT, Rbx) O(CONTEXT, Rsp) O(CONTEXT, Rbp) O(CONTEXT, Rsi) \
+	O(CONTEXT, Rdi) O(CONTEXT, R8) O(CONTEXT, R12) O(CONTEXT, R15) \
+	O(CONTEXT, Rip) O(CONTEXT, FltSave) O(CONTEXT, Xmm0) \
+	O(CONTEXT, Xmm15) O(CONTEXT, VectorRegister) \
+	O(CONTEXT, VectorControl) O(CONTEXT, DebugControl) \
+	O(CONTEXT, LastExceptionFromRip) \
+	O(SLIST_HEADER, Alignment) O(SLIST_HEADER, Region)
+#else
+#define VFW_ABI_LIST_ARCH(S, O, C, A) \
+	A(FLOATING_SAVE_AREA) \
+	S(FLOATING_SAVE_AREA) O(FLOATING_SAVE_AREA, ControlWord) \
+	O(FLOATING_SAVE_AREA, StatusWord) O(FLOATING_SAVE_AREA, TagWord) \
+	O(FLOATING_SAVE_AREA, ErrorOffset) O(FLOATING_SAVE_AREA, ErrorSelector) \
+	O(FLOATING_SAVE_AREA, DataOffset) O(FLOATING_SAVE_AREA, DataSelector) \
+	O(FLOATING_SAVE_AREA, RegisterArea) O(FLOATING_SAVE_AREA, Cr0NpxState) \
+	O(CONTEXT, FloatSave) O(CONTEXT, Edi) O(CONTEXT, Esi) \
+	O(CONTEXT, Ebx) O(CONTEXT, Edx) O(CONTEXT, Ecx) O(CONTEXT, Eax) \
+	O(CONTEXT, Ebp) O(CONTEXT, Eip) O(CONTEXT, Esp) \
+	O(CONTEXT, ExtendedRegisters) \
+	O(SLIST_HEADER, Depth) O(SLIST_HEADER, Sequence)
+#endif
 
 /* Every GUID list in include/win32, compared with mingw's values. */
 #define VFW_ABI_GUIDS(G) \

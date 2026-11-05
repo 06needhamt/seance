@@ -29,6 +29,7 @@
 #include "win32/internal.h"
 #include "win32/k32.h"
 #include "win32/path.h"
+#include "win32/winva.h"
 
 #define CRTFN(ret) static ret STUB_CDECL
 
@@ -84,11 +85,11 @@ CRTFN(int) crt__open(const char *name, int oflag, ...)
 	int pmode = 0;
 
 	if (oflag & CRT_O_CREAT) {
-		va_list ap;
+		win_va_list ap;
 
-		va_start(ap, oflag);
-		pmode = va_arg(ap, int);
-		va_end(ap);
+		win_va_start(ap, oflag);
+		pmode = win_va_arg(ap, int);
+		win_va_end(ap);
 	}
 	return open_win(name, oflag, pmode);
 }
@@ -98,11 +99,11 @@ CRTFN(int) crt__wopen(const WCHAR *name, int oflag, ...)
 	int pmode = 0;
 
 	if (oflag & CRT_O_CREAT) {
-		va_list ap;
+		win_va_list ap;
 
-		va_start(ap, oflag);
-		pmode = va_arg(ap, int);
-		va_end(ap);
+		win_va_start(ap, oflag);
+		pmode = win_va_arg(ap, int);
+		win_va_end(ap);
 	}
 	return open_wide(name, oflag, pmode);
 }
@@ -113,11 +114,11 @@ CRTFN(int) crt__sopen(const char *name, int oflag, int shflag, ...)
 	int pmode = 0;
 
 	if (oflag & CRT_O_CREAT) {
-		va_list ap;
+		win_va_list ap;
 
-		va_start(ap, shflag);
-		pmode = va_arg(ap, int);
-		va_end(ap);
+		win_va_start(ap, shflag);
+		pmode = win_va_arg(ap, int);
+		win_va_end(ap);
 	}
 	return open_win(name, oflag, pmode);
 }
@@ -127,11 +128,11 @@ CRTFN(int) crt__wsopen(const WCHAR *name, int oflag, int shflag, ...)
 	int pmode = 0;
 
 	if (oflag & CRT_O_CREAT) {
-		va_list ap;
+		win_va_list ap;
 
-		va_start(ap, shflag);
-		pmode = va_arg(ap, int);
-		va_end(ap);
+		win_va_start(ap, shflag);
+		pmode = win_va_arg(ap, int);
+		win_va_end(ap);
 	}
 	return open_wide(name, oflag, pmode);
 }

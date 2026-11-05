@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Structured exception handling: the i386 fs:[0] chain of
+ * Structured exception handling (seh.c; on x86-64, seh_x64.c): the i386
+ * fs:[0] chain of
  * EXCEPTION_REGISTRATION_RECORDs that __try/__except and __finally compile
  * to, and the three ways code drives it (a hardware fault, RaiseException,
  * RtlUnwind).
@@ -37,9 +38,11 @@ int seh_take_fault(int sig, siginfo_t *si, void *ucontext);
  * kernel32.dll (RtlUnwind is also exported, as a forward, by ntdll.dll). */
 void WINAPI seh_RaiseException(DWORD code, DWORD flags, DWORD nargs,
 			       const DWORD_PTR *args);
+#if !defined(__x86_64__)	/* the fs:[0] chain's */
 void WINAPI seh_RtlUnwind(PEXCEPTION_REGISTRATION_RECORD target_frame,
 			  void *target_ip, EXCEPTION_RECORD *rec,
 			  void *retval);
+#endif
 LPTOP_LEVEL_EXCEPTION_FILTER WINAPI
 seh_SetUnhandledExceptionFilter(LPTOP_LEVEL_EXCEPTION_FILTER filter);
 LONG WINAPI seh_UnhandledExceptionFilter(EXCEPTION_POINTERS *ep);

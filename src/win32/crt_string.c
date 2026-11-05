@@ -331,23 +331,39 @@ CRTFN(int) crt_rand(void)
 	return (rand_state >> 16) & 0x7fff;
 }
 
-CRTFN(void) crt_qsort(void *base, size_t n, size_t size,
-		      int (STUB_CDECL *cmp)(const void *, const void *))
+/*
+ * The DLL's comparator has the Windows calling convention, which on x86-64
+ * isn't glibc's, so it is called through cmp_call rather than handed over.
+ */
+typedef int (STUB_CDECL *crt_cmp_fn)(const void *, const void *);
+
+static int cmp_call(const void *a, const void *b, void *cmp)
 {
-	/*
-	 * glibc's comparator is plain cdecl too (the C standard's qsort has
-	 * no calling-convention distinction), so the codec's stdcall-free
-	 * cdecl comparator (STUB_CDECL matches what mingw-built code emits
-	 * for a plain int(*)(const void*,const void*)) can be handed to it
-	 * directly.
-	 */
-	qsort(base, n, size, (int (*)(const void *, const void *))cmp);
+	return (*(crt_cmp_fn *)cmp)(a, b);
 }
 
-CRTFN(void *) crt_bsearch(const void *key, const void *base, size_t n, size_t size,
-			  int (STUB_CDECL *cmp)(const void *, const void *))
+CRTFN(void) crt_qsort(void *base, size_t n, size_t size, crt_cmp_fn cmp)
 {
-	return bsearch(key, base, n, size, (int (*)(const void *, const void *))cmp);
+	qsort_r(base, n, size, cmp_call, &cmp);
+}
+
+CRTFN(void *) crt_bsearch(const void *key, const void *base, size_t n,
+			  size_t size, crt_cmp_fn cmp)
+{
+	size_t lo = 0, hi = n;
+
+	while (lo < hi) {
+		size_t mid = lo + (hi - lo) / 2;
+		const void *p = (const char *)base + mid * size;
+		int c = cmp(key, p);
+		if (!c)
+			return (void *)p;
+		if (c < 0)
+			hi = mid;
+		else
+			lo = mid + 1;
+	}
+	return NULL;
 }
 
 CRTFN(int) crt_abs(int v) { return abs(v); }

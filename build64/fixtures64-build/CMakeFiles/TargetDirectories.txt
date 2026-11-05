@@ -1,0 +1,8 @@
+/home/user/libseance/build64/fixtures64-build/CMakeFiles/pe_basic_implib.dir
+/home/user/libseance/build64/fixtures64-build/CMakeFiles/pe_basic.dir
+/home/user/libseance/build64/fixtures64-build/CMakeFiles/pe_reloc.dir
+/home/user/libseance/build64/fixtures64-build/CMakeFiles/pe_tls.dir
+/home/user/libseance/build64/fixtures64-build/CMakeFiles/pe_dep.dir
+/home/user/libseance/build64/fixtures64-build/CMakeFiles/pe_noreloc.dir
+/home/user/libseance/build64/fixtures64-build/CMakeFiles/edit_cache.dir
+/home/user/libseance/build64/fixtures64-build/CMakeFiles/rebuild_cache.dir

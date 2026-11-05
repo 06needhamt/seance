@@ -1,0 +1,43 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "/home/user/libseance/build64/CMakeFiles/fixtures"
+		},
+		{
+			"file" : "/home/user/libseance/build64/CMakeFiles/fixtures.rule"
+		},
+		{
+			"file" : "/home/user/libseance/build64/CMakeFiles/fixtures-complete.rule"
+		},
+		{
+			"file" : "/home/user/libseance/build64/fixtures-prefix/src/fixtures-stamp/fixtures-build.rule"
+		},
+		{
+			"file" : "/home/user/libseance/build64/fixtures-prefix/src/fixtures-stamp/fixtures-configure.rule"
+		},
+		{
+			"file" : "/home/user/libseance/build64/fixtures-prefix/src/fixtures-stamp/fixtures-download.rule"
+		},
+		{
+			"file" : "/home/user/libseance/build64/fixtures-prefix/src/fixtures-stamp/fixtures-install.rule"
+		},
+		{
+			"file" : "/home/user/libseance/build64/fixtures-prefix/src/fixtures-stamp/fixtures-mkdir.rule"
+		},
+		{
+			"file" : "/home/user/libseance/build64/fixtures-prefix/src/fixtures-stamp/fixtures-patch.rule"
+		},
+		{
+			"file" : "/home/user/libseance/build64/fixtures-prefix/src/fixtures-stamp/fixtures-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"fixtures"
+		],
+		"name" : "fixtures"
+	}
+}

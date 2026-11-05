@@ -260,17 +260,30 @@ typedef struct tagMONITORINFO {
 #define WM_USER              0x0400
 #define WM_APP               0x8000
 
-/* Get/SetWindowLong. */
+/*
+ * Get/SetWindowLong, and the Ptr forms' indices for the pointer-sized
+ * values. Win64 has only the latter for those: a LONG can't hold them.
+ */
+#if !defined(__x86_64__)
 #define GWL_WNDPROC    (-4)
 #define GWL_HINSTANCE  (-6)
 #define GWL_HWNDPARENT (-8)
-#define GWL_ID         (-12)
-#define GWL_STYLE      (-16)
-#define GWL_EXSTYLE    (-20)
 #define GWL_USERDATA   (-21)
 #define DWL_MSGRESULT  0
 #define DWL_DLGPROC    4
 #define DWL_USER       8
+#endif
+#define GWL_ID         (-12)
+#define GWL_STYLE      (-16)
+#define GWL_EXSTYLE    (-20)
+#define GWLP_WNDPROC    (-4)
+#define GWLP_HINSTANCE  (-6)
+#define GWLP_HWNDPARENT (-8)
+#define GWLP_ID         (-12)
+#define GWLP_USERDATA   (-21)
+#define DWLP_MSGRESULT  0
+#define DWLP_DLGPROC    ((LONG_PTR)DWLP_MSGRESULT + (LONG_PTR)sizeof(LRESULT))
+#define DWLP_USER       ((LONG_PTR)DWLP_DLGPROC + (LONG_PTR)sizeof(void *))
 
 /* Window styles. */
 #define WS_OVERLAPPED       0x00000000

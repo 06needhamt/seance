@@ -1,0 +1,17 @@
+# ninja log v5
+1	11	1793905172807883888	libpe_basic.a	5c8bd15eadbac1c4
+1	11	1793905172807883888	/home/user/libseance/build64/fixtures64-build/libpe_basic.a	5c8bd15eadbac1c4
+0	25	1793905172818369331	CMakeFiles/pe_basic.dir/pe_basic.rc.res	e994fa9e2e3eec1b
+1	541	1793905173337672372	CMakeFiles/pe_tls.dir/pe_tls.c.obj	ab7e01260f4bdcf8
+0	548	1793905173342770663	CMakeFiles/pe_basic.dir/pe_basic.c.obj	e6056fe713bc6298
+541	548	1793905173344555451	/home/user/libseance/build64/fixtures64/pe_tls.dll	c3b0cefff6ced3b6
+541	548	1793905173344555451	implib/libpe_tls.dll.a	c3b0cefff6ced3b6
+548	554	1793905173351173451	/home/user/libseance/build64/fixtures64/pe_basic.dll	90968ef05b057b5b
+548	554	1793905173351173451	implib/libpe_basic.dll.a	90968ef05b057b5b
+0	563	1793905173359339760	CMakeFiles/pe_reloc.dir/pe_reloc.c.obj	e66727d4656c98b3
+11	564	1793905173360841177	CMakeFiles/pe_dep.dir/pe_dep.c.obj	159c80eed00393b6
+563	569	1793905173365440244	/home/user/libseance/build64/fixtures64/pe_reloc.dll	68ebaa2d9359dc39
+563	569	1793905173365440244	implib/libpe_reloc.dll.a	68ebaa2d9359dc39
+564	571	1793905173367230157	/home/user/libseance/build64/fixtures64/pe_dep.dll	6afcbdf08f755b87
+564	571	1793905173367230157	implib/libpe_dep.dll.a	6afcbdf08f755b87
+569	571	1793905173368185493	/home/user/libseance/build64/fixtures64/pe_noreloc.dll	420511c6f8d5f14f

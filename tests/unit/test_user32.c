@@ -139,6 +139,11 @@ static void test_classes_and_windows(void)
 	FN(int, GetWindowTextLengthA, HWND);
 	FN(LONG, GetWindowLongA, HWND, int);
 	FN(LONG, SetWindowLongA, HWND, int, LONG);
+	LONG_PTR (WINAPI *GetWindowLongPtrA)(HWND, int) =
+		(LONG_PTR (WINAPI *)(HWND, int))get_from(u32, WLP_NAME(Get, A));
+	LONG_PTR (WINAPI *SetWindowLongPtrA)(HWND, int, LONG_PTR) =
+		(LONG_PTR (WINAPI *)(HWND, int, LONG_PTR))
+			get_from(u32, WLP_NAME(Set, A));
 	FN(HWND, GetParent, HWND);
 	FN(HWND, GetDlgItem, HWND, int);
 	FN(int, GetClassNameA, HWND, LPSTR, int);
@@ -150,6 +155,9 @@ static void test_classes_and_windows(void)
 	FN(HWND, GetDesktopWindow, void);
 	FN(DWORD, GetWindowThreadProcessId, HWND, LPDWORD);
 	K32(DWORD, GetLastError, void);
+#if defined(__x86_64__)
+	K32(void, SetLastError, DWORD);
+#endif
 	K32(DWORD, GetCurrentThreadId, void);
 
 	def_a = (WNDPROC)get_from(u32, "DefWindowProcA");
@@ -228,13 +236,22 @@ static void test_classes_and_windows(void)
 	CHECK_STR(log_buf, "hide");
 
 	/* Window longs: the fields and the extra bytes. */
-	CHECK_EQ(SetWindowLongA(h, GWL_USERDATA, 77), 0);
-	CHECK_EQ(GetWindowLongA(h, GWL_USERDATA), 77);
+	CHECK_EQ(SetWindowLongA(h, GWLP_USERDATA, 77), 0);
+	CHECK_EQ(GetWindowLongA(h, GWLP_USERDATA), 77);
 	CHECK_EQ(SetWindowLongA(h, 4, 5), 0);
 	CHECK_EQ(GetWindowLongA(h, 4), 5);
 	CHECK_EQ(GetWindowLongA(h, 8), 0);
 	CHECK_EQ(GetLastError(), ERROR_INVALID_INDEX);
-	CHECK(GetWindowLongA(h, GWL_WNDPROC) == (LONG)(ULONG_PTR)proc_a);
+	CHECK(GetWindowLongPtrA(h, GWLP_WNDPROC) == (LONG_PTR)proc_a);
+	/* The Ptr forms keep the whole pointer. */
+	CHECK_EQ(SetWindowLongPtrA(h, GWLP_USERDATA, (LONG_PTR)&log_buf), 77);
+	CHECK(GetWindowLongPtrA(h, GWLP_USERDATA) == (LONG_PTR)&log_buf);
+#if defined(__x86_64__)
+	/* Win64: only they have the pointer fields. */
+	SetLastError(0);
+	CHECK_EQ(GetWindowLongA(h, GWLP_WNDPROC), 0);
+	CHECK_EQ(GetLastError(), ERROR_INVALID_INDEX);
+#endif
 	CHECK(!(GetWindowLongA(h, GWL_STYLE) & WS_VISIBLE));
 
 	/* Properties. */
@@ -414,8 +431,8 @@ static void test_messages(void)
 
 static void test_strings(void)
 {
-	int (*wsprintfA)(LPSTR, LPCSTR, ...) = get_from(u32, "wsprintfA");
-	int (*wsprintfW)(LPWSTR, LPCWSTR, ...) = get_from(u32, "wsprintfW");
+	int (CDECL *wsprintfA)(LPSTR, LPCSTR, ...) = get_from(u32, "wsprintfA");
+	int (CDECL *wsprintfW)(LPWSTR, LPCWSTR, ...) = get_from(u32, "wsprintfW");
 	FN(LPSTR, CharUpperA, LPSTR);
 	FN(LPSTR, CharLowerA, LPSTR);
 	FN(LPWSTR, CharUpperW, LPWSTR);
@@ -683,7 +700,7 @@ static void test_fixture(void)
 		return;
 	static const char *const tests[] = { "gui_strings", "gui_window", "gui_bitmap" };
 	for (size_t i = 0; i < 3; i++) {
-		int (*fn)(void) = mod_get_proc(m, tests[i]);
+		int (CDECL *fn)(void) = mod_get_proc(m, tests[i]);
 		CHECK(fn != NULL);
 		if (!fn)
 			continue;

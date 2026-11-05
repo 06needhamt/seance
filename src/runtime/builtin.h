@@ -15,9 +15,15 @@
 /*
  * Stubs are called from Win32 code, which only keeps the stack 4-byte
  * aligned, so they realign it before running (glibc and gcc assume 16).
+ * Win64 code keeps it 16-byte aligned, as the SysV ABI does.
  */
+#if defined(__x86_64__)
+#define STUB_WINAPI __attribute__((ms_abi))
+#define STUB_CDECL  __attribute__((ms_abi))
+#else
 #define STUB_WINAPI __attribute__((stdcall, force_align_arg_pointer))
 #define STUB_CDECL  __attribute__((cdecl, force_align_arg_pointer))
+#endif
 
 struct builtin_export {
 	const char *name;	/* NULL for an ordinal-only export */

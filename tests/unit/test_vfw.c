@@ -259,13 +259,13 @@ static void test_driver_proc(void)
 	CHECK(strstr(vfw_error(), "no codec is registered"));
 }
 
-typedef int (*stats_fn)(DWORD *out, int n, int reset);
-typedef LONG (*count_fn)(void);
-typedef int (*selftest_fn)(void);
+typedef int (CDECL *stats_fn)(DWORD *out, int n, int reset);
+typedef LONG (CDECL *count_fn)(void);
+typedef int (CDECL *selftest_fn)(void);
 
 static stats_fn codec_stats;
 static count_fn codec_opens;
-static DWORD (*codec_quality)(void);
+static DWORD (CDECL *codec_quality)(void);
 static count_fn codec_module_misses;
 
 static int log_is(const UINT *want, int n)
@@ -798,10 +798,10 @@ static void test_drawdib(void)
 	BOOL (WINAPI *timing)(HDRAWDIB, DRAWDIBTIME *) = P(vfw, DrawDibTime);
 	LRESULT (WINAPI *profile)(BITMAPINFOHEADER *) =
 		P(vfw, DrawDibProfileDisplay);
-	DWORD (__attribute__((cdecl)) *draw_begin)(HIC, DWORD, HPALETTE, HWND,
+	DWORD (CDECL *draw_begin)(HIC, DWORD, HPALETTE, HWND,
 		HDC, int, int, int, int, BITMAPINFOHEADER *, int, int, int,
 		int, DWORD, DWORD) = P(vfw, ICDrawBegin);
-	DWORD (__attribute__((cdecl)) *ic_draw)(HIC, DWORD, void *, void *,
+	DWORD (CDECL *ic_draw)(HIC, DWORD, void *, void *,
 		DWORD, LONG) = P(vfw, ICDraw);
 	HDC (WINAPI *create_dc)(HDC) = P(gdi, CreateCompatibleDC);
 	BOOL (WINAPI *delete_dc)(HDC) = P(gdi, DeleteDC);

@@ -10,6 +10,7 @@
 #include "runtime/seh.h"
 #include "runtime/teb.h"
 #include "win32/crt.h"
+#include "win32/winva.h"
 
 #define NT(ret) static ret STUB_WINAPI
 
@@ -58,22 +59,22 @@ NT(struct win_teb *) nt_NtCurrentTeb(void)
 
 /* msvcrt's, as ntdll's are (crt_printf.c). */
 static int STUB_CDECL nt__vsnprintf(char *buf, SIZE_T n, const char *fmt,
-				    va_list ap)
+				    win_va_list ap)
 {
 	return crt_vsnprintf(0, buf, n, fmt, ap);
 }
 
 static int STUB_CDECL nt__snprintf(char *buf, SIZE_T n, const char *fmt, ...)
 {
-	va_list ap;
-	va_start(ap, fmt);
+	win_va_list ap;
+	win_va_start(ap, fmt);
 	int r = crt_vsnprintf(0, buf, n, fmt, ap);
-	va_end(ap);
+	win_va_end(ap);
 	return r;
 }
 
 static int STUB_CDECL nt__vsnwprintf(WCHAR *buf, SIZE_T n, const WCHAR *fmt,
-				     va_list ap)
+				     win_va_list ap)
 {
 	return crt_vsnprintf(1, buf, n, fmt, ap);
 }
@@ -81,10 +82,10 @@ static int STUB_CDECL nt__vsnwprintf(WCHAR *buf, SIZE_T n, const WCHAR *fmt,
 static int STUB_CDECL nt__snwprintf(WCHAR *buf, SIZE_T n, const WCHAR *fmt,
 				    ...)
 {
-	va_list ap;
-	va_start(ap, fmt);
+	win_va_list ap;
+	win_va_start(ap, fmt);
 	int r = crt_vsnprintf(1, buf, n, fmt, ap);
-	va_end(ap);
+	win_va_end(ap);
 	return r;
 }
 
@@ -102,7 +103,9 @@ static const struct builtin_export exports[] = {
 	E(RtlMoveMemory),
 	E(RtlSetLastWin32Error),
 	E(RtlZeroMemory),
+#if !defined(__x86_64__)
 	{ "RtlUnwind", 0, (void *)seh_RtlUnwind },
+#endif
 	BUILTIN_END
 };
 

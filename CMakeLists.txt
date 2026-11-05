@@ -21,20 +21,39 @@
 # The compiler: see cmake/i386.cmake. On an x86 host it is the default one
 # with -m32, else (or without 32-bit support) an i686 cross compiler; a
 # cross build's tests run through qemu-i386 when there is one.
+#
+# VFW_ARCH=x86_64 builds seance64 instead, which runs 64-bit (PE32+) DLLs
+# (cmake/x86_64.cmake; docs/X64_PLAN.md). Use a build directory of its own.
 cmake_minimum_required(VERSION 3.20)
 
-# The harness loads 32-bit Windows DLLs into its own address space, so it
-# is always an i386 program. Chosen before project() so the compiler
-# checks use it too.
-include(cmake/i386.cmake)
+# The harness loads Windows DLLs into its own address space, so it is an
+# i386 program for 32-bit DLLs and an x86-64 one for 64-bit DLLs. Chosen
+# before project() so the compiler checks use it too.
+set(VFW_ARCH "i386" CACHE STRING
+	"What the harness runs: i386 (seance) or x86_64 (seance64) DLLs")
+set_property(CACHE VFW_ARCH PROPERTY STRINGS i386 x86_64)
+if(VFW_ARCH STREQUAL "x86_64")
+	include(cmake/x86_64.cmake)
+elseif(VFW_ARCH STREQUAL "i386")
+	include(cmake/i386.cmake)
+else()
+	message(FATAL_ERROR "VFW_ARCH must be i386 or x86_64, not ${VFW_ARCH}")
+endif()
 
 project(seance VERSION 0.1.0 LANGUAGES C)
 
-if(NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
-	message(FATAL_ERROR "seance must be built as a 32-bit x86 "
-		"program; the compiler gives ${CMAKE_SIZEOF_VOID_P}-byte pointers. "
-		"Install gcc-multilib or an i686 cross compiler, or give a "
-		"toolchain file for i386.")
+if(VFW_ARCH STREQUAL "x86_64")
+	set(vfw_pointer_size 8)
+	set(vfw_harness seance64)
+else()
+	set(vfw_pointer_size 4)
+	set(vfw_harness seance)
+endif()
+if(NOT CMAKE_SIZEOF_VOID_P EQUAL vfw_pointer_size)
+	message(FATAL_ERROR "VFW_ARCH=${VFW_ARCH} needs a compiler that gives "
+		"${vfw_pointer_size}-byte pointers; this one gives "
+		"${CMAKE_SIZEOF_VOID_P}. For i386, install gcc-multilib or an "
+		"i686 cross compiler, or give a toolchain file.")
 endif()
 
 include(cmake/emulator.cmake)
@@ -87,6 +106,7 @@ target_link_libraries(seance PRIVATE vfw_core)
 target_compile_definitions(seance PRIVATE
 	SEANCE_VERSION="${PROJECT_VERSION}-dev")
 set_target_properties(seance PROPERTIES
+	OUTPUT_NAME ${vfw_harness}
 	RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
 install(TARGETS seance RUNTIME DESTINATION bin)
@@ -160,6 +180,19 @@ if(BUILD_TESTING)
 		endif()
 	endfunction()
 
+	# The fixtures the harness can run: the 64-bit ones in seance64's
+	# build. That set is partial so far (docs/X64_PLAN.md), so tests
+	# needing the others skip there, and smoke runs without fixtures.
+	if(VFW_ARCH STREQUAL "x86_64")
+		set(vfw_run_fixtures ${VFW_FIXTURE64_DIR})
+		set(vfw_fixtures_required OFF)
+		set(vfw_smoke_fixtures "")
+	else()
+		set(vfw_run_fixtures ${VFW_FIXTURE_DIR})
+		set(vfw_fixtures_required ${VFW_REQUIRE_MINGW})
+		set(vfw_smoke_fixtures $<$<BOOL:${VFW_MINGW_CC}>:${VFW_FIXTURE_DIR}>)
+	endif()
+
 	file(GLOB unit_sources CONFIGURE_DEPENDS tests/unit/test_*.c)
 	foreach(src ${unit_sources})
 		get_filename_component(name ${src} NAME_WE)
@@ -170,9 +203,9 @@ if(BUILD_TESTING)
 			RUNTIME_OUTPUT_DIRECTORY ${test_dir})
 		add_test(NAME ${name} COMMAND ${name})
 		set_tests_properties(${name} PROPERTIES
-			ENVIRONMENT "VFW_FIXTURES=${VFW_FIXTURE_DIR};VFW_FIXTURES64=${VFW_FIXTURE64_DIR};VFW_EMULATOR=${vfw_emulator}"
+			ENVIRONMENT "VFW_FIXTURES=${vfw_run_fixtures};VFW_FIXTURES64=${VFW_FIXTURE64_DIR};VFW_EMULATOR=${vfw_emulator}"
 			LABELS unit)
-		skippable(${name} ${VFW_REQUIRE_MINGW})
+		skippable(${name} ${vfw_fixtures_required})
 	endforeach()
 
 	# Every struct, field and constant in include/win32, checked against
@@ -201,7 +234,18 @@ if(BUILD_TESTING)
 		VERBATIM)
 	add_custom_target(abi_checks ALL DEPENDS ${abi_checks})
 
-	if(VFW_MINGW_CC)
+	# The checks hold for the architecture being built, so they are
+	# compiled with the mingw-w64 for it.
+	if(VFW_ARCH STREQUAL "x86_64")
+		set(vfw_abi_cc "${VFW_MINGW64_CC}")
+		set(vfw_abi_prefix ${VFW_MINGW64_PREFIX})
+		set(vfw_abi_required ${VFW_REQUIRE_MINGW64})
+	else()
+		set(vfw_abi_cc "${VFW_MINGW_CC}")
+		set(vfw_abi_prefix ${VFW_MINGW_PREFIX})
+		set(vfw_abi_required ${VFW_REQUIRE_MINGW})
+	endif()
+	if(vfw_abi_cc)
 		# GUIDs aren't constants, so check_abi gets mingw's values
 		# from its preprocessor (see mingw_guids.sh).
 		set(abi_mingw_guids ${test_dir}/abi_mingw_guids.inc)
@@ -209,24 +253,24 @@ if(BUILD_TESTING)
 			COMMAND ${CMAKE_COMMAND} -DOUTPUT=${abi_mingw_guids}
 				-P ${PROJECT_SOURCE_DIR}/cmake/capture.cmake --
 				sh ${PROJECT_SOURCE_DIR}/tests/abi/mingw_guids.sh
-				${VFW_MINGW_CC}
+				${vfw_abi_cc}
 			DEPENDS tests/abi/mingw_guids.sh
 			VERBATIM)
 		add_custom_target(abi_mingw_guids ALL DEPENDS ${abi_mingw_guids})
 		add_test(NAME check_abi
-			COMMAND ${VFW_MINGW_CC} -std=c11 -fsyntax-only -I${test_dir}
+			COMMAND ${vfw_abi_cc} -std=c11 -fsyntax-only -I${test_dir}
 				${PROJECT_SOURCE_DIR}/tests/abi/check_abi.c)
 	else()
 		add_test(NAME check_abi COMMAND sh -c
-			"echo 'check_abi: ${VFW_MINGW_PREFIX}gcc not found'; exit 77")
+			"echo 'check_abi: ${vfw_abi_prefix}gcc not found'; exit 77")
 	endif()
 	set_tests_properties(check_abi PROPERTIES LABELS abi)
-	skippable(check_abi ${VFW_REQUIRE_MINGW})
+	skippable(check_abi ${vfw_abi_required})
 
 	add_test(NAME smoke
 		COMMAND sh ${PROJECT_SOURCE_DIR}/tests/smoke.sh
 			$<TARGET_FILE:seance> ${PROJECT_SOURCE_DIR}/CMakeLists.txt
-			$<$<BOOL:${VFW_MINGW_CC}>:${VFW_FIXTURE_DIR}>
+			"${vfw_smoke_fixtures}"
 			$<IF:$<BOOL:${VFW_SANITIZE}>,0,1>)
 	set_tests_properties(smoke PROPERTIES LABELS cli
 		ENVIRONMENT "VFW_EMULATOR=${vfw_emulator}")

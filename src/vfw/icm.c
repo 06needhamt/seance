@@ -454,8 +454,8 @@ const char *icerr_name(LRESULT err, char buf[24])
 	case ICERR_BADBITDEPTH:  return "ICERR_BADBITDEPTH";
 	case ICERR_BADIMAGESIZE: return "ICERR_BADIMAGESIZE";
 	}
-	if (err <= ICERR_CUSTOM)
-		snprintf(buf, 24, "ICERR_CUSTOM%+ld", (long)(err - ICERR_CUSTOM));
+	if (err <= ICERR_CUSTOM && err - ICERR_CUSTOM >= -0x7fffffff)
+		snprintf(buf, 24, "ICERR_CUSTOM%+d", (int)(err - ICERR_CUSTOM));
 	else
 		snprintf(buf, 24, "%ld", (long)err);
 	return buf;

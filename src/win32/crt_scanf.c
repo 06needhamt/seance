@@ -25,6 +25,7 @@
 #include "runtime/builtin.h"
 #include "win32/codepage.h"
 #include "win32/internal.h"
+#include "win32/winva.h"
 
 #define CRTFN(ret) static ret STUB_CDECL
 
@@ -74,7 +75,7 @@ static int store_wide(WCHAR *dst, size_t room, const char *a, size_t len,
 }
 
 static int crt_vscan(unsigned options, const char *in, const char *fmt,
-		     va_list ap)
+		     win_va_list ap)
 {
 	const char *start = in;
 	int assigned = 0, converted = 0;
@@ -160,7 +161,7 @@ static int crt_vscan(unsigned options, const char *in, const char *fmt,
 
 		if (conv == 'n') {
 			if (!suppress) {
-				void *p = va_arg(ap, void *);
+				void *p = win_va_arg(ap, void *);
 				long long pos = in - start;
 				if (size == SZ_HH)
 					*(signed char *)p = (signed char)pos;
@@ -195,7 +196,7 @@ static int crt_vscan(unsigned options, const char *in, const char *fmt,
 				snprintf(w, sizeof(w), "%d", width);
 			snprintf(f, sizeof(f), "%%%s%s%s%c%%n", suppress ? "*" : "",
 				 w, c == 'p' ? "" : sizes[size], c);
-			r = host_scan(at, f, suppress ? NULL : va_arg(ap, void *),
+			r = host_scan(at, f, suppress ? NULL : win_va_arg(ap, void *),
 				      &used);
 			break;
 		}
@@ -208,7 +209,7 @@ static int crt_vscan(unsigned options, const char *in, const char *fmt,
 				snprintf(w, sizeof(w), "%d", width);
 			snprintf(f, sizeof(f), "%%%s%s%sf%%n", suppress ? "*" : "",
 				 w, dbl ? "l" : "");
-			r = host_scan(at, f, suppress ? NULL : va_arg(ap, void *),
+			r = host_scan(at, f, suppress ? NULL : win_va_arg(ap, void *),
 				      &used);
 			break;
 		}
@@ -216,10 +217,10 @@ static int crt_vscan(unsigned options, const char *in, const char *fmt,
 			int is_c = conv == 'c' || conv == 'C';
 			int wide = size == SZ_L || size == SZ_W ||
 				   (size != SZ_H && (conv == 'S' || conv == 'C'));
-			void *dst = suppress ? NULL : va_arg(ap, void *);
+			void *dst = suppress ? NULL : win_va_arg(ap, void *);
 			size_t room = SIZE_MAX;
 			if (!suppress && (options & SCANF_SECURECRT))
-				room = va_arg(ap, unsigned);
+				room = win_va_arg(ap, unsigned);
 			if (is_c && !width)
 				width = 1;
 			size_t cap = width ? (size_t)width : strlen(at);
@@ -279,14 +280,14 @@ static int crt_vscan(unsigned options, const char *in, const char *fmt,
 
 CRTFN(int) crt_sscanf(const char *s, const char *fmt, ...)
 {
-	va_list ap;
-	va_start(ap, fmt);
+	win_va_list ap;
+	win_va_start(ap, fmt);
 	int r = crt_vscan(0, s, fmt, ap);
-	va_end(ap);
+	win_va_end(ap);
 	return r;
 }
 
-CRTFN(int) crt_vsscanf(const char *s, const char *fmt, va_list ap)
+CRTFN(int) crt_vsscanf(const char *s, const char *fmt, win_va_list ap)
 {
 	return crt_vscan(0, s, fmt, ap);
 }
@@ -294,7 +295,7 @@ CRTFN(int) crt_vsscanf(const char *s, const char *fmt, va_list ap)
 /* length (size_t)-1: up to the terminator; otherwise that many bytes. */
 CRTFN(int) crt___stdio_common_vsscanf(ULONGLONG options, const char *s,
 				       size_t length, const char *fmt,
-				       void *locale, va_list ap)
+				       void *locale, win_va_list ap)
 {
 	(void)locale;
 	if (!s || length == (size_t)-1)

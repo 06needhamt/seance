@@ -197,8 +197,8 @@ HRESULT dshow_encoder_configure(void *object,
 			hr = codec_api_rate_mode(api);
 			if (SUCCEEDED(hr))
 				hr = codec_api_set(api, &CODECAPI_AVEncCommonMeanBitRate,
-						   options->bitrate > ULONG_MAX ? ULONG_MAX :
-						   (ULONG)options->bitrate);
+						   options->bitrate > 0xffffffffLL ?
+						   0xffffffffu : (ULONG)options->bitrate);
 			if (hr == S_OK)
 				have_rate = 1;
 			else if (FAILED(hr) && SUCCEEDED(rate_error))
@@ -227,7 +227,7 @@ HRESULT dshow_filter_load_state(void *filter, const void *data, size_t size)
 	HGLOBAL block = NULL;
 	HRESULT hr;
 
-	if ((!data && size) || size > ULONG_MAX)
+	if ((!data && size) || size > 0xffffffffu)	/* a Windows ULONG */
 		return E_INVALIDARG;
 	if (FAILED(hr = persist_stream(filter, &persist)))
 		return hr;

@@ -151,8 +151,8 @@ static void test_relocate_dir64(void)
 	CHECK_EQ(get32(image + 0x1000), 0x10001244);
 }
 
-typedef int (*int_fn)(void);
-typedef const char *(*str_fn)(void);
+typedef int (CDECL *int_fn)(void);
+typedef const char *(CDECL *str_fn)(void);
 
 static void *export_addr(struct pe_image *img, const char *name)
 {
@@ -177,11 +177,23 @@ static struct pe_image *map_fixture(const char *name, unsigned flags)
 	return img;
 }
 
-static DWORD mapped_image_base(const struct pe_image *img)
+/* The fixtures' preferred base (the 64-bit ones are above 4 GB). */
+#if defined(__x86_64__)
+#define FIXTURE_BASE 0x180000000ull
+#else
+#define FIXTURE_BASE 0x10000000u
+#endif
+
+/* ImageBase in the mapped header, which the loader updates. */
+static uintptr_t mapped_image_base(const struct pe_image *img)
 {
 	const IMAGE_DOS_HEADER *dos = (const void *)img->base;
-	const IMAGE_NT_HEADERS32 *nt = (const void *)(img->base + dos->e_lfanew);
-	return nt->OptionalHeader.ImageBase;
+	const BYTE *nt = img->base + dos->e_lfanew;
+#if defined(__x86_64__)
+	return ((const IMAGE_NT_HEADERS64 *)nt)->OptionalHeader.ImageBase;
+#else
+	return ((const IMAGE_NT_HEADERS32 *)nt)->OptionalHeader.ImageBase;
+#endif
 }
 
 static void check_reloc_fixture(struct pe_image *img)
@@ -206,7 +218,7 @@ static void test_map(void)
 	CHECK(basic != NULL);
 	if (!basic)
 		return;
-	CHECK_EQ((uintptr_t)basic->base, 0x10000000);
+	CHECK_EQ((uintptr_t)basic->base, FIXTURE_BASE);
 	CHECK_EQ(basic->relocated, 0);
 	int_fn add = (int_fn)export_addr(basic, "basic_add");
 	CHECK(add != NULL);
@@ -216,9 +228,9 @@ static void test_map(void)
 	CHECK(img != NULL);
 	if (img) {
 		CHECK(img->relocated);
-		CHECK((uintptr_t)img->base != 0x10000000);
+		CHECK((uintptr_t)img->base != FIXTURE_BASE);
 		CHECK_EQ((uintptr_t)img->base % 0x10000, 0);	/* 64K aligned */
-		CHECK_EQ(mapped_image_base(img), (DWORD)(uintptr_t)img->base);
+		CHECK(mapped_image_base(img) == (uintptr_t)img->base);
 		check_reloc_fixture(img);
 		pe_free(img);
 	}
@@ -238,7 +250,7 @@ static void test_map(void)
 	img = map_fixture("pe_noreloc.dll", 0);
 	CHECK(img != NULL);
 	if (img) {
-		CHECK_EQ((uintptr_t)img->base, 0x10000000);
+		CHECK_EQ((uintptr_t)img->base, FIXTURE_BASE);
 		check_reloc_fixture(img);
 		pe_free(img);
 	}
@@ -248,7 +260,7 @@ static void test_map(void)
 	CHECK(img != NULL);
 	if (img) {
 		CHECK(img->relocated);
-		CHECK((uintptr_t)img->base != 0x10000000);
+		CHECK((uintptr_t)img->base != FIXTURE_BASE);
 		check_reloc_fixture(img);
 		pe_free(img);
 	}

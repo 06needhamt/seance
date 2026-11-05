@@ -56,8 +56,8 @@ int main(void)
 	ATOM a=add("LocalTest"); char buf[32]; CHECK(a>=0xc000); CHECK_EQ(find("localtest"),a);
 	CHECK_EQ(name(a,buf,sizeof(buf)),9); CHECK_STR(buf,"LocalTest");
 
-	int (*isctype_)(int,int)=proc(c,"_isctype");
-	int (*wcmp)(const WCHAR*,const WCHAR*,size_t)=proc(c,"wcsncmp");
+	int (CDECL *isctype_)(int,int)=proc(c,"_isctype");
+	int (CDECL *wcmp)(const WCHAR*,const WCHAR*,size_t)=proc(c,"wcsncmp");
 	WCHAR wa[]={ 'a','b',0 }, wb[]={ 'a','c',0 };
 	CHECK(isctype_('A',0x100)); CHECK(wcmp(wa,wb,1)==0); CHECK(wcmp(wa,wb,2)<0);
 	int *mb=proc(c,"__mb_cur_max"); CHECK_EQ(*mb,1);

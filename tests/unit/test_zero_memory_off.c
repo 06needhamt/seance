@@ -35,9 +35,9 @@ int main(void)
 	CHECK(c && k);
 	if (!c || !k)
 		return 1;
-	void *(*crt_malloc)(size_t) = (void *(*)(size_t))get(c, "malloc");
-	void (*crt_free)(void *) = (void (*)(void *))get(c, "free");
-	void *(*operator_new)(size_t) = (void *(*)(size_t))get(c, "??2@YAPAXI@Z");
+	void *(CDECL *crt_malloc)(size_t) = (void *(CDECL *)(size_t))get(c, "malloc");
+	void (CDECL *crt_free)(void *) = (void (CDECL *)(void *))get(c, "free");
+	void *(CDECL *operator_new)(size_t) = (void *(CDECL *)(size_t))get(c, "??2@YAPAXI@Z");
 	void *(WINAPI *get_heap)(void) = (void *(WINAPI *)(void))get(k, "GetProcessHeap");
 	void *(WINAPI *heap_alloc)(void *, DWORD, SIZE_T) =
 		(void *(WINAPI *)(void *, DWORD, SIZE_T))get(k, "HeapAlloc");

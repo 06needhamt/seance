@@ -1,0 +1,15 @@
+7:test_cli
+10:test_crash
+14:test_discover
+15:test_dmo
+16:test_dmo_discover
+23:test_lowmem
+25:test_modules
+28:test_ole32
+31:test_pe_parse
+34:test_runtime
+36:test_seh
+38:test_shell32
+42:test_version
+43:test_vfw
+49:test_xform_audio

@@ -737,7 +737,7 @@ int encode_audio(const struct audio_codec_job *j)
 
 	hr = xform_find_output(j->codec, j->clsid, 1, 1, j->format_tag, &found);
 	if (FAILED(hr)) {
-		char tag[32] = "";
+		char tag[48] = "";
 		if (j->format_tag)
 			snprintf(tag, sizeof(tag), " of format tag 0x%04lx",
 				 j->format_tag);

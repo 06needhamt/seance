@@ -98,9 +98,9 @@ static int unloadable(void)
 
 	/* An ACM driver has no COM objects: its own counts say. */
 	if (is_acm) {
-		LONG (*opens)(void) = m ? mod_get_proc(m, "testacm_open_count") :
+		LONG (CDECL *opens)(void) = m ? mod_get_proc(m, "testacm_open_count") :
 				      NULL;
-		LONG (*streams)(void) = m ? mod_get_proc(m,
+		LONG (CDECL *streams)(void) = m ? mod_get_proc(m,
 						"testacm_stream_count") : NULL;
 		return opens && streams && !opens() && !streams();
 	}

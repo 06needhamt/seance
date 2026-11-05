@@ -18,6 +18,11 @@
 
 #define PAGE     0x1000u
 #define GRANULE  0x10000u		/* allocation granularity */
+#if defined(__x86_64__)
+/* The end of the Windows (8.1 and later) and Linux user address spaces. */
+#define USER_TOP    0x7fffffff0000ull
+#define ADDRESS_TOP 0x7fffffff0000ull
+#else
 #define USER_TOP 0x7fff0000u		/* end of the Windows user address space */
 /*
  * The real top of a 32-bit process on a 64-bit Linux kernel. Unlike on
@@ -25,6 +30,7 @@
  * reservations usually live near 0xf7000000), so queries must cover them.
  */
 #define ADDRESS_TOP 0xffff0000u
+#endif
 
 /* Heaps. */
 
@@ -35,10 +41,11 @@ struct block {
 	struct heap *heap;
 	SIZE_T size;
 	struct block *hash_next;	/* the live-block set */
-	DWORD pad[3];
-};
+} __attribute__((aligned(16)));
 
-_Static_assert(sizeof(struct block) == 32, "keeps allocations 16-byte aligned");
+/* 32 bytes on i386, as Windows' header is; 48 on x86-64. */
+_Static_assert(sizeof(struct block) % 16 == 0,
+	       "keeps allocations 16-byte aligned");
 
 struct heap {
 	DWORD magic;

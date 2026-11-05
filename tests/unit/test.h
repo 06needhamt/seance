@@ -48,6 +48,16 @@ static int test_checks;
 		} \
 	} while (0)
 
+/*
+ * The exports behind Get/SetWindowLongPtrA/W: their own on Win64, the plain
+ * Get/SetWindowLong ones on Win32 (where the Ptr names are macros).
+ */
+#if defined(__x86_64__)
+#define WLP_NAME(get_or_set, aw) #get_or_set "WindowLongPtr" #aw
+#else
+#define WLP_NAME(get_or_set, aw) #get_or_set "WindowLong" #aw
+#endif
+
 /* Exit status telling CTest that a test was skipped. */
 #define TEST_SKIP 77
 

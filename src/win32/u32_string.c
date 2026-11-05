@@ -19,6 +19,7 @@
 #include "win32/codepage.h"
 #include "win32/internal.h"
 #include "win32/k32.h"
+#include "win32/winva.h"
 
 #define WSPRINTF_MAX 1024
 
@@ -171,7 +172,7 @@ static WCHAR *string_arg(const void *s, int wide, int max)
 }
 
 /* Formats into o; fmt is ANSI or UTF-16 as wide says. */
-static void format(struct out *o, const void *fmt, int wide, va_list ap)
+static void format(struct out *o, const void *fmt, int wide, win_va_list ap)
 {
 	const BYTE *fa = fmt;
 	const WCHAR *fw = fmt;
@@ -228,7 +229,7 @@ static void format(struct out *o, const void *fmt, int wide, va_list ap)
 		case 'C': {
 			int char_wide = size ? size == 'l' :
 				       (type == 'c') == !!wide;
-			WCHAR ch = (WCHAR)va_arg(ap, int);
+			WCHAR ch = (WCHAR)win_va_arg(ap, int);
 			if (!char_wide) {
 				char b = (char)ch;
 				cp_to_utf16(CP_ACP, &b, 1, &ch, 1, 0);
@@ -240,7 +241,7 @@ static void format(struct out *o, const void *fmt, int wide, va_list ap)
 		case 'S': {
 			int str_wide = size ? size == 'l' :
 				      (type == 's') == !!wide;
-			WCHAR *s = string_arg(va_arg(ap, const void *), str_wide, prec);
+			WCHAR *s = string_arg(win_va_arg(ap, const void *), str_wide, prec);
 			if (s)
 				field(o, s, wstrlen(s), width, left, ' ');
 			free(s);
@@ -252,7 +253,7 @@ static void format(struct out *o, const void *fmt, int wide, va_list ap)
 		case 'x':
 		case 'X':
 		case 'p': {
-			unsigned long v = va_arg(ap, unsigned long);
+			unsigned long v = win_va_arg(ap, unsigned long);
 			int neg = (type == 'd' || type == 'i') && (long)v < 0;
 			unsigned long u = neg ? -(unsigned long)v : v;
 			int base = (type == 'x' || type == 'X' || type == 'p') ? 16 : 10;
@@ -317,7 +318,7 @@ static int out_w(const struct out *o, LPWSTR buf)
 	return o->n;
 }
 
-WINFN(int) user_wvsprintfA(LPSTR buf, LPCSTR fmt, va_list ap)
+WINFN(int) user_wvsprintfA(LPSTR buf, LPCSTR fmt, win_va_list ap)
 {
 	struct out o;
 
@@ -327,7 +328,7 @@ WINFN(int) user_wvsprintfA(LPSTR buf, LPCSTR fmt, va_list ap)
 	return out_a(&o, buf);
 }
 
-WINFN(int) user_wvsprintfW(LPWSTR buf, LPCWSTR fmt, va_list ap)
+WINFN(int) user_wvsprintfW(LPWSTR buf, LPCWSTR fmt, win_va_list ap)
 {
 	struct out o;
 
@@ -340,26 +341,26 @@ WINFN(int) user_wvsprintfW(LPWSTR buf, LPCWSTR fmt, va_list ap)
 static int STUB_CDECL user_wsprintfA(LPSTR buf, LPCSTR fmt, ...)
 {
 	struct out o;
-	va_list ap;
+	win_va_list ap;
 
 	if (!buf || !fmt)
 		return 0;
-	va_start(ap, fmt);
+	win_va_start(ap, fmt);
 	format(&o, fmt, 0, ap);
-	va_end(ap);
+	win_va_end(ap);
 	return out_a(&o, buf);
 }
 
 static int STUB_CDECL user_wsprintfW(LPWSTR buf, LPCWSTR fmt, ...)
 {
 	struct out o;
-	va_list ap;
+	win_va_list ap;
 
 	if (!buf || !fmt)
 		return 0;
-	va_start(ap, fmt);
+	win_va_start(ap, fmt);
 	format(&o, fmt, 1, ap);
-	va_end(ap);
+	win_va_end(ap);
 	return out_w(&o, buf);
 }
 

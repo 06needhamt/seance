@@ -18,10 +18,10 @@
 #include "runtime/trap.h"
 #include "test.h"
 
-typedef int (*int_fn)(void);
-typedef int (*add_fn)(int, int);
-typedef void (*flag_fn)(int *);
-typedef DWORD (*dword_fn)(void);
+typedef int (CDECL *int_fn)(void);
+typedef int (CDECL *add_fn)(int, int);
+typedef void (CDECL *flag_fn)(int *);
+typedef DWORD (CDECL *dword_fn)(void);
 
 /* The permissions ("r-xp" etc.) of the mapping containing addr. */
 static int page_perms(const void *addr, char perms[5])
@@ -326,7 +326,7 @@ static void test_delay_load(void)
 	add_fn add = mod_get_proc(m, "delay_add");
 	add_fn add_ord = mod_get_proc(m, "delay_add_by_ordinal");
 	dword_fn helper = mod_get_proc(m, "delay_helper_calls");
-	HMODULE (*handle)(int) = mod_get_proc(m, "delay_module");
+	HMODULE (CDECL *handle)(int) = mod_get_proc(m, "delay_module");
 	CHECK(add && add_ord && helper && handle);
 	struct module *basic = mod_find("pe_basic.dll");
 	CHECK(basic != NULL);

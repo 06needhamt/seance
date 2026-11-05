@@ -13,6 +13,7 @@
  */
 #include <pthread.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "win32/handle.h"
 #include "win32/internal.h"
@@ -346,14 +347,50 @@ WINFN(BOOL) k32_InitOnceExecuteOnce(PINIT_ONCE once, PINIT_ONCE_FN fn,
 /*
  * Interlocked singly linked lists. The header is the first entry's address,
  * the depth and a sequence number that changes with each pop; one lock
- * guards every list.
+ * guards every list, so these work on either layout of the header.
  */
 
 static pthread_mutex_t slist_lock = PTHREAD_MUTEX_INITIALIZER;
 
+#if defined(__x86_64__)
+static PSLIST_ENTRY slist_first(const SLIST_HEADER *h)
+{
+	return (PSLIST_ENTRY)(uintptr_t)(h->HeaderX64.NextEntry << 4);
+}
+
+static void slist_set(SLIST_HEADER *h, PSLIST_ENTRY first, WORD depth)
+{
+	h->HeaderX64.NextEntry = (uintptr_t)first >> 4;
+	h->HeaderX64.Depth = depth;
+	h->HeaderX64.Sequence++;
+}
+
+static WORD slist_depth(const SLIST_HEADER *h)
+{
+	return h->HeaderX64.Depth;
+}
+#else
+static PSLIST_ENTRY slist_first(const SLIST_HEADER *h)
+{
+	return h->Next.Next;
+}
+
+static void slist_set(SLIST_HEADER *h, PSLIST_ENTRY first, WORD depth)
+{
+	h->Next.Next = first;
+	h->Depth = depth;
+	h->Sequence++;
+}
+
+static WORD slist_depth(const SLIST_HEADER *h)
+{
+	return h->Depth;
+}
+#endif
+
 WINFN(void) k32_InitializeSListHead(PSLIST_HEADER h)
 {
-	h->Alignment = 0;
+	memset(h, 0, sizeof(*h));
 }
 
 WINFN(PSLIST_ENTRY) k32_InterlockedPushListSList(PSLIST_HEADER h,
@@ -363,11 +400,9 @@ WINFN(PSLIST_ENTRY) k32_InterlockedPushListSList(PSLIST_HEADER h,
 	PSLIST_ENTRY old;
 
 	pthread_mutex_lock(&slist_lock);
-	old = h->Next.Next;
+	old = slist_first(h);
 	last->Next = old;
-	h->Next.Next = first;
-	h->Depth += count;
-	h->Sequence++;
+	slist_set(h, first, slist_depth(h) + count);
 	pthread_mutex_unlock(&slist_lock);
 	return old;
 }
@@ -390,12 +425,9 @@ WINFN(PSLIST_ENTRY) k32_InterlockedPopEntrySList(PSLIST_HEADER h)
 	PSLIST_ENTRY e;
 
 	pthread_mutex_lock(&slist_lock);
-	e = h->Next.Next;
-	if (e) {
-		h->Next.Next = e->Next;
-		h->Depth--;
-		h->Sequence++;
-	}
+	e = slist_first(h);
+	if (e)
+		slist_set(h, e->Next, slist_depth(h) - 1);
 	pthread_mutex_unlock(&slist_lock);
 	return e;
 }
@@ -405,10 +437,8 @@ WINFN(PSLIST_ENTRY) k32_InterlockedFlushSList(PSLIST_HEADER h)
 	PSLIST_ENTRY e;
 
 	pthread_mutex_lock(&slist_lock);
-	e = h->Next.Next;
-	h->Next.Next = NULL;
-	h->Depth = 0;
-	h->Sequence++;
+	e = slist_first(h);
+	slist_set(h, NULL, 0);
 	pthread_mutex_unlock(&slist_lock);
 	return e;
 }
@@ -418,7 +448,7 @@ WINFN(WORD) k32_QueryDepthSList(PSLIST_HEADER h)
 	WORD depth;
 
 	pthread_mutex_lock(&slist_lock);
-	depth = h->Depth;
+	depth = slist_depth(h);
 	pthread_mutex_unlock(&slist_lock);
 	return depth;
 }

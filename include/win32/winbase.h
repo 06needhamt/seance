@@ -498,7 +498,29 @@ typedef struct _RTL_CONDITION_VARIABLE { PVOID Ptr; }
 typedef struct _RTL_RUN_ONCE { PVOID Ptr; }
 	RTL_RUN_ONCE, INIT_ONCE, *PINIT_ONCE;
 
-/* Interlocked singly linked lists (the 32-bit layout). */
+/* Interlocked singly linked lists. */
+#if defined(__x86_64__)
+/*
+ * 16 bytes, for cmpxchg16b: the depth and a sequence number, then the
+ * first entry's address shifted right by 4 (entries are 16-aligned).
+ */
+typedef struct __attribute__((aligned(16))) _SLIST_ENTRY {
+	struct _SLIST_ENTRY *Next;
+} SLIST_ENTRY, *PSLIST_ENTRY;
+
+typedef union __attribute__((aligned(16))) _SLIST_HEADER {
+	struct {
+		ULONGLONG Alignment;
+		ULONGLONG Region;
+	};
+	struct {
+		ULONGLONG Depth : 16;
+		ULONGLONG Sequence : 48;
+		ULONGLONG Reserved : 4;
+		ULONGLONG NextEntry : 60;
+	} HeaderX64;
+} SLIST_HEADER, *PSLIST_HEADER;
+#else
 typedef struct _SLIST_ENTRY {
 	struct _SLIST_ENTRY *Next;
 } SLIST_ENTRY, *PSLIST_ENTRY;
@@ -511,6 +533,7 @@ typedef union _SLIST_HEADER {
 		WORD Sequence;
 	};
 } SLIST_HEADER, *PSLIST_HEADER;
+#endif
 
 typedef struct _GROUP_AFFINITY {
 	ULONG_PTR Mask;
