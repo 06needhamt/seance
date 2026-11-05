@@ -1,1 +1,0 @@
-cmd='/usr/bin/cmake;-DCMAKE_TOOLCHAIN_FILE=/home/user/libseance/cmake/mingw-x86_64.cmake;-DVFW_MINGW_PREFIX=x86_64-w64-mingw32-;-DVFW_FIXTURE_DIR=/home/user/libseance/build64/fixtures64;-GNinja;-S;<SOURCE_DIR><SOURCE_SUBDIR>;-B;<BINARY_DIR>'
