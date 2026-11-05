@@ -13,6 +13,18 @@
  * multiple inheritance, C++/CLI's filter helpers, operator new and the
  * handler setters are called directly.
  */
+#if defined(__x86_64__)
+/* x86-64 has no counterpart of the i386 C++ exception model (docs/X64_PLAN.md, phases 4-5). */
+#include <stdio.h>
+
+int main(void)
+{
+	printf("i386 only\n");
+	return 77;
+}
+
+#else
+
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
@@ -764,3 +776,5 @@ int main(void)
 	mod_free(crt);
 	return test_summary("test_cxxeh");
 }
+
+#endif /* !__x86_64__ */

@@ -173,6 +173,7 @@ static void test_printf(void)
 	CHECK(w16_is(w, "7"));
 }
 
+#if !defined(__x86_64__)	/* x87 intrinsics: i386 only */
 /*
  * Calling the _CI* intrinsics as cl does: arguments pushed on the x87
  * stack, the result left in ST0.
@@ -275,6 +276,8 @@ static void test_intrinsics(void)
 }
 
 /* MSVCRT behaviour that differs from glibc's, called directly. */
+#endif
+
 static void test_msvcrt_semantics(void)
 {
 	int (CDECL *snprintf_)(char *, size_t, const char *, ...) = get("_snprintf");
@@ -488,8 +491,9 @@ static void test_ucrt(void)
 	CHECK_STR(b, "abc");
 
 	/* stdin, stdout and stderr are _iob's. */
-	CHECK(iob_func(0) == iob && iob_func(1) == iob + 32 &&
-	      iob_func(2) == iob + 64 && !iob_func(3));
+	const size_t file_size = sizeof(void *) == 8 ? 48 : 32;
+	CHECK(iob_func(0) == iob && iob_func(1) == iob + file_size &&
+	      iob_func(2) == iob + 2 * file_size && !iob_func(3));
 	win_va_list none;
 	memset(&none, 0, sizeof(none));
 	CHECK_EQ(vfprintf_(0, iob_func(1), "", NULL, none), 0);
@@ -605,7 +609,9 @@ int main(void)
 	if (crt) {
 		test_msvcrt_semantics();
 		test_printf();
+#if !defined(__x86_64__)
 		test_intrinsics();
+#endif
 		test_ucrt();
 		test_scanf();
 		mod_free(crt);

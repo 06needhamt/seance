@@ -31,9 +31,10 @@
 	       (unsigned long)(l), (unsigned)(w1), (unsigned)(w2), \
 	       (unsigned)(b1), (unsigned)(b2), (unsigned)(b3), (unsigned)(b4), \
 	       (unsigned)(b5), (unsigned)(b6), (unsigned)(b7), (unsigned)(b8));
+/* Through ULONG_PTR: some (the predefined HKEYs) are pointers. */
 #define C(c) \
-	printf("_Static_assert((DWORD)(%s) == 0x%08xu, \"%s\");\n", \
-	       #c, (unsigned)(DWORD)(c), #c);
+	printf("_Static_assert((DWORD)(ULONG_PTR)(%s) == 0x%08xu, \"%s\");\n", \
+	       #c, (unsigned)(DWORD)(ULONG_PTR)(c), #c);
 
 int main(void)
 {

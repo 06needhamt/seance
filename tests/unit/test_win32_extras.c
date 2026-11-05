@@ -726,7 +726,7 @@ static void test_zeroed_allocation(void)
 		return;
 	CFN(c, void *, malloc, size_t);
 	CFN(c, void, free, void *);
-	void *(CDECL *operator_new)(size_t) = (void *(CDECL *)(size_t))get(c, "??2@YAPAXI@Z");
+	void *(CDECL *operator_new)(size_t) = (void *(CDECL *)(size_t))get(c, OPERATOR_NEW);
 	FN(k, HANDLE, GetProcessHeap, void);
 	FN(k, LPVOID, HeapAlloc, HANDLE, DWORD, SIZE_T);
 	FN(k, BOOL, HeapFree, HANDLE, DWORD, LPVOID);

@@ -25,9 +25,12 @@ Work is split into phases; see [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION
 | 4 | AVI / Y4M I/O, `decode` and `encode` | done: AVI reader and writer, Y4M/BMP/raw input and output, `avi`, `convert`, `decode`, `encode` |
 | 5 | Hardening and CI | done: DLL memory below 2 GB, crash and hang reports, SSE/FPU fixture, fuzzing, samples run, CI |
 
-64-bit (x86-64) codecs are planned in [docs/X64_PLAN.md](docs/X64_PLAN.md).
-So far `info` reads them; running them needs the x86-64 build that plan
-describes.
+64-bit (x86-64) codecs run in `seance64`, built from the same tree with
+`cmake -B build64 -DVFW_ARCH=x86_64` ([docs/X64_PLAN.md](docs/X64_PLAN.md)).
+The 64-bit test codecs (VfW, ACM, DirectShow and DMO) work there;
+exception handling (SEH and C++ exceptions) and the hand-off between the
+two binaries are still to come. `seance info` reads 64-bit DLLs in either
+build.
 
 DirectShow video decoders and encoders (`.ax`) have phases of their own; see
 [docs/DIRECT_SHOW_PLAN.md](docs/DIRECT_SHOW_PLAN.md). They are done: the headers

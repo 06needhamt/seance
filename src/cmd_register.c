@@ -77,7 +77,7 @@ int cmd_register(int argc, char **argv)
 	if (FAILED(hr)) {
 		fprintf(stderr, "seance: %s failed: 0x%08lx\n",
 			unregister ? "DllUnregisterServer" : "DllRegisterServer",
-			(unsigned long)hr);
+			(unsigned long)(DWORD)hr);
 		return 1;
 	}
 	if (!dry_run) {

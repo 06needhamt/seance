@@ -9,6 +9,7 @@
  * would take %S and %ls as 32-bit wchar_t), there are no floating-point
  * conversions, and the output stops at 1024 characters.
  */
+#include <stdint.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -253,9 +254,12 @@ static void format(struct out *o, const void *fmt, int wide, win_va_list ap)
 		case 'x':
 		case 'X':
 		case 'p': {
-			unsigned long v = win_va_arg(ap, unsigned long);
-			int neg = (type == 'd' || type == 'i') && (long)v < 0;
-			unsigned long u = neg ? -(unsigned long)v : v;
+			/* 32-bit, with or without 'l'; %p pointer-sized. */
+			uint64_t v = type == 'p' ?
+				     (uintptr_t)win_va_arg(ap, void *) :
+				     win_va_arg(ap, DWORD);
+			int neg = (type == 'd' || type == 'i') && (int32_t)v < 0;
+			uint64_t u = neg ? (uint64_t)-(int64_t)(int32_t)v : v;
 			int base = (type == 'x' || type == 'X' || type == 'p') ? 16 : 10;
 			const char *digits = type == 'x' ? "0123456789abcdef" :
 							   "0123456789ABCDEF";
@@ -266,7 +270,7 @@ static void format(struct out *o, const void *fmt, int wide, win_va_list ap)
 				u /= base;
 			} while (u);
 			if (type == 'p')
-				prec = 8;
+				prec = 2 * sizeof(void *);
 			while (nd < prec && nd < 32)
 				rev[nd++] = '0';
 			if (neg)

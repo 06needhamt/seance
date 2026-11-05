@@ -380,10 +380,10 @@ static void test_print_find(void)
 	FN(HWND, ReplaceTextW, LPFINDREPLACEW);
 	FN(DWORD, CommDlgExtendedError, void);
 
-	/* The packed layouts, as on 32-bit Windows. */
-	CHECK_EQ(sizeof(PRINTDLGA), 66);
-	CHECK_EQ(sizeof(OPENFILENAMEA), 88);
-	CHECK_EQ(sizeof(CHOOSEFONTA), 60);
+	/* Byte-packed on 32-bit Windows; natural on Win64. */
+	CHECK_EQ(sizeof(PRINTDLGA), sizeof(void *) == 8 ? 120 : 66);
+	CHECK_EQ(sizeof(OPENFILENAMEA), sizeof(void *) == 8 ? 152 : 88);
+	CHECK_EQ(sizeof(CHOOSEFONTA), sizeof(void *) == 8 ? 104 : 60);
 
 	PRINTDLGA pd;
 	memset(&pd, 0, sizeof(pd));

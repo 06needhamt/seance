@@ -450,7 +450,9 @@ static void test_strings(void)
 	CHECK_EQ(wsprintfA(buf, "%s %S %hs %ls", "a", w("b"), "c", w("d")), 7);
 	CHECK_STR(buf, "a b c d");
 	wsprintfA(buf, "%s|%i|%p|%y", NULL, -5, (void *)0x1234);
-	CHECK_STR(buf, "(null)|-5|00001234|y");
+	/* %p: as many digits as a pointer has. */
+	CHECK_STR(buf, sizeof(void *) == 8 ? "(null)|-5|0000000000001234|y" :
+					     "(null)|-5|00001234|y");
 	wsprintfA(buf, "%05d|%-05d|%#x", -42, 3, 0u);
 	CHECK_STR(buf, "-0042|3    |0");
 	/* Output stops at 1024 characters, NUL included. */

@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * PE parsing without loading: headers, exports, imports, TLS, resources,
- * version info, and robustness against truncated and corrupted files.
+ * version info, and robustness against truncated and corrupted files. It
+ * runs over the i386 fixtures and, when they were built, the x86-64 ones,
+ * in either build: parsing doesn't depend on the architecture.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,7 +75,7 @@ static void test_machine_and_magic(void)
 	void *buf;
 	size_t len;
 
-	CHECK_EQ(vfw_read_file(fixture("pe_basic.dll"), &buf, &len), 0);
+	CHECK_EQ(vfw_read_file(fixture32("pe_basic.dll"), &buf, &len), 0);
 	BYTE *p = buf;
 	DWORD nt;
 	memcpy(&nt, p + 60, 4);
@@ -113,7 +115,7 @@ static int count_export(void *ctx, const struct pe_export *e)
 
 static void test_exports(void)
 {
-	struct pe_image *img = pe_open(fixture("pe_basic.dll"));
+	struct pe_image *img = pe_open(fixture32("pe_basic.dll"));
 	struct pe_export e;
 	int count = 0;
 
@@ -160,7 +162,7 @@ static void test_exports(void)
 	CHECK_EQ(pe_find_export_ordinal(img, 13, &e), -1);
 	pe_free(img);
 
-	img = pe_open(fixture("pe_dep.dll"));
+	img = pe_open(fixture32("pe_dep.dll"));
 	CHECK(img != NULL);
 	if (!img)
 		return;
@@ -172,7 +174,7 @@ static void test_exports(void)
 	pe_free(img);
 
 	/* No export table at all. */
-	img = pe_open(fixture("pe_missing.dll"));
+	img = pe_open(fixture32("pe_missing.dll"));
 	if (img) {
 		CHECK_EQ(pe_find_export(img, "anything", 0, &e), -1);
 		CHECK_EQ(pe_find_export(img, "missing_call", 0, &e), 0);
@@ -208,7 +210,7 @@ static int stop_import(void *ctx, const struct pe_import *imp)
 
 static void test_imports(void)
 {
-	struct pe_image *img = pe_open(fixture("pe_dep.dll"));
+	struct pe_image *img = pe_open(fixture32("pe_dep.dll"));
 	struct import_list l = { .n = 0 };
 	int calls = 0;
 
@@ -230,7 +232,7 @@ static void test_imports(void)
 	CHECK_EQ(pe_bind_imports(img, NULL, NULL), -1);
 	pe_free(img);
 
-	img = pe_open(fixture("pe_basic.dll"));
+	img = pe_open(fixture32("pe_basic.dll"));
 	l.n = 0;
 	CHECK_EQ(pe_foreach_import(img, list_import, &l), 0);
 	CHECK_EQ(l.n, 0);
@@ -247,7 +249,7 @@ static int count_tls(void *ctx, DWORD rva)
 
 static void test_tls(void)
 {
-	struct pe_image *img = pe_open(fixture("pe_tls.dll"));
+	struct pe_image *img = pe_open(fixture32("pe_tls.dll"));
 	int n = 0;
 
 	CHECK(img != NULL);
@@ -257,7 +259,7 @@ static void test_tls(void)
 	CHECK_EQ(n, 1);
 	pe_free(img);
 
-	img = pe_open(fixture("pe_basic.dll"));
+	img = pe_open(fixture32("pe_basic.dll"));
 	n = 0;
 	CHECK_EQ(pe_foreach_tls_callback(img, count_tls, &n), 0);
 	CHECK_EQ(n, 0);
@@ -306,7 +308,7 @@ static int list_resource(void *ctx, const struct pe_resource *r)
 
 static void test_resources(void)
 {
-	struct pe_image *img = pe_open(fixture("pe_basic.dll"));
+	struct pe_image *img = pe_open(fixture32("pe_basic.dll"));
 	struct pe_resource r;
 	struct res_types types = { 0, 0, 0 };
 	struct version_seen seen = { 0, 0 };
@@ -347,7 +349,7 @@ static void test_resources(void)
 	CHECK_EQ(fixed.dwProductVersionMS, 0x00010002);
 	pe_free(img);
 
-	img = pe_open(fixture("pe_dep.dll"));
+	img = pe_open(fixture32("pe_dep.dll"));
 	CHECK_EQ(pe_foreach_resource(img, list_resource, &types), 0);
 	CHECK_EQ(pe_version_info(img, NULL, NULL, NULL), -1);
 	pe_free(img);
@@ -533,7 +535,7 @@ static void test_pe64(void)
 	}
 	pe_free(img);
 	CHECK_EQ(pe_peek_machine(path), IMAGE_FILE_MACHINE_AMD64);
-	CHECK_EQ(pe_peek_machine(fixture("pe_basic.dll")),
+	CHECK_EQ(pe_peek_machine(fixture32("pe_basic.dll")),
 		 IMAGE_FILE_MACHINE_I386);
 	CHECK_EQ(pe_peek_machine("/nonexistent/file.dll"), 0);
 
@@ -577,10 +579,10 @@ int main(void)
 	test_imports();
 	test_tls();
 	test_resources();
-	test_truncation_and_corruption(fixture("pe_basic.dll"));
-	test_truncation_and_corruption(fixture("pe_dep.dll"));
-	test_truncation_and_corruption(fixture("pe_tls.dll"));
-	test_truncation_and_corruption(fixture("testcodec.dll"));
+	test_truncation_and_corruption(fixture32("pe_basic.dll"));
+	test_truncation_and_corruption(fixture32("pe_dep.dll"));
+	test_truncation_and_corruption(fixture32("pe_tls.dll"));
+	test_truncation_and_corruption(fixture32("testcodec.dll"));
 	test_pe64();
 	return test_summary("test_pe_parse");
 }

@@ -81,7 +81,7 @@ Decisions:
      `DllMain` (no stdcall decoration). Tests find them through
      `$VFW_FIXTURES64` (`fixture64()` in `tests/unit/test.h`);
      `VFW_REQUIRE_MINGW64` (on in the `ci` preset) makes them required.
-2. **The x86-64 build.** `cmake/x86_64.cmake` beside `cmake/i386.cmake`,
+2. **The x86-64 build.** (Done.) `cmake/x86_64.cmake` beside `cmake/i386.cmake`,
    chosen by `VFW_ARCH=x86_64` (default `i386`); its probe needs
    `__x86_64__`, `asm/prctl.h` and `SYS_arch_prctl`. The output is
    `seance64`; cross builds run through `qemu-x86_64`.
@@ -98,7 +98,16 @@ Decisions:
      left out of that build, with the exports that need it.
    Milestone: `seance64` builds and the unit tests that don't run DLL
    code pass.
-3. **Loading and running.**
+   - What the 64-bit `check_abi` found, now fixed: `commdlg.h` and
+     `shellapi.h` are byte-packed on Win32 only; `SLIST_HEADER` is 16
+     bytes (with `HeaderX64`); `ACMSTREAMHEADER` has 15 reserved DWORDs;
+     `SECURITY_DESCRIPTOR_MIN_LENGTH` is 40; `GWL_WNDPROC` and the other
+     pointer indices exist only as `GWLP_`/`DWLP_`.
+   - The i386-only parts (the fs:[0] SEH in `seh.c` and `crt_seh.c`, the
+     i386 C++ EH, `_allmul` and the other helpers, `_CI*`, `_EH_prolog`)
+     are left out of the x86-64 build; `seh_x64.c` sends exceptions to
+     the unhandled-exception filter until phase 4.
+3. **Loading and running.** (Mostly done; what remains is marked.)
    - `src/runtime/teb_x64.c`: the x64 TEB and PEB (offsets checked with
      `_Static_assert`), installed with `arch_prctl(ARCH_SET_GS)`. glibc
      uses `fs` for its own TLS on x86-64, so `gs` is free. The
@@ -116,15 +125,28 @@ Decisions:
      `RtlLookupFunctionEntry`, `RtlVirtualUnwind`, `RtlUnwindEx`,
      `RtlAddFunctionTable`, `RtlDeleteFunctionTable`,
      `__C_specific_handler`, `__chkstk`, `_setjmpex`.
-   - The CRT's uses of the host's `long` (about 86 in `src/win32/crt_*.c`)
-     become `LONG`.
+   - (Remaining.) The CRT's uses of the host's `long` (about 86 in
+     `src/win32/crt_*.c`: `strtol`, `fseek`, `ftell`, `_lseek`, ...)
+     become `LONG`: a Win64 caller leaves the upper half of a 32-bit
+     argument undefined.
    - Varargs exports (`printf` and `scanf` families, `wsprintfA/W`,
-     `_snprintf`, the `v*` forms) take `__builtin_ms_va_list`; the printf
-     dialect follows Win64 (`%I` alone and `z`/`t` are 64-bit, `%p` 16
-     digits).
-   Milestone: the 64-bit `pe_basic`, `pe_reloc`, `pe_tls`, `pe_dep` and
-   `pe_crt` load in `seance64`, `DllMain` and TLS callbacks run, and
-   their exports return the right values.
+     `_snprintf`, `_open`, the `v*` forms) take `win_va_list`
+     (`src/win32/winva.h`: `__builtin_ms_va_list` on x86-64). `wsprintf`
+     reads 32-bit integers and pointer-sized `%p`. (Remaining: the CRT
+     printf dialect, where on Win64 `%I` alone and `z`/`t` are 64-bit and
+     `%p` has 16 digits.)
+   - Callbacks the CRT makes into the DLL (`qsort` and `bsearch`
+     comparators, `signal` handlers) use its convention; `qsort` goes
+     through `qsort_r` rather than handing the comparator to glibc.
+   - `_setjmp`, `_setjmpex` and `longjmp` with the Win64 `_JUMP_BUFFER`
+     (`src/win32/crt_seh_x64.c`), restoring registers without unwinding;
+     `operator new` and `delete` under their x64 names, and `_purecall`.
+   - `WNDCLASS` is copied field by field, not as the tail of a
+     `WNDCLASSEX` (the padding differs on x86-64); the lock words of SRW
+     locks, condition variables and `InitOnce` are pointer-sized.
+   Milestone (reached): the 64-bit `pe_basic`, `pe_reloc`, `pe_tls`,
+   `pe_dep` and `pe_crt` load in `seance64`, `DllMain` and TLS callbacks
+   run, and their exports return the right values.
 4. **Table-based SEH.** `src/runtime/seh_x64.c`, beside the i386
    `seh.c`: function lookup in each module's sorted `.pdata` and in tables
    added with `RtlAddFunctionTable`; a virtual unwinder for every unwind
@@ -148,12 +170,18 @@ Decisions:
    Milestone: a 64-bit C++ exception fixture laid out as cl compiles it
    throws, catches by type, rethrows and destroys on unwind; mingw's own
    `__gxx_personality_seh0` code works through phase 4.
-6. **Codecs.** `DriverProc` is looked up undecorated only; the VfW, ACM,
-   DirectShow and DMO hosts are checked for pointers held in `DWORD`s.
-   The 64-bit fixture set grows to `testcodec`, `testacm`, `testfilter`
-   and `testdmo`, with `.def` files without `@N`.
-   Milestone: `seance64 probe`, `encode` and `decode` with each 64-bit
-   test codec match the i386 one byte for byte.
+6. **Codecs.** (Fixtures and tests done.) The 64-bit fixture set is every
+   fixture but the i386-only `pe_seh`, `pe_sehcrt`, `pe_cxxeh`,
+   `pe_thunk` and `pe_delay` (hand-written i386 tables), including
+   `testcodec`, `testacm`, `testfilter` and `testdmo`. On x86-64 the
+   fixture build strips the stdcall decorations from the `.def` files and
+   drops `-mpreferred-stack-boundary=2`, and every fixture has one
+   absolute pointer so GNU ld gives it a `.reloc` (it leaves one out when
+   nothing needs relocating). The VfW, ACM, DirectShow and DMO unit
+   tests and `validate_media` pass with them under `seance64`.
+   Milestone (reached): `seance64 probe`, `encode` and `decode` with each
+   64-bit test codec give what the i386 ones do. (Remaining: a smoke
+   test over the 64-bit fixtures, and `pe_delay` for x86-64.)
 7. **One command for both.** `src/main.c` checks the DLL a command names
    with `pe_peek_machine` before running it, and `exec`s the other
    binary (`$VFW_SEANCE64`/`$VFW_SEANCE32`, else `seance64`/`seance`
@@ -191,6 +219,7 @@ Decisions:
 - `build/seance info build/fixtures64/pe_basic.dll` shows `x86-64` and
   image base `0x0000000180000000`; `build/seance probe` of it says that
   `seance64` runs it.
-- From phase 2: `cmake -B build64 -DVFW_ARCH=x86_64 && cmake --build
-  build64 && ctest --test-dir build64`; from phase 6, round trips through
-  the 64-bit test codecs compared with `cmp` against the i386 ones.
+- `cmake -B build64 -DVFW_ARCH=x86_64 && cmake --build build64 &&
+  ctest --test-dir build64`: the same 55 tests, run against the 64-bit
+  fixtures; those for i386-only mechanisms (`test_seh`, `test_cxxeh`,
+  `test_crt_helpers`, `test_lowmem`) skip.

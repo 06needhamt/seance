@@ -46,7 +46,7 @@ EXPORT float sse_dot(const float *a, const float *b, int n)
 EXPORT int sse_stack_aligned(void)
 {
 	char probe __attribute__((aligned(16)));
-	return ((DWORD)&probe & 15) == 0;
+	return ((ULONG_PTR)&probe & 15) == 0;
 }
 
 EXPORT void sse_fpu_state(DWORD *cw, DWORD *mxcsr)

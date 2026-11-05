@@ -38,13 +38,32 @@ else()
 	set(fixture_link_options -Wl,--image-base,0x10000000 -Wl,-e,_DllMain@12)
 endif()
 
+# The .def file to use: as written, or for x86-64 a copy without the
+# stdcall decorations (Name@12), which Win64 names don't have. Ordinals
+# (Name @12, with a space) stay.
+function(def_for out file)
+	if(VFW_FIXTURE_64)
+		set(src ${CMAKE_CURRENT_SOURCE_DIR}/${file})
+		set(dst ${CMAKE_BINARY_DIR}/def64/${file})
+		file(READ ${src} text)
+		string(REGEX REPLACE "([A-Za-z0-9_])@[0-9]+" "\\1" text "${text}")
+		file(WRITE ${dst}.tmp "${text}")
+		configure_file(${dst}.tmp ${dst} COPYONLY)
+		set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${src})
+		set(${out} ${dst} PARENT_SCOPE)
+	else()
+		set(${out} ${CMAKE_CURRENT_SOURCE_DIR}/${file} PARENT_SCOPE)
+	endif()
+endfunction()
+
 # An import library made from a .def file (for DLLs that aren't built
 # here, or to import by the ordinals the .def gives).
 function(import_library name)
 	set(lib ${CMAKE_BINARY_DIR}/lib${name}.a)
+	def_for(def ${name}.def)
 	add_custom_command(OUTPUT ${lib}
-		COMMAND ${VFW_DLLTOOL} -k -d ${CMAKE_CURRENT_SOURCE_DIR}/${name}.def -l ${lib}
-		DEPENDS ${name}.def
+		COMMAND ${VFW_DLLTOOL} -k -d ${def} -l ${lib}
+		DEPENDS ${def}
 		VERBATIM)
 	add_custom_target(${name}_implib DEPENDS ${lib})
 	add_library(${name}_imports STATIC IMPORTED GLOBAL)
@@ -55,7 +74,18 @@ endfunction()
 # fixture(<name> <sources...> [LIBS <libs...>] [OPTIONS <options...>])
 function(fixture name)
 	cmake_parse_arguments(F "" "" "LIBS;OPTIONS" ${ARGN})
-	add_library(${name} SHARED ${F_UNPARSED_ARGUMENTS})
+	if(VFW_FIXTURE_64)
+		# Win64 code keeps the stack 16-aligned; there is no 4-byte ABI.
+		list(REMOVE_ITEM F_OPTIONS -mpreferred-stack-boundary=2)
+	endif()
+	set(srcs)
+	foreach(src ${F_UNPARSED_ARGUMENTS})
+		if(src MATCHES "\\.def$")
+			def_for(src ${src})
+		endif()
+		list(APPEND srcs ${src})
+	endforeach()
+	add_library(${name} SHARED ${srcs})
 	target_compile_options(${name} PRIVATE ${common_options} ${F_OPTIONS})
 	target_link_options(${name} PRIVATE ${common_options} ${F_OPTIONS}
 		${fixture_link_options})
@@ -68,23 +98,9 @@ endfunction()
 
 import_library(pe_basic)
 
-# The 64-bit fixtures: the loader's (PE32+ headers, DIR64 relocations,
-# 64-bit thunks and TLS). The rest follow as the x64 runtime grows.
-if(VFW_FIXTURE_64)
-	fixture(pe_basic pe_basic.c pe_basic.def pe_basic.rc)
-	fixture(pe_reloc pe_reloc.c)
-	fixture(pe_tls pe_tls.c)
-	fixture(pe_dep pe_dep.c pe_dep.def LIBS pe_basic_imports)
-	add_custom_command(OUTPUT ${VFW_FIXTURE_DIR}/pe_noreloc.dll
-		COMMAND ${VFW_OBJCOPY} --remove-section .reloc
-			$<TARGET_FILE:pe_reloc> ${VFW_FIXTURE_DIR}/pe_noreloc.dll
-		DEPENDS pe_reloc
-		VERBATIM)
-	add_custom_target(pe_noreloc ALL
-		DEPENDS ${VFW_FIXTURE_DIR}/pe_noreloc.dll)
-	return()
-endif()
-
+# The 64-bit fixtures leave out what is i386 only: fs:[0] SEH frames
+# written by hand, cl's i386 C++ exception layout, Win9x thunks, and
+# pe_delay's hand-written (i386) delay-load tables.
 import_library(zz_nosuch)
 import_library(vfw_missing)
 import_library(sehcrt)
@@ -98,12 +114,16 @@ fixture(pe_reloc pe_reloc.c)
 fixture(pe_tls pe_tls.c)
 fixture(pe_fail pe_fail.c)
 fixture(pe_realcodec pe_realcodec.c)
-fixture(pe_thunk pe_thunk.c LIBS k32_thunk_imports)
+if(NOT VFW_FIXTURE_64)
+	fixture(pe_thunk pe_thunk.c LIBS k32_thunk_imports)
+endif()
 fixture(pe_fourccs pe_fourccs.c pe_fourccs.rc)
 fixture(pe_dep pe_dep.c pe_dep.def LIBS pe_basic_imports)
 fixture(pe_missing pe_missing.c LIBS zz_nosuch_imports pe_basic_imports)
 # Its own delay-load tables (GNU ld doesn't make them); see pe_delay.c.
-fixture(pe_delay pe_delay.c)
+if(NOT VFW_FIXTURE_64)	# its tables are i386 asm
+	fixture(pe_delay pe_delay.c)
+endif()
 
 # Links against kernel32 (the mingw import library) and a made-up function.
 fixture(pe_runtime pe_runtime.c LIBS vfw_missing_imports kernel32)
@@ -120,17 +140,23 @@ fixture(pe_sse pe_sse.c LIBS kernel32
 
 # Installs its own fs:[0] SEH frames by hand (no CRT here to compile
 # __try/__except into _except_handler3 frames) and faults under them.
-fixture(pe_seh pe_seh.c LIBS kernel32 OPTIONS -mpreferred-stack-boundary=2)
+if(NOT VFW_FIXTURE_64)
+	fixture(pe_seh pe_seh.c LIBS kernel32 OPTIONS -mpreferred-stack-boundary=2)
+endif()
 
 # __try/__except/__finally as cl compiles them against msvcrt's
 # _except_handler3 and _except_handler4_common, frames written out by hand.
-fixture(pe_sehcrt pe_sehcrt.c LIBS sehcrt_imports kernel32
-	OPTIONS -mpreferred-stack-boundary=2)
+if(NOT VFW_FIXTURE_64)
+	fixture(pe_sehcrt pe_sehcrt.c LIBS sehcrt_imports kernel32
+		OPTIONS -mpreferred-stack-boundary=2)
+endif()
 
 # C++ exceptions laid out as cl compiles them, against msvcrt's
 # __CxxFrameHandler and _CxxThrowException.
-fixture(pe_cxxeh pe_cxxeh.c LIBS cxxcrt_imports kernel32
-	OPTIONS -mpreferred-stack-boundary=2 -fno-builtin)
+if(NOT VFW_FIXTURE_64)
+	fixture(pe_cxxeh pe_cxxeh.c LIBS cxxcrt_imports kernel32
+		OPTIONS -mpreferred-stack-boundary=2 -fno-builtin)
+endif()
 
 # Converts audio through msacm32, as an application would.
 fixture(pe_acm pe_acm.c LIBS msacm32 OPTIONS -mpreferred-stack-boundary=2)

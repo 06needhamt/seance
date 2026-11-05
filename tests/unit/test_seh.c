@@ -13,6 +13,18 @@
  * sanitizer builds leave uninstalled (ASan's own runs instead); only the
  * RaiseException path, which never touches a signal, still applies there.
  */
+#if defined(__x86_64__)
+/* x86-64 has no counterpart of the fs:[0] chain (docs/X64_PLAN.md, phases 4-5). */
+#include <stdio.h>
+
+int main(void)
+{
+	printf("i386 only\n");
+	return 77;
+}
+
+#else
+
 #include <signal.h>
 #include <sys/wait.h>
 
@@ -123,3 +135,5 @@ int main(void)
 
 	return test_summary("test_seh");
 }
+
+#endif /* !__x86_64__ */

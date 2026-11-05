@@ -34,14 +34,10 @@ static const struct builtin_export *const tables[] = {
 	crt_stdio_exports,
 	crt_startup_exports,
 	crt_helpers_exports,
-#if !defined(__x86_64__)
 	crt_seh_exports,
-#endif
 	crt_printf_exports,
 	crt_scanf_exports,
-#if !defined(__x86_64__)
 	crt_cxx_exports,
-#endif
 	crt_lowio_exports,
 	crt_legacy_exports,
 	NULL
@@ -94,14 +90,10 @@ static const struct builtin_export *const crtdll_tables[] = {
 	crt_stdio_exports,
 	crt_startup_exports,
 	crt_helpers_exports,
-#if !defined(__x86_64__)
 	crt_seh_exports,
-#endif
 	crt_printf_exports,
 	crt_scanf_exports,
-#if !defined(__x86_64__)
 	crt_cxx_exports,
-#endif
 	crt_lowio_exports,
 	crt_legacy_exports,
 	NULL

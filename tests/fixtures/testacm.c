@@ -122,8 +122,13 @@ static HANDLE process_heap(void)
 {
 	BYTE *peb;
 
+#ifdef _WIN64
+	__asm__ volatile("movq %%gs:0x60, %0" : "=r"(peb));
+	return *(HANDLE *)(peb + 0x30);
+#else
 	__asm__ volatile("movl %%fs:0x30, %0" : "=r"(peb));
 	return *(HANDLE *)(peb + 0x18);
+#endif
 }
 
 static int env_on(const char *name)
@@ -142,10 +147,10 @@ static int high(int n, ...)
 
 	if (!strict)
 		return 0;
-	bad = (DWORD)&here >= 0x80000000u;
+	bad = (ULONG_PTR)&here >= 0x80000000u;
 	__builtin_va_start(ap, n);
 	for (i = 0; i < n; i++)
-		bad |= (DWORD)__builtin_va_arg(ap, const void *) >= 0x80000000u;
+		bad |= (ULONG_PTR)__builtin_va_arg(ap, const void *) >= 0x80000000u;
 	__builtin_va_end(ap);
 	return bad;
 }

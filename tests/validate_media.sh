@@ -13,12 +13,15 @@
 #     FFmpeg writes (Y4M, BMP files, AVI) and writes AVIs FFmpeg reads, and
 #     `decode` gives back FFmpeg's pictures exactly.
 #
-# usage: tests/validate_media.sh <build dir> <work dir>
+# usage: tests/validate_media.sh <build dir> <work dir> [<harness> [<fixtures>]]
+# (the harness is <build dir>/seance and the fixture DLLs those in
+# <build dir>/fixtures unless given: seance64 and fixtures64, say)
 set -eu
 
 build=${1:?usage: $0 <build dir> <work dir>}
 work=${2:?usage: $0 <build dir> <work dir>}
-harness=$build/seance
+harness=${3:-$build/seance}
+fixtures=${4:-$build/fixtures}
 # On a cross build, what runs i386 programs (qemu-i386), from CMake.
 emu=${VFW_EMULATOR:-}
 failures=0
@@ -298,7 +301,7 @@ else
 fi
 # TSTA through testfilter.ax: FFmpeg's PCM back exactly, and FFmpeg reads
 # the AVI the encoder's packets went into.
-filter=$build/fixtures/testfilter.ax
+filter=$fixtures/testfilter.ax
 if [ -f "$filter" ]; then
 	$emu "$harness" encode "$filter" $a/s24le.wav -o $a/tsta.avi 2>/dev/null ||
 		fail "encode TSTA"
@@ -314,13 +317,13 @@ if [ -f "$filter" ]; then
 	$emu "$harness" encode "$filter" $a/six.wav -o $a/six.avi 2>/dev/null
 	$emu "$harness" decode "$filter" $a/six.avi -o $a/six-tsta.pcm 2>/dev/null
 	same "6-channel WAV -> TSTA -> PCM identical" $a/six-tsta.pcm $a/six.ref
-	dmo=$build/fixtures/testdmo.dll
+	dmo=$fixtures/testdmo.dll
 	$emu "$harness" encode "$dmo" $a/s24le.wav -o $a/tsta-dmo.avi 2>/dev/null
 	same "TSTA DMO's AVI is the filter's" $a/tsta-dmo.avi $a/tsta.avi
 	$emu "$harness" decode "$dmo" $a/six.avi -o $a/six-dmo.pcm 2>/dev/null
 	same "6-channel TSTA -> DMO -> PCM identical" $a/six-dmo.pcm $a/six.ref
 	# The ACM driver's AVI: blocks of a constant size, as ACM's are.
-	acm=$build/fixtures/testacm.acm
+	acm=$fixtures/testacm.acm
 	$emu "$harness" encode "$acm" $a/s24le.wav -o $a/tsta-acm.avi \
 		2>/dev/null || fail "encode TSTA through ACM"
 	expect "TSTA ACM AVI: FFmpeg sees its packets" \
@@ -338,7 +341,7 @@ if [ -f "$filter" ]; then
 fi
 echo
 
-codec=$build/fixtures/testcodec.dll
+codec=$fixtures/testcodec.dll
 if [ -f "$codec" ]; then
 	echo "== encode and decode with testcodec.dll"
 	e=$work/enc
@@ -353,7 +356,7 @@ if [ -f "$codec" ]; then
 		-show_entries stream=codec_tag_string -of csv=p=0 $e/t.avi)" TST0
 	$emu "$harness" decode $codec $e/t.avi -o $e/out.y4m 2>/dev/null || fail "decode"
 	at_least "Y4M -> TST0 -> Y4M" "$(psnr $e/out.y4m $e/in.y4m)" inf
-	filter=$build/fixtures/testfilter.ax
+	filter=$fixtures/testfilter.ax
 	if [ -f "$filter" ]; then
 		$emu "$harness" decode "$filter" $e/t.avi -o $e/dshow-out.y4m \
 			2>/dev/null || fail "DirectShow decode"

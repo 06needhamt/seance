@@ -203,7 +203,7 @@ if(BUILD_TESTING)
 			RUNTIME_OUTPUT_DIRECTORY ${test_dir})
 		add_test(NAME ${name} COMMAND ${name})
 		set_tests_properties(${name} PROPERTIES
-			ENVIRONMENT "VFW_FIXTURES=${vfw_run_fixtures};VFW_FIXTURES64=${VFW_FIXTURE64_DIR};VFW_EMULATOR=${vfw_emulator}"
+			ENVIRONMENT "VFW_FIXTURES=${vfw_run_fixtures};VFW_FIXTURES32=${VFW_FIXTURE_DIR};VFW_FIXTURES64=${VFW_FIXTURE64_DIR};VFW_EMULATOR=${vfw_emulator}"
 			LABELS unit)
 		skippable(${name} ${vfw_fixtures_required})
 	endforeach()
@@ -302,7 +302,8 @@ if(BUILD_TESTING)
 	# The AVI and image code cross-checked with FFmpeg.
 	add_test(NAME validate_media
 		COMMAND sh ${PROJECT_SOURCE_DIR}/tests/validate_media.sh
-			${CMAKE_BINARY_DIR} ${CMAKE_BINARY_DIR}/media)
+			${CMAKE_BINARY_DIR} ${CMAKE_BINARY_DIR}/media
+			$<TARGET_FILE:seance> ${vfw_run_fixtures})
 	set_tests_properties(validate_media PROPERTIES LABELS media
 		ENVIRONMENT "VFW_EMULATOR=${vfw_emulator}")
 	skippable(validate_media ${VFW_REQUIRE_FFMPEG})

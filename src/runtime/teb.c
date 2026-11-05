@@ -99,9 +99,14 @@ static int install_teb(struct win_teb *teb)
 		vfw_set_error("arch_prctl(ARCH_SET_GS): %s", strerror(errno));
 		return -1;
 	}
-	/* Windows starts threads with every SSE exception masked. */
+	/*
+	 * Windows starts threads with every SSE exception masked, and the
+	 * x87 at 53-bit precision as on i386 (code may still use it).
+	 */
 	unsigned mxcsr = 0x1f80;
+	unsigned short cw = 0x27f;
 	__asm__ volatile("ldmxcsr %0" : : "m"(mxcsr));
+	__asm__ volatile("fldcw %0" : : "m"(cw));
 	return 0;
 }
 

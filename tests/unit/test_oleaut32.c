@@ -16,10 +16,14 @@
 
 static struct module *oa;
 
-/* Where Win32 code can use it (the sanitizers' allocator isn't kept low). */
+/*
+ * Where Win32 code can use it (the sanitizers' allocator isn't kept low,
+ * and Win64 code has no such limit).
+ */
 static int low(const void *p)
 {
-	return VFW_SANITIZER_BUILD || (uintptr_t)p < 0x80000000u;
+	return VFW_SANITIZER_BUILD || sizeof(void *) == 8 ||
+	       (uintptr_t)p < 0x80000000u;
 }
 
 static void *get(const char *name)
@@ -267,7 +271,7 @@ static const char *as_text(VARIANT in, VARTYPE from, USHORT flags)
 
 	HRESULT hr = change(&out, from, in, VT_BSTR, flags);
 	if (FAILED(hr)) {
-		snprintf(s, 80, "error 0x%08lx", (unsigned long)hr);
+		snprintf(s, 80, "error 0x%08lx", (unsigned long)(DWORD)hr);
 		return s;
 	}
 	snprintf(s, 80, "%s", text(out.bstrVal));
@@ -701,7 +705,8 @@ static void test_safearrays(void)
 
 	/* BSTRs are copied in and out, and freed with the array. */
 	SAFEARRAY *bs = SafeArrayCreateVector(VT_BSTR, 0, 2);
-	CHECK(bs && (bs->fFeatures & FADF_BSTR) && bs->cbElements == 4);
+	CHECK(bs && (bs->fFeatures & FADF_BSTR) &&
+	      bs->cbElements == sizeof(BSTR));
 	BSTR s = SysAllocString(w("one")), out = NULL;
 	LONG i0 = 0, i1 = 1;
 	CHECK_EQ(SafeArrayPutElement(bs, &i0, s), S_OK);

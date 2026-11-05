@@ -45,6 +45,10 @@ typedef struct crt_FILE {
 	char *_tmpfname;
 } crt_FILE;
 
+/* msvcrt's FILE, which _iob is an array of: 32 bytes, 48 on Win64. */
+_Static_assert(sizeof(crt_FILE) == (sizeof(void *) == 8 ? 48 : 32),
+	       "crt_FILE");
+
 #define _IOFBF 0
 #define _IOREAD  0x0001
 #define _IOWRT   0x0002

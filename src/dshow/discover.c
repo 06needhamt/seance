@@ -226,7 +226,7 @@ static HRESULT call_server(struct module *m, const char *entry)
 	crash_enter(entry, (const void *)fn, 0, NULL, &saved);
 	HRESULT hr = fn();
 	crash_leave(&saved);
-	TRACE("dshow: %s!%s = 0x%08lx", m->name, entry, (unsigned long)hr);
+	TRACE("dshow: %s!%s = 0x%08lx", m->name, entry, (unsigned long)(DWORD)hr);
 	return hr;
 }
 

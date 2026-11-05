@@ -627,7 +627,7 @@ static HRESULT inproc_class_object(REFCLSID clsid, REFIID riid, void **ppv)
 	}
 	HRESULT hr = get(clsid, riid, ppv);
 	TRACE("CoGetClassObject(%s): %s DllGetClassObject = 0x%08lx", g, dll,
-	      (unsigned long)hr);
+	      (unsigned long)(DWORD)hr);
 	free(dll);
 	return hr;
 }

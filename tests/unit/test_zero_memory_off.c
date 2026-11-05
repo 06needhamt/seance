@@ -37,7 +37,7 @@ int main(void)
 		return 1;
 	void *(CDECL *crt_malloc)(size_t) = (void *(CDECL *)(size_t))get(c, "malloc");
 	void (CDECL *crt_free)(void *) = (void (CDECL *)(void *))get(c, "free");
-	void *(CDECL *operator_new)(size_t) = (void *(CDECL *)(size_t))get(c, "??2@YAPAXI@Z");
+	void *(CDECL *operator_new)(size_t) = (void *(CDECL *)(size_t))get(c, OPERATOR_NEW);
 	void *(WINAPI *get_heap)(void) = (void *(WINAPI *)(void))get(k, "GetProcessHeap");
 	void *(WINAPI *heap_alloc)(void *, DWORD, SIZE_T) =
 		(void *(WINAPI *)(void *, DWORD, SIZE_T))get(k, "HeapAlloc");

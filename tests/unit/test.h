@@ -58,6 +58,13 @@ static int test_checks;
 #define WLP_NAME(get_or_set, aw) #get_or_set "WindowLong" #aw
 #endif
 
+/* msvcrt's operator new(size_t), as each architecture's compilers mangle it. */
+#if defined(__x86_64__)
+#define OPERATOR_NEW "??2@YAPEAX_K@Z"
+#else
+#define OPERATOR_NEW "??2@YAPAXI@Z"
+#endif
+
 /* Exit status telling CTest that a test was skipped. */
 #define TEST_SKIP 77
 
@@ -83,6 +90,15 @@ static inline const char *fixture_in(const char *var, const char *name)
 static inline const char *fixture(const char *name)
 {
 	return fixture_in("VFW_FIXTURES", name);
+}
+
+/*
+ * The 32-bit (i386) fixtures in $VFW_FIXTURES32, whichever architecture
+ * the harness is built for: for tests that only parse them.
+ */
+static inline const char *fixture32(const char *name)
+{
+	return fixture_in("VFW_FIXTURES32", name);
 }
 
 /*

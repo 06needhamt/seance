@@ -19,10 +19,10 @@
 #include "win32/internal.h"
 #include "win32/k32.h"
 
-/* The word behind a lock, as the integer we keep in it. */
-static uint32_t *word(void *p)
+/* The pointer-sized word behind a lock, as the integer we keep in it. */
+static uintptr_t *word(void *p)
 {
-	return (uint32_t *)p;
+	return (uintptr_t *)p;
 }
 
 /*
@@ -40,7 +40,7 @@ WINFN(void) k32_InitializeSRWLock(PSRWLOCK l)
 
 static void srw_acquire(PSRWLOCK l, int exclusive)
 {
-	uint32_t *w = word(&l->Ptr);
+	uintptr_t *w = word(&l->Ptr);
 
 	wait_lock();
 	while (exclusive ? *w != 0 : (*w & SRW_WRITER))
@@ -51,7 +51,7 @@ static void srw_acquire(PSRWLOCK l, int exclusive)
 
 static BOOL srw_try(PSRWLOCK l, int exclusive)
 {
-	uint32_t *w = word(&l->Ptr);
+	uintptr_t *w = word(&l->Ptr);
 	BOOL got;
 
 	wait_lock();
@@ -65,7 +65,7 @@ static BOOL srw_try(PSRWLOCK l, int exclusive)
 /* With the wait lock held. */
 static void srw_release_locked(PSRWLOCK l, int exclusive)
 {
-	uint32_t *w = word(&l->Ptr);
+	uintptr_t *w = word(&l->Ptr);
 
 	if (exclusive)
 		*w &= ~SRW_WRITER;
@@ -102,19 +102,19 @@ struct cv_waiter {
 	int signaled;
 };
 
-static struct cv_waiter *cv_first(uint32_t *w)
+static struct cv_waiter *cv_first(uintptr_t *w)
 {
 	return (struct cv_waiter *)(uintptr_t)*w;
 }
 
 /* With the wait lock held. */
-static void cv_enqueue(uint32_t *w, struct cv_waiter *n)
+static void cv_enqueue(uintptr_t *w, struct cv_waiter *n)
 {
 	struct cv_waiter *first = cv_first(w);
 
 	if (!first) {
 		n->next = n->prev = n;
-		*w = (uint32_t)(uintptr_t)n;
+		*w = (uintptr_t)n;
 		return;
 	}
 	n->prev = first->prev;
@@ -123,7 +123,7 @@ static void cv_enqueue(uint32_t *w, struct cv_waiter *n)
 	first->prev = n;
 }
 
-static void cv_remove(uint32_t *w, struct cv_waiter *n)
+static void cv_remove(uintptr_t *w, struct cv_waiter *n)
 {
 	if (n->next == n) {
 		*w = 0;
@@ -131,7 +131,7 @@ static void cv_remove(uint32_t *w, struct cv_waiter *n)
 		n->prev->next = n->next;
 		n->next->prev = n->prev;
 		if (cv_first(w) == n)
-			*w = (uint32_t)(uintptr_t)n->next;
+			*w = (uintptr_t)n->next;
 	}
 	n->next = n->prev = NULL;
 }
@@ -153,7 +153,7 @@ struct cv_lock {
 
 static BOOL cv_sleep(PCONDITION_VARIABLE cv, DWORD ms, const struct cv_lock *l)
 {
-	uint32_t *w = word(&cv->Ptr);
+	uintptr_t *w = word(&cv->Ptr);
 	struct cv_waiter me = { NULL, NULL, 0 };
 	struct timespec deadline;
 	BOOL woken = TRUE;
@@ -223,7 +223,7 @@ WINFN(BOOL) k32_SleepConditionVariableCS(PCONDITION_VARIABLE cv,
 
 WINFN(void) k32_WakeConditionVariable(PCONDITION_VARIABLE cv)
 {
-	uint32_t *w = word(&cv->Ptr);
+	uintptr_t *w = word(&cv->Ptr);
 	struct cv_waiter *first;
 
 	wait_lock();
@@ -237,7 +237,7 @@ WINFN(void) k32_WakeConditionVariable(PCONDITION_VARIABLE cv)
 
 WINFN(void) k32_WakeAllConditionVariable(PCONDITION_VARIABLE cv)
 {
-	uint32_t *w = word(&cv->Ptr);
+	uintptr_t *w = word(&cv->Ptr);
 	struct cv_waiter *first;
 
 	wait_lock();
@@ -265,7 +265,7 @@ WINFN(void) k32_InitOnceInitialize(PINIT_ONCE once)
 WINFN(BOOL) k32_InitOnceBeginInitialize(PINIT_ONCE once, DWORD flags,
 					PBOOL pending, PVOID *context)
 {
-	uint32_t *w = word(&once->Ptr);
+	uintptr_t *w = word(&once->Ptr);
 	BOOL ok = TRUE;
 
 	if (flags & ~(DWORD)(INIT_ONCE_CHECK_ONLY | INIT_ONCE_ASYNC)) {
@@ -277,7 +277,7 @@ WINFN(BOOL) k32_InitOnceBeginInitialize(PINIT_ONCE once, DWORD flags,
 		if ((*w & 3) == ONCE_DONE) {
 			*pending = FALSE;
 			if (context)
-				*context = (PVOID)(uintptr_t)(*w & ~3u);
+				*context = (PVOID)(*w & ~(uintptr_t)3);
 			break;
 		}
 		if (flags & INIT_ONCE_CHECK_ONLY) {
@@ -299,7 +299,7 @@ WINFN(BOOL) k32_InitOnceBeginInitialize(PINIT_ONCE once, DWORD flags,
 
 WINFN(BOOL) k32_InitOnceComplete(PINIT_ONCE once, DWORD flags, PVOID context)
 {
-	uint32_t *w = word(&once->Ptr);
+	uintptr_t *w = word(&once->Ptr);
 	BOOL ok = TRUE;
 
 	if ((flags & ~(DWORD)(INIT_ONCE_ASYNC | INIT_ONCE_INIT_FAILED)) ||
@@ -313,7 +313,7 @@ WINFN(BOOL) k32_InitOnceComplete(PINIT_ONCE once, DWORD flags, PVOID context)
 		ok = FALSE;
 	} else {
 		*w = (flags & INIT_ONCE_INIT_FAILED) ? 0 :
-		     ((uint32_t)(uintptr_t)context | ONCE_DONE);
+		     ((uintptr_t)context | ONCE_DONE);
 		wait_broadcast();
 	}
 	wait_unlock();

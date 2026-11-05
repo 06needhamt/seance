@@ -93,9 +93,9 @@ EXPORT int gui_window(void)
 	/* 4-5: sent and posted messages, window longs */
 	if (SendMessageA(hwnd, WM_USER, 2, 3) != 5)
 		return 4;
-	SetWindowLongA(hwnd, GWL_USERDATA, 1234);
+	SetWindowLongA(hwnd, GWLP_USERDATA, 1234);
 	SetWindowLongA(hwnd, 4, 99);
-	if (GetWindowLongA(hwnd, GWL_USERDATA) != 1234 || GetWindowLongA(hwnd, 4) != 99)
+	if (GetWindowLongA(hwnd, GWLP_USERDATA) != 1234 || GetWindowLongA(hwnd, 4) != 99)
 		return 5;
 	PostMessageA(hwnd, WM_USER, 10, 0);
 	if (!PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE) || msg.hwnd != hwnd ||

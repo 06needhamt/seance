@@ -6,6 +6,18 @@
  * codegen never emits calls to them - there is no way to make a
  * mingw-compiled fixture exercise them by just writing normal C.
  */
+#if defined(__x86_64__)
+/* Win64 compilers never call these helpers: x86-64 has the instructions. */
+#include <stdio.h>
+
+int main(void)
+{
+	printf("i386 only\n");
+	return 77;
+}
+
+#else
+
 #include "runtime/builtin.h"
 #include "test.h"
 
@@ -91,3 +103,5 @@ int main(void)
 
 	return test_summary("test_crt_helpers");
 }
+
+#endif /* !__x86_64__ */

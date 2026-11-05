@@ -618,7 +618,7 @@ WINFN(HRESULT) fm2_UnregisterFilter(IFilterMapper2 *self,
 	capture_remove(filter, category ? category :
 			       &CLSID_LegacyAmFilterCategory);
 	TRACE("IFilterMapper2::UnregisterFilter(%s) = 0x%08lx", path,
-	      (unsigned long)hr);
+	      (unsigned long)(DWORD)hr);
 	return hr;
 }
 
@@ -1112,7 +1112,7 @@ static const char *error_text(HRESULT hr, char *buf, size_t size)
 			snprintf(buf, size, "%s", qz_errors[i].name);
 		return buf;
 	}
-	snprintf(buf, size, "Error 0x%08lX.", (unsigned long)hr);
+	snprintf(buf, size, "Error 0x%08lX.", (unsigned long)(DWORD)hr);
 	return buf;
 }
 

@@ -287,7 +287,7 @@ static int run_trapping(struct module *m, const char *fn, char *err, size_t size
 	return status;
 }
 
-static void test_delay_load(void)
+static void __attribute__((unused)) test_delay_load(void)
 {
 	char dir[4096], err[1024];
 	const char *t = getenv("TMPDIR");
@@ -368,6 +368,8 @@ int main(void)
 	test_search_path();
 	test_force_reloc();
 	CHECK_EQ(runtime_enter(), 0);
+#if !defined(__x86_64__)	/* pe_delay's tables are i386 only, so far */
 	test_delay_load();
+#endif
 	return test_summary("test_modules");
 }
