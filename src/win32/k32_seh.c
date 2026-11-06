@@ -18,6 +18,12 @@ const struct builtin_export k32_seh_exports[] = {
 	E(RtlVirtualUnwind),
 	E(RtlAddFunctionTable),
 	E(RtlDeleteFunctionTable),
+	E(RtlCaptureContext),
+	E(RtlRestoreContext),
+	E(RtlUnwindEx),
+	E(RtlUnwind),
+	E(RtlPcToFileHeader),
+	{ "__C_specific_handler", 0, (void *)seh_C_specific_handler },
 #endif
 	E(SetUnhandledExceptionFilter),
 	E(UnhandledExceptionFilter),

@@ -126,14 +126,14 @@ static int epilogue_at(const BYTE *p, int *pops, int *is_ret)
 	int len = 0;
 
 	*pops = 0;
-	if ((p[0] == 0x48 || p[0] == 0x4c) && p[1] == 0x83 && p[2] == 0xc4)
+	if (p[0] == 0x48 && p[1] == 0x83 && p[2] == 0xc4)
 		len = 4;		/* add rsp, imm8 */
 	else if (p[0] == 0x48 && p[1] == 0x81 && p[2] == 0xc4)
 		len = 7;		/* add rsp, imm32 */
-	else if ((p[0] == 0x48 || p[0] == 0x4c) && p[1] == 0x8d &&
+	else if ((p[0] == 0x48 || p[0] == 0x49) && p[1] == 0x8d &&
 		 (p[2] & 0x38) == 0x20 && (p[2] & 0xc0) == 0x40)
 		len = 4;		/* lea rsp, [reg+disp8] */
-	else if ((p[0] == 0x48 || p[0] == 0x4c) && p[1] == 0x8d &&
+	else if ((p[0] == 0x48 || p[0] == 0x49) && p[1] == 0x8d &&
 		 (p[2] & 0x38) == 0x20 && (p[2] & 0xc0) == 0x80)
 		len = 7;		/* lea rsp, [reg+disp32] */
 
@@ -175,10 +175,10 @@ static void unwind_epilogue(CONTEXT *ctx, const BYTE *p, int len, int pops,
 	else if (len == 7 && p[1] == 0x81)
 		ctx->Rsp += *(const int32_t *)(p + 3);
 	else if (len == 4)
-		ctx->Rsp = regs[((p[0] & 4) ? 8 : 0) + (p[2] & 7)] +
+		ctx->Rsp = regs[((p[0] & 1) ? 8 : 0) + (p[2] & 7)] +
 			   (int8_t)p[3];
 	else if (len == 7)
-		ctx->Rsp = regs[((p[0] & 4) ? 8 : 0) + (p[2] & 7)] +
+		ctx->Rsp = regs[((p[0] & 1) ? 8 : 0) + (p[2] & 7)] +
 			   *(const int32_t *)(p + 3);
 
 	p += len;

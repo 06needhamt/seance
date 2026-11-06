@@ -141,6 +141,13 @@ if(NOT VFW_FIXTURE_64)
 	fixture(pe_seh pe_seh.c LIBS kernel32 OPTIONS -mpreferred-stack-boundary=2)
 endif()
 
+# x86-64 table-based SEH: hand-written functions with .seh_* unwind data and
+# __C_specific_handler scope tables (msvcrt's), as cl compiles __try.
+if(VFW_FIXTURE_64)
+	fixture(pe_seh64 pe_seh64.c LIBS kernel32 msvcrt
+		OPTIONS -Wl,--disable-auto-import)
+endif()
+
 # __try/__except/__finally as cl compiles them against msvcrt's
 # _except_handler3 and _except_handler4_common, frames written out by hand.
 if(NOT VFW_FIXTURE_64)

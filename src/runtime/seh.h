@@ -59,6 +59,17 @@ seh_RtlVirtualUnwind(DWORD type, ULONGLONG base, ULONGLONG pc,
 BOOLEAN WINAPI seh_RtlAddFunctionTable(PRUNTIME_FUNCTION entries, DWORD count,
 				       ULONGLONG base);
 BOOLEAN WINAPI seh_RtlDeleteFunctionTable(PRUNTIME_FUNCTION entries);
+void WINAPI seh_RtlCaptureContext(CONTEXT *ctx);
+void WINAPI seh_RtlRestoreContext(CONTEXT *ctx, EXCEPTION_RECORD *rec);
+void WINAPI seh_RtlUnwindEx(void *target_frame, void *target_ip,
+			    EXCEPTION_RECORD *rec, void *retval,
+			    CONTEXT *ctx, void *history);
+void WINAPI seh_RtlUnwind(void *target_frame, void *target_ip,
+			  EXCEPTION_RECORD *rec, void *retval);
+PVOID WINAPI seh_RtlPcToFileHeader(PVOID pc, PVOID *base);
+EXCEPTION_DISPOSITION WINAPI
+seh_C_specific_handler(EXCEPTION_RECORD *rec, void *frame, CONTEXT *ctx,
+		       DISPATCHER_CONTEXT *dc);
 #endif
 
 #endif /* VFW_RUNTIME_SEH_H */

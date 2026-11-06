@@ -105,8 +105,8 @@ Decisions:
      pointer indices exist only as `GWLP_`/`DWLP_`.
    - The i386-only parts (the fs:[0] SEH in `seh.c` and `crt_seh.c`, the
      i386 C++ EH, `_allmul` and the other helpers, `_CI*`, `_EH_prolog`)
-     are left out of the x86-64 build; `seh_x64.c` sends exceptions to
-     the unhandled-exception filter until phase 4.
+     are left out of the x86-64 build; `seh_x64.c` and `unwind_x64.c` take
+     their place (phase 4).
 3. **Loading and running.** (Mostly done; what remains is marked.)
    - `src/runtime/teb_x64.c`: the x64 TEB and PEB (offsets checked with
      `_Static_assert`), installed with `arch_prctl(ARCH_SET_GS)`. glibc
@@ -141,7 +141,7 @@ Decisions:
      comparators, `signal` handlers) use its convention; `qsort` goes
      through `qsort_r` rather than handing the comparator to glibc.
    - `_setjmp`, `_setjmpex` and `longjmp` with the Win64 `_JUMP_BUFFER`
-     (`src/win32/crt_seh_x64.c`), restoring registers without unwinding;
+     (`src/win32/crt_seh_x64.c`; `longjmp` unwinds, see phase 4);
      `operator new` and `delete` under their x64 names, and `_purecall`.
    - `WNDCLASS` is copied field by field, not as the tail of a
      `WNDCLASSEX` (the padding differs on x86-64); the lock words of SRW
@@ -149,8 +149,8 @@ Decisions:
    Milestone (reached): the 64-bit `pe_basic`, `pe_reloc`, `pe_tls`,
    `pe_dep` and `pe_crt` load in `seance64`, `DllMain` and TLS callbacks
    run, and their exports return the right values.
-4. **Table-based SEH.** `src/runtime/seh_x64.c`, beside the i386
-   `seh.c`: function lookup in each module's sorted `.pdata` and in tables
+4. **Table-based SEH.** (Done.) `src/runtime/seh_x64.c` and
+   `unwind_x64.c`, beside the i386 `seh.c`: function lookup in each module's sorted `.pdata` and in tables
    added with `RtlAddFunctionTable`; a virtual unwinder for every unwind
    code (`PUSH_NONVOL`, `ALLOC_*`, `SET_FPREG`, `SAVE_NONVOL*`,
    `SAVE_XMM128*`, `PUSH_MACHFRAME`), chained unwind info and epilogues;
@@ -160,9 +160,17 @@ Decisions:
    `CONTEXT` and dispatch on the thread's own stack, as on i386.
    `setjmp`/`longjmp` use the x64 `_JUMP_BUFFER`, and `longjmp` unwinds
    when its `Frame` is set.
-   Milestone: 64-bit SEH fixtures pass: `__try`/`__except` around an
-   access violation, `__finally` on unwind, `RaiseException` with a
-   filter, and `longjmp` across frames.
+   Milestone (reached): the hand-written `pe_seh64` fixture (`.seh_*`
+   unwind data and `__C_specific_handler` scope tables, as cl compiles
+   `__try`) passes: `__except` around an access violation with rbx, r12
+   and xmm6 restored by the unwind, a frame-pointer function, filters
+   (execute, reject, continue execution), `__finally` on unwind,
+   `RaiseException`, `longjmp` out of a `__finally` scope, the top-level
+   filter resuming, and an unhandled fault crashing with the usual
+   report.
+   Limit: a frame in code the harness itself runs (a built-in DLL's
+   function) has no unwind data, so an exception cannot be caught by a
+   `__try` beyond one, and a fault inside such code is unhandled.
 5. **C++ exceptions and RTTI.** `src/win32/crt_cxx_x64.c`:
    `_CxxThrowException` with the image base as the fourth parameter and
    RVA-based `ThrowInfo`; `__CxxFrameHandler3` and `__CxxFrameHandler4`
