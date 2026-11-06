@@ -33,6 +33,11 @@ static void *get_from(struct module *m, const char *name)
 #define GDI(ret, name, ...) \
 	ret (WINAPI *name)(__VA_ARGS__) = \
 		(ret (WINAPI *)(__VA_ARGS__))get_from(gdi, #name)
+/* Get/SetWindowLongPtrW, whatever their export names. */
+#define USER_WLP(get_or_set, ...) \
+	LONG_PTR (WINAPI *get_or_set##WindowLongPtrW)(__VA_ARGS__) = \
+		(LONG_PTR (WINAPI *)(__VA_ARGS__))get_from(u32, \
+			WLP_NAME(get_or_set, W))
 
 static WCHAR *w(const char *s)
 {
@@ -562,7 +567,7 @@ static void test_subclass(void)
 	USER(HWND, CreateWindowExW, DWORD, LPCWSTR, LPCWSTR, DWORD, int, int,
 	     int, int, HWND, HMENU, HINSTANCE, LPVOID);
 	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
-	USER(LONG, GetWindowLongW, HWND, int);
+	USER_WLP(Get, HWND, int);
 	USER(BOOL, IsWindowUnicode, HWND);
 	USER(BOOL, DestroyWindow, HWND);
 	WNDCLASSW wc;
@@ -580,7 +585,7 @@ static void test_subclass(void)
 	/* The newest runs first; each passes on; then the original. */
 	CHECK(SetWindowSubclass(h, sub_proc, 1, 'a'));
 	CHECK(SetWindowSubclass(h, sub_proc, 10, 'b'));
-	CHECK(GetWindowLongW(h, GWL_WNDPROC) != (LONG)(ULONG_PTR)base_proc);
+	CHECK(GetWindowLongPtrW(h, GWLP_WNDPROC) != (LONG_PTR)base_proc);
 	trail[0] = '\0';
 	CHECK_EQ(SendMessageW(h, WM_USER + 1, 0, 0), 111);
 	CHECK_STR(trail, "bao");
@@ -600,7 +605,7 @@ static void test_subclass(void)
 	CHECK_EQ(SendMessageW(h, WM_USER + 1, 5, 0), 106);
 	CHECK_STR(trail, "co");
 	CHECK(RemoveWindowSubclass(h, sub_proc, 1));
-	CHECK_EQ(GetWindowLongW(h, GWL_WNDPROC), (LONG)(ULONG_PTR)base_proc);
+	CHECK(GetWindowLongPtrW(h, GWLP_WNDPROC) == (LONG_PTR)base_proc);
 	CHECK(IsWindowUnicode(h));	/* still a Unicode window */
 
 	/* Left in place, they see WM_NCDESTROY and are then dropped. */
@@ -942,7 +947,7 @@ static void test_misc(void)
 	USER(LONG, GetWindowLongW, HWND, int);
 	USER(BOOL, GetClientRect, HWND, LPRECT);
 	USER(BOOL, DestroyWindow, HWND);
-	USER(LONG, SetWindowLongW, HWND, int, LONG);
+	USER_WLP(Set, HWND, int, LONG_PTR);
 
 	DLLVERSIONINFO v;
 	memset(&v, 0, sizeof(v));
@@ -979,7 +984,7 @@ static void test_misc(void)
 	CHECK(!ShowHideMenuCtl(parent, 999, info));
 
 	/* SendNotify: WM_NOTIFY to the parent, from the control. */
-	SetWindowLongW(parent, GWL_WNDPROC, (LONG)(ULONG_PTR)parent_proc);
+	SetWindowLongPtrW(parent, GWLP_WNDPROC, (LONG_PTR)parent_proc);
 	NMHDR hdr;
 	CHECK_EQ(SendNotify(NULL, s, NM_CLICK, &hdr), 77);
 	CHECK(notified == NM_CLICK && hdr.hwndFrom == s && hdr.idFrom == 50);

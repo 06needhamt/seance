@@ -21,7 +21,10 @@ typedef UINT_PTR (CALLBACK *LPSETUPHOOKPROC)(HWND, UINT, WPARAM, LPARAM);
 typedef UINT_PTR (CALLBACK *LPPAGEPAINTHOOK)(HWND, UINT, WPARAM, LPARAM);
 typedef UINT_PTR (CALLBACK *LPPAGESETUPHOOK)(HWND, UINT, WPARAM, LPARAM);
 
+/* Byte-packed on 32-bit Windows only; Win64 lays these out naturally. */
+#if !defined(__x86_64__)
 #pragma pack(push, 1)
+#endif
 
 typedef struct tagOFNA {
 	DWORD lStructSize;
@@ -299,7 +302,9 @@ typedef struct tagPSDW {
 	HGLOBAL hPageSetupTemplate;
 } PAGESETUPDLGW, *LPPAGESETUPDLGW;
 
+#if !defined(__x86_64__)
 #pragma pack(pop)
+#endif
 
 /* OPENFILENAME flags. */
 #define OFN_READONLY             0x1

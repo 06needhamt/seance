@@ -2,10 +2,11 @@
 # seance build.
 #
 #   cmake -B build            configure (or: cmake --preset default)
-#   cmake --build build       build build/seance (i386) and, with
+#   cmake --build build       build build/seance (i386), build/seance64
+#                             (x86-64, in build/x86_64) and, with
 #                             mingw-w64, the fixture DLLs
 #   ctest --test-dir build    unit tests, ABI cross-check, CLI smoke test
-#                             and the FFmpeg media checks
+#                             and the FFmpeg media checks, for both
 #
 # Options:
 #   VFW_REQUIRE_MINGW   fail instead of skipping what needs mingw-w64
@@ -13,26 +14,51 @@
 #   VFW_REQUIRE_FFMPEG  fail instead of skipping the FFmpeg checks
 #   VFW_SANITIZE        build with AddressSanitizer and UBSan
 #   VFW_MINGW_PREFIX    the mingw-w64 tool prefix (i686-w64-mingw32-)
+#   VFW_REQUIRE_MINGW64 fail instead of skipping the 64-bit fixture DLLs
+#   VFW_MINGW64_PREFIX  the 64-bit mingw-w64 prefix (x86_64-w64-mingw32-)
 #   VFW_SAMPLES_DIR     codec DLLs for the samples test (info and probe)
 #   VFW_HOST_ARCH       the host architecture, if detecting it goes wrong
+#   VFW_BUILD_X86_64    also build seance64 (default: on an x86-64 host)
 #
 # The compiler: see cmake/i386.cmake. On an x86 host it is the default one
 # with -m32, else (or without 32-bit support) an i686 cross compiler; a
 # cross build's tests run through qemu-i386 when there is one.
+#
+# seance64, which runs 64-bit (PE32+) DLLs (cmake/x86_64.cmake;
+# docs/X64_PLAN.md), is this same project configured with VFW_ARCH=x86_64.
+# The default (i386) build does that itself in build/x86_64 and puts
+# seance64 beside seance; VFW_BUILD_X86_64=OFF leaves it out. A build
+# directory configured with VFW_ARCH=x86_64 builds seance64 alone.
 cmake_minimum_required(VERSION 3.20)
 
-# The harness loads 32-bit Windows DLLs into its own address space, so it
-# is always an i386 program. Chosen before project() so the compiler
-# checks use it too.
-include(cmake/i386.cmake)
+# The harness loads Windows DLLs into its own address space, so it is an
+# i386 program for 32-bit DLLs and an x86-64 one for 64-bit DLLs. Chosen
+# before project() so the compiler checks use it too.
+set(VFW_ARCH "i386" CACHE STRING
+	"What the harness runs: i386 (seance) or x86_64 (seance64) DLLs")
+set_property(CACHE VFW_ARCH PROPERTY STRINGS i386 x86_64)
+if(VFW_ARCH STREQUAL "x86_64")
+	include(cmake/x86_64.cmake)
+elseif(VFW_ARCH STREQUAL "i386")
+	include(cmake/i386.cmake)
+else()
+	message(FATAL_ERROR "VFW_ARCH must be i386 or x86_64, not ${VFW_ARCH}")
+endif()
 
 project(seance VERSION 0.1.0 LANGUAGES C)
 
-if(NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
-	message(FATAL_ERROR "seance must be built as a 32-bit x86 "
-		"program; the compiler gives ${CMAKE_SIZEOF_VOID_P}-byte pointers. "
-		"Install gcc-multilib or an i686 cross compiler, or give a "
-		"toolchain file for i386.")
+if(VFW_ARCH STREQUAL "x86_64")
+	set(vfw_pointer_size 8)
+	set(vfw_harness seance64)
+else()
+	set(vfw_pointer_size 4)
+	set(vfw_harness seance)
+endif()
+if(NOT CMAKE_SIZEOF_VOID_P EQUAL vfw_pointer_size)
+	message(FATAL_ERROR "VFW_ARCH=${VFW_ARCH} needs a compiler that gives "
+		"${vfw_pointer_size}-byte pointers; this one gives "
+		"${CMAKE_SIZEOF_VOID_P}. For i386, install gcc-multilib or an "
+		"i686 cross compiler, or give a toolchain file.")
 endif()
 
 include(cmake/emulator.cmake)
@@ -41,9 +67,12 @@ string(REPLACE ";" " " vfw_emulator "${CMAKE_CROSSCOMPILING_EMULATOR}")
 
 option(VFW_REQUIRE_MINGW "Fail if mingw-w64 is missing" OFF)
 option(VFW_REQUIRE_FFMPEG "Fail the media checks if FFmpeg is missing" OFF)
+option(VFW_REQUIRE_MINGW64 "Fail if the 64-bit mingw-w64 is missing" OFF)
 option(VFW_SANITIZE "Build with AddressSanitizer and UBSan" OFF)
 set(VFW_MINGW_PREFIX "i686-w64-mingw32-" CACHE STRING
 	"Prefix of the mingw-w64 cross tools")
+set(VFW_MINGW64_PREFIX "x86_64-w64-mingw32-" CACHE STRING
+	"Prefix of the 64-bit mingw-w64 cross tools")
 set(VFW_SAMPLES_DIR "" CACHE PATH
 	"A directory of codec DLLs to run info and probe over (the samples test)")
 
@@ -77,20 +106,38 @@ add_library(vfw_core STATIC ${core_sources})
 target_include_directories(vfw_core PUBLIC include src)
 target_link_libraries(vfw_core PUBLIC m)
 
+# Where the harness goes: the build directory, unless the i386 build that
+# made this one (for seance64) wants it beside its own seance.
+set(VFW_HARNESS_DIR ${CMAKE_BINARY_DIR} CACHE PATH
+	"Where to put the seance (or seance64) executable")
+mark_as_advanced(VFW_HARNESS_DIR)
+
 add_executable(seance src/main.c)
 target_link_libraries(seance PRIVATE vfw_core)
 target_compile_definitions(seance PRIVATE
 	SEANCE_VERSION="${PROJECT_VERSION}-dev")
 set_target_properties(seance PROPERTIES
-	RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+	OUTPUT_NAME ${vfw_harness}
+	RUNTIME_OUTPUT_DIRECTORY ${VFW_HARNESS_DIR})
 
 install(TARGETS seance RUNTIME DESTINATION bin)
 
-# The fixture DLLs, cross-compiled as a separate project.
+# The fixture DLLs, cross-compiled as a separate project: by this build,
+# or (for the seance64 an i386 build makes) by the build that made it,
+# which then passes VFW_EXTERNAL_FIXTURES and the directories they're in.
 
-set(VFW_FIXTURE_DIR ${CMAKE_BINARY_DIR}/fixtures)
+option(VFW_EXTERNAL_FIXTURES "Use fixture DLLs built elsewhere" OFF)
+mark_as_advanced(VFW_EXTERNAL_FIXTURES)
+set(VFW_FIXTURE_DIR ${CMAKE_BINARY_DIR}/fixtures CACHE PATH
+	"Where the i386 fixture DLLs are")
+set(VFW_FIXTURE64_DIR ${CMAKE_BINARY_DIR}/fixtures64 CACHE PATH
+	"Where the x86-64 fixture DLLs are")
+mark_as_advanced(VFW_FIXTURE_DIR VFW_FIXTURE64_DIR)
 find_program(VFW_MINGW_CC ${VFW_MINGW_PREFIX}gcc)
-if(VFW_MINGW_CC)
+find_program(VFW_MINGW64_CC ${VFW_MINGW64_PREFIX}gcc)
+if(VFW_EXTERNAL_FIXTURES)
+	# Built (or found missing) by the build that made this one.
+elseif(VFW_MINGW_CC)
 	include(ExternalProject)
 	ExternalProject_Add(fixtures
 		SOURCE_DIR ${PROJECT_SOURCE_DIR}/tests/fixtures
@@ -109,6 +156,84 @@ elseif(VFW_REQUIRE_MINGW)
 else()
 	message(STATUS "${VFW_MINGW_PREFIX}gcc not found: the fixture DLL "
 		"tests and the ABI check will be skipped")
+endif()
+
+# The 64-bit (x86-64, PE32+) fixture DLLs, from the same sources.
+if(VFW_EXTERNAL_FIXTURES)
+elseif(VFW_MINGW64_CC)
+	include(ExternalProject)
+	ExternalProject_Add(fixtures64
+		SOURCE_DIR ${PROJECT_SOURCE_DIR}/tests/fixtures
+		BINARY_DIR ${CMAKE_BINARY_DIR}/fixtures64-build
+		CMAKE_ARGS
+			-DCMAKE_TOOLCHAIN_FILE=${PROJECT_SOURCE_DIR}/cmake/mingw-x86_64.cmake
+			-DVFW_MINGW_PREFIX=${VFW_MINGW64_PREFIX}
+			-DVFW_FIXTURE_DIR=${VFW_FIXTURE64_DIR}
+		INSTALL_COMMAND ""
+		BUILD_ALWAYS ON
+		USES_TERMINAL_CONFIGURE ON
+		USES_TERMINAL_BUILD ON)
+elseif(VFW_REQUIRE_MINGW64)
+	message(FATAL_ERROR "${VFW_MINGW64_PREFIX}gcc not found (install mingw-w64)")
+else()
+	message(STATUS "${VFW_MINGW64_PREFIX}gcc not found: the 64-bit "
+		"fixture DLL tests will be skipped")
+endif()
+
+# seance64: this project again, configured for x86-64, in build/x86_64.
+# On by default on an x86-64 host, where the default compiler builds it;
+# elsewhere it needs an x86_64 Linux cross compiler (cmake/x86_64.cmake).
+
+if(VFW_HOST_ARCH)
+	set(vfw_build_host "${VFW_HOST_ARCH}")
+else()
+	cmake_host_system_information(RESULT vfw_build_host QUERY OS_PLATFORM)
+endif()
+string(TOLOWER "${vfw_build_host}" vfw_build_host)
+if(vfw_build_host MATCHES "^(x86_64|amd64|x64)$")
+	set(vfw_x86_64_default ON)
+else()
+	set(vfw_x86_64_default OFF)
+endif()
+if(VFW_ARCH STREQUAL "i386")
+	option(VFW_BUILD_X86_64 "Also build seance64, for 64-bit DLLs"
+		${vfw_x86_64_default})
+else()
+	set(VFW_BUILD_X86_64 OFF)
+endif()
+
+set(vfw_x86_64_dir ${CMAKE_BINARY_DIR}/x86_64)
+if(VFW_BUILD_X86_64)
+	include(ExternalProject)
+	set(vfw_x86_64_deps)
+	foreach(t fixtures fixtures64)
+		if(TARGET ${t})
+			list(APPEND vfw_x86_64_deps ${t})
+		endif()
+	endforeach()
+	ExternalProject_Add(x86_64
+		SOURCE_DIR ${PROJECT_SOURCE_DIR}
+		BINARY_DIR ${vfw_x86_64_dir}
+		CMAKE_ARGS
+			-DVFW_ARCH=x86_64
+			-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+			-DVFW_HARNESS_DIR=${CMAKE_BINARY_DIR}
+			-DVFW_EXTERNAL_FIXTURES=ON
+			-DVFW_FIXTURE_DIR=${VFW_FIXTURE_DIR}
+			-DVFW_FIXTURE64_DIR=${VFW_FIXTURE64_DIR}
+			-DVFW_MINGW_PREFIX=${VFW_MINGW_PREFIX}
+			-DVFW_MINGW64_PREFIX=${VFW_MINGW64_PREFIX}
+			-DVFW_REQUIRE_MINGW=${VFW_REQUIRE_MINGW}
+			-DVFW_REQUIRE_MINGW64=${VFW_REQUIRE_MINGW64}
+			-DVFW_REQUIRE_FFMPEG=${VFW_REQUIRE_FFMPEG}
+			-DVFW_SANITIZE=${VFW_SANITIZE}
+			-DVFW_HOST_ARCH=${VFW_HOST_ARCH}
+		INSTALL_COMMAND ""
+		BUILD_ALWAYS ON
+		DEPENDS ${vfw_x86_64_deps}
+		USES_TERMINAL_CONFIGURE ON
+		USES_TERMINAL_BUILD ON)
+	install(PROGRAMS ${CMAKE_BINARY_DIR}/seance64 DESTINATION bin)
 endif()
 
 # Tests.
@@ -132,6 +257,19 @@ if(BUILD_TESTING)
 		endif()
 	endfunction()
 
+	# The fixtures the harness can run: the 64-bit ones in seance64's
+	# build. That set is partial so far (docs/X64_PLAN.md), so tests
+	# needing the others skip there, and smoke runs without fixtures.
+	if(VFW_ARCH STREQUAL "x86_64")
+		set(vfw_run_fixtures ${VFW_FIXTURE64_DIR})
+		set(vfw_fixtures_required OFF)
+		set(vfw_smoke_fixtures "")
+	else()
+		set(vfw_run_fixtures ${VFW_FIXTURE_DIR})
+		set(vfw_fixtures_required ${VFW_REQUIRE_MINGW})
+		set(vfw_smoke_fixtures $<$<BOOL:${VFW_MINGW_CC}>:${VFW_FIXTURE_DIR}>)
+	endif()
+
 	file(GLOB unit_sources CONFIGURE_DEPENDS tests/unit/test_*.c)
 	foreach(src ${unit_sources})
 		get_filename_component(name ${src} NAME_WE)
@@ -142,9 +280,9 @@ if(BUILD_TESTING)
 			RUNTIME_OUTPUT_DIRECTORY ${test_dir})
 		add_test(NAME ${name} COMMAND ${name})
 		set_tests_properties(${name} PROPERTIES
-			ENVIRONMENT "VFW_FIXTURES=${VFW_FIXTURE_DIR};VFW_EMULATOR=${vfw_emulator}"
+			ENVIRONMENT "VFW_FIXTURES=${vfw_run_fixtures};VFW_FIXTURES32=${VFW_FIXTURE_DIR};VFW_FIXTURES64=${VFW_FIXTURE64_DIR};VFW_EMULATOR=${vfw_emulator}"
 			LABELS unit)
-		skippable(${name} ${VFW_REQUIRE_MINGW})
+		skippable(${name} ${vfw_fixtures_required})
 	endforeach()
 
 	# Every struct, field and constant in include/win32, checked against
@@ -173,7 +311,18 @@ if(BUILD_TESTING)
 		VERBATIM)
 	add_custom_target(abi_checks ALL DEPENDS ${abi_checks})
 
-	if(VFW_MINGW_CC)
+	# The checks hold for the architecture being built, so they are
+	# compiled with the mingw-w64 for it.
+	if(VFW_ARCH STREQUAL "x86_64")
+		set(vfw_abi_cc "${VFW_MINGW64_CC}")
+		set(vfw_abi_prefix ${VFW_MINGW64_PREFIX})
+		set(vfw_abi_required ${VFW_REQUIRE_MINGW64})
+	else()
+		set(vfw_abi_cc "${VFW_MINGW_CC}")
+		set(vfw_abi_prefix ${VFW_MINGW_PREFIX})
+		set(vfw_abi_required ${VFW_REQUIRE_MINGW})
+	endif()
+	if(vfw_abi_cc)
 		# GUIDs aren't constants, so check_abi gets mingw's values
 		# from its preprocessor (see mingw_guids.sh).
 		set(abi_mingw_guids ${test_dir}/abi_mingw_guids.inc)
@@ -181,24 +330,24 @@ if(BUILD_TESTING)
 			COMMAND ${CMAKE_COMMAND} -DOUTPUT=${abi_mingw_guids}
 				-P ${PROJECT_SOURCE_DIR}/cmake/capture.cmake --
 				sh ${PROJECT_SOURCE_DIR}/tests/abi/mingw_guids.sh
-				${VFW_MINGW_CC}
+				${vfw_abi_cc}
 			DEPENDS tests/abi/mingw_guids.sh
 			VERBATIM)
 		add_custom_target(abi_mingw_guids ALL DEPENDS ${abi_mingw_guids})
 		add_test(NAME check_abi
-			COMMAND ${VFW_MINGW_CC} -std=c11 -fsyntax-only -I${test_dir}
+			COMMAND ${vfw_abi_cc} -std=c11 -fsyntax-only -I${test_dir}
 				${PROJECT_SOURCE_DIR}/tests/abi/check_abi.c)
 	else()
 		add_test(NAME check_abi COMMAND sh -c
-			"echo 'check_abi: ${VFW_MINGW_PREFIX}gcc not found'; exit 77")
+			"echo 'check_abi: ${vfw_abi_prefix}gcc not found'; exit 77")
 	endif()
 	set_tests_properties(check_abi PROPERTIES LABELS abi)
-	skippable(check_abi ${VFW_REQUIRE_MINGW})
+	skippable(check_abi ${vfw_abi_required})
 
 	add_test(NAME smoke
 		COMMAND sh ${PROJECT_SOURCE_DIR}/tests/smoke.sh
 			$<TARGET_FILE:seance> ${PROJECT_SOURCE_DIR}/CMakeLists.txt
-			$<$<BOOL:${VFW_MINGW_CC}>:${VFW_FIXTURE_DIR}>
+			"${vfw_smoke_fixtures}"
 			$<IF:$<BOOL:${VFW_SANITIZE}>,0,1>)
 	set_tests_properties(smoke PROPERTIES LABELS cli
 		ENVIRONMENT "VFW_EMULATOR=${vfw_emulator}")
@@ -212,6 +361,13 @@ if(BUILD_TESTING)
 		set_tests_properties(samples_fixtures PROPERTIES LABELS cli
 			ENVIRONMENT "VFW_EMULATOR=${vfw_emulator}")
 	endif()
+	if(VFW_MINGW64_CC)
+		add_test(NAME samples_fixtures64
+			COMMAND sh ${PROJECT_SOURCE_DIR}/tests/samples.sh
+				$<TARGET_FILE:seance> ${VFW_FIXTURE64_DIR})
+		set_tests_properties(samples_fixtures64 PROPERTIES LABELS cli
+			ENVIRONMENT "VFW_EMULATOR=${vfw_emulator}")
+	endif()
 	if(VFW_SAMPLES_DIR)
 		add_test(NAME samples
 			COMMAND sh ${PROJECT_SOURCE_DIR}/tests/samples.sh
@@ -223,16 +379,32 @@ if(BUILD_TESTING)
 	# The AVI and image code cross-checked with FFmpeg.
 	add_test(NAME validate_media
 		COMMAND sh ${PROJECT_SOURCE_DIR}/tests/validate_media.sh
-			${CMAKE_BINARY_DIR} ${CMAKE_BINARY_DIR}/media)
+			${CMAKE_BINARY_DIR} ${CMAKE_BINARY_DIR}/media
+			$<TARGET_FILE:seance> ${vfw_run_fixtures})
 	set_tests_properties(validate_media PROPERTIES LABELS media
 		ENVIRONMENT "VFW_EMULATOR=${vfw_emulator}")
 	skippable(validate_media ${VFW_REQUIRE_FFMPEG})
+
+	# seance64's own tests, run in its build directory: one test here,
+	# whose output lists those that failed.
+	if(VFW_BUILD_X86_64)
+		cmake_host_system_information(RESULT vfw_cores
+			QUERY NUMBER_OF_LOGICAL_CORES)
+		add_test(NAME x86_64
+			COMMAND ${CMAKE_CTEST_COMMAND} --test-dir ${vfw_x86_64_dir}
+				--output-on-failure --parallel ${vfw_cores})
+		set_tests_properties(x86_64 PROPERTIES LABELS x86_64
+			TIMEOUT 3600)
+	endif()
 endif()
 
 # The fixtures' configure and build wait for everything else, rather than
 # running alongside the main build with their output interleaved with it.
 if(TARGET fixtures)
 	get_property(vfw_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
-	list(REMOVE_ITEM vfw_targets fixtures)
+	list(REMOVE_ITEM vfw_targets fixtures fixtures64 x86_64)
 	add_dependencies(fixtures ${vfw_targets})
+	if(TARGET fixtures64)
+		add_dependencies(fixtures64 fixtures)
+	endif()
 endif()

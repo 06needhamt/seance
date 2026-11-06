@@ -230,10 +230,10 @@ static int high(int n, ...)
 
 	if (!strict)
 		return 0;
-	bad = (DWORD)&here >= 0x80000000u;
+	bad = (ULONG_PTR)&here >= 0x80000000u;
 	__builtin_va_start(ap, n);
 	for (i = 0; i < n; i++)
-		bad |= (DWORD)__builtin_va_arg(ap, const void *) >= 0x80000000u;
+		bad |= (ULONG_PTR)__builtin_va_arg(ap, const void *) >= 0x80000000u;
 	__builtin_va_end(ap);
 	return bad;
 }

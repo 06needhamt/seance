@@ -1,10 +1,14 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * PE parsing without loading: headers, exports, imports, TLS, resources,
- * version info, and robustness against truncated and corrupted files.
+ * version info, and robustness against truncated and corrupted files. It
+ * runs over the i386 fixtures and, when they were built, the x86-64 ones,
+ * in either build: parsing doesn't depend on the architecture.
  */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "common/error.h"
 #include "loader/pe.h"
@@ -71,23 +75,29 @@ static void test_machine_and_magic(void)
 	void *buf;
 	size_t len;
 
-	CHECK_EQ(vfw_read_file(fixture("pe_basic.dll"), &buf, &len), 0);
+	CHECK_EQ(vfw_read_file(fixture32("pe_basic.dll"), &buf, &len), 0);
 	BYTE *p = buf;
 	DWORD nt;
 	memcpy(&nt, p + 60, 4);
 
-	/* A 64-bit (PE32+) optional header. */
+	/* A PE32+ optional header with the i386 machine type. */
 	p[nt + 24] = 0x0b;
 	p[nt + 25] = 0x02;
 	CHECK(!pe_parse(buf, len));
-	CHECK(strstr(vfw_error(), "64-bit") != NULL);
+	CHECK(strstr(vfw_error(), "PE32+ optional header for an i386") != NULL);
 	p[nt + 25] = 0x01;
 
-	/* An x86-64 machine type. */
+	/* The x86-64 machine type with a PE32 optional header. */
 	p[nt + 4] = 0x64;
 	p[nt + 5] = 0x86;
 	CHECK(!pe_parse(buf, len));
-	CHECK(strstr(vfw_error(), "machine type 0x8664") != NULL);
+	CHECK(strstr(vfw_error(), "PE32 optional header for an x86-64") != NULL);
+
+	/* Neither i386 nor x86-64 (ARM). */
+	p[nt + 4] = 0xc4;
+	p[nt + 5] = 0x01;
+	CHECK(!pe_parse(buf, len));
+	CHECK(strstr(vfw_error(), "machine type 0x01c4") != NULL);
 	p[nt + 4] = 0x4c;
 	p[nt + 5] = 0x01;
 
@@ -105,7 +115,7 @@ static int count_export(void *ctx, const struct pe_export *e)
 
 static void test_exports(void)
 {
-	struct pe_image *img = pe_open(fixture("pe_basic.dll"));
+	struct pe_image *img = pe_open(fixture32("pe_basic.dll"));
 	struct pe_export e;
 	int count = 0;
 
@@ -152,7 +162,7 @@ static void test_exports(void)
 	CHECK_EQ(pe_find_export_ordinal(img, 13, &e), -1);
 	pe_free(img);
 
-	img = pe_open(fixture("pe_dep.dll"));
+	img = pe_open(fixture32("pe_dep.dll"));
 	CHECK(img != NULL);
 	if (!img)
 		return;
@@ -164,7 +174,7 @@ static void test_exports(void)
 	pe_free(img);
 
 	/* No export table at all. */
-	img = pe_open(fixture("pe_missing.dll"));
+	img = pe_open(fixture32("pe_missing.dll"));
 	if (img) {
 		CHECK_EQ(pe_find_export(img, "anything", 0, &e), -1);
 		CHECK_EQ(pe_find_export(img, "missing_call", 0, &e), 0);
@@ -200,7 +210,7 @@ static int stop_import(void *ctx, const struct pe_import *imp)
 
 static void test_imports(void)
 {
-	struct pe_image *img = pe_open(fixture("pe_dep.dll"));
+	struct pe_image *img = pe_open(fixture32("pe_dep.dll"));
 	struct import_list l = { .n = 0 };
 	int calls = 0;
 
@@ -222,7 +232,7 @@ static void test_imports(void)
 	CHECK_EQ(pe_bind_imports(img, NULL, NULL), -1);
 	pe_free(img);
 
-	img = pe_open(fixture("pe_basic.dll"));
+	img = pe_open(fixture32("pe_basic.dll"));
 	l.n = 0;
 	CHECK_EQ(pe_foreach_import(img, list_import, &l), 0);
 	CHECK_EQ(l.n, 0);
@@ -239,7 +249,7 @@ static int count_tls(void *ctx, DWORD rva)
 
 static void test_tls(void)
 {
-	struct pe_image *img = pe_open(fixture("pe_tls.dll"));
+	struct pe_image *img = pe_open(fixture32("pe_tls.dll"));
 	int n = 0;
 
 	CHECK(img != NULL);
@@ -249,7 +259,7 @@ static void test_tls(void)
 	CHECK_EQ(n, 1);
 	pe_free(img);
 
-	img = pe_open(fixture("pe_basic.dll"));
+	img = pe_open(fixture32("pe_basic.dll"));
 	n = 0;
 	CHECK_EQ(pe_foreach_tls_callback(img, count_tls, &n), 0);
 	CHECK_EQ(n, 0);
@@ -298,7 +308,7 @@ static int list_resource(void *ctx, const struct pe_resource *r)
 
 static void test_resources(void)
 {
-	struct pe_image *img = pe_open(fixture("pe_basic.dll"));
+	struct pe_image *img = pe_open(fixture32("pe_basic.dll"));
 	struct pe_resource r;
 	struct res_types types = { 0, 0, 0 };
 	struct version_seen seen = { 0, 0 };
@@ -339,7 +349,7 @@ static void test_resources(void)
 	CHECK_EQ(fixed.dwProductVersionMS, 0x00010002);
 	pe_free(img);
 
-	img = pe_open(fixture("pe_dep.dll"));
+	img = pe_open(fixture32("pe_dep.dll"));
 	CHECK_EQ(pe_foreach_resource(img, list_resource, &types), 0);
 	CHECK_EQ(pe_version_info(img, NULL, NULL, NULL), -1);
 	pe_free(img);
@@ -409,12 +419,13 @@ static DWORD rng(void)
 	return rng_state;
 }
 
-static void test_truncation_and_corruption(const char *name)
+static void test_truncation_and_corruption(const char *path)
 {
 	void *orig;
 	size_t len;
+	int runs_here = 0;
 
-	CHECK_EQ(vfw_read_file(fixture(name), &orig, &len), 0);
+	CHECK_EQ(vfw_read_file(path, &orig, &len), 0);
 
 	/*
 	 * A truncated file parses exactly when every section's raw data is
@@ -423,6 +434,8 @@ static void test_truncation_and_corruption(const char *name)
 	struct pe_image *full = pe_parse(orig, len);
 	size_t need = 0;
 	CHECK(full != NULL);
+	/* An image for the other architecture parses but never maps. */
+	runs_here = full && full->nt.FileHeader.Machine == PE_HOST_MACHINE;
 	for (unsigned i = 0; full && i < full->nsections; i++) {
 		const IMAGE_SECTION_HEADER *s = &full->sections[i];
 		size_t end = (size_t)s->PointerToRawData + s->SizeOfRawData;
@@ -473,9 +486,89 @@ static void test_truncation_and_corruption(const char *name)
 		}
 	}
 	CHECK(survived > 0);	/* the walkers really ran on damaged images */
-	CHECK(mapped > 0);
+	CHECK(runs_here ? mapped > 0 : mapped == 0);
 	free(buf);
 	free(orig);
+}
+
+/*
+ * PE32+ (x86-64) images: parsed the same in either build. Skipped, without
+ * skipping the rest, when the 64-bit fixtures were not built.
+ */
+static void test_pe64(void)
+{
+	const char *dir = getenv("VFW_FIXTURES64");
+	char path[4096];
+	struct pe_export e;
+	int n = 0;
+
+	snprintf(path, sizeof(path), "%s/pe_basic.dll", dir ? dir : ".");
+	if (!dir || access(path, R_OK)) {
+		printf("64-bit fixtures not available: PE32+ tests skipped\n");
+		return;
+	}
+
+	struct pe_image *img = pe_open(path);
+	CHECK(img != NULL);
+	if (!img)
+		return;
+	CHECK(img->pe64);
+	CHECK_EQ(img->nt.FileHeader.Machine, IMAGE_FILE_MACHINE_AMD64);
+	CHECK_EQ(img->nt.OptionalHeader.Magic, IMAGE_NT_OPTIONAL_HDR64_MAGIC);
+	/* Above 4 GB: the whole 64-bit ImageBase was kept. */
+	CHECK(img->nt.OptionalHeader.ImageBase == 0x180000000ull);
+	CHECK_EQ(img->nt.OptionalHeader.BaseOfData, 0);
+	CHECK(img->nt.OptionalHeader.SizeOfStackReserve != 0);
+	CHECK_STR(pe_export_dll_name(img), "PE_BASIC.DLL");
+	CHECK_EQ(pe_foreach_export(img, count_export, &n), 0);
+	CHECK_EQ(n, 7);
+	CHECK_EQ(pe_find_export_ordinal(img, 7, &e), 0);
+	CHECK(e.name == NULL);
+	CHECK(in_section(img, e.rva, ".text"));
+	CHECK_EQ(pe_find_export(img, "basic_data", 0, &e), 0);
+	CHECK(in_section(img, e.rva, ".data"));
+	CHECK(pe_dir(img, IMAGE_DIRECTORY_ENTRY_RESOURCE) != NULL);
+	CHECK_EQ(pe_version_info(img, NULL, NULL, NULL), 0);
+	if (img->nt.FileHeader.Machine != PE_HOST_MACHINE) {
+		CHECK_EQ(pe_map(img, 0), -1);
+		CHECK(strstr(vfw_error(), "an x86-64 DLL") != NULL);
+	}
+	pe_free(img);
+	CHECK_EQ(pe_peek_machine(path), IMAGE_FILE_MACHINE_AMD64);
+	CHECK_EQ(pe_peek_machine(fixture32("pe_basic.dll")),
+		 IMAGE_FILE_MACHINE_I386);
+	CHECK_EQ(pe_peek_machine("/nonexistent/file.dll"), 0);
+
+	/* 8-byte thunks, with the ordinal flag in bit 63. */
+	snprintf(path, sizeof(path), "%s/pe_dep.dll", dir);
+	img = pe_open(path);
+	CHECK(img != NULL);
+	if (img) {
+		struct import_list l = { .n = 0 };
+		CHECK_EQ(pe_foreach_import(img, list_import, &l), 0);
+		CHECK_EQ(l.n, 4);
+		CHECK_STR(l.text[0], "PE_BASIC.DLL!basic_add");
+		CHECK_STR(l.text[3], "PE_BASIC.DLL!#7");
+		CHECK_EQ(pe_find_export(img, "fwd_add", 0, &e), 0);
+		CHECK_STR(e.forwarder, "PE_BASIC.basic_add");
+		pe_free(img);
+	}
+	test_truncation_and_corruption(path);
+
+	/* The 64-bit TLS directory and its 8-byte callback array. */
+	snprintf(path, sizeof(path), "%s/pe_tls.dll", dir);
+	img = pe_open(path);
+	CHECK(img != NULL);
+	if (img) {
+		n = 0;
+		CHECK_EQ(pe_foreach_tls_callback(img, count_tls, &n), 0);
+		CHECK_EQ(n, 1);
+		pe_free(img);
+	}
+	test_truncation_and_corruption(path);
+
+	snprintf(path, sizeof(path), "%s/pe_basic.dll", dir);
+	test_truncation_and_corruption(path);
 }
 
 int main(void)
@@ -486,9 +579,10 @@ int main(void)
 	test_imports();
 	test_tls();
 	test_resources();
-	test_truncation_and_corruption("pe_basic.dll");
-	test_truncation_and_corruption("pe_dep.dll");
-	test_truncation_and_corruption("pe_tls.dll");
-	test_truncation_and_corruption("testcodec.dll");
+	test_truncation_and_corruption(fixture32("pe_basic.dll"));
+	test_truncation_and_corruption(fixture32("pe_dep.dll"));
+	test_truncation_and_corruption(fixture32("pe_tls.dll"));
+	test_truncation_and_corruption(fixture32("testcodec.dll"));
+	test_pe64();
 	return test_summary("test_pe_parse");
 }

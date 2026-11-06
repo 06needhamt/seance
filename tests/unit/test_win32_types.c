@@ -8,10 +8,21 @@
 #include "win32.h"
 #include "test.h"
 
-/* Sizes a 32-bit Windows build gives these types. */
+/* The same on both: Win64 is LLP64. */
 _Static_assert(sizeof(WCHAR) == 2, "WCHAR is UTF-16");
 _Static_assert(sizeof(LONG) == 4, "LONG is 32-bit");
+_Static_assert(sizeof(ULONG) == 4, "ULONG is 32-bit");
 _Static_assert(sizeof(LONGLONG) == 8, "LONGLONG is 64-bit");
+_Static_assert(sizeof(LPARAM) == sizeof(void *), "LPARAM is pointer-sized");
+_Static_assert(sizeof(SIZE_T) == sizeof(void *), "SIZE_T is pointer-sized");
+
+#if defined(__x86_64__)
+/* x86-64: check_abi compares the rest with the 64-bit Windows headers. */
+_Static_assert(sizeof(void *) == 8, "64-bit pointers");
+_Static_assert(sizeof(ICCOMPRESS) == 88, "ICCOMPRESS");
+_Static_assert(sizeof(AM_MEDIA_TYPE) == 88, "AM_MEDIA_TYPE");
+#else
+/* Sizes a 32-bit Windows build gives these types. */
 _Static_assert(sizeof(void *) == 4, "32-bit pointers");
 _Static_assert(sizeof(BITMAPINFOHEADER) == 40, "BITMAPINFOHEADER");
 _Static_assert(sizeof(BITMAPFILEHEADER) == 14, "BITMAPFILEHEADER");
@@ -29,6 +40,7 @@ _Static_assert(sizeof(VIDEOINFOHEADER2) == 112, "VIDEOINFOHEADER2");
 _Static_assert(sizeof(AM_SAMPLE2_PROPERTIES) == 48, "AM_SAMPLE2_PROPERTIES");
 _Static_assert(sizeof(PIN_INFO) == 264, "PIN_INFO");
 _Static_assert(sizeof(STATSTG) == 72, "STATSTG");
+#endif
 
 /* 64-bit members are 8-byte aligned, as on Windows (not 4, as on Linux). */
 struct align_probe {

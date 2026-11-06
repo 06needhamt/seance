@@ -1,15 +1,26 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Checks the runtime from the Win32 side: the TEB behind %fs, GetLastError
+ * Checks the runtime from the Win32 side: the TEB behind %fs (%gs), GetLastError
  * through it, the x87 control word, and imports of unimplemented functions.
  */
 #include "fixture.h"
 
+/*
+ * A TEB field as Win32 code reads it, by its i386 offset: fs:[offset], or
+ * on Win64 gs:[the same field's offset] (the low half, for a pointer).
+ */
 static DWORD fs_read(DWORD offset)
 {
+#ifdef _WIN64
+	ULONG_PTR v, off = offset == 0x18 ? 0x30 : offset == 0x24 ? 0x48 :
+			   offset == 0x34 ? 0x68 : offset;
+	__asm__ volatile("movq %%gs:(%1), %0" : "=r"(v) : "r"(off));
+	return (DWORD)v;
+#else
 	DWORD v;
 	__asm__ volatile("movl %%fs:(%1), %0" : "=r"(v) : "r"(offset));
 	return v;
+#endif
 }
 
 EXPORT DWORD rt_fs(DWORD offset)

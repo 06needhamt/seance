@@ -15,12 +15,27 @@
 #include "runtime/teb.h"
 #include "test.h"
 
+/*
+ * A TEB field the way Win32 code reads it: fs:[offset] on i386, and on
+ * x86-64 gs:[offset] at the Win64 offset (which these i386 ones map to).
+ */
+#if defined(__x86_64__)
+static ULONG_PTR fs_read(DWORD offset)
+{
+	ULONG_PTR v;
+	DWORD off64 = offset == 0x18 ? 0x30 : offset == 0x30 ? 0x60 :
+		      offset == 0x20 ? 0x40 : offset == 0x24 ? 0x48 : offset;
+	__asm__ volatile("movq %%gs:(%1), %0" : "=r"(v) : "r"((ULONG_PTR)off64));
+	return v;
+}
+#else
 static DWORD fs_read(DWORD offset)
 {
 	DWORD v;
 	__asm__ volatile("movl %%fs:(%1), %0" : "=r"(v) : "r"(offset));
 	return v;
 }
+#endif
 
 static void test_teb(void)
 {
@@ -31,9 +46,11 @@ static void test_teb(void)
 		return;
 
 	CHECK(teb_init_thread() == teb);	/* idempotent */
-	CHECK_EQ(fs_read(0x18), (DWORD)(uintptr_t)teb);
+	CHECK(fs_read(0x18) == (uintptr_t)teb);
+#if !defined(__x86_64__)
 	CHECK_EQ(fs_read(0x00), 0xffffffff);	/* empty SEH chain */
-	CHECK_EQ(fs_read(0x30), (DWORD)(uintptr_t)peb_get());
+#endif
+	CHECK(fs_read(0x30) == (uintptr_t)peb_get());
 	CHECK_EQ(fs_read(0x20), (DWORD)getpid());
 	/* The frame address, not a local: ASan may move locals off the stack. */
 	BYTE *frame = __builtin_frame_address(0);
@@ -53,7 +70,7 @@ static void test_teb(void)
 
 struct thread_result {
 	struct win_teb *teb;
-	DWORD fs_self;
+	ULONG_PTR fs_self;
 	void *slot_value;
 	DWORD tid;
 };
@@ -90,7 +107,7 @@ static void test_threads_and_tls(void)
 	CHECK_EQ(pthread_create(&t, NULL, thread_main, &r), 0);
 	pthread_join(t, NULL);
 	CHECK(r.teb != NULL && r.teb != teb_current());
-	CHECK_EQ(r.fs_self, (DWORD)(uintptr_t)r.teb);
+	CHECK(r.fs_self == (uintptr_t)r.teb);
 	CHECK(r.slot_value == NULL);
 	CHECK(r.tid != 0 && r.tid != fs_read(0x24));
 	/* The other thread's write didn't touch ours. */
@@ -264,9 +281,9 @@ static void test_builtin_modules(void)
 	CHECK(mod_from_base(exe->base) == exe);
 }
 
-typedef DWORD (*dword_arg_fn)(DWORD);
-typedef DWORD (*dword_fn)(void);
-typedef WORD (*word_fn)(void);
+typedef DWORD (CDECL *dword_arg_fn)(DWORD);
+typedef DWORD (CDECL *dword_fn)(void);
+typedef WORD (CDECL *word_fn)(void);
 
 static void test_fixture(void)
 {

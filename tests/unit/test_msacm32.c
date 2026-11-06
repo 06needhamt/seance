@@ -694,7 +694,7 @@ static void test_fixture(void)
 	CHECK(m != NULL);
 	if (!m)
 		return;
-	int (*selftest)(void) = mod_get_proc(m, "acm_selftest");
+	int (CDECL *selftest)(void) = mod_get_proc(m, "acm_selftest");
 	CHECK(selftest != NULL);
 	if (selftest)
 		CHECK_EQ(selftest(), 0);
@@ -729,7 +729,7 @@ static int have_testacm(void)
 static LONG driver_count(const char *name)
 {
 	struct module *m = mod_load(testacm, NULL);
-	LONG (*fn)(void) = m ? mod_get_proc(m, name) : NULL;
+	LONG (CDECL *fn)(void) = m ? mod_get_proc(m, name) : NULL;
 	LONG n = fn ? fn() : -1;
 
 	if (m)

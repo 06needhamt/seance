@@ -420,6 +420,13 @@ typedef struct tACMFILTERCHOOSEW {
  * view of it (ACMDRVSTREAMHEADER, below): msacm32 hands the same memory
  * to the driver.
  */
+/* Room for the driver's fields below: more on Win64, for its pointers. */
+#if defined(__x86_64__)
+#define _DRVRESERVED 15
+#else
+#define _DRVRESERVED 10
+#endif
+
 typedef struct tACMSTREAMHEADER {
 	DWORD cbStruct;
 	DWORD fdwStatus;
@@ -432,7 +439,7 @@ typedef struct tACMSTREAMHEADER {
 	DWORD cbDstLength;
 	DWORD cbDstLengthUsed;
 	DWORD_PTR dwDstUser;
-	DWORD dwReservedDriver[10];
+	DWORD dwReservedDriver[_DRVRESERVED];
 } ACMSTREAMHEADER, *PACMSTREAMHEADER, *LPACMSTREAMHEADER;
 
 typedef BOOL (CALLBACK *ACMFORMATTAGENUMCBA)(HACMDRIVERID hadid,
@@ -535,23 +542,34 @@ typedef struct tACMDRVFORMATSUGGEST {
 } ACMDRVFORMATSUGGEST, *PACMDRVFORMATSUGGEST, *LPACMDRVFORMATSUGGEST;
 #pragma pack(pop)
 
-/* The driver-side layouts, as Windows has them (i386). */
-_Static_assert(sizeof(ACMDRVOPENDESCW) == 36, "ACMDRVOPENDESCW");
-_Static_assert(offsetof(ACMDRVOPENDESCW, pszAliasName) == 28,
+/*
+ * The driver-side layouts, as Windows has them: byte-packed on both, so
+ * on Win64 the pointers simply grow.
+ */
+#if defined(__x86_64__)
+#define ACM_ABI(i386, x64) (x64)
+#else
+#define ACM_ABI(i386, x64) (i386)
+#endif
+_Static_assert(sizeof(ACMDRVOPENDESCW) == ACM_ABI(36, 44), "ACMDRVOPENDESCW");
+_Static_assert(offsetof(ACMDRVOPENDESCW, pszAliasName) == ACM_ABI(28, 32),
 	       "ACMDRVOPENDESCW.pszAliasName");
-_Static_assert(sizeof(ACMDRVSTREAMINSTANCE) == 40, "ACMDRVSTREAMINSTANCE");
-_Static_assert(offsetof(ACMDRVSTREAMINSTANCE, fdwDriver) == 28,
+_Static_assert(sizeof(ACMDRVSTREAMINSTANCE) == ACM_ABI(40, 68),
+	       "ACMDRVSTREAMINSTANCE");
+_Static_assert(offsetof(ACMDRVSTREAMINSTANCE, fdwDriver) == ACM_ABI(28, 48),
 	       "ACMDRVSTREAMINSTANCE.fdwDriver");
-_Static_assert(offsetof(ACMDRVSTREAMINSTANCE, has) == 36,
+_Static_assert(offsetof(ACMDRVSTREAMINSTANCE, has) == ACM_ABI(36, 60),
 	       "ACMDRVSTREAMINSTANCE.has");
 _Static_assert(sizeof(ACMDRVSTREAMHEADER) == sizeof(ACMSTREAMHEADER),
 	       "ACMDRVSTREAMHEADER");
 _Static_assert(offsetof(ACMDRVSTREAMHEADER, fdwConvert) ==
 	       offsetof(ACMSTREAMHEADER, dwReservedDriver),
 	       "ACMDRVSTREAMHEADER.fdwConvert");
-_Static_assert(offsetof(ACMDRVSTREAMHEADER, cbPreparedDstLength) == 80,
-	       "ACMDRVSTREAMHEADER.cbPreparedDstLength");
+_Static_assert(offsetof(ACMDRVSTREAMHEADER, cbPreparedDstLength) ==
+	       ACM_ABI(80, 120), "ACMDRVSTREAMHEADER.cbPreparedDstLength");
 _Static_assert(sizeof(ACMDRVSTREAMSIZE) == 16, "ACMDRVSTREAMSIZE");
-_Static_assert(sizeof(ACMDRVFORMATSUGGEST) == 24, "ACMDRVFORMATSUGGEST");
+_Static_assert(sizeof(ACMDRVFORMATSUGGEST) == ACM_ABI(24, 32),
+	       "ACMDRVFORMATSUGGEST");
+#undef ACM_ABI
 
 #endif /* VFW_WIN32_MSACM_H */

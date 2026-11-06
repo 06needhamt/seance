@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * PE32 image parsing and mapping.
+ * PE32 and PE32+ image parsing and mapping.
  *
  * A struct pe_image starts as a parsed, read-only view of a file (pe_parse),
  * which is enough for inspection. pe_map() then lays it out in memory and
@@ -15,15 +15,70 @@
 #define VFW_LOADER_PE_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include "win32.h"
+
+/*
+ * The optional header of either format, with the fields that PE32+ widens
+ * (ImageBase and the stack and heap sizes) held at 64 bits. BaseOfData is
+ * 0 for a PE32+ image, which has none. The names match the Windows ones.
+ */
+struct pe_optional {
+	WORD Magic;		/* IMAGE_NT_OPTIONAL_HDR32_MAGIC or ..64_MAGIC */
+	BYTE MajorLinkerVersion;
+	BYTE MinorLinkerVersion;
+	DWORD SizeOfCode;
+	DWORD SizeOfInitializedData;
+	DWORD SizeOfUninitializedData;
+	DWORD AddressOfEntryPoint;
+	DWORD BaseOfCode;
+	DWORD BaseOfData;
+	uint64_t ImageBase;
+	DWORD SectionAlignment;
+	DWORD FileAlignment;
+	WORD MajorOperatingSystemVersion;
+	WORD MinorOperatingSystemVersion;
+	WORD MajorImageVersion;
+	WORD MinorImageVersion;
+	WORD MajorSubsystemVersion;
+	WORD MinorSubsystemVersion;
+	DWORD Win32VersionValue;
+	DWORD SizeOfImage;
+	DWORD SizeOfHeaders;
+	DWORD CheckSum;
+	WORD Subsystem;
+	WORD DllCharacteristics;
+	uint64_t SizeOfStackReserve;
+	uint64_t SizeOfStackCommit;
+	uint64_t SizeOfHeapReserve;
+	uint64_t SizeOfHeapCommit;
+	DWORD LoaderFlags;
+	DWORD NumberOfRvaAndSizes;
+	IMAGE_DATA_DIRECTORY DataDirectory[IMAGE_NUMBEROF_DIRECTORY_ENTRIES];
+};
+
+/*
+ * The machine type this build runs: an image of another one can be parsed
+ * and inspected, but not mapped.
+ */
+#if defined(__x86_64__)
+#define PE_HOST_MACHINE IMAGE_FILE_MACHINE_AMD64
+#else
+#define PE_HOST_MACHINE IMAGE_FILE_MACHINE_I386
+#endif
 
 struct pe_image {
 	/* The file, owned by the image. */
 	BYTE *file;
 	size_t file_len;
 
-	IMAGE_NT_HEADERS32 nt;		/* copy; DataDirectory zero-filled */
+	struct {
+		DWORD Signature;
+		IMAGE_FILE_HEADER FileHeader;
+		struct pe_optional OptionalHeader; /* DataDirectory zero-filled */
+	} nt;
+	int pe64;			/* PE32+ (x86-64), else PE32 (i386) */
 	IMAGE_SECTION_HEADER *sections;	/* copy of the section table */
 	unsigned nsections;
 
@@ -37,9 +92,21 @@ struct pe_image {
 	DWORD tls_index;
 };
 
-/* Parses (and copies) a PE32 i386 image. Returns NULL on error. */
+/*
+ * Parses (and copies) a PE32 i386 or PE32+ x86-64 image, whatever the
+ * build. Returns NULL on error.
+ */
 struct pe_image *pe_parse(const void *buf, size_t len);
 struct pe_image *pe_open(const char *path);
+
+/*
+ * The machine type in a file's PE header (IMAGE_FILE_MACHINE_*), reading no
+ * more than the headers; 0 with an error set if it isn't a PE file.
+ */
+WORD pe_peek_machine(const char *path);
+
+/* "i386", "x86-64" or "unknown", for messages. */
+const char *pe_machine_name(WORD machine);
 
 /* Unmaps (without DllMain/TLS notifications) and frees the image. */
 void pe_free(struct pe_image *img);
@@ -64,10 +131,12 @@ int pe_map(struct pe_image *img, unsigned flags);
 
 /*
  * Applies base relocations to an in-memory image of image_len bytes, given
- * the .reloc data. Exposed separately so it can be unit tested.
+ * the .reloc data. delta is the new base less the preferred one, modulo
+ * 2^64; HIGHLOW and the 16-bit types use its low 32 bits, DIR64 all of it.
+ * Exposed separately so it can be unit tested.
  */
 int pe_relocate(BYTE *image, size_t image_len, const BYTE *relocs,
-		size_t relocs_len, DWORD delta);
+		size_t relocs_len, uint64_t delta);
 
 /* Sets per-section page protections on a mapped image. */
 int pe_protect(struct pe_image *img);

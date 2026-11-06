@@ -171,6 +171,13 @@ void crash_report_and_die(int sig, const void *pc, const void *fault_addr)
 	crash_exit(sig);
 }
 
+/* The faulting instruction's address in a signal context. */
+#if defined(__x86_64__)
+#define REG_PC REG_RIP
+#else
+#define REG_PC REG_EIP
+#endif
+
 /* x86 page fault error code bits, in the context's REG_ERR. */
 #define PF_PROTECTION 0x01		/* the page was present */
 #define PF_FETCH      0x10		/* an instruction fetch */
@@ -234,7 +241,7 @@ static int run_data(int sig, const siginfo_t *si, const ucontext_t *uc)
 		return 0;
 	if (vfw_trace_enabled) {
 		char where[160], line[256];
-		describe((const void *)uc->uc_mcontext.gregs[REG_EIP], where,
+		describe((const void *)uc->uc_mcontext.gregs[REG_PC], where,
 			 sizeof(where));
 		snprintf(line, sizeof(line), "trace[%d] running code at %s from "
 			 "data: page %#lx made executable (no DEP)\n",
@@ -247,7 +254,7 @@ static int run_data(int sig, const siginfo_t *si, const ucontext_t *uc)
 static void on_fault(int sig, siginfo_t *si, void *ctx)
 {
 	ucontext_t *uc = ctx;
-	const void *pc = (const void *)uc->uc_mcontext.gregs[REG_EIP];
+	const void *pc = (const void *)uc->uc_mcontext.gregs[REG_PC];
 
 	if (run_data(sig, si, uc))
 		return;

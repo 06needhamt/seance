@@ -25,6 +25,13 @@ Work is split into phases; see [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION
 | 4 | AVI / Y4M I/O, `decode` and `encode` | done: AVI reader and writer, Y4M/BMP/raw input and output, `avi`, `convert`, `decode`, `encode` |
 | 5 | Hardening and CI | done: DLL memory below 2 GB, crash and hang reports, SSE/FPU fixture, fuzzing, samples run, CI |
 
+64-bit (x86-64) codecs run in `seance64`, which the default build makes
+beside `seance` ([docs/X64_PLAN.md](docs/X64_PLAN.md)).
+The 64-bit test codecs (VfW, ACM, DirectShow and DMO) work there;
+exception handling (SEH and C++ exceptions) and the hand-off between the
+two binaries are still to come. `seance info` reads 64-bit DLLs in either
+build.
+
 DirectShow video decoders and encoders (`.ax`) have phases of their own; see
 [docs/DIRECT_SHOW_PLAN.md](docs/DIRECT_SHOW_PLAN.md). They are done: the headers
 and their ABI check, a built-in quartz.dll (filter mappers, device enumerator,
@@ -59,8 +66,8 @@ Foundation transforms, network access and hardware decoding.
 
 ## Prerequisites
 
-The codecs are i386 code, so the harness is built as a 32-bit Linux program.
-On a 64-bit x86 host the kernel must support running 32-bit programs, which
+Most codecs are i386 code, so `seance` is built as a 32-bit Linux program
+(`seance64`, for x86-64 codecs, is a 64-bit one). On a 64-bit x86 host the kernel must support running 32-bit programs, which
 most distributions enable by default.
 
 - A C compiler that builds i386 programs, one of:
@@ -75,7 +82,8 @@ most distributions enable by default.
 - CMake 3.20 or later (3.25 for the presets) and Ninja or make
 - Optional: the mingw-w64 i686 cross compiler (`mingw-w64`). It builds the
   test fixture DLLs and runs the ABI cross-check; without it those tests are
-  skipped.
+  skipped. Its x86_64 compiler (in the same Debian/Ubuntu package) builds
+  the 64-bit fixture DLLs.
 - Optional: FFmpeg (`ffmpeg`, `ffprobe`) for the media cross-checks.
 
 ```sh
@@ -86,17 +94,19 @@ sudo apt install build-essential gcc-multilib cmake ninja-build mingw-w64 ffmpeg
 
 ```sh
 cmake --preset default        # configure build/ (or: cmake -B build)
-cmake --build --preset default
+cmake --build --preset default  # build/seance and build/seance64
 ctest --preset default        # unit tests, ABI cross-check, CLI smoke test,
-                              # FFmpeg media checks
+                              # FFmpeg media checks; seance64's as the
+                              # one test x86_64
 
 cmake --preset asan && cmake --build --preset asan && ctest --preset asan
                               # the same under AddressSanitizer and UBSan,
                               # in build-asan/
 ```
 
-The harness is always built as an i386 program. Before anything else,
-configuring picks a compiler for that ([`cmake/i386.cmake`](cmake/i386.cmake)),
+`seance` is always built as an i386 program (`seance64`, built alongside it,
+is the x86-64 one; see `VFW_ARCH`). Before anything else, configuring picks a
+compiler for the i386 build ([`cmake/i386.cmake`](cmake/i386.cmake)),
 trying each until one links a 32-bit program with the headers the harness
 needs:
 
@@ -126,10 +136,14 @@ Useful CMake options:
 | `VFW_REQUIRE_FFMPEG=ON` | fail instead of skipping the FFmpeg checks |
 | `VFW_SANITIZE=ON` | build with ASan and UBSan |
 | `VFW_MINGW_PREFIX=...` | the cross tools' prefix (`i686-w64-mingw32-`) |
+| `VFW_REQUIRE_MINGW64=ON` | fail instead of skipping the 64-bit fixture DLLs |
+| `VFW_MINGW64_PREFIX=...` | the 64-bit cross tools' prefix (`x86_64-w64-mingw32-`) |
 | `VFW_SAMPLES_DIR=<dir>` | add a `samples` test: `info` and `probe` over the codec DLLs in `<dir>` |
 | `VFW_HOST_ARCH=...` | the host architecture as `uname -m` spells it, if detecting it goes wrong |
+| `VFW_BUILD_X86_64=OFF` | build only the i386 `seance`, not `seance64` too (on by default on an x86-64 host; elsewhere it needs an x86_64 Linux cross compiler) |
+| `VFW_ARCH=x86_64` | make this build directory build `seance64` alone |
 
-The `ci` preset turns on both `REQUIRE` options. Tests carry the CTest
+The `ci` preset turns on all three `REQUIRE` options. Tests carry the CTest
 labels `unit`, `abi`, `cli`, `media` and `samples`, so `ctest --preset default -L unit`
 runs only the unit tests and `-LE media` leaves out the FFmpeg checks.
 

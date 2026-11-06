@@ -13,6 +13,7 @@
 #include "runtime/crash.h"
 #include "runtime/runtime.h"
 #include "test.h"
+#include "win32/winva.h"
 
 static struct module *crt;
 
@@ -56,12 +57,12 @@ static int w16_starts(const WCHAR *w, const char *s)
 /* msvcrt.dll's printf dialect. */
 static void test_printf(void)
 {
-	int (*sprintf_)(char *, const char *, ...) = get("sprintf");
-	int (*snprintf_)(char *, size_t, const char *, ...) = get("_snprintf");
-	int (*scprintf)(const char *, ...) = get("_scprintf");
-	int (*swprintf_)(WCHAR *, const WCHAR *, ...) = get("swprintf");
-	int (*snwprintf)(WCHAR *, size_t, const WCHAR *, ...) = get("_snwprintf");
-	int (*scwprintf)(const WCHAR *, ...) = get("_scwprintf");
+	int (CDECL *sprintf_)(char *, const char *, ...) = get("sprintf");
+	int (CDECL *snprintf_)(char *, size_t, const char *, ...) = get("_snprintf");
+	int (CDECL *scprintf)(const char *, ...) = get("_scprintf");
+	int (CDECL *swprintf_)(WCHAR *, const WCHAR *, ...) = get("swprintf");
+	int (CDECL *snwprintf)(WCHAR *, size_t, const WCHAR *, ...) = get("_snwprintf");
+	int (CDECL *scwprintf)(const WCHAR *, ...) = get("_scwprintf");
 	char b[128];
 	WCHAR w[128];
 	static const WCHAR euro_w[] = { 'a', 'b', 0x20ac, 0 };
@@ -114,7 +115,13 @@ static void test_printf(void)
 
 	/* Pointers, strings and characters. */
 	sprintf_(b, "%p [%12p]", (void *)0x1234abcd, (void *)0xff);
+#ifdef __x86_64__
+	CHECK_STR(b, "000000001234ABCD [00000000000000FF]");
+	sprintf_(b, "%p", (void *)0x7ffe12345678abcdull);
+	CHECK_STR(b, "7FFE12345678ABCD");
+#else
 	CHECK_STR(b, "1234ABCD [    000000FF]");
+#endif
 	sprintf_(b, "%s|%.2s|%5s|%-5s|%hs", "abc", "abc", "ab", "ab", "hs");
 	CHECK_STR(b, "abc|ab|   ab|ab   |hs");
 	CHECK_EQ(sprintf_(b, "%S|%ls|%ws|%.2S", euro_w, euro_w, euro_w,
@@ -172,6 +179,7 @@ static void test_printf(void)
 	CHECK(w16_is(w, "7"));
 }
 
+#if !defined(__x86_64__)	/* x87 intrinsics: i386 only */
 /*
  * Calling the _CI* intrinsics as cl does: arguments pushed on the x87
  * stack, the result left in ST0.
@@ -274,26 +282,28 @@ static void test_intrinsics(void)
 }
 
 /* MSVCRT behaviour that differs from glibc's, called directly. */
+#endif
+
 static void test_msvcrt_semantics(void)
 {
-	int (*snprintf_)(char *, size_t, const char *, ...) = get("_snprintf");
-	int (*fprintf_)(void *, const char *, ...) = get("fprintf");
-	void *(*fopen_)(const char *, const char *) = get("fopen");
-	size_t (*fwrite_)(const void *, size_t, size_t, void *) = get("fwrite");
-	size_t (*fread_)(void *, size_t, size_t, void *) = get("fread");
-	int (*fseek_)(void *, long, int) = get("fseek");
-	int (*feof_)(void *) = get("feof");
-	int (*fclose_)(void *) = get("fclose");
-	int (*isprint_)(int) = get("isprint");
-	int (*isgraph_)(int) = get("isgraph");
-	unsigned (*control87)(unsigned, unsigned) = get("_control87");
-	int (*controlfp_s)(unsigned *, unsigned, unsigned) = get("_controlfp_s");
-	void (*srand_)(unsigned) = get("srand");
-	int (*rand_)(void) = get("rand");
-	int (*sscanf_)(const char *, const char *, ...) = get("sscanf");
-	int (*access_)(const char *, int) = get("_access");
-	char *(*getenv_)(const char *) = get("getenv");
-	time_t (*time_)(time_t *) = get("time");
+	int (CDECL *snprintf_)(char *, size_t, const char *, ...) = get("_snprintf");
+	int (CDECL *fprintf_)(void *, const char *, ...) = get("fprintf");
+	void *(CDECL *fopen_)(const char *, const char *) = get("fopen");
+	size_t (CDECL *fwrite_)(const void *, size_t, size_t, void *) = get("fwrite");
+	size_t (CDECL *fread_)(void *, size_t, size_t, void *) = get("fread");
+	int (CDECL *fseek_)(void *, long, int) = get("fseek");
+	int (CDECL *feof_)(void *) = get("feof");
+	int (CDECL *fclose_)(void *) = get("fclose");
+	int (CDECL *isprint_)(int) = get("isprint");
+	int (CDECL *isgraph_)(int) = get("isgraph");
+	unsigned (CDECL *control87)(unsigned, unsigned) = get("_control87");
+	int (CDECL *controlfp_s)(unsigned *, unsigned, unsigned) = get("_controlfp_s");
+	void (CDECL *srand_)(unsigned) = get("srand");
+	int (CDECL *rand_)(void) = get("rand");
+	int (CDECL *sscanf_)(const char *, const char *, ...) = get("sscanf");
+	int (CDECL *access_)(const char *, int) = get("_access");
+	char *(CDECL *getenv_)(const char *) = get("getenv");
+	time_t (CDECL *time_)(time_t *) = get("time");
 	BYTE *iob = get("_iob");
 
 	int parsed = 0;
@@ -318,19 +328,20 @@ static void test_msvcrt_semantics(void)
 	CHECK_STR(buf, "12");
 
 	/* A null pointer with a length of zero, which codecs pass. */
-	void *(*memcpy_)(void *, const void *, size_t) = get("memcpy");
-	void *(*memmove_)(void *, const void *, size_t) = get("memmove");
-	void *(*memset_)(void *, int, size_t) = get("memset");
-	int (*memcmp_)(const void *, const void *, size_t) = get("memcmp");
-	void *(*memchr_)(const void *, int, size_t) = get("memchr");
+	void *(CDECL *memcpy_)(void *, const void *, size_t) = get("memcpy");
+	void *(CDECL *memmove_)(void *, const void *, size_t) = get("memmove");
+	void *(CDECL *memset_)(void *, int, size_t) = get("memset");
+	int (CDECL *memcmp_)(const void *, const void *, size_t) = get("memcmp");
+	void *(CDECL *memchr_)(const void *, int, size_t) = get("memchr");
 	CHECK(memcpy_(buf, NULL, 0) == buf);
 	CHECK(memmove_(buf, NULL, 0) == buf);
 	CHECK(memset_(NULL, 0, 0) == NULL);
 	CHECK_EQ(memcmp_(NULL, buf, 0), 0);
 	CHECK(memchr_(NULL, 'x', 0) == NULL);
 
-	/* An empty write to stdout through _iob[1]. */
-	CHECK_EQ(fprintf_(iob + 32, "%s", ""), 0);
+	/* An empty write to stdout through _iob[1] (a FILE is 32 bytes, or
+	 * 48 on Win64). */
+	CHECK_EQ(fprintf_(iob + (sizeof(void *) == 8 ? 48 : 32), "%s", ""), 0);
 
 	/* A successful fseek clears end-of-file. */
 	void *f = fopen_("C:\\WINDOWS\\TEMP\\test_crt.tmp", "w+b");
@@ -346,6 +357,25 @@ static void test_msvcrt_semantics(void)
 		CHECK(!feof_(f));
 		CHECK_EQ(fread_(&c, 1, 1, f), 1);
 		CHECK_EQ(c, 'y');
+		fclose_(f);
+	}
+
+	/* fscanf: %ld fills 32 bits, and %% and %*d take no pointer. */
+	int (CDECL *fscanf_)(void *, const char *, ...) = get("fscanf");
+	f = fopen_("C:\\WINDOWS\\TEMP\\test_crt.tmp", "wb");
+	CHECK(f != NULL);
+	if (f) {
+		CHECK_EQ(fwrite_("-12 % 7 34", 1, 10, f), 10);
+		fclose_(f);
+	}
+	f = fopen_("C:\\WINDOWS\\TEMP\\test_crt.tmp", "rb");
+	CHECK(f != NULL);
+	if (f) {
+		int32_t fl[2] = { 0, 0x55 };
+		int last = 0;
+		CHECK_EQ(fscanf_(f, "%ld %% %*d %d", &fl[0], &last), 2);
+		CHECK(fl[0] == -12 && fl[1] == 0x55);
+		CHECK_EQ(last, 34);
 		fclose_(f);
 	}
 
@@ -375,40 +405,40 @@ static void test_msvcrt_semantics(void)
 }
 
 /* ucrtbase's __stdio_common_* functions, called as its headers do. */
-typedef int (*common_sprintf_fn)(unsigned long long, void *, size_t,
-				 const void *, void *, va_list);
-typedef int (*common_snprintf_s_fn)(unsigned long long, void *, size_t,
-				    size_t, const void *, void *, va_list);
-typedef int (*common_sscanf_fn)(unsigned long long, const char *, size_t,
-				const char *, void *, va_list);
+typedef int (CDECL *common_sprintf_fn)(unsigned long long, void *, size_t,
+				 const void *, void *, win_va_list);
+typedef int (CDECL *common_snprintf_s_fn)(unsigned long long, void *, size_t,
+				    size_t, const void *, void *, win_va_list);
+typedef int (CDECL *common_sscanf_fn)(unsigned long long, const char *, size_t,
+				const char *, void *, win_va_list);
 
-static int csp(common_sprintf_fn fn, unsigned long long options, void *buf,
+static int CDECL csp(common_sprintf_fn fn, unsigned long long options, void *buf,
 	       size_t n, const void *fmt, ...)
 {
-	va_list ap;
-	va_start(ap, fmt);
+	win_va_list ap;
+	win_va_start(ap, fmt);
 	int r = fn(options, buf, n, fmt, NULL, ap);
-	va_end(ap);
+	win_va_end(ap);
 	return r;
 }
 
-static int csnp_s(common_snprintf_s_fn fn, void *buf, size_t n, size_t count,
+static int CDECL csnp_s(common_snprintf_s_fn fn, void *buf, size_t n, size_t count,
 		  const void *fmt, ...)
 {
-	va_list ap;
-	va_start(ap, fmt);
+	win_va_list ap;
+	win_va_start(ap, fmt);
 	int r = fn(0, buf, n, count, fmt, NULL, ap);
-	va_end(ap);
+	win_va_end(ap);
 	return r;
 }
 
-static int css(common_sscanf_fn fn, unsigned long long options,
+static int CDECL css(common_sscanf_fn fn, unsigned long long options,
 	       const char *in, size_t len, const char *fmt, ...)
 {
-	va_list ap;
-	va_start(ap, fmt);
+	win_va_list ap;
+	win_va_start(ap, fmt);
 	int r = fn(options, in, len, fmt, NULL, ap);
-	va_end(ap);
+	win_va_end(ap);
 	return r;
 }
 
@@ -425,9 +455,9 @@ static void test_ucrt(void)
 	common_sprintf_fn vswprintf_ = get("__stdio_common_vswprintf");
 	common_sprintf_fn vsprintf_s = get("__stdio_common_vsprintf_s");
 	common_snprintf_s_fn vsnprintf_s = get("__stdio_common_vsnprintf_s");
-	int (*vfprintf_)(unsigned long long, void *, const char *, void *,
-			 va_list) = get("__stdio_common_vfprintf");
-	void *(*iob_func)(unsigned) = get("__acrt_iob_func");
+	int (CDECL *vfprintf_)(unsigned long long, void *, const char *, void *,
+			       win_va_list) = get("__stdio_common_vfprintf");
+	void *(CDECL *iob_func)(unsigned) = get("__acrt_iob_func");
 	common_sscanf_fn vsscanf_ = get("__stdio_common_vsscanf");
 	BYTE *iob = get("_iob");
 	char b[64];
@@ -464,6 +494,12 @@ static void test_ucrt(void)
 	csp(vsprintf_, 0, b, sizeof(b), "%zu %td %jd %.1F", (size_t)7,
 	    (ptrdiff_t)-3, (long long)1 << 40, 2.5);
 	CHECK_STR(b, "7 -3 1099511627776 2.5");
+#ifdef __x86_64__
+	/* %I, %z and %t are pointer-sized on Win64. */
+	csp(vsprintf_, 0, b, sizeof(b), "%zu %Iu %Ix", (size_t)0x100000001ull,
+	    (size_t)0x100000002ull, (size_t)0x1234567890ull);
+	CHECK_STR(b, "4294967297 4294967298 1234567890");
+#endif
 
 	/* In the wide forms %s is narrow, unless legacy; %S is wide. */
 	CHECK_EQ(csp(vswprintf_, 0, w, 32, w16("%s|%S|%c"), "nar", w16("wid"),
@@ -487,9 +523,10 @@ static void test_ucrt(void)
 	CHECK_STR(b, "abc");
 
 	/* stdin, stdout and stderr are _iob's. */
-	CHECK(iob_func(0) == iob && iob_func(1) == iob + 32 &&
-	      iob_func(2) == iob + 64 && !iob_func(3));
-	va_list none;
+	const size_t file_size = sizeof(void *) == 8 ? 48 : 32;
+	CHECK(iob_func(0) == iob && iob_func(1) == iob + file_size &&
+	      iob_func(2) == iob + 2 * file_size && !iob_func(3));
+	win_va_list none;
 	memset(&none, 0, sizeof(none));
 	CHECK_EQ(vfprintf_(0, iob_func(1), "", NULL, none), 0);
 
@@ -511,7 +548,7 @@ static void test_ucrt(void)
 /* msvcrt's sscanf: its sizes, sets, %n, and EOF. */
 static void test_scanf(void)
 {
-	int (*sscanf_)(const char *, const char *, ...) = get("sscanf");
+	int (CDECL *sscanf_)(const char *, const char *, ...) = get("sscanf");
 	long long big = 0;
 	unsigned long long hex = 0;
 	signed char tiny = 0;
@@ -527,6 +564,15 @@ static void test_scanf(void)
 	CHECK(big == -5000000000LL && hex == 0xffffffffffULL);
 	CHECK_EQ(tiny, -56);
 	CHECK_EQ(sh, -7);
+	/* %ld fills a Windows long, 32 bits, and nothing past it. */
+	int32_t lw[2] = { 0, 0x55 };
+	CHECK_EQ(sscanf_("-9", "%ld", &lw[0]), 1);
+	CHECK(lw[0] == -9 && lw[1] == 0x55);
+#ifdef __x86_64__
+	size_t zs = 0;
+	CHECK_EQ(sscanf_("4294967297", "%zu", &zs), 1);
+	CHECK(zs == 0x100000001ull);
+#endif
 	CHECK_EQ(sscanf_("1.5 2.25 3.125", "%f %lf %Lf", &f, &d, &ld), 3);
 	CHECK(f == 1.5f && d == 2.25 && ld == 3.125);
 	CHECK_EQ(sscanf_("abc123", "%[a-z]%n", set, &n), 1);
@@ -548,13 +594,13 @@ static void test_scanf(void)
 }
 
 /* ntdll's own _vsnprintf and friends: msvcrt's. */
-static int nt_vsn(int (*fn)(char *, size_t, const char *, va_list),
+static int CDECL nt_vsn(int (CDECL *fn)(char *, size_t, const char *, win_va_list),
 		  char *buf, size_t n, const char *fmt, ...)
 {
-	va_list ap;
-	va_start(ap, fmt);
+	win_va_list ap;
+	win_va_start(ap, fmt);
 	int r = fn(buf, n, fmt, ap);
-	va_end(ap);
+	win_va_end(ap);
 	return r;
 }
 
@@ -564,11 +610,11 @@ static void test_ntdll_printf(void)
 	CHECK(nt != NULL);
 	if (!nt)
 		return;
-	int (*vsn)(char *, size_t, const char *, va_list) =
+	int (CDECL *vsn)(char *, size_t, const char *, win_va_list) =
 		mod_get_proc(nt, "_vsnprintf");
-	int (*sn)(char *, size_t, const char *, ...) =
+	int (CDECL *sn)(char *, size_t, const char *, ...) =
 		mod_get_proc(nt, "_snprintf");
-	int (*snw)(WCHAR *, size_t, const WCHAR *, ...) =
+	int (CDECL *snw)(WCHAR *, size_t, const WCHAR *, ...) =
 		mod_get_proc(nt, "_snwprintf");
 	CHECK(vsn && sn && snw && mod_get_proc(nt, "_vsnwprintf"));
 	if (vsn && sn && snw) {
@@ -604,7 +650,9 @@ int main(void)
 	if (crt) {
 		test_msvcrt_semantics();
 		test_printf();
+#if !defined(__x86_64__)
 		test_intrinsics();
+#endif
 		test_ucrt();
 		test_scanf();
 		mod_free(crt);
@@ -618,10 +666,10 @@ int main(void)
 	if (!m)
 		printf("test_crt: pe_crt.dll not built, skipping the fixture\n");
 	if (m) {
-		double (*math_check)(void) = mod_get_proc(m, "crt_math_check");
-		int (*string_check)(void) = mod_get_proc(m, "crt_string_check");
-		int (*stdio_check)(void) = mod_get_proc(m, "crt_stdio_check");
-		int (*startup_check)(void) = mod_get_proc(m, "crt_startup_check");
+		double (CDECL *math_check)(void) = mod_get_proc(m, "crt_math_check");
+		int (CDECL *string_check)(void) = mod_get_proc(m, "crt_string_check");
+		int (CDECL *stdio_check)(void) = mod_get_proc(m, "crt_stdio_check");
+		int (CDECL *startup_check)(void) = mod_get_proc(m, "crt_startup_check");
 		CHECK(math_check != NULL);
 		CHECK(string_check != NULL);
 		CHECK(stdio_check != NULL);
@@ -651,7 +699,7 @@ int main(void)
 				fprintf(stderr, "crt_startup_check failed at %d\n", r);
 			CHECK_EQ(r, 0);
 		}
-		int (*setjmp_check)(void) = mod_get_proc(m, "crt_setjmp_check");
+		int (CDECL *setjmp_check)(void) = mod_get_proc(m, "crt_setjmp_check");
 		CHECK(setjmp_check != NULL);
 		if (setjmp_check) {
 			int r = setjmp_check();

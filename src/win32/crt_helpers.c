@@ -19,6 +19,9 @@
 #include "runtime/builtin.h"
 #include "win32/internal.h"
 
+/* x86-64 has instructions for all of it: Win64 compilers call none. */
+#if !defined(__x86_64__)
+
 #define CRTFN(ret) static ret STUB_WINAPI
 
 static long long pack64(int lo, int hi)
@@ -150,8 +153,12 @@ extern void _aullshr(void);
 #define E(name) { #name, 0, (void *)crt_##name }
 #define EASM(name) { #name, 0, (void *)name }
 
+#endif /* !__x86_64__ */
+
 const struct builtin_export crt_helpers_exports[] = {
+#if !defined(__x86_64__)
 	E(_allmul), E(_alldiv), E(_aulldiv), E(_allrem), E(_aullrem),
 	EASM(_ftol), EASM(_ftol2), EASM(_allshl), EASM(_allshr), EASM(_aullshr),
+#endif
 	BUILTIN_END
 };

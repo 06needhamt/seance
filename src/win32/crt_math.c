@@ -154,6 +154,7 @@ CRTFN(unsigned int) crt__controlfp(unsigned int new_val, unsigned int mask)
  * control word, and restores it under the result. The arguments are
  * rounded to double on the way, as /Op code stores them anyway.
  */
+#if !defined(__x86_64__)	/* x87 only: Win64 code has none of them */
 #define CI1(name) \
 	double vfw_ci_##name(double x) \
 		__attribute__((used, visibility("hidden"))); \
@@ -218,6 +219,7 @@ extern void _CIacos(void), _CIasin(void), _CIatan(void), _CIcos(void),
 	_CIcosh(void), _CIexp(void), _CIlog(void), _CIlog10(void),
 	_CIsin(void), _CIsinh(void), _CIsqrt(void), _CItan(void),
 	_CItanh(void), _CIatan2(void), _CIfmod(void), _CIpow(void);
+#endif
 
 #define EASM(name) { #name, 0, (void *)name }
 
@@ -232,9 +234,11 @@ const struct builtin_export crt_math_exports[] = {
 	E(_finite), E(_isnan), E(_fpclass), E(_matherr),
 	E(_control87), E(_controlfp), E(_controlfp_s),
 	E(sinf), E(cosf), E(sqrtf), E(fabsf), E(powf), E(floorf), E(ceilf),
+#if !defined(__x86_64__)
 	EASM(_CIacos), EASM(_CIasin), EASM(_CIatan), EASM(_CIatan2),
 	EASM(_CIcos), EASM(_CIcosh), EASM(_CIexp), EASM(_CIfmod),
 	EASM(_CIlog), EASM(_CIlog10), EASM(_CIpow), EASM(_CIsin),
 	EASM(_CIsinh), EASM(_CIsqrt), EASM(_CItan), EASM(_CItanh),
+#endif
 	BUILTIN_END
 };

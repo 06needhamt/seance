@@ -30,6 +30,7 @@
 #include "win32/crt.h"
 #include "win32/internal.h"
 #include "win32/path.h"
+#include "win32/winva.h"
 
 #define CRTFN(ret) static ret STUB_CDECL
 
@@ -43,6 +44,10 @@ typedef struct crt_FILE {
 	int _bufsiz;
 	char *_tmpfname;
 } crt_FILE;
+
+/* msvcrt's FILE, which _iob is an array of: 32 bytes, 48 on Win64. */
+_Static_assert(sizeof(crt_FILE) == (sizeof(void *) == 8 ? 48 : 32),
+	       "crt_FILE");
 
 #define _IOFBF 0
 #define _IOREAD  0x0001
@@ -263,7 +268,7 @@ CRTFN(int) crt_setvbuf(crt_FILE *f, char *buf, int mode, size_t size)
 
 /* Formatting is crt_printf.c's; a wide result is written as ANSI. */
 static int print_flags(crt_FILE *f, int wide, unsigned flags, const void *fmt,
-		       va_list ap)
+		       win_va_list ap)
 {
 	void *out;
 	size_t len;
@@ -289,64 +294,64 @@ static int print_flags(crt_FILE *f, int wide, unsigned flags, const void *fmt,
 	return w == n ? (int)len : -1;
 }
 
-static int print(crt_FILE *f, int wide, const void *fmt, va_list ap)
+static int print(crt_FILE *f, int wide, const void *fmt, win_va_list ap)
 {
 	return print_flags(f, wide, 0, fmt, ap);
 }
 
-CRTFN(int) crt_vfprintf(crt_FILE *f, const char *fmt, va_list ap)
+CRTFN(int) crt_vfprintf(crt_FILE *f, const char *fmt, win_va_list ap)
 {
 	return print(f, 0, fmt, ap);
 }
 
 CRTFN(int) crt_fprintf(crt_FILE *f, const char *fmt, ...)
 {
-	va_list ap;
-	va_start(ap, fmt);
+	win_va_list ap;
+	win_va_start(ap, fmt);
 	int r = print(f, 0, fmt, ap);
-	va_end(ap);
+	win_va_end(ap);
 	return r;
 }
 
-CRTFN(int) crt_vprintf(const char *fmt, va_list ap)
+CRTFN(int) crt_vprintf(const char *fmt, win_va_list ap)
 {
 	return print(&crt_iob[1], 0, fmt, ap);
 }
 
 CRTFN(int) crt_printf(const char *fmt, ...)
 {
-	va_list ap;
-	va_start(ap, fmt);
+	win_va_list ap;
+	win_va_start(ap, fmt);
 	int r = print(&crt_iob[1], 0, fmt, ap);
-	va_end(ap);
+	win_va_end(ap);
 	return r;
 }
 
-CRTFN(int) crt_vfwprintf(crt_FILE *f, const WCHAR *fmt, va_list ap)
+CRTFN(int) crt_vfwprintf(crt_FILE *f, const WCHAR *fmt, win_va_list ap)
 {
 	return print(f, 1, fmt, ap);
 }
 
 CRTFN(int) crt_fwprintf(crt_FILE *f, const WCHAR *fmt, ...)
 {
-	va_list ap;
-	va_start(ap, fmt);
+	win_va_list ap;
+	win_va_start(ap, fmt);
 	int r = print(f, 1, fmt, ap);
-	va_end(ap);
+	win_va_end(ap);
 	return r;
 }
 
-CRTFN(int) crt_vwprintf(const WCHAR *fmt, va_list ap)
+CRTFN(int) crt_vwprintf(const WCHAR *fmt, win_va_list ap)
 {
 	return print(&crt_iob[1], 1, fmt, ap);
 }
 
 CRTFN(int) crt_wprintf(const WCHAR *fmt, ...)
 {
-	va_list ap;
-	va_start(ap, fmt);
+	win_va_list ap;
+	win_va_start(ap, fmt);
 	int r = print(&crt_iob[1], 1, fmt, ap);
-	va_end(ap);
+	win_va_end(ap);
 	return r;
 }
 
@@ -361,14 +366,14 @@ CRTFN(crt_FILE *) crt___acrt_iob_func(unsigned i) { return i < 3 ? &crt_iob[i] :
 
 /* ucrtbase's fprintf family (see crt_printf.c for its options). */
 CRTFN(int) crt___stdio_common_vfprintf(ULONGLONG options, crt_FILE *f,
-					const char *fmt, void *locale, va_list ap)
+					const char *fmt, void *locale, win_va_list ap)
 {
 	(void)locale;
 	return print_flags(f, 0, CRT_UCRT | (unsigned)(options & CRT_PRINTF_OPTIONS),
 			   fmt, ap);
 }
 CRTFN(int) crt___stdio_common_vfwprintf(ULONGLONG options, crt_FILE *f,
-					 const WCHAR *fmt, void *locale, va_list ap)
+					 const WCHAR *fmt, void *locale, win_va_list ap)
 {
 	(void)locale;
 	return print_flags(f, 1, CRT_UCRT | (unsigned)(options & CRT_PRINTF_OPTIONS),

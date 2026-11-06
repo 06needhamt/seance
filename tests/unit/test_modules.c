@@ -18,10 +18,10 @@
 #include "runtime/trap.h"
 #include "test.h"
 
-typedef int (*int_fn)(void);
-typedef int (*add_fn)(int, int);
-typedef void (*flag_fn)(int *);
-typedef DWORD (*dword_fn)(void);
+typedef int (CDECL *int_fn)(void);
+typedef int (CDECL *add_fn)(int, int);
+typedef void (CDECL *flag_fn)(int *);
+typedef DWORD (CDECL *dword_fn)(void);
 
 /* The permissions ("r-xp" etc.) of the mapping containing addr. */
 static int page_perms(const void *addr, char perms[5])
@@ -287,7 +287,7 @@ static int run_trapping(struct module *m, const char *fn, char *err, size_t size
 	return status;
 }
 
-static void test_delay_load(void)
+static void __attribute__((unused)) test_delay_load(void)
 {
 	char dir[4096], err[1024];
 	const char *t = getenv("TMPDIR");
@@ -326,7 +326,7 @@ static void test_delay_load(void)
 	add_fn add = mod_get_proc(m, "delay_add");
 	add_fn add_ord = mod_get_proc(m, "delay_add_by_ordinal");
 	dword_fn helper = mod_get_proc(m, "delay_helper_calls");
-	HMODULE (*handle)(int) = mod_get_proc(m, "delay_module");
+	HMODULE (CDECL *handle)(int) = mod_get_proc(m, "delay_module");
 	CHECK(add && add_ord && helper && handle);
 	struct module *basic = mod_find("pe_basic.dll");
 	CHECK(basic != NULL);
@@ -368,6 +368,8 @@ int main(void)
 	test_search_path();
 	test_force_reloc();
 	CHECK_EQ(runtime_enter(), 0);
+#if !defined(__x86_64__)	/* pe_delay's tables are i386 only, so far */
 	test_delay_load();
+#endif
 	return test_summary("test_modules");
 }

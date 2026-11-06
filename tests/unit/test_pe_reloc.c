@@ -4,6 +4,8 @@
  * preferred base.
  */
 #include <stdint.h>
+#include <sys/mman.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "common/error.h"
@@ -108,8 +110,51 @@ static void test_relocate(void)
 	CHECK_EQ(pe_relocate(image, sizeof(image), relocs, n, delta), -1);
 }
 
-typedef int (*int_fn)(void);
-typedef const char *(*str_fn)(void);
+/* DIR64 (PE32+): a 64-bit field, moved by the whole 64-bit delta. */
+static void test_relocate_dir64(void)
+{
+	static BYTE image[0x2000];
+	BYTE relocs[64];
+	uint64_t v;
+
+	/* From 0x180000000 to 0x7f0000010000, then back down below 4 GB. */
+	const uint64_t up = 0x7f0000010000ull - 0x180000000ull;
+	const uint64_t down = 0x10000000ull - 0x7f0000010000ull;
+
+	v = 0x180001234ull;
+	memcpy(image + 0x1008, &v, 8);
+	put32(image + 0x1ff8, 0xaaaaaaaa);	/* untouched */
+	const WORD e[] = {
+		ENTRY(IMAGE_REL_BASED_DIR64, 0x008),
+		ENTRY(IMAGE_REL_BASED_ABSOLUTE, 0),
+	};
+	size_t n = block(relocs, 0x1000, e, 2);
+
+	CHECK_EQ(pe_relocate(image, sizeof(image), relocs, n, up), 0);
+	memcpy(&v, image + 0x1008, 8);
+	CHECK(v == 0x7f0000011234ull);
+	CHECK_EQ(pe_relocate(image, sizeof(image), relocs, n, down), 0);
+	memcpy(&v, image + 0x1008, 8);
+	CHECK(v == 0x10001234ull);
+	CHECK_EQ(get32(image + 0x1ff8), 0xaaaaaaaa);
+
+	/* Eight bytes must fit: one at 0xffc of the last page runs off. */
+	const WORD over[] = { ENTRY(IMAGE_REL_BASED_DIR64, 0xffc) };
+	n = block(relocs, 0x1000, over, 1);
+	CHECK_EQ(pe_relocate(image, sizeof(image), relocs, n, up), -1);
+	CHECK(strstr(vfw_error(), "outside the image") != NULL);
+
+	/* HIGHLOW wraps at 32 bits whatever the upper half of the delta. */
+	put32(image + 0x1000, 0x10001234);
+	const WORD hl[] = { ENTRY(IMAGE_REL_BASED_HIGHLOW, 0) };
+	n = block(relocs, 0x1000, hl, 1);
+	CHECK_EQ(pe_relocate(image, sizeof(image), relocs, n,
+			     0xffffffff00000010ull), 0);
+	CHECK_EQ(get32(image + 0x1000), 0x10001244);
+}
+
+typedef int (CDECL *int_fn)(void);
+typedef const char *(CDECL *str_fn)(void);
 
 static void *export_addr(struct pe_image *img, const char *name)
 {
@@ -134,11 +179,23 @@ static struct pe_image *map_fixture(const char *name, unsigned flags)
 	return img;
 }
 
-static DWORD mapped_image_base(const struct pe_image *img)
+/* The fixtures' preferred base (the 64-bit ones are above 4 GB). */
+#if defined(__x86_64__)
+#define FIXTURE_BASE 0x180000000ull
+#else
+#define FIXTURE_BASE 0x10000000u
+#endif
+
+/* ImageBase in the mapped header, which the loader updates. */
+static uintptr_t mapped_image_base(const struct pe_image *img)
 {
 	const IMAGE_DOS_HEADER *dos = (const void *)img->base;
-	const IMAGE_NT_HEADERS32 *nt = (const void *)(img->base + dos->e_lfanew);
-	return nt->OptionalHeader.ImageBase;
+	const BYTE *nt = img->base + dos->e_lfanew;
+#if defined(__x86_64__)
+	return ((const IMAGE_NT_HEADERS64 *)nt)->OptionalHeader.ImageBase;
+#else
+	return ((const IMAGE_NT_HEADERS32 *)nt)->OptionalHeader.ImageBase;
+#endif
 }
 
 static void check_reloc_fixture(struct pe_image *img)
@@ -156,15 +213,37 @@ static void check_reloc_fixture(struct pe_image *img)
 	CHECK_STR(msg, "relocated");
 }
 
+/*
+ * Whether this process can map the fixtures' base at all: not under ASan
+ * on x86-64, whose shadow memory reserves the range 0x180000000 is in.
+ */
+static int base_mappable(void)
+{
+	void *want = (void *)(uintptr_t)FIXTURE_BASE;
+	void *p = mmap(want, 0x10000, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS |
+		       MAP_FIXED_NOREPLACE, -1, 0);
+
+	if (p == MAP_FAILED)
+		return 0;
+	munmap(p, 0x10000);
+	return p == want;
+}
+
 static void test_map(void)
 {
+	int at_base = base_mappable();
+
+	if (!at_base)
+		printf("the fixtures' base 0x%llx is taken here: checking "
+		       "relocation only\n", (unsigned long long)FIXTURE_BASE);
+
 	/* The preferred base is free, so no relocation is needed. */
 	struct pe_image *basic = map_fixture("pe_basic.dll", 0);
 	CHECK(basic != NULL);
 	if (!basic)
 		return;
-	CHECK_EQ((uintptr_t)basic->base, 0x10000000);
-	CHECK_EQ(basic->relocated, 0);
+	CHECK_EQ((uintptr_t)basic->base == FIXTURE_BASE, at_base);
+	CHECK_EQ(basic->relocated, !at_base);
 	int_fn add = (int_fn)export_addr(basic, "basic_add");
 	CHECK(add != NULL);
 
@@ -173,9 +252,9 @@ static void test_map(void)
 	CHECK(img != NULL);
 	if (img) {
 		CHECK(img->relocated);
-		CHECK((uintptr_t)img->base != 0x10000000);
+		CHECK((uintptr_t)img->base != FIXTURE_BASE);
 		CHECK_EQ((uintptr_t)img->base % 0x10000, 0);	/* 64K aligned */
-		CHECK_EQ(mapped_image_base(img), (DWORD)(uintptr_t)img->base);
+		CHECK(mapped_image_base(img) == (uintptr_t)img->base);
 		check_reloc_fixture(img);
 		pe_free(img);
 	}
@@ -192,10 +271,10 @@ static void test_map(void)
 	pe_free(basic);
 
 	/* With the base free again, pe_noreloc loads where it wants. */
-	img = map_fixture("pe_noreloc.dll", 0);
-	CHECK(img != NULL);
+	img = at_base ? map_fixture("pe_noreloc.dll", 0) : NULL;
+	CHECK(img != NULL || !at_base);
 	if (img) {
-		CHECK_EQ((uintptr_t)img->base, 0x10000000);
+		CHECK_EQ((uintptr_t)img->base, FIXTURE_BASE);
 		check_reloc_fixture(img);
 		pe_free(img);
 	}
@@ -205,7 +284,7 @@ static void test_map(void)
 	CHECK(img != NULL);
 	if (img) {
 		CHECK(img->relocated);
-		CHECK((uintptr_t)img->base != 0x10000000);
+		CHECK((uintptr_t)img->base != FIXTURE_BASE);
 		check_reloc_fixture(img);
 		pe_free(img);
 	}
@@ -227,6 +306,7 @@ static void test_map(void)
 int main(void)
 {
 	test_relocate();
+	test_relocate_dir64();
 	test_map();
 	return test_summary("test_pe_reloc");
 }

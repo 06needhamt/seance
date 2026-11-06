@@ -26,6 +26,8 @@
  * unwind, which takes each frame off the chain once its handler is done
  * with it, as Windows does, so the new exception doesn't meet them again.
  */
+#if !defined(__x86_64__)	/* x86-64: seh_x64.c */
+
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
@@ -467,3 +469,5 @@ LONG WINAPI seh_UnhandledExceptionFilter(EXCEPTION_POINTERS *ep)
 	LPTOP_LEVEL_EXCEPTION_FILTER f = top_filter;
 	return f ? f(ep) : EXCEPTION_CONTINUE_SEARCH;
 }
+
+#endif /* !__x86_64__ */

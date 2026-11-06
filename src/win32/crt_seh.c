@@ -37,6 +37,13 @@
  * any other (see runtime/seh.c); when it is caught, the abandoned
  * __finally is forgotten for _abnormal_termination's sake.
  */
+/*
+ * The fs:[0] frames and i386 register conventions this implements don't
+ * exist on x86-64, whose exceptions are table-based (docs/X64_PLAN.md,
+ * phases 4 and 5).
+ */
+#if !defined(__x86_64__)
+
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -490,3 +497,5 @@ const struct builtin_export crt_seh_exports[] = {
 	E(_seh_longjmp_unwind4),
 	BUILTIN_END
 };
+
+#endif /* !__x86_64__ */

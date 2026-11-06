@@ -58,3 +58,4 @@ dkms.conf
 # Build output
 /build/
 /build-asan/
+/build64/

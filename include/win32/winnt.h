@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * PE32 image format: the on-disk structures and constants the loader uses.
+ * PE32 and PE32+ image formats: the on-disk structures and constants the
+ * loader uses. The 64-bit (PE32+) structures are on-disk layouts too, so
+ * they are defined whatever the build, and an i386 harness can inspect a
+ * 64-bit image.
  */
 #ifndef VFW_WIN32_WINNT_H
 #define VFW_WIN32_WINNT_H
@@ -11,7 +14,8 @@
 #define IMAGE_DOS_SIGNATURE 0x5A4D      /* "MZ" */
 #define IMAGE_NT_SIGNATURE  0x00004550  /* "PE\0\0" */
 
-#define IMAGE_FILE_MACHINE_I386 0x014c
+#define IMAGE_FILE_MACHINE_I386  0x014c
+#define IMAGE_FILE_MACHINE_AMD64 0x8664
 
 /* IMAGE_FILE_HEADER.Characteristics. */
 #define IMAGE_FILE_RELOCS_STRIPPED     0x0001
@@ -22,6 +26,7 @@
 #define IMAGE_FILE_DLL                 0x2000
 
 #define IMAGE_NT_OPTIONAL_HDR32_MAGIC 0x10b
+#define IMAGE_NT_OPTIONAL_HDR64_MAGIC 0x20b
 
 /* IMAGE_OPTIONAL_HEADER.Subsystem. */
 #define IMAGE_SUBSYSTEM_UNKNOWN     0
@@ -30,6 +35,7 @@
 #define IMAGE_SUBSYSTEM_WINDOWS_CUI 3
 
 /* IMAGE_OPTIONAL_HEADER.DllCharacteristics. */
+#define IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA       0x0020
 #define IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE          0x0040
 #define IMAGE_DLLCHARACTERISTICS_FORCE_INTEGRITY       0x0080
 #define IMAGE_DLLCHARACTERISTICS_NX_COMPAT             0x0100
@@ -76,9 +82,12 @@
 #define IMAGE_REL_BASED_LOW      2
 #define IMAGE_REL_BASED_HIGHLOW  3
 #define IMAGE_REL_BASED_HIGHADJ  4
+#define IMAGE_REL_BASED_DIR64    10
 
 #define IMAGE_ORDINAL_FLAG32 0x80000000
 #define IMAGE_ORDINAL32(o)   ((o) & 0xffff)
+#define IMAGE_ORDINAL_FLAG64 0x8000000000000000ull
+#define IMAGE_ORDINAL64(o)   ((o) & 0xffff)
 
 #define IMAGE_RESOURCE_NAME_IS_STRING    0x80000000
 #define IMAGE_RESOURCE_DATA_IS_DIRECTORY 0x80000000
@@ -192,6 +201,52 @@ typedef struct _IMAGE_NT_HEADERS {
 	IMAGE_OPTIONAL_HEADER32 OptionalHeader;
 } IMAGE_NT_HEADERS32;
 
+/*
+ * PE32+: no BaseOfData, and ImageBase and the four stack and heap sizes are
+ * 64-bit. Windows packs these to 4 bytes (pshpack4.h), which leaves every
+ * member where natural alignment would put it but the structure 4-aligned.
+ */
+#pragma pack(push, 4)
+typedef struct _IMAGE_OPTIONAL_HEADER64 {
+	WORD Magic;
+	BYTE MajorLinkerVersion;
+	BYTE MinorLinkerVersion;
+	DWORD SizeOfCode;
+	DWORD SizeOfInitializedData;
+	DWORD SizeOfUninitializedData;
+	DWORD AddressOfEntryPoint;
+	DWORD BaseOfCode;
+	ULONGLONG ImageBase;
+	DWORD SectionAlignment;
+	DWORD FileAlignment;
+	WORD MajorOperatingSystemVersion;
+	WORD MinorOperatingSystemVersion;
+	WORD MajorImageVersion;
+	WORD MinorImageVersion;
+	WORD MajorSubsystemVersion;
+	WORD MinorSubsystemVersion;
+	DWORD Win32VersionValue;
+	DWORD SizeOfImage;
+	DWORD SizeOfHeaders;
+	DWORD CheckSum;
+	WORD Subsystem;
+	WORD DllCharacteristics;
+	ULONGLONG SizeOfStackReserve;
+	ULONGLONG SizeOfStackCommit;
+	ULONGLONG SizeOfHeapReserve;
+	ULONGLONG SizeOfHeapCommit;
+	DWORD LoaderFlags;
+	DWORD NumberOfRvaAndSizes;
+	IMAGE_DATA_DIRECTORY DataDirectory[IMAGE_NUMBEROF_DIRECTORY_ENTRIES];
+} IMAGE_OPTIONAL_HEADER64;
+
+typedef struct _IMAGE_NT_HEADERS64 {
+	DWORD Signature;
+	IMAGE_FILE_HEADER FileHeader;
+	IMAGE_OPTIONAL_HEADER64 OptionalHeader;
+} IMAGE_NT_HEADERS64;
+#pragma pack(pop)
+
 typedef struct _IMAGE_SECTION_HEADER {
 	BYTE Name[IMAGE_SIZEOF_SHORT_NAME];
 	union {
@@ -242,6 +297,15 @@ typedef struct _IMAGE_THUNK_DATA32 {
 	} u1;
 } IMAGE_THUNK_DATA32;
 
+typedef struct _IMAGE_THUNK_DATA64 {
+	union {
+		ULONGLONG ForwarderString;
+		ULONGLONG Function;
+		ULONGLONG Ordinal;
+		ULONGLONG AddressOfData;
+	} u1;
+} IMAGE_THUNK_DATA64;
+
 typedef struct _IMAGE_IMPORT_DESCRIPTOR {
 	union {
 		DWORD Characteristics;
@@ -280,6 +344,30 @@ typedef struct _IMAGE_TLS_DIRECTORY32 {
 	DWORD SizeOfZeroFill;
 	DWORD Characteristics;
 } IMAGE_TLS_DIRECTORY32;
+
+#pragma pack(push, 4)	/* as Windows declares it */
+typedef struct _IMAGE_TLS_DIRECTORY64 {
+	ULONGLONG StartAddressOfRawData;	/* VAs, as in the 32-bit one */
+	ULONGLONG EndAddressOfRawData;
+	ULONGLONG AddressOfIndex;
+	ULONGLONG AddressOfCallBacks;
+	DWORD SizeOfZeroFill;
+	DWORD Characteristics;
+} IMAGE_TLS_DIRECTORY64;
+#pragma pack(pop)
+
+/*
+ * x86-64 exception data (.pdata): one entry per non-leaf function, sorted
+ * by BeginAddress, each pointing at its UNWIND_INFO in .xdata.
+ */
+typedef struct _IMAGE_RUNTIME_FUNCTION_ENTRY {
+	DWORD BeginAddress;
+	DWORD EndAddress;
+	union {
+		DWORD UnwindInfoAddress;
+		DWORD UnwindData;
+	};
+} IMAGE_RUNTIME_FUNCTION_ENTRY, RUNTIME_FUNCTION, *PRUNTIME_FUNCTION;
 
 typedef struct _IMAGE_RESOURCE_DIRECTORY {
 	DWORD Characteristics;
@@ -369,6 +457,86 @@ typedef struct _EXCEPTION_RECORD {
 	DWORD_PTR ExceptionInformation[EXCEPTION_MAXIMUM_PARAMETERS];
 } EXCEPTION_RECORD, *PEXCEPTION_RECORD;
 
+#if defined(__x86_64__)
+
+/* CONTEXT (AMD64): the flags selecting which sections are meaningful. */
+#define CONTEXT_AMD64           0x00100000
+#define CONTEXT_CONTROL         (CONTEXT_AMD64 | 0x00000001)
+#define CONTEXT_INTEGER         (CONTEXT_AMD64 | 0x00000002)
+#define CONTEXT_SEGMENTS        (CONTEXT_AMD64 | 0x00000004)
+#define CONTEXT_FLOATING_POINT  (CONTEXT_AMD64 | 0x00000008)
+#define CONTEXT_DEBUG_REGISTERS (CONTEXT_AMD64 | 0x00000010)
+#define CONTEXT_FULL (CONTEXT_CONTROL | CONTEXT_INTEGER | \
+		      CONTEXT_FLOATING_POINT)
+
+typedef struct __attribute__((aligned(16))) _M128A {
+	ULONGLONG Low;
+	LONGLONG High;
+} M128A, *PM128A;
+
+/* The FXSAVE image. */
+typedef struct __attribute__((aligned(16))) _XMM_SAVE_AREA32 {
+	WORD ControlWord;
+	WORD StatusWord;
+	BYTE TagWord;
+	BYTE Reserved1;
+	WORD ErrorOpcode;
+	DWORD ErrorOffset;
+	WORD ErrorSelector;
+	WORD Reserved2;
+	DWORD DataOffset;
+	WORD DataSelector;
+	WORD Reserved3;
+	DWORD MxCsr;
+	DWORD MxCsr_Mask;
+	M128A FloatRegisters[8];
+	M128A XmmRegisters[16];
+	BYTE Reserved4[96];
+} XMM_SAVE_AREA32;
+
+typedef struct __attribute__((aligned(16))) _CONTEXT {
+	/* Home space for a callee's register arguments. */
+	ULONGLONG P1Home, P2Home, P3Home, P4Home, P5Home, P6Home;
+
+	DWORD ContextFlags;
+	DWORD MxCsr;
+
+	WORD SegCs, SegDs, SegEs, SegFs, SegGs, SegSs;
+	DWORD EFlags;
+
+	ULONGLONG Dr0, Dr1, Dr2, Dr3, Dr6, Dr7;
+
+	ULONGLONG Rax, Rcx, Rdx, Rbx, Rsp, Rbp, Rsi, Rdi;
+	ULONGLONG R8, R9, R10, R11, R12, R13, R14, R15;
+	ULONGLONG Rip;
+
+	union {
+		XMM_SAVE_AREA32 FltSave;
+		struct {
+			M128A Header[2];
+			M128A Legacy[8];
+			M128A Xmm0, Xmm1, Xmm2, Xmm3, Xmm4, Xmm5, Xmm6, Xmm7;
+			M128A Xmm8, Xmm9, Xmm10, Xmm11, Xmm12, Xmm13, Xmm14,
+			      Xmm15;
+		};
+	};
+
+	M128A VectorRegister[26];
+	ULONGLONG VectorControl;
+
+	ULONGLONG DebugControl;
+	ULONGLONG LastBranchToRip, LastBranchFromRip;
+	ULONGLONG LastExceptionToRip, LastExceptionFromRip;
+} CONTEXT, *PCONTEXT;
+
+_Static_assert(sizeof(XMM_SAVE_AREA32) == 512, "XMM_SAVE_AREA32");
+_Static_assert(__builtin_offsetof(CONTEXT, Rip) == 0xf8, "CONTEXT.Rip");
+_Static_assert(__builtin_offsetof(CONTEXT, FltSave) == 0x100,
+	       "CONTEXT.FltSave");
+_Static_assert(sizeof(CONTEXT) == 0x4d0, "CONTEXT");
+
+#else
+
 /* CONTEXT (i386): GetThreadContext/SetThreadContext's flags selecting which
  * of the sections below are meaningful. */
 #define CONTEXT_i386                0x00010000
@@ -408,6 +576,8 @@ typedef struct _CONTEXT {
 
 	BYTE ExtendedRegisters[MAXIMUM_SUPPORTED_EXTENSION];
 } CONTEXT, *PCONTEXT;
+
+#endif
 
 typedef struct _EXCEPTION_POINTERS {
 	PEXCEPTION_RECORD ExceptionRecord;

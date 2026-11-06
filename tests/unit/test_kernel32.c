@@ -1121,9 +1121,9 @@ static void test_modules(void)
 
 /* The same APIs from Win32 code (with a 4-byte-aligned stack). */
 /* Implicit TLS and thread notifications, with pe_tls.dll. */
-static int (*tls_read)(void), (*tls_block_ok)(void);
-static void (*tls_write)(int);
-static LONG (*tls_callback_count)(DWORD), (*tls_entry_count)(DWORD);
+static int (CDECL *tls_read)(void), (CDECL *tls_block_ok)(void);
+static void (CDECL *tls_write)(int);
+static LONG (CDECL *tls_callback_count)(DWORD), (CDECL *tls_entry_count)(DWORD);
 
 struct tls_seen {
 	HANDLE ready, go;	/* for the thread started before the load */
@@ -1251,7 +1251,7 @@ static void test_static_tls(void)
 	m = mod_load(path, NULL);
 	CHECK(m != NULL);
 	if (m) {
-		int (*again)(void) = mod_get_proc(m, "tls_read");
+		int (CDECL *again)(void) = mod_get_proc(m, "tls_read");
 		CHECK(again && again() == 1234);
 		mod_free(m);
 	}
@@ -1272,10 +1272,10 @@ static void test_sse(void)
 	CHECK(m != NULL);
 	if (!m)
 		return;
-	float (*dot)(const float *, const float *, int) = mod_get_proc(m, "sse_dot");
-	int (*aligned)(void) = mod_get_proc(m, "sse_stack_aligned");
-	void (*state)(DWORD *, DWORD *) = mod_get_proc(m, "sse_fpu_state");
-	int (*in_thread)(DWORD *, DWORD *, int *, float *) =
+	float (CDECL *dot)(const float *, const float *, int) = mod_get_proc(m, "sse_dot");
+	int (CDECL *aligned)(void) = mod_get_proc(m, "sse_stack_aligned");
+	void (CDECL *state)(DWORD *, DWORD *) = mod_get_proc(m, "sse_fpu_state");
+	int (CDECL *in_thread)(DWORD *, DWORD *, int *, float *) =
 		mod_get_proc(m, "sse_in_thread");
 	CHECK(dot && aligned && state && in_thread);
 	if (dot && aligned && state && in_thread) {
@@ -1314,7 +1314,7 @@ static void test_fixture(void)
 	CHECK(m != NULL);
 	if (!m)
 		return;
-	int (*selftest)(void) = mod_get_proc(m, "k32_selftest");
+	int (CDECL *selftest)(void) = mod_get_proc(m, "k32_selftest");
 	CHECK(selftest != NULL);
 	if (selftest)
 		CHECK_EQ(selftest(), 0);

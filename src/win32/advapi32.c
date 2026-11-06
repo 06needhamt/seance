@@ -52,9 +52,10 @@ static const struct {
 	{ HKEY_CURRENT_CONFIG, "HKEY_CURRENT_CONFIG" },
 };
 
+/* The predefined keys are LONGs sign-extended into a handle on Win64. */
 static int is_predefined(HKEY h)
 {
-	return (ULONG_PTR)h >= 0x80000000 && (ULONG_PTR)h <= 0x80000006;
+	return h >= HKEY_CLASSES_ROOT && h <= HKEY_DYN_DATA;
 }
 
 /* The path of an open key (malloc()ed), or NULL with *err. */

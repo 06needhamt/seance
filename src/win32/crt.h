@@ -7,6 +7,7 @@
 
 #include <stdarg.h>
 #include <stddef.h>
+#include "win32/winva.h"
 
 /*
  * Formats as msvcrt.dll's printf family does (see crt_printf.c). With
@@ -16,14 +17,14 @@
  * On success returns 0 with a malloc()ed buffer of *len characters plus a
  * terminating NUL in *out. Returns -1 on a bad format or no memory.
  */
-int crt_vformat(int wide, unsigned flags, const void *fmt, va_list ap,
+int crt_vformat(int wide, unsigned flags, const void *fmt, win_va_list ap,
 		void **out, size_t *len);
 
 /*
  * _vsnprintf, or with wide _vsnwprintf: at most n characters in buf,
  * terminated if they fit; the length, or -1 if it was more than n.
  */
-int crt_vsnprintf(int wide, void *buf, size_t n, const void *fmt, va_list ap);
+int crt_vsnprintf(int wide, void *buf, size_t n, const void *fmt, win_va_list ap);
 
 /* The low bits are ucrtbase's _CRT_INTERNAL_PRINTF_* options. */
 #define CRT_PRINTF_LEGACY_VSPRINTF_NULL_TERMINATION 0x0001

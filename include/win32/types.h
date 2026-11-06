@@ -2,9 +2,9 @@
 /*
  * Basic Win32 types for seance.
  *
- * These describe the ABI that 32-bit Windows DLLs expect. They are written
- * for a Linux i386 build: LONG is always 32-bit and WCHAR is always UTF-16,
- * whatever the host's long and wchar_t are.
+ * These describe the ABI that Windows DLLs expect. They are written for a
+ * Linux i386 or x86-64 build: LONG is always 32-bit (Win64 is LLP64) and
+ * WCHAR is always UTF-16, whatever the host's long and wchar_t are.
  */
 #ifndef VFW_WIN32_TYPES_H
 #define VFW_WIN32_TYPES_H
@@ -12,14 +12,22 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#if !defined(__i386__) && !defined(VFW_ALLOW_NON_I386)
-#error "seance must be built for i386 (gcc -m32)"
+#if !defined(__i386__) && !defined(__x86_64__) && !defined(VFW_ALLOW_NON_I386)
+#error "seance must be built for i386 (gcc -m32) or x86-64"
 #endif
 
-/* Calling conventions. */
+/*
+ * Calling conventions. Win64 has a single one, which isn't the SysV one
+ * Linux uses on x86-64: every Win32-facing function is ms_abi there.
+ */
+#if defined(__x86_64__)
+#define WINAPI   __attribute__((ms_abi))
+#define CDECL    __attribute__((ms_abi))
+#else
 #define WINAPI   __attribute__((stdcall))
-#define CALLBACK WINAPI
 #define CDECL    __attribute__((cdecl))
+#endif
+#define CALLBACK WINAPI
 #define WINAPIV  CDECL
 
 /* Integer types. */

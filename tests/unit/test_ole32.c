@@ -596,8 +596,8 @@ static void test_inproc_server(void)
 	set_class_value(key, path);
 	free(path);
 
-	int (*run)(void) = mod_get_proc(m, "com_run");
-	int (*objects)(void) = mod_get_proc(m, "com_objects");
+	int (CDECL *run)(void) = mod_get_proc(m, "com_run");
+	int (CDECL *objects)(void) = mod_get_proc(m, "com_objects");
 	CHECK(run && objects);
 	if (run && objects) {
 		CHECK_EQ(run(), 0);

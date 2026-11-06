@@ -11,7 +11,9 @@
 
 const struct builtin_export k32_seh_exports[] = {
 	E(RaiseException),
+#if !defined(__x86_64__)
 	E(RtlUnwind),
+#endif
 	E(SetUnhandledExceptionFilter),
 	E(UnhandledExceptionFilter),
 	BUILTIN_END

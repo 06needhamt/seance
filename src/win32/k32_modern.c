@@ -13,15 +13,18 @@
  */
 #include <pthread.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "win32/handle.h"
 #include "win32/internal.h"
 #include "win32/k32.h"
 
-/* The word behind a lock, as the integer we keep in it. */
-static uint32_t *word(void *p)
+/* The pointer-sized word behind a lock, as the integer we keep in it. */
+typedef uintptr_t __attribute__((may_alias)) lock_word;
+
+static lock_word *word(void *p)
 {
-	return (uint32_t *)p;
+	return (lock_word *)p;
 }
 
 /*
@@ -39,7 +42,7 @@ WINFN(void) k32_InitializeSRWLock(PSRWLOCK l)
 
 static void srw_acquire(PSRWLOCK l, int exclusive)
 {
-	uint32_t *w = word(&l->Ptr);
+	lock_word *w = word(&l->Ptr);
 
 	wait_lock();
 	while (exclusive ? *w != 0 : (*w & SRW_WRITER))
@@ -50,7 +53,7 @@ static void srw_acquire(PSRWLOCK l, int exclusive)
 
 static BOOL srw_try(PSRWLOCK l, int exclusive)
 {
-	uint32_t *w = word(&l->Ptr);
+	lock_word *w = word(&l->Ptr);
 	BOOL got;
 
 	wait_lock();
@@ -64,7 +67,7 @@ static BOOL srw_try(PSRWLOCK l, int exclusive)
 /* With the wait lock held. */
 static void srw_release_locked(PSRWLOCK l, int exclusive)
 {
-	uint32_t *w = word(&l->Ptr);
+	lock_word *w = word(&l->Ptr);
 
 	if (exclusive)
 		*w &= ~SRW_WRITER;
@@ -101,19 +104,19 @@ struct cv_waiter {
 	int signaled;
 };
 
-static struct cv_waiter *cv_first(uint32_t *w)
+static struct cv_waiter *cv_first(lock_word *w)
 {
 	return (struct cv_waiter *)(uintptr_t)*w;
 }
 
 /* With the wait lock held. */
-static void cv_enqueue(uint32_t *w, struct cv_waiter *n)
+static void cv_enqueue(lock_word *w, struct cv_waiter *n)
 {
 	struct cv_waiter *first = cv_first(w);
 
 	if (!first) {
 		n->next = n->prev = n;
-		*w = (uint32_t)(uintptr_t)n;
+		*w = (uintptr_t)n;
 		return;
 	}
 	n->prev = first->prev;
@@ -122,7 +125,7 @@ static void cv_enqueue(uint32_t *w, struct cv_waiter *n)
 	first->prev = n;
 }
 
-static void cv_remove(uint32_t *w, struct cv_waiter *n)
+static void cv_remove(lock_word *w, struct cv_waiter *n)
 {
 	if (n->next == n) {
 		*w = 0;
@@ -130,7 +133,7 @@ static void cv_remove(uint32_t *w, struct cv_waiter *n)
 		n->prev->next = n->next;
 		n->next->prev = n->prev;
 		if (cv_first(w) == n)
-			*w = (uint32_t)(uintptr_t)n->next;
+			*w = (uintptr_t)n->next;
 	}
 	n->next = n->prev = NULL;
 }
@@ -152,7 +155,7 @@ struct cv_lock {
 
 static BOOL cv_sleep(PCONDITION_VARIABLE cv, DWORD ms, const struct cv_lock *l)
 {
-	uint32_t *w = word(&cv->Ptr);
+	lock_word *w = word(&cv->Ptr);
 	struct cv_waiter me = { NULL, NULL, 0 };
 	struct timespec deadline;
 	BOOL woken = TRUE;
@@ -222,7 +225,7 @@ WINFN(BOOL) k32_SleepConditionVariableCS(PCONDITION_VARIABLE cv,
 
 WINFN(void) k32_WakeConditionVariable(PCONDITION_VARIABLE cv)
 {
-	uint32_t *w = word(&cv->Ptr);
+	lock_word *w = word(&cv->Ptr);
 	struct cv_waiter *first;
 
 	wait_lock();
@@ -236,7 +239,7 @@ WINFN(void) k32_WakeConditionVariable(PCONDITION_VARIABLE cv)
 
 WINFN(void) k32_WakeAllConditionVariable(PCONDITION_VARIABLE cv)
 {
-	uint32_t *w = word(&cv->Ptr);
+	lock_word *w = word(&cv->Ptr);
 	struct cv_waiter *first;
 
 	wait_lock();
@@ -264,7 +267,7 @@ WINFN(void) k32_InitOnceInitialize(PINIT_ONCE once)
 WINFN(BOOL) k32_InitOnceBeginInitialize(PINIT_ONCE once, DWORD flags,
 					PBOOL pending, PVOID *context)
 {
-	uint32_t *w = word(&once->Ptr);
+	lock_word *w = word(&once->Ptr);
 	BOOL ok = TRUE;
 
 	if (flags & ~(DWORD)(INIT_ONCE_CHECK_ONLY | INIT_ONCE_ASYNC)) {
@@ -276,7 +279,7 @@ WINFN(BOOL) k32_InitOnceBeginInitialize(PINIT_ONCE once, DWORD flags,
 		if ((*w & 3) == ONCE_DONE) {
 			*pending = FALSE;
 			if (context)
-				*context = (PVOID)(uintptr_t)(*w & ~3u);
+				*context = (PVOID)(*w & ~(uintptr_t)3);
 			break;
 		}
 		if (flags & INIT_ONCE_CHECK_ONLY) {
@@ -298,7 +301,7 @@ WINFN(BOOL) k32_InitOnceBeginInitialize(PINIT_ONCE once, DWORD flags,
 
 WINFN(BOOL) k32_InitOnceComplete(PINIT_ONCE once, DWORD flags, PVOID context)
 {
-	uint32_t *w = word(&once->Ptr);
+	lock_word *w = word(&once->Ptr);
 	BOOL ok = TRUE;
 
 	if ((flags & ~(DWORD)(INIT_ONCE_ASYNC | INIT_ONCE_INIT_FAILED)) ||
@@ -312,7 +315,7 @@ WINFN(BOOL) k32_InitOnceComplete(PINIT_ONCE once, DWORD flags, PVOID context)
 		ok = FALSE;
 	} else {
 		*w = (flags & INIT_ONCE_INIT_FAILED) ? 0 :
-		     ((uint32_t)(uintptr_t)context | ONCE_DONE);
+		     ((uintptr_t)context | ONCE_DONE);
 		wait_broadcast();
 	}
 	wait_unlock();
@@ -346,14 +349,50 @@ WINFN(BOOL) k32_InitOnceExecuteOnce(PINIT_ONCE once, PINIT_ONCE_FN fn,
 /*
  * Interlocked singly linked lists. The header is the first entry's address,
  * the depth and a sequence number that changes with each pop; one lock
- * guards every list.
+ * guards every list, so these work on either layout of the header.
  */
 
 static pthread_mutex_t slist_lock = PTHREAD_MUTEX_INITIALIZER;
 
+#if defined(__x86_64__)
+static PSLIST_ENTRY slist_first(const SLIST_HEADER *h)
+{
+	return (PSLIST_ENTRY)(uintptr_t)(h->HeaderX64.NextEntry << 4);
+}
+
+static void slist_set(SLIST_HEADER *h, PSLIST_ENTRY first, WORD depth)
+{
+	h->HeaderX64.NextEntry = (uintptr_t)first >> 4;
+	h->HeaderX64.Depth = depth;
+	h->HeaderX64.Sequence++;
+}
+
+static WORD slist_depth(const SLIST_HEADER *h)
+{
+	return h->HeaderX64.Depth;
+}
+#else
+static PSLIST_ENTRY slist_first(const SLIST_HEADER *h)
+{
+	return h->Next.Next;
+}
+
+static void slist_set(SLIST_HEADER *h, PSLIST_ENTRY first, WORD depth)
+{
+	h->Next.Next = first;
+	h->Depth = depth;
+	h->Sequence++;
+}
+
+static WORD slist_depth(const SLIST_HEADER *h)
+{
+	return h->Depth;
+}
+#endif
+
 WINFN(void) k32_InitializeSListHead(PSLIST_HEADER h)
 {
-	h->Alignment = 0;
+	memset(h, 0, sizeof(*h));
 }
 
 WINFN(PSLIST_ENTRY) k32_InterlockedPushListSList(PSLIST_HEADER h,
@@ -363,11 +402,9 @@ WINFN(PSLIST_ENTRY) k32_InterlockedPushListSList(PSLIST_HEADER h,
 	PSLIST_ENTRY old;
 
 	pthread_mutex_lock(&slist_lock);
-	old = h->Next.Next;
+	old = slist_first(h);
 	last->Next = old;
-	h->Next.Next = first;
-	h->Depth += count;
-	h->Sequence++;
+	slist_set(h, first, slist_depth(h) + count);
 	pthread_mutex_unlock(&slist_lock);
 	return old;
 }
@@ -390,12 +427,9 @@ WINFN(PSLIST_ENTRY) k32_InterlockedPopEntrySList(PSLIST_HEADER h)
 	PSLIST_ENTRY e;
 
 	pthread_mutex_lock(&slist_lock);
-	e = h->Next.Next;
-	if (e) {
-		h->Next.Next = e->Next;
-		h->Depth--;
-		h->Sequence++;
-	}
+	e = slist_first(h);
+	if (e)
+		slist_set(h, e->Next, slist_depth(h) - 1);
 	pthread_mutex_unlock(&slist_lock);
 	return e;
 }
@@ -405,10 +439,8 @@ WINFN(PSLIST_ENTRY) k32_InterlockedFlushSList(PSLIST_HEADER h)
 	PSLIST_ENTRY e;
 
 	pthread_mutex_lock(&slist_lock);
-	e = h->Next.Next;
-	h->Next.Next = NULL;
-	h->Depth = 0;
-	h->Sequence++;
+	e = slist_first(h);
+	slist_set(h, NULL, 0);
 	pthread_mutex_unlock(&slist_lock);
 	return e;
 }
@@ -418,7 +450,7 @@ WINFN(WORD) k32_QueryDepthSList(PSLIST_HEADER h)
 	WORD depth;
 
 	pthread_mutex_lock(&slist_lock);
-	depth = h->Depth;
+	depth = slist_depth(h);
 	pthread_mutex_unlock(&slist_lock);
 	return depth;
 }

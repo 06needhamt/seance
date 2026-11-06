@@ -234,6 +234,13 @@ WINFN(DWORD) user_GetClassLongA(HWND hwnd, int index)
 	return 0;
 }
 
+#if defined(__x86_64__)
+WINFN(ULONG_PTR) user_GetClassLongPtrA(HWND hwnd, int index)
+{
+	return 0;
+}
+#endif
+
 WINFN(HCURSOR) user_GetCursor(void)
 {
 	return NULL;
@@ -438,6 +445,9 @@ const struct builtin_export u32_legacy_exports[] = {
 	E(DrawTextW),
 	E(EnableMenuItem),
 	E(GetClassLongA),
+#if defined(__x86_64__)
+	E(GetClassLongPtrA),
+#endif
 	E(GetCursor),
 	E(GetMenu),
 	E(GetMenuCheckMarkDimensions),

@@ -343,11 +343,28 @@ static void class_from_a(const WNDCLASSEXA *a, WNDCLASSEXW *w, WCHAR **f1,
 	w->lpszMenuName = a->lpszMenuName ? wide_arg(a->lpszMenuName, f2) : NULL;
 }
 
+/*
+ * A WNDCLASSEX from a WNDCLASS: the same fields after cbSize, but not at
+ * the same offsets on x86-64, where the pointers are 8-aligned.
+ */
+#define EX_FROM_PLAIN(e, p) do { \
+	memset((e), 0, sizeof(*(e))); \
+	(e)->cbSize = sizeof(*(e)); \
+	(e)->style = (p)->style; \
+	(e)->lpfnWndProc = (p)->lpfnWndProc; \
+	(e)->cbClsExtra = (p)->cbClsExtra; \
+	(e)->cbWndExtra = (p)->cbWndExtra; \
+	(e)->hInstance = (p)->hInstance; \
+	(e)->hIcon = (p)->hIcon; \
+	(e)->hCursor = (p)->hCursor; \
+	(e)->hbrBackground = (p)->hbrBackground; \
+	(e)->lpszMenuName = (p)->lpszMenuName; \
+	(e)->lpszClassName = (p)->lpszClassName; \
+} while (0)
+
 static void ex_from_plain(const WNDCLASSW *p, WNDCLASSEXW *e)
 {
-	memset(e, 0, sizeof(*e));
-	e->cbSize = sizeof(*e);
-	memcpy(&e->style, p, sizeof(*p));
+	EX_FROM_PLAIN(e, p);
 }
 
 WINFN(ATOM) user_RegisterClassExW(const WNDCLASSEXW *wc)
@@ -387,9 +404,7 @@ WINFN(ATOM) user_RegisterClassA(const WNDCLASSA *wc)
 
 	if (!wc)
 		return 0;
-	memset(&e, 0, sizeof(e));
-	e.cbSize = sizeof(e);
-	memcpy(&e.style, wc, sizeof(*wc));
+	EX_FROM_PLAIN(&e, wc);
 	return user_RegisterClassExA(&e);
 }
 
@@ -465,12 +480,23 @@ static BOOL class_info(HINSTANCE inst, const WCHAR *name, void *out, int ex,
 	leave();
 	if (!c || !out)
 		return FALSE;
-	/* The A and W structures share a layout. */
-	if (ex)
+	/* The A and W structures share a layout; the caller's cbSize stays. */
+	if (ex) {
 		memcpy((BYTE *)out + sizeof(UINT), &w.style,
 		       sizeof(w) - sizeof(UINT));
-	else
-		memcpy(out, &w.style, sizeof(WNDCLASSW));
+	} else {
+		WNDCLASSW *p = out;
+		p->style = w.style;
+		p->lpfnWndProc = w.lpfnWndProc;
+		p->cbClsExtra = w.cbClsExtra;
+		p->cbWndExtra = w.cbWndExtra;
+		p->hInstance = w.hInstance;
+		p->hIcon = w.hIcon;
+		p->hCursor = w.hCursor;
+		p->hbrBackground = w.hbrBackground;
+		p->lpszMenuName = w.lpszMenuName;
+		p->lpszClassName = w.lpszClassName;
+	}
 	return ex ? atom : TRUE;
 }
 
@@ -1257,63 +1283,104 @@ WINFN(BOOL) user_SetWindowPos(HWND hwnd, HWND after, int x, int y, int cx,
 	return set_pos(hwnd, x, y, cx, cy, flags);
 }
 
-static LONG window_long(HWND hwnd, int index, int set, LONG value, int unicode)
+/*
+ * Get/SetWindowLong, and with wide the Ptr forms, whose values (and extra
+ * bytes) are pointer-sized; on i386 the two are the same.
+ */
+static LONG_PTR window_long(HWND hwnd, int index, int set, LONG_PTR value,
+			    int unicode, int wide)
 {
-	LONG old = 0;
+	LONG_PTR old = 0;
 
 	enter();
 	struct window *w = get(hwnd);
 	if (!w)
 		goto out;
-	LONG *field = NULL;
-	switch (index) {
-	case GWL_WNDPROC:
-		old = (LONG)(ULONG_PTR)w->proc;
-		if (set) {
-			w->proc = (WNDPROC)(ULONG_PTR)value;
-			w->unicode = unicode;
-		}
-		goto out;
-	case GWL_HINSTANCE:
-		field = (LONG *)&w->inst;
-		break;
-	case GWL_HWNDPARENT:
-		field = (LONG *)(w->parent ? &w->parent : &w->owner);
-		break;
-	case GWL_ID:
-		field = (LONG *)&w->id;
-		break;
-	case GWL_STYLE:
-		field = (LONG *)&w->style;
-		break;
-	case GWL_EXSTYLE:
-		field = (LONG *)&w->exstyle;
-		break;
-	case GWL_USERDATA:
-		field = (LONG *)&w->userdata;
-		break;
-	default:
-		if (index >= 0 && index + 4 <= w->nextra) {
-			memcpy(&old, w->extra + index, 4);
-			if (set)
-				memcpy(w->extra + index, &value, 4);
-		} else {
-			win_set_error(ERROR_INVALID_INDEX);
-		}
+#if defined(__x86_64__)
+	/* A LONG can't hold these on Win64: only the Ptr forms have them. */
+	if (!wide && (index == GWLP_WNDPROC || index == GWLP_HINSTANCE ||
+		      index == GWLP_HWNDPARENT)) {
+		win_set_error(ERROR_INVALID_INDEX);
 		goto out;
 	}
-	old = *field;
-	if (set)
-		*field = value;
+#endif
+	switch (index) {
+	case GWLP_WNDPROC:
+		old = (LONG_PTR)w->proc;
+		if (set) {
+			w->proc = (WNDPROC)value;
+			w->unicode = unicode;
+		}
+		break;
+	case GWLP_HINSTANCE:
+		old = (LONG_PTR)w->inst;
+		if (set)
+			w->inst = (HINSTANCE)value;
+		break;
+	case GWLP_HWNDPARENT: {
+		HWND *f = w->parent ? &w->parent : &w->owner;
+		old = (LONG_PTR)*f;
+		if (set)
+			*f = (HWND)value;
+		break;
+	}
+	case GWLP_ID:
+		old = (LONG_PTR)w->id;
+		if (set)
+			w->id = (UINT_PTR)value;
+		break;
+	case GWL_STYLE:
+		old = (LONG)w->style;
+		if (set)
+			w->style = (DWORD)value;
+		break;
+	case GWL_EXSTYLE:
+		old = (LONG)w->exstyle;
+		if (set)
+			w->exstyle = (DWORD)value;
+		break;
+	case GWLP_USERDATA:
+		old = w->userdata;
+		if (set)
+			w->userdata = value;
+		break;
+	default: {
+		size_t n = wide ? sizeof(LONG_PTR) : sizeof(LONG);
+		if (index < 0 || (size_t)index + n > (size_t)w->nextra) {
+			win_set_error(ERROR_INVALID_INDEX);
+			break;
+		}
+		if (wide) {
+			memcpy(&old, w->extra + index, n);
+			if (set)
+				memcpy(w->extra + index, &value, n);
+		} else {
+			LONG v, nv = (LONG)value;
+			memcpy(&v, w->extra + index, n);
+			old = v;
+			if (set)
+				memcpy(w->extra + index, &nv, n);
+		}
+		break;
+	}
+	}
 out:
 	leave();
 	return old;
 }
 
-WINFN(LONG) user_GetWindowLongA(HWND h, int i) { return window_long(h, i, 0, 0, 0); }
-WINFN(LONG) user_GetWindowLongW(HWND h, int i) { return window_long(h, i, 0, 0, 1); }
-WINFN(LONG) user_SetWindowLongA(HWND h, int i, LONG v) { return window_long(h, i, 1, v, 0); }
-WINFN(LONG) user_SetWindowLongW(HWND h, int i, LONG v) { return window_long(h, i, 1, v, 1); }
+WINFN(LONG) user_GetWindowLongA(HWND h, int i) { return (LONG)window_long(h, i, 0, 0, 0, 0); }
+WINFN(LONG) user_GetWindowLongW(HWND h, int i) { return (LONG)window_long(h, i, 0, 0, 1, 0); }
+WINFN(LONG) user_SetWindowLongA(HWND h, int i, LONG v) { return (LONG)window_long(h, i, 1, v, 0, 0); }
+WINFN(LONG) user_SetWindowLongW(HWND h, int i, LONG v) { return (LONG)window_long(h, i, 1, v, 1, 0); }
+
+#if defined(__x86_64__)
+/* Exported on Win64 only: 32-bit Windows #defines them to the above. */
+WINFN(LONG_PTR) user_GetWindowLongPtrA(HWND h, int i) { return window_long(h, i, 0, 0, 0, 1); }
+WINFN(LONG_PTR) user_GetWindowLongPtrW(HWND h, int i) { return window_long(h, i, 0, 0, 1, 1); }
+WINFN(LONG_PTR) user_SetWindowLongPtrA(HWND h, int i, LONG_PTR v) { return window_long(h, i, 1, v, 0, 1); }
+WINFN(LONG_PTR) user_SetWindowLongPtrW(HWND h, int i, LONG_PTR v) { return window_long(h, i, 1, v, 1, 1); }
+#endif
 
 WINFN(BOOL) user_SetWindowTextA(HWND hwnd, LPCSTR text)
 {
@@ -2252,6 +2319,10 @@ const struct builtin_export u32_window_exports[] = {
 	E(GetPropW),
 	E(GetWindowLongA),
 	E(GetWindowLongW),
+#if defined(__x86_64__)
+	E(GetWindowLongPtrA),
+	E(GetWindowLongPtrW),
+#endif
 	E(GetWindowRect),
 	E(GetWindowTextA),
 	E(GetWindowTextLengthA),
@@ -2309,6 +2380,10 @@ const struct builtin_export u32_window_exports[] = {
 	E(SetTimer),
 	E(SetWindowLongA),
 	E(SetWindowLongW),
+#if defined(__x86_64__)
+	E(SetWindowLongPtrA),
+	E(SetWindowLongPtrW),
+#endif
 	E(SetWindowPos),
 	E(SetWindowTextA),
 	E(SetWindowTextW),

@@ -40,7 +40,7 @@ const char *dshow_hr_name(HRESULT hr, char buf[24])
 	default:
 		if (ACM_IS_HRESULT(hr))	/* an ACM driver's MMRESULT */
 			return msacm_error_name(ACM_MMRESULT(hr), buf);
-		snprintf(buf, 24, "0x%08lx", (unsigned long)hr);
+		snprintf(buf, 24, "0x%08lx", (unsigned long)(DWORD)hr);
 		return buf;
 	}
 }

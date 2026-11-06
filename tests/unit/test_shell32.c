@@ -510,7 +510,7 @@ static void test_fixture(void)
 	CHECK(m != NULL);
 	if (!m)
 		return;
-	int (*run)(void) = mod_get_proc(m, "shell_run");
+	int (CDECL *run)(void) = mod_get_proc(m, "shell_run");
 	CHECK(run != NULL);
 	if (run)
 		CHECK_EQ(run(), 0);

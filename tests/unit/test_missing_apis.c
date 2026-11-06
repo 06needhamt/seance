@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /* Regression coverage for the compatibility entry points added as a group. */
 #include <fcntl.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -14,6 +15,8 @@ static void *proc(struct module *m, const char *name)
 {
 	void *p = mod_get_proc(m, name);
 	CHECK(p != NULL);
+	if (!p)
+		fprintf(stderr, "no export %s\n", name);
 	return p;
 }
 
@@ -33,7 +36,11 @@ int main(void)
 		"_hread","_hwrite","_lclose","_lcreat","_llseek",NULL};
 	const char *un[] = {"GetScrollRange","GetWindowWord",NULL};
 	const char *gn[] = {"CreatePatternBrush","DeleteEnhMetaFile","PlayEnhMetaFile","SetEnhMetaFileBits",NULL};
-	const char *cn[] = {"_EH_prolog","__mb_cur_max","_assert","_ctype","_errno",
+	const char *cn[] = {
+#if !defined(__x86_64__)
+		"_EH_prolog",	/* i386 only */
+#endif
+		"__mb_cur_max","_assert","_ctype","_errno",
 		"_fdopen","_filbuf","_filelengthi64","_flsbuf","_fstat","_isctype",
 		"_lseek","_read","_write","fgetpos","fsetpos","localeconv","setlocale",
 		"strcoll","strxfrm","ungetc","wcsncmp",NULL};
@@ -56,8 +63,8 @@ int main(void)
 	ATOM a=add("LocalTest"); char buf[32]; CHECK(a>=0xc000); CHECK_EQ(find("localtest"),a);
 	CHECK_EQ(name(a,buf,sizeof(buf)),9); CHECK_STR(buf,"LocalTest");
 
-	int (*isctype_)(int,int)=proc(c,"_isctype");
-	int (*wcmp)(const WCHAR*,const WCHAR*,size_t)=proc(c,"wcsncmp");
+	int (CDECL *isctype_)(int,int)=proc(c,"_isctype");
+	int (CDECL *wcmp)(const WCHAR*,const WCHAR*,size_t)=proc(c,"wcsncmp");
 	WCHAR wa[]={ 'a','b',0 }, wb[]={ 'a','c',0 };
 	CHECK(isctype_('A',0x100)); CHECK(wcmp(wa,wb,1)==0); CHECK(wcmp(wa,wb,2)<0);
 	int *mb=proc(c,"__mb_cur_max"); CHECK_EQ(*mb,1);

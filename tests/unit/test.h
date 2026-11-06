@@ -48,6 +48,23 @@ static int test_checks;
 		} \
 	} while (0)
 
+/*
+ * The exports behind Get/SetWindowLongPtrA/W: their own on Win64, the plain
+ * Get/SetWindowLong ones on Win32 (where the Ptr names are macros).
+ */
+#if defined(__x86_64__)
+#define WLP_NAME(get_or_set, aw) #get_or_set "WindowLongPtr" #aw
+#else
+#define WLP_NAME(get_or_set, aw) #get_or_set "WindowLong" #aw
+#endif
+
+/* msvcrt's operator new(size_t), as each architecture's compilers mangle it. */
+#if defined(__x86_64__)
+#define OPERATOR_NEW "??2@YAPEAX_K@Z"
+#else
+#define OPERATOR_NEW "??2@YAPAXI@Z"
+#endif
+
 /* Exit status telling CTest that a test was skipped. */
 #define TEST_SKIP 77
 
@@ -55,11 +72,11 @@ static int test_checks;
  * The path of a fixture DLL in $VFW_FIXTURES. Exits with TEST_SKIP if the
  * fixtures were not built (no mingw-w64).
  */
-static inline const char *fixture(const char *name)
+static inline const char *fixture_in(const char *var, const char *name)
 {
 	static char paths[8][4096];
 	static int next;
-	const char *dir = getenv("VFW_FIXTURES");
+	const char *dir = getenv(var);
 	char *p = paths[next++ % 8];
 
 	snprintf(p, sizeof(paths[0]), "%s/%s", dir ? dir : ".", name);
@@ -68,6 +85,29 @@ static inline const char *fixture(const char *name)
 		exit(TEST_SKIP);
 	}
 	return p;
+}
+
+static inline const char *fixture(const char *name)
+{
+	return fixture_in("VFW_FIXTURES", name);
+}
+
+/*
+ * The 32-bit (i386) fixtures in $VFW_FIXTURES32, whichever architecture
+ * the harness is built for: for tests that only parse them.
+ */
+static inline const char *fixture32(const char *name)
+{
+	return fixture_in("VFW_FIXTURES32", name);
+}
+
+/*
+ * The same for the 64-bit (x86-64, PE32+) fixtures in $VFW_FIXTURES64,
+ * which need x86_64-w64-mingw32-gcc.
+ */
+static inline const char *fixture64(const char *name)
+{
+	return fixture_in("VFW_FIXTURES64", name);
 }
 
 /*

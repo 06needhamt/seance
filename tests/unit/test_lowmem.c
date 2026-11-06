@@ -89,14 +89,14 @@ int main(void)
 	struct module *k32 = mod_load("kernel32.dll", NULL);
 	CHECK(k32 != NULL);
 	if (k32) {
-		void *(__attribute__((stdcall)) *valloc)(void *, SIZE_T, DWORD, DWORD) =
+		void *(WINAPI *valloc)(void *, SIZE_T, DWORD, DWORD) =
 			mod_get_proc(k32, "VirtualAlloc");
 		void *v = valloc ? valloc(NULL, 32 << 20, MEM_COMMIT | MEM_RESERVE,
 					  PAGE_READWRITE) : NULL;
 		CHECK(v && LOW(v));
-		void *(__attribute__((stdcall)) *halloc)(HANDLE, DWORD, SIZE_T) =
+		void *(WINAPI *halloc)(HANDLE, DWORD, SIZE_T) =
 			mod_get_proc(k32, "HeapAlloc");
-		HANDLE (__attribute__((stdcall)) *heap)(void) =
+		HANDLE (WINAPI *heap)(void) =
 			mod_get_proc(k32, "GetProcessHeap");
 		void *hb = halloc && heap ? halloc(heap(), 0, 8 << 20) : NULL;
 		CHECK(hb && LOW(hb));

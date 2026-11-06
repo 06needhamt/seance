@@ -58,6 +58,13 @@
  * code, called through its native entry like DelDtor's), and
  * __CxxLongjmpUnwind.
  */
+/*
+ * The fs:[0] frames and i386 register conventions this implements don't
+ * exist on x86-64, whose exceptions are table-based (docs/X64_PLAN.md,
+ * phases 4 and 5).
+ */
+#if !defined(__x86_64__)
+
 #include <pthread.h>
 #include <setjmp.h>
 #include <signal.h>
@@ -2012,3 +2019,59 @@ const struct builtin_export crt_cxx_exports[] = {
 	E(__std_exception_destroy),
 	BUILTIN_END
 };
+
+
+#else /* __x86_64__ */
+
+/*
+ * Until the x64 C++ runtime (exceptions, RTTI, type_info, std::exception)
+ * comes: operator new and delete under their x64 names, which code built
+ * with any C++ compiler links, and _purecall.
+ */
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include "runtime/builtin.h"
+#include "runtime/crash.h"
+#include "win32/crt.h"
+#include "win32/internal.h"
+
+#define CRTFN(ret) static ret STUB_CDECL
+
+/* No _set_new_mode on x86-64 yet, so malloc never retries. */
+int crt_malloc_retry(size_t size)
+{
+	return 0;
+}
+
+CRTFN(void *) crt_operator_new(size_t size)
+{
+	/* Zeroed unless VFW_ZERO_MEMORY=0, as for the i386 one. */
+	return win_alloc(1, size ? size : 1);
+}
+
+CRTFN(void) crt_operator_delete(void *p) { free(p); }
+CRTFN(void) crt_operator_delete_sized(void *p, size_t size) { free(p); }
+
+CRTFN(void) crt__purecall(void)
+{
+	fprintf(stderr, "seance: a DLL called a pure virtual function\n");
+	fflush(stderr);
+	crash_exit(SIGABRT);
+}
+
+#define M(mangled, fn) { mangled, 0, (void *)fn }
+
+const struct builtin_export crt_cxx_exports[] = {
+	M("??2@YAPEAX_K@Z", crt_operator_new),
+	M("??_U@YAPEAX_K@Z", crt_operator_new),
+	M("??3@YAXPEAX@Z", crt_operator_delete),
+	M("??_V@YAXPEAX@Z", crt_operator_delete),
+	M("??3@YAXPEAX_K@Z", crt_operator_delete_sized),
+	M("??_V@YAXPEAX_K@Z", crt_operator_delete_sized),
+	M("_purecall", crt__purecall),
+	BUILTIN_END
+};
+
+#endif /* __x86_64__ */

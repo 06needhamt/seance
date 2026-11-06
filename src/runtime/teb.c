@@ -1,5 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+#if defined(__x86_64__)
+#include <asm/prctl.h>
+#else
 #include <asm/ldt.h>
+#endif
 #include <errno.h>
 #include <pthread.h>
 #include <stddef.h>
@@ -13,33 +17,38 @@
 #include "runtime/crash.h"
 #include "runtime/teb.h"
 
-_Static_assert(offsetof(struct win_teb, ExceptionList) == 0x00, "TEB");
-_Static_assert(offsetof(struct win_teb, StackBase) == 0x04, "TEB");
-_Static_assert(offsetof(struct win_teb, StackLimit) == 0x08, "TEB");
-_Static_assert(offsetof(struct win_teb, Self) == 0x18, "TEB");
-_Static_assert(offsetof(struct win_teb, UniqueProcess) == 0x20, "TEB");
-_Static_assert(offsetof(struct win_teb, UniqueThread) == 0x24, "TEB");
-_Static_assert(offsetof(struct win_teb, ThreadLocalStoragePointer) == 0x2c, "TEB");
-_Static_assert(offsetof(struct win_teb, Peb) == 0x30, "TEB");
-_Static_assert(offsetof(struct win_teb, LastErrorValue) == 0x34, "TEB");
-_Static_assert(offsetof(struct win_teb, TlsSlots) == 0xe10, "TEB");
-_Static_assert(offsetof(struct win_teb, TlsExpansionSlots) == 0xf94, "TEB");
+#define CHECK_OFF(type, field, i386, x64) \
+	_Static_assert(offsetof(type, field) == TEB_OFF(i386, x64), #type "." #field)
+CHECK_OFF(struct win_teb, ExceptionList, 0x00, 0x00);
+CHECK_OFF(struct win_teb, StackBase, 0x04, 0x08);
+CHECK_OFF(struct win_teb, StackLimit, 0x08, 0x10);
+CHECK_OFF(struct win_teb, Self, 0x18, 0x30);
+CHECK_OFF(struct win_teb, UniqueProcess, 0x20, 0x40);
+CHECK_OFF(struct win_teb, UniqueThread, 0x24, 0x48);
+CHECK_OFF(struct win_teb, ThreadLocalStoragePointer, 0x2c, 0x58);
+CHECK_OFF(struct win_teb, Peb, 0x30, 0x60);
+CHECK_OFF(struct win_teb, LastErrorValue, 0x34, 0x68);
+CHECK_OFF(struct win_teb, TlsSlots, 0xe10, 0x1480);
+CHECK_OFF(struct win_teb, TlsExpansionSlots, 0xf94, 0x1780);
+CHECK_OFF(struct win_teb, priv, TEB_PRIVATE, TEB_PRIVATE);
 _Static_assert(sizeof(struct win_teb) <= TEB_SIZE, "TEB size");
-_Static_assert(offsetof(struct win_teb, priv) == 0x1000, "TEB private area");
-_Static_assert(offsetof(struct win_peb, BeingDebugged) == 0x02, "PEB");
-_Static_assert(offsetof(struct win_peb, ImageBaseAddress) == 0x08, "PEB");
-_Static_assert(offsetof(struct win_peb, ProcessHeap) == 0x18, "PEB");
-_Static_assert(offsetof(struct win_peb, NumberOfProcessors) == 0x64, "PEB");
-_Static_assert(offsetof(struct win_peb, OSMajorVersion) == 0xa4, "PEB");
-_Static_assert(offsetof(struct win_peb, OSPlatformId) == 0xb0, "PEB");
+CHECK_OFF(struct win_peb, BeingDebugged, 0x02, 0x02);
+CHECK_OFF(struct win_peb, ImageBaseAddress, 0x08, 0x10);
+CHECK_OFF(struct win_peb, ProcessHeap, 0x18, 0x30);
+CHECK_OFF(struct win_peb, NumberOfProcessors, 0x64, 0xb8);
+CHECK_OFF(struct win_peb, OSMajorVersion, 0xa4, 0x118);
+CHECK_OFF(struct win_peb, OSPlatformId, 0xb0, 0x124);
+#undef CHECK_OFF
 
-#define LDT_ENTRIES 8192
+#define LDT_ENTRIES 8192	/* i386 only */
 #define EXPANSION_BYTES (TEB_TLS_EXPANSION_SLOTS * sizeof(void *))
 
 static _Thread_local struct win_teb *current;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static struct win_teb *all_tebs;
+#if !defined(__x86_64__)
 static unsigned char ldt_used[LDT_ENTRIES];
+#endif
 static unsigned char tls_used[TEB_TLS_MAX];
 
 static struct win_peb peb;
@@ -81,6 +90,33 @@ struct win_peb *peb_get(void)
 	return &peb;
 }
 
+#if defined(__x86_64__)
+
+/* No LDT: the TEB is wherever the GS base points. */
+static int install_teb(struct win_teb *teb)
+{
+	if (syscall(SYS_arch_prctl, ARCH_SET_GS, (unsigned long)teb)) {
+		vfw_set_error("arch_prctl(ARCH_SET_GS): %s", strerror(errno));
+		return -1;
+	}
+	/*
+	 * Windows starts threads with every SSE exception masked, and the
+	 * x87 at 53-bit precision as on i386 (code may still use it).
+	 */
+	unsigned mxcsr = 0x1f80;
+	unsigned short cw = 0x27f;
+	__asm__ volatile("ldmxcsr %0" : : "m"(mxcsr));
+	__asm__ volatile("fldcw %0" : : "m"(cw));
+	return 0;
+}
+
+static void remove_teb(struct win_teb *teb)
+{
+	syscall(SYS_arch_prctl, ARCH_SET_GS, 0ul);
+}
+
+#else
+
 static int set_ldt(int entry, void *base, unsigned limit, int present)
 {
 	struct user_desc d;
@@ -110,6 +146,42 @@ static void set_fpu_control(unsigned short cw)
 {
 	__asm__ volatile("fldcw %0" : : "m"(cw));
 }
+
+/* Gives the TEB an LDT entry and loads it into %fs; lock held. */
+static int install_teb(struct win_teb *teb)
+{
+	int entry = -1;
+
+	for (int i = 0; i < LDT_ENTRIES; i++) {
+		if (!ldt_used[i]) {
+			entry = i;
+			break;
+		}
+	}
+	if (entry < 0) {
+		vfw_set_error("no free LDT entries");
+		return -1;
+	}
+	if (set_ldt(entry, teb, TEB_SIZE - 1, 1)) {
+		vfw_set_error("modify_ldt: %s", strerror(errno));
+		return -1;
+	}
+	ldt_used[entry] = 1;
+	teb->priv.ldt_entry = entry;
+	load_fs((entry << 3) | 7);	/* LDT, ring 3 */
+	set_fpu_control(0x27f);
+	return 0;
+}
+
+/* Unloads %fs and frees the TEB's LDT entry; lock held. */
+static void remove_teb(struct win_teb *teb)
+{
+	load_fs(0);
+	set_ldt(teb->priv.ldt_entry, NULL, 0, 0);
+	ldt_used[teb->priv.ldt_entry] = 0;
+}
+
+#endif
 
 struct win_teb *teb_init_thread(void)
 {
@@ -156,33 +228,17 @@ struct win_teb *teb_init_thread(void)
 			return NULL;
 		}
 	}
-	int entry = -1;
-	for (int i = 0; i < LDT_ENTRIES; i++) {
-		if (!ldt_used[i]) {
-			entry = i;
-			break;
-		}
-	}
-	if (entry < 0 || set_ldt(entry, teb, TEB_SIZE - 1, 1)) {
-		int err = errno;
+	if (install_teb(teb)) {
 		pthread_mutex_unlock(&lock);
 		for (int i = 0; i < TEB_STATIC_TLS_MAX; i++)
 			free(teb->priv.static_tls[i]);
 		munmap(teb, TEB_SIZE);
-		if (entry < 0)
-			vfw_set_error("no free LDT entries");
-		else
-			vfw_set_error("modify_ldt: %s", strerror(err));
 		return NULL;
 	}
-	ldt_used[entry] = 1;
-	teb->priv.ldt_entry = entry;
 	teb->priv.next = all_tebs;
 	all_tebs = teb;
 	pthread_mutex_unlock(&lock);
 
-	load_fs((entry << 3) | 7);	/* LDT, ring 3 */
-	set_fpu_control(0x27f);
 	current = teb;
 	return teb;
 }
@@ -194,7 +250,6 @@ void teb_exit_thread(void)
 	if (!teb)
 		return;
 	crash_thread_exit();
-	load_fs(0);
 	current = NULL;
 
 	pthread_mutex_lock(&lock);
@@ -204,8 +259,7 @@ void teb_exit_thread(void)
 			break;
 		}
 	}
-	set_ldt(teb->priv.ldt_entry, NULL, 0, 0);
-	ldt_used[teb->priv.ldt_entry] = 0;
+	remove_teb(teb);
 	pthread_mutex_unlock(&lock);
 
 	for (int i = 0; i < TEB_STATIC_TLS_MAX; i++)

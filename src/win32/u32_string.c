@@ -9,6 +9,7 @@
  * would take %S and %ls as 32-bit wchar_t), there are no floating-point
  * conversions, and the output stops at 1024 characters.
  */
+#include <stdint.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,6 +20,7 @@
 #include "win32/codepage.h"
 #include "win32/internal.h"
 #include "win32/k32.h"
+#include "win32/winva.h"
 
 #define WSPRINTF_MAX 1024
 
@@ -171,7 +173,7 @@ static WCHAR *string_arg(const void *s, int wide, int max)
 }
 
 /* Formats into o; fmt is ANSI or UTF-16 as wide says. */
-static void format(struct out *o, const void *fmt, int wide, va_list ap)
+static void format(struct out *o, const void *fmt, int wide, win_va_list ap)
 {
 	const BYTE *fa = fmt;
 	const WCHAR *fw = fmt;
@@ -228,7 +230,7 @@ static void format(struct out *o, const void *fmt, int wide, va_list ap)
 		case 'C': {
 			int char_wide = size ? size == 'l' :
 				       (type == 'c') == !!wide;
-			WCHAR ch = (WCHAR)va_arg(ap, int);
+			WCHAR ch = (WCHAR)win_va_arg(ap, int);
 			if (!char_wide) {
 				char b = (char)ch;
 				cp_to_utf16(CP_ACP, &b, 1, &ch, 1, 0);
@@ -240,7 +242,7 @@ static void format(struct out *o, const void *fmt, int wide, va_list ap)
 		case 'S': {
 			int str_wide = size ? size == 'l' :
 				      (type == 's') == !!wide;
-			WCHAR *s = string_arg(va_arg(ap, const void *), str_wide, prec);
+			WCHAR *s = string_arg(win_va_arg(ap, const void *), str_wide, prec);
 			if (s)
 				field(o, s, wstrlen(s), width, left, ' ');
 			free(s);
@@ -252,9 +254,12 @@ static void format(struct out *o, const void *fmt, int wide, va_list ap)
 		case 'x':
 		case 'X':
 		case 'p': {
-			unsigned long v = va_arg(ap, unsigned long);
-			int neg = (type == 'd' || type == 'i') && (long)v < 0;
-			unsigned long u = neg ? -(unsigned long)v : v;
+			/* 32-bit, with or without 'l'; %p pointer-sized. */
+			uint64_t v = type == 'p' ?
+				     (uintptr_t)win_va_arg(ap, void *) :
+				     win_va_arg(ap, DWORD);
+			int neg = (type == 'd' || type == 'i') && (int32_t)v < 0;
+			uint64_t u = neg ? (uint64_t)-(int64_t)(int32_t)v : v;
 			int base = (type == 'x' || type == 'X' || type == 'p') ? 16 : 10;
 			const char *digits = type == 'x' ? "0123456789abcdef" :
 							   "0123456789ABCDEF";
@@ -265,7 +270,7 @@ static void format(struct out *o, const void *fmt, int wide, va_list ap)
 				u /= base;
 			} while (u);
 			if (type == 'p')
-				prec = 8;
+				prec = 2 * sizeof(void *);
 			while (nd < prec && nd < 32)
 				rev[nd++] = '0';
 			if (neg)
@@ -317,7 +322,7 @@ static int out_w(const struct out *o, LPWSTR buf)
 	return o->n;
 }
 
-WINFN(int) user_wvsprintfA(LPSTR buf, LPCSTR fmt, va_list ap)
+WINFN(int) user_wvsprintfA(LPSTR buf, LPCSTR fmt, win_va_list ap)
 {
 	struct out o;
 
@@ -327,7 +332,7 @@ WINFN(int) user_wvsprintfA(LPSTR buf, LPCSTR fmt, va_list ap)
 	return out_a(&o, buf);
 }
 
-WINFN(int) user_wvsprintfW(LPWSTR buf, LPCWSTR fmt, va_list ap)
+WINFN(int) user_wvsprintfW(LPWSTR buf, LPCWSTR fmt, win_va_list ap)
 {
 	struct out o;
 
@@ -340,26 +345,26 @@ WINFN(int) user_wvsprintfW(LPWSTR buf, LPCWSTR fmt, va_list ap)
 static int STUB_CDECL user_wsprintfA(LPSTR buf, LPCSTR fmt, ...)
 {
 	struct out o;
-	va_list ap;
+	win_va_list ap;
 
 	if (!buf || !fmt)
 		return 0;
-	va_start(ap, fmt);
+	win_va_start(ap, fmt);
 	format(&o, fmt, 0, ap);
-	va_end(ap);
+	win_va_end(ap);
 	return out_a(&o, buf);
 }
 
 static int STUB_CDECL user_wsprintfW(LPWSTR buf, LPCWSTR fmt, ...)
 {
 	struct out o;
-	va_list ap;
+	win_va_list ap;
 
 	if (!buf || !fmt)
 		return 0;
-	va_start(ap, fmt);
+	win_va_start(ap, fmt);
 	format(&o, fmt, 1, ap);
-	va_end(ap);
+	win_va_end(ap);
 	return out_w(&o, buf);
 }
 

@@ -34,8 +34,10 @@ static struct {
 	LRESULT (WINAPI *CallWindowProcA)(WNDPROC, HWND, UINT, WPARAM, LPARAM);
 	LRESULT (WINAPI *CallWindowProcW)(WNDPROC, HWND, UINT, WPARAM, LPARAM);
 	LONG (WINAPI *GetWindowLongW)(HWND, int);
-	LONG (WINAPI *SetWindowLongA)(HWND, int, LONG);
-	LONG (WINAPI *SetWindowLongW)(HWND, int, LONG);
+	/* Get/SetWindowLongPtr: the plain ones on i386, as Windows has it. */
+	LONG_PTR (WINAPI *GetWindowLongPtrW)(HWND, int);
+	LONG_PTR (WINAPI *SetWindowLongPtrA)(HWND, int, LONG_PTR);
+	LONG_PTR (WINAPI *SetWindowLongPtrW)(HWND, int, LONG_PTR);
 	BOOL (WINAPI *IsWindowUnicode)(HWND);
 	BOOL (WINAPI *ShowWindow)(HWND, int);
 	HANDLE (WINAPI *GetPropW)(HWND, LPCWSTR);
@@ -71,7 +73,14 @@ static void api_init(void)
 #define G(name) api.name = GDI32(name)
 	U(RegisterClassW); U(CreateWindowExW); U(DefWindowProcW);
 	U(SendMessageW); U(CallWindowProcA); U(CallWindowProcW);
-	U(GetWindowLongW); U(SetWindowLongA); U(SetWindowLongW);
+	U(GetWindowLongW);
+#if defined(__x86_64__)
+	U(GetWindowLongPtrW); U(SetWindowLongPtrA); U(SetWindowLongPtrW);
+#else
+	api.GetWindowLongPtrW = USER32(GetWindowLongW);
+	api.SetWindowLongPtrA = USER32(SetWindowLongA);
+	api.SetWindowLongPtrW = USER32(SetWindowLongW);
+#endif
 	U(IsWindowUnicode); U(ShowWindow);
 	U(GetPropW); U(SetPropW); U(RemovePropW);
 	U(SetWindowTextW); U(GetWindowTextW); U(GetParent); U(GetDlgItem);
@@ -153,15 +162,15 @@ static int text_len(const WCHAR *text, int wide)
 	return n;
 }
 
-/* Every control keeps its state behind the first window extra DWORD. */
+/* Every control keeps its state behind its first window extra bytes. */
 static void *state(HWND h)
 {
-	return (void *)(ULONG_PTR)api.GetWindowLongW(h, 0);
+	return (void *)api.GetWindowLongPtrW(h, 0);
 }
 
 static void set_state(HWND h, void *s)
 {
-	api.SetWindowLongW(h, 0, (LONG)(ULONG_PTR)s);
+	api.SetWindowLongPtrW(h, 0, (LONG_PTR)s);
 }
 
 static DWORD style_of(HWND h)
@@ -1017,9 +1026,9 @@ static void subclass_cleanup(HWND h, struct subclass_info *s)
 	if (s->procs || s->running)
 		return;
 	if (s->unicode)
-		api.SetWindowLongW(h, GWL_WNDPROC, (LONG)(ULONG_PTR)s->orig);
+		api.SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)s->orig);
 	else
-		api.SetWindowLongA(h, GWL_WNDPROC, (LONG)(ULONG_PTR)s->orig);
+		api.SetWindowLongPtrA(h, GWLP_WNDPROC, (LONG_PTR)s->orig);
 	api.RemovePropW(h, subclass_prop);
 	free(s);
 }
@@ -1078,12 +1087,12 @@ WINFN(BOOL) cc_SetWindowSubclass(HWND h, SUBCLASSPROC proc, UINT_PTR id,
 			free(s);
 			return FALSE;
 		}
-		LONG old = s->unicode ?
-			   api.SetWindowLongW(h, GWL_WNDPROC,
-					      (LONG)(ULONG_PTR)subclass_proc) :
-			   api.SetWindowLongA(h, GWL_WNDPROC,
-					      (LONG)(ULONG_PTR)subclass_proc);
-		s->orig = (WNDPROC)(ULONG_PTR)old;
+		LONG_PTR old = s->unicode ?
+			   api.SetWindowLongPtrW(h, GWLP_WNDPROC,
+						 (LONG_PTR)subclass_proc) :
+			   api.SetWindowLongPtrA(h, GWLP_WNDPROC,
+						 (LONG_PTR)subclass_proc);
+		s->orig = (WNDPROC)old;
 	}
 	for (struct subclass *p = s->procs; p; p = p->next)
 		if (p->proc == proc && p->id == id) {

@@ -12,7 +12,11 @@
 #include "runtime/crash.h"
 #include "runtime/trap.h"
 
+#if defined(__x86_64__)
+#define THUNK_SIZE  32
+#else
 #define THUNK_SIZE  16
+#endif
 #define POOL_SIZE   0x10000
 
 struct trap_record {
@@ -22,9 +26,22 @@ struct trap_record {
 };
 
 /*
- * Each thunk is "mov eax, record; jmp vfw_trap_entry". The entry point
- * passes the record and the caller's return address to trap_report().
+ * Each thunk is "mov eax, record; jmp vfw_trap_entry" ("movabs rax, record;
+ * jmp [rip]" with the target after it, on x86-64, where the entry point may
+ * be more than 2 GB away). The entry point passes the record and the
+ * caller's return address to trap_report().
  */
+#if defined(__x86_64__)
+__asm__(
+	".text\n"
+	".globl vfw_trap_entry\n"
+	"vfw_trap_entry:\n"
+	"	movq (%rsp), %rsi\n"	/* return address into the caller */
+	"	movq %rax, %rdi\n"
+	"	subq $8, %rsp\n"	/* 16-byte aligned for the call */
+	"	call vfw_trap_report\n"
+	"	ud2\n");
+#else
 __asm__(
 	".text\n"
 	".globl vfw_trap_entry\n"
@@ -34,6 +51,7 @@ __asm__(
 	"	pushl %eax\n"
 	"	call vfw_trap_report\n"
 	"	ud2\n");
+#endif
 
 void vfw_trap_entry(void);
 void vfw_trap_report(const struct trap_record *r, const void *ret)
@@ -98,6 +116,18 @@ void *trap_thunk_why(const char *dll, const char *name, WORD ordinal,
 	records = r;
 	pthread_mutex_unlock(&lock);
 
+#if defined(__x86_64__)
+	uint64_t rec = (uintptr_t)r;
+	uint64_t entry = (uintptr_t)vfw_trap_entry;
+	t[0] = 0x48;			/* movabs rax, imm64 */
+	t[1] = 0xb8;
+	memcpy(t + 2, &rec, 8);
+	t[10] = 0xff;			/* jmp [rip + 0] */
+	t[11] = 0x25;
+	memset(t + 12, 0, 4);
+	memcpy(t + 16, &entry, 8);	/* its target */
+	memset(t + 24, 0xcc, THUNK_SIZE - 24);	/* int3 padding */
+#else
 	DWORD rec = (DWORD)(uintptr_t)r;
 	DWORD rel = (DWORD)((uintptr_t)vfw_trap_entry - (uintptr_t)(t + 10));
 	t[0] = 0xb8;			/* mov eax, imm32 */
@@ -105,6 +135,7 @@ void *trap_thunk_why(const char *dll, const char *name, WORD ordinal,
 	t[5] = 0xe9;			/* jmp rel32 */
 	memcpy(t + 6, &rel, 4);
 	memset(t + 10, 0xcc, THUNK_SIZE - 10);	/* int3 padding */
+#endif
 	return t;
 
 fail:
