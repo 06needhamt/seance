@@ -7,6 +7,9 @@
  * not the host's wchar_t.
  */
 #include <ctype.h>
+#include <errno.h>
+#include <inttypes.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <malloc.h>
@@ -274,25 +277,67 @@ CRTFN(size_t) crt_strxfrm(char *d, const char *s, size_t n) { return strxfrm(d, 
  * shared with the host's exactly; MSVC's own itoa/ltoa/ultoa family has no
  * glibc equivalent, so they go through snprintf. */
 CRTFN(int) crt_atoi(const char *s) { return atoi(s); }
-CRTFN(long) crt_atol(const char *s) { return atol(s); }
 CRTFN(double) crt_atof(const char *s) { return atof(s); }
-CRTFN(long) crt_strtol(const char *s, char **end, int base) { return strtol(s, end, base); }
-CRTFN(unsigned long) crt_strtoul(const char *s, char **end, int base) { return strtoul(s, end, base); }
+/*
+ * A Windows long is 32 bits, also on Win64: strtol and strtoul clamp to
+ * that range (and set ERANGE) whatever the host's long is.
+ */
+CRTFN(LONG) crt_strtol(const char *s, char **end, int base)
+{
+	errno = 0;
+	long long v = strtoll(s, end, base);
+	if (v > INT32_MAX || (v == LLONG_MAX && errno == ERANGE)) {
+		errno = ERANGE;
+		return INT32_MAX;
+	}
+	if (v < INT32_MIN || (v == LLONG_MIN && errno == ERANGE)) {
+		errno = ERANGE;
+		return INT32_MIN;
+	}
+	return (LONG)v;
+}
+CRTFN(LONG) crt_atol(const char *s) { return crt_strtol(s, NULL, 10); }
+CRTFN(ULONG) crt_strtoul(const char *s, char **end, int base)
+{
+	/* As C has it: the magnitude must fit, then a '-' negates it. */
+	const char *p = s;
+	while (isspace((unsigned char)*p))
+		p++;
+	int neg = *p == '-';
+	if (*p == '-' || *p == '+')
+		p++;
+	char *e;
+	errno = 0;
+	unsigned long long m = strtoull(p, &e, base);
+	if (e == p || *p == '-' || *p == '+') {	/* no digits after the sign */
+		if (end)
+			*end = (char *)s;
+		return 0;
+	}
+	if (end)
+		*end = e;
+	if (errno == ERANGE || m > UINT32_MAX) {
+		errno = ERANGE;
+		return UINT32_MAX;
+	}
+	return neg ? (ULONG)-(uint32_t)m : (ULONG)m;
+}
 CRTFN(double) crt_strtod(const char *s, char **end) { return strtod(s, end); }
 
-static char *itoa_base(long v, char *buf, int radix, int is_unsigned)
+/* v is a 32-bit Windows int or long; other bases than 10 show its bits. */
+static char *itoa_base(int32_t v, char *buf, int radix, int is_unsigned)
 {
 	if (radix == 10 && is_unsigned)
-		snprintf(buf, 34, "%lu", (unsigned long)v);
+		snprintf(buf, 34, "%" PRIu32, (uint32_t)v);
 	else if (radix == 10)
-		snprintf(buf, 34, "%ld", v);
+		snprintf(buf, 34, "%" PRId32, v);
 	else if (radix == 16)
-		snprintf(buf, 34, "%lx", (unsigned long)v);
+		snprintf(buf, 34, "%" PRIx32, (uint32_t)v);
 	else if (radix == 8)
-		snprintf(buf, 34, "%lo", (unsigned long)v);
+		snprintf(buf, 34, "%" PRIo32, (uint32_t)v);
 	else {
 		/* An uncommon base: build it up a digit at a time. */
-		unsigned long u = is_unsigned || v >= 0 ? (unsigned long)v : (unsigned long)-v;
+		uint32_t u = is_unsigned || v >= 0 ? (uint32_t)v : -(uint32_t)v;
 		char tmp[34];
 		int i = 0;
 		if (!u)
@@ -313,10 +358,10 @@ static char *itoa_base(long v, char *buf, int radix, int is_unsigned)
 }
 
 CRTFN(char *) crt__itoa(int v, char *buf, int radix) { return itoa_base(v, buf, radix, 0); }
-CRTFN(char *) crt__ltoa(long v, char *buf, int radix) { return itoa_base(v, buf, radix, 0); }
-CRTFN(char *) crt__ultoa(unsigned long v, char *buf, int radix)
+CRTFN(char *) crt__ltoa(LONG v, char *buf, int radix) { return itoa_base(v, buf, radix, 0); }
+CRTFN(char *) crt__ultoa(ULONG v, char *buf, int radix)
 {
-	return itoa_base((long)v, buf, radix, 1);
+	return itoa_base((int32_t)v, buf, radix, 1);
 }
 
 /*
@@ -367,7 +412,7 @@ CRTFN(void *) crt_bsearch(const void *key, const void *base, size_t n,
 }
 
 CRTFN(int) crt_abs(int v) { return abs(v); }
-CRTFN(long) crt_labs(long v) { return labs(v); }
+CRTFN(LONG) crt_labs(LONG v) { return v < 0 ? -v : v; }
 
 /* The CRT heap: its own malloc/free/calloc/realloc, independent of
  * kernel32's HeapAlloc/GlobalAlloc family - a codec may use either. On

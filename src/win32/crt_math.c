@@ -33,7 +33,7 @@ CRTFN(void) crt___setusermatherr(void *handler) { (void)handler; }
 CRTFN(double) crt__hypot(double x, double y) { return hypot(x, y); }
 CRTFN(double) crt__copysign(double x, double y) { return copysign(x, y); }
 CRTFN(double) crt__logb(double x) { return logb(x); }
-CRTFN(double) crt__scalb(double x, long n) { return scalbn(x, (int)n); }
+CRTFN(double) crt__scalb(double x, LONG n) { return scalbn(x, n); }
 CRTFN(double) crt__nextafter(double x, double y) { return nextafter(x, y); }
 CRTFN(int) crt__finite(double x) { return isfinite(x) != 0; }
 CRTFN(int) crt__isnan(double x) { return isnan(x) != 0; }

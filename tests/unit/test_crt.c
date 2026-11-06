@@ -4,6 +4,7 @@
  * with a dynamic CRT (/MD) would; the harness's own builtin_msvcrt serves
  * them, forwarding to the host's libm/libc.
  */
+#include <errno.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stddef.h>
@@ -284,6 +285,49 @@ static void test_intrinsics(void)
 /* MSVCRT behaviour that differs from glibc's, called directly. */
 #endif
 
+/* A Windows long is 32 bits on both architectures. */
+static void test_long(void)
+{
+	LONG (CDECL *strtol_)(const char *, char **, int) = get("strtol");
+	ULONG (CDECL *strtoul_)(const char *, char **, int) = get("strtoul");
+	LONG (CDECL *atol_)(const char *) = get("atol");
+	LONG (CDECL *labs_)(LONG) = get("labs");
+	char *(CDECL *ltoa_)(LONG, char *, int) = get("_ltoa");
+	char *(CDECL *ultoa_)(ULONG, char *, int) = get("_ultoa");
+	int *(CDECL *errno_)(void) = get("_errno");
+	char b[40], *end;
+
+	*errno_() = 0;
+	CHECK_EQ(strtol_("4294967296", &end, 10), INT32_MAX);
+	CHECK_EQ(*errno_(), ERANGE);
+	CHECK_EQ(*end, 0);
+	CHECK_EQ(strtol_("-4294967296", NULL, 10), INT32_MIN);
+	CHECK_EQ(strtol_(" -123x", &end, 10), -123);
+	CHECK_EQ(*end, 'x');
+	CHECK_EQ(strtol_("7fffffff", NULL, 16), INT32_MAX);
+	CHECK(strtoul_("-1", NULL, 10) == 0xffffffffu);
+	CHECK(strtoul_("ffffffff", NULL, 16) == 0xffffffffu);
+	*errno_() = 0;
+	CHECK(strtoul_("4294967296", NULL, 10) == 0xffffffffu);
+	CHECK_EQ(*errno_(), ERANGE);
+	const char *none = "  -z";
+	CHECK(strtoul_(none, &end, 10) == 0 && end == none);
+	CHECK_EQ(atol_("99999999999"), INT32_MAX);
+	CHECK_EQ(labs_(-5), 5);
+	CHECK_STR(ltoa_(-1, b, 16), "ffffffff");
+	CHECK_STR(ltoa_(-42, b, 10), "-42");
+	CHECK_STR(ultoa_(0xfffffffeu, b, 10), "4294967294");
+	CHECK_STR(ltoa_(-1, b, 2), "-1");
+#ifdef __x86_64__
+	/* A Win64 caller may leave the upper half of a 32-bit argument as
+	 * anything: only the low 32 bits count. */
+	char *(CDECL *ltoa64)(long long, char *, int) = get("_ltoa");
+	CHECK_STR(ltoa64(0xdeadbeef00000005ll, b, 10), "5");
+	LONG (CDECL *labs64)(long long) = get("labs");
+	CHECK_EQ(labs64(0x12345678fffffffbll), 5);
+#endif
+}
+
 static void test_msvcrt_semantics(void)
 {
 	int (CDECL *snprintf_)(char *, size_t, const char *, ...) = get("_snprintf");
@@ -291,7 +335,7 @@ static void test_msvcrt_semantics(void)
 	void *(CDECL *fopen_)(const char *, const char *) = get("fopen");
 	size_t (CDECL *fwrite_)(const void *, size_t, size_t, void *) = get("fwrite");
 	size_t (CDECL *fread_)(void *, size_t, size_t, void *) = get("fread");
-	int (CDECL *fseek_)(void *, long, int) = get("fseek");
+	int (CDECL *fseek_)(void *, LONG, int) = get("fseek");
 	int (CDECL *feof_)(void *) = get("feof");
 	int (CDECL *fclose_)(void *) = get("fclose");
 	int (CDECL *isprint_)(int) = get("isprint");
@@ -649,6 +693,7 @@ int main(void)
 	CHECK(crt != NULL);
 	if (crt) {
 		test_msvcrt_semantics();
+		test_long();
 		test_printf();
 #if !defined(__x86_64__)
 		test_intrinsics();
