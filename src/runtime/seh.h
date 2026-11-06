@@ -47,4 +47,18 @@ LPTOP_LEVEL_EXCEPTION_FILTER WINAPI
 seh_SetUnhandledExceptionFilter(LPTOP_LEVEL_EXCEPTION_FILTER filter);
 LONG WINAPI seh_UnhandledExceptionFilter(EXCEPTION_POINTERS *ep);
 
+#if defined(__x86_64__)
+/* The x86-64 unwinder (unwind_x64.c), exported by ntdll.dll and kernel32.dll. */
+PRUNTIME_FUNCTION WINAPI seh_RtlLookupFunctionEntry(ULONGLONG pc,
+						    ULONGLONG *image_base,
+						    void *history);
+PEXCEPTION_ROUTINE WINAPI
+seh_RtlVirtualUnwind(DWORD type, ULONGLONG base, ULONGLONG pc,
+		     PRUNTIME_FUNCTION fe, CONTEXT *ctx, void **handler_data,
+		     ULONGLONG *frame_ret, KNONVOLATILE_CONTEXT_POINTERS *ptrs);
+BOOLEAN WINAPI seh_RtlAddFunctionTable(PRUNTIME_FUNCTION entries, DWORD count,
+				       ULONGLONG base);
+BOOLEAN WINAPI seh_RtlDeleteFunctionTable(PRUNTIME_FUNCTION entries);
+#endif
+
 #endif /* VFW_RUNTIME_SEH_H */
