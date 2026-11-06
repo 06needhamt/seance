@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "commands.h"
+#include "handoff.h"
 #include "runtime/crash.h"
 #include "runtime/lowmem.h"
 #include "win32/k32.h"
@@ -20,33 +21,34 @@ struct command {
 	const char *args;
 	const char *summary;
 	int (*run)(int argc, char **argv);	/* NULL until implemented */
+	int takes_codec;	/* its first argument names one */
 };
 
 static const struct command commands[] = {
 	{ "info", "<dll>",
 	  "show PE headers, sections, exports, imports and resources",
-	  cmd_info },
+	  cmd_info, 0 },
 	{ "avi", "<in.avi> [--chunks]",
-	  "show an AVI file's headers, streams and index", cmd_avi },
+	  "show an AVI file's headers, streams and index", cmd_avi, 0 },
 	{ "convert", "<in.avi|wav> -o <out>",
 	  "write uncompressed video as Y4M, BMP or raw frames, or audio as "
-	  "WAV, PCM or AVI", cmd_convert },
+	  "WAV, PCM or AVI", cmd_convert, 0 },
 	{ "list", "[--no-open] [--all]",
-	  "list the codecs and DirectShow filters registered", cmd_list },
+	  "list the codecs and DirectShow filters registered", cmd_list, 0 },
 	{ "probe", "<dll|fourcc> [in.avi]",
-	  "show codec info and the formats it accepts", cmd_probe },
+	  "show codec info and the formats it accepts", cmd_probe, 1 },
 	{ "decode", "<dll|fourcc|auto> <in.avi|wav> -o <out>",
 	  "decompress video to Y4M, BMP or raw frames, or audio to WAV or PCM",
-	  cmd_decode },
+	  cmd_decode, 1 },
 	{ "encode", "<dll|fourcc> <in.y4m|avi|bmp|raw|wav> -o <out.avi>",
-	  "compress video or audio to an AVI", cmd_encode },
+	  "compress video or audio to an AVI", cmd_encode, 1 },
 	{ "sweep", "<dir|dll>... [--markdown <f>]",
 	  "try every codec in a directory: encode, decode, PSNR",
-	  cmd_sweep },
+	  cmd_sweep, 0 },
 	{ "register", "[--dry-run] <filter.ax>",
-	  "register a DirectShow filter server's filters", cmd_register },
+	  "register a DirectShow filter server's filters", cmd_register, 1 },
 	{ "unregister", "<filter.ax>",
-	  "unregister a DirectShow filter server's filters", cmd_register },
+	  "unregister a DirectShow filter server's filters", cmd_register, 1 },
 };
 
 static void usage(FILE *out)
@@ -89,6 +91,21 @@ int main(int argc, char **argv)
 			fprintf(stderr, "seance: '%s' is not implemented yet\n",
 				cmd);
 			return 2;
+		}
+		/*
+		 * A codec of the other architecture runs in the other binary:
+		 * one named by path goes there now, one found later (a FOURCC
+		 * in vfw.ini, a CLSID) when it is first mapped. "decode auto"
+		 * tries every codec and keeps to this binary's.
+		 */
+		handoff_init(argc, argv);
+		const char *codec = NULL;
+		for (int a = 2; c->takes_codec && a < argc && !codec; a++)
+			if (argv[a][0] != '-')
+				codec = argv[a];
+		if (codec && strcmp(codec, "auto")) {
+			handoff_if_foreign(codec);
+			handoff_arm();
 		}
 		/* Crashes and hangs in DLL code get reported. */
 		if (crash_install())

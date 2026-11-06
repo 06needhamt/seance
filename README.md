@@ -28,9 +28,12 @@ Work is split into phases; see [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION
 64-bit (x86-64) codecs run in `seance64`, which the default build makes
 beside `seance` ([docs/X64_PLAN.md](docs/X64_PLAN.md)).
 The 64-bit test codecs (VfW, ACM, DirectShow and DMO) work there;
-exception handling (SEH and C++ exceptions) and the hand-off between the
-two binaries are still to come. `seance info` reads 64-bit DLLs in either
-build.
+exception handling (SEH and C++ exceptions) is still to come. Either
+binary runs either kind of codec: given one of the other architecture,
+by path or by a FOURCC or CLSID that names one, `probe`, `decode`,
+`encode`, `register` and `unregister` run in the other binary, so
+`sweep` takes a directory of both, and `list` names each codec's
+architecture. `seance info` reads 64-bit DLLs in either build.
 
 DirectShow video decoders and encoders (`.ax`) have phases of their own; see
 [docs/DIRECT_SHOW_PLAN.md](docs/DIRECT_SHOW_PLAN.md). They are done: the headers
@@ -913,6 +916,8 @@ decodes below 40 dB.
 | `VFW_ZERO_MEMORY=0` | Don't zero memory from `malloc`, `operator new` and `HeapAlloc` (zeroed by default) |
 | `VFW_LOW_MEMORY=0` | Don't keep DLL-visible memory below 2 GB |
 | `VFW_ENV_<NAME>=<value>` | Put `NAME=value` in the Windows environment codecs see |
+| `VFW_SEANCE64`, `VFW_SEANCE32` | The binary that runs a codec of the other architecture (default: `seance64`, or `seance`, beside this one) |
+| `VFW_EMULATOR64`, `VFW_EMULATOR32` | What runs that binary, on a host that can't (`qemu-x86_64`, `qemu-i386`) |
 
 ## Layout
 

@@ -212,7 +212,7 @@ static void test_msvcrt(void)
 	/* Time: UTC, nine ints in MSVC's order. */
 	CFN(c, int *, gmtime, const time_t *);
 	CFN(c, int *, __p__daylight, void);
-	CFN(c, long *, __p__timezone, void);
+	CFN(c, LONG *, __p__timezone, void);
 	CFN(c, int *, __p__dstbias, void);
 	CFN(c, void, _tzset, void);
 	time_t when = 1700000000;	/* 2023-11-14 22:13:20 UTC, a Tuesday */

@@ -17,10 +17,48 @@
 #include "dmo/discover.h"
 #include "dshow/discover.h"
 #include "runtime/runtime.h"
+#include "loader/pe.h"
 #include "vfw/icm.h"
 #include "vfw/registry.h"
 #include "win32/msacm32.h"
+#include "win32/path.h"
 #include "win32/reg.h"
+
+/*
+ * A registered DLL's architecture, for the list: "i386" or "x86-64", or
+ * NULL if it isn't a PE file there. *foreign says the other binary runs it.
+ */
+static const char *arch_of(const char *path, int *foreign)
+{
+	*foreign = 0;
+	if (!path)
+		return NULL;
+	/* A registry entry's path is a Windows one (Z:\\...). */
+	char *host = strchr(path, '\\') || (path[0] && path[1] == ':') ?
+		     path_to_unix(path) : NULL;
+	WORD m = pe_peek_machine(host ? host : path);
+	free(host);
+	if (m != IMAGE_FILE_MACHINE_I386 && m != IMAGE_FILE_MACHINE_AMD64)
+		return NULL;
+	*foreign = m != PE_HOST_MACHINE;
+	return pe_machine_name(m);
+}
+
+/* The other binary, by name, for a foreign codec. */
+#if defined(__x86_64__)
+#define OTHER_BINARY "seance"
+#else
+#define OTHER_BINARY "seance64"
+#endif
+
+static void print_server_arch(const char *path)
+{
+	int foreign;
+	const char *arch = arch_of(path, &foreign);
+	if (arch)
+		printf("      %s%s\n", arch,
+		       foreign ? ", run by " OTHER_BINARY : "");
+}
 
 /* The DirectShow filters registered, video ones unless all. */
 static void list_filters(int all)
@@ -36,6 +74,7 @@ static void list_filters(int all)
 			continue;
 		dshow_print_filter(&r[i].f, r[i].path ? r[i].path :
 				   "(no InprocServer32)", 0);
+		print_server_arch(r[i].path);
 		shown++;
 	}
 	if (!shown)
@@ -60,6 +99,7 @@ static void list_dmos(int all)
 			continue;
 		dmo_print(&r[i].d, r[i].path ? r[i].path : "(no InprocServer32)",
 			  0);
+		print_server_arch(r[i].path);
 		shown++;
 	}
 	if (!shown)
@@ -81,10 +121,17 @@ static void list_codecs(int open)
 		char t[FOURCC_STR_SIZE], h[FOURCC_STR_SIZE];
 		FOURCC type = c->type, handler = c->handler;
 
-		printf("  %s.%s  %s\n", fourcc_str(type, t), fourcc_str(handler, h),
-		       c->path ? c->path : "(function)");
+		int foreign;
+		const char *arch = arch_of(c->path, &foreign);
+		printf("  %s.%s  %s%s%s%s\n", fourcc_str(type, t),
+		       fourcc_str(handler, h), c->path ? c->path : "(function)",
+		       arch ? " (" : "", arch ? arch : "", arch ? ")" : "");
 		if (!open)
 			continue;
+		if (foreign) {
+			printf("      not opened: " OTHER_BINARY " runs it\n");
+			continue;
+		}
 		HIC hic = ic_open(type, handler, ICMODE_QUERY);
 		if (!hic) {
 			printf("      can't open: %s\n", vfw_error());
@@ -140,8 +187,13 @@ static void list_acm(int open)
 		msacm_acmDriverEnum(collect_driver, (DWORD_PTR)ids,
 				    ACM_DRIVERENUMF_DISABLED);
 	for (unsigned n = 0; !vfw_acm_get(n, &alias, &path); n++) {
-		printf("  %s  %s\n", alias, path);
-		if (open) {
+		int foreign;
+		const char *arch = arch_of(path, &foreign);
+		printf("  %s  %s%s%s%s\n", alias, path, arch ? " (" : "",
+		       arch ? arch : "", arch ? ")" : "");
+		if (open && foreign) {
+			printf("      not opened: " OTHER_BINARY " runs it\n");
+		} else if (open) {
 			char line[600];
 			int found = 0;
 			for (int i = 0; i < MAX_ACM && ids[i] && !found; i++) {

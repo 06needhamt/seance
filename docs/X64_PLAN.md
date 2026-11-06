@@ -125,16 +125,18 @@ Decisions:
      `RtlLookupFunctionEntry`, `RtlVirtualUnwind`, `RtlUnwindEx`,
      `RtlAddFunctionTable`, `RtlDeleteFunctionTable`,
      `__C_specific_handler`, `__chkstk`, `_setjmpex`.
-   - (Remaining.) The CRT's uses of the host's `long` (about 86 in
-     `src/win32/crt_*.c`: `strtol`, `fseek`, `ftell`, `_lseek`, ...)
-     become `LONG`: a Win64 caller leaves the upper half of a 32-bit
-     argument undefined.
+   - The CRT exports that take or return a Windows `long` (`strtol`,
+     `strtoul`, `atol`, `labs`, `_ltoa`, `_ultoa`, `fseek`, `ftell`,
+     `_lseek`, `_scalb`, `__p__timezone`) use `LONG`: a Win64 caller
+     leaves the upper half of a 32-bit argument undefined, and the
+     results clamp to 32 bits as MSVC's do. `scanf`'s `%l` integers are
+     32-bit too.
    - Varargs exports (`printf` and `scanf` families, `wsprintfA/W`,
      `_snprintf`, `_open`, the `v*` forms) take `win_va_list`
      (`src/win32/winva.h`: `__builtin_ms_va_list` on x86-64). `wsprintf`
-     reads 32-bit integers and pointer-sized `%p`. (Remaining: the CRT
-     printf dialect, where on Win64 `%I` alone and `z`/`t` are 64-bit and
-     `%p` has 16 digits.)
+     reads 32-bit integers and pointer-sized `%p`. In the CRT's `printf`
+     and `scanf`, `%I` alone and `z`/`t` are 64-bit on Win64, and `%p`
+     has 16 digits.
    - Callbacks the CRT makes into the DLL (`qsort` and `bsearch`
      comparators, `signal` handlers) use its convention; `qsort` goes
      through `qsort_r` rather than handing the comparator to glibc.
@@ -182,17 +184,25 @@ Decisions:
    Milestone (reached): `seance64 probe`, `encode` and `decode` with each
    64-bit test codec give what the i386 ones do. (Remaining: a smoke
    test over the 64-bit fixtures, and `pe_delay` for x86-64.)
-7. **One command for both.** `src/main.c` checks the DLL a command names
-   with `pe_peek_machine` before running it, and `exec`s the other
-   binary (`$VFW_SEANCE64`/`$VFW_SEANCE32`, else `seance64`/`seance`
-   beside itself, through `$VFW_EMULATOR` if set) for the other
-   architecture. Commands that find their codec later (`decode auto`, a
-   FourCC from `vfw.ini`, a CLSID from the registry) hand off where they
-   resolve the path. `sweep` picks the binary per DLL; `register` runs
+7. **One command for both.** (Done.) `src/handoff.c`: `src/main.c`
+   checks the DLL that `probe`, `decode`, `encode`, `register` or
+   `unregister` names with `pe_peek_machine` before running it, and
+   `exec`s the other binary (`$VFW_SEANCE64`/`$VFW_SEANCE32`, else
+   `seance64`/`seance` beside itself, through `$VFW_EMULATOR64`/
+   `$VFW_EMULATOR32` if set; `VFW_EMULATOR` is this binary's own) for the
+   other architecture. A codec found later (a FourCC from `vfw.ini`, a
+   CLSID from the registry) hands off when `pe_map` meets it as the first
+   image it maps: a hook that the first native image disarms, so a
+   foreign dependency stays an error. `decode auto` tries every codec and
+   keeps to its own binary's. `VFW_HANDED_OFF` in the sibling's
+   environment stops a second hand-off. `sweep` runs `seance` per step,
+   so each step goes to the binary its DLL needs; `register` runs
    `DllRegisterServer` in the matching one; `list` shows each entry's
-   architecture.
-   Milestone: `seance probe` of a 64-bit codec works from the i386
-   binary, and `sweep` over a mixed directory runs both.
+   architecture and doesn't open the other kind.
+   Milestone (reached): `seance probe` of a 64-bit codec works from the
+   i386 binary and the reverse, a round trip through the 64-bit
+   `testcodec` from `seance` matches the i386 one, and `sweep` over both
+   runs both (`tests/handoff.sh`).
 8. **CI and real codecs.** (CI done: the default build makes and tests
    both binaries, so the existing `test`, `sanitizers` and `minimal` jobs
    cover `seance64`, and `install` puts both side by side.) Real 64-bit codecs
