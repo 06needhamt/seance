@@ -171,15 +171,33 @@ Decisions:
    Limit: a frame in code the harness itself runs (a built-in DLL's
    function) has no unwind data, so an exception cannot be caught by a
    `__try` beyond one, and a fault inside such code is unhandled.
-5. **C++ exceptions and RTTI.** `src/win32/crt_cxx_x64.c`:
-   `_CxxThrowException` with the image base as the fourth parameter and
-   RVA-based `ThrowInfo`; `__CxxFrameHandler3` and `__CxxFrameHandler4`
-   (state maps, catch funclets, unwind actions); `__RTtypeid`,
-   `__RTDynamicCast` and `__RTCastToVoid` with the x64 complete object
-   locator.
-   Milestone: a 64-bit C++ exception fixture laid out as cl compiles it
-   throws, catches by type, rethrows and destroys on unwind; mingw's own
-   `__gxx_personality_seh0` code works through phase 4.
+5. **C++ exceptions and RTTI.** (Partly done.) `src/win32/crt_cxx_x64.c`:
+   - Done: `_CxxThrowException` (the image base as the fourth parameter,
+     RVA-based `ThrowInfo`, `throw;`) and `__CxxFrameHandler3`: the
+     state comes from the control pc (`IpToStateMap`), destructors are
+     unwind funclets, a catch block is a funclet called on top of the
+     stack the exception was thrown from (where the exception object
+     lives), and the function resumes at the address it returns. An
+     exception leaving a catch block goes on from its function's context
+     (`seh_link` in `seh_x64.c`) and ends the block. `noexcept` functions
+     terminate.
+   - Done: `__RTtypeid`, `__RTDynamicCast` and `__RTCastToVoid` over the
+     x64 complete object locator (single and multiple inheritance, as on
+     i386); `type_info`; `std::exception`, `bad_alloc`, `bad_cast`,
+     `bad_typeid` and `__non_rtti_object` with their ThrowInfo and RTTI,
+     built at startup in one executable arena so their tables are RVAs
+     from a single base; `__std_exception_copy`/`_destroy`.
+   - Not done: `__CxxFrameHandler4` (the compressed FuncInfo of
+     VS 2019 and later), try blocks inside catch funclets (cl gives these
+     their own handler data), exception specifications, the SE
+     translator, `std::bad_exception`, msvcp's `logic_error` family, and
+     mingw's `__gxx_personality_seh0` (g++-built codecs).
+   Milestone (reached for FrameHandler3): the hand-written `pe_cxxeh64`
+   fixture, laid out as cl compiles it, throws and catches by type, as
+   `catch (...)`, a base by reference, with an exception object's
+   destructor run once, rethrows, lets a catch for another type pass,
+   destroys on unwind, and has msvcrt throw `bad_cast` and `bad_typeid`
+   (caught by name and as `std::exception`).
 6. **Codecs.** (Done.) The 64-bit fixture set is every fixture but the
    i386-only `pe_seh`, `pe_sehcrt`, `pe_cxxeh` and `pe_thunk`, including
    `testcodec`, `testacm`, `testfilter`, `testdmo` and `pe_delay` (whose

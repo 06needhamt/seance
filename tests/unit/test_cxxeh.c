@@ -70,6 +70,15 @@ int main(void)
 	CHECK_EQ(FN("cxx64_wrongtype")(3), 3);
 	CHECK_EQ(counter(0, 1), 1);
 
+	/* RTTI: typeid, dynamic_cast up/down, to void. */
+	CHECK_EQ(FN("rt_typeid")(0), 1);
+	CHECK_EQ(FN("rt_cast_ok")(0), 1);
+	CHECK_EQ(FN("rt_cast_null")(0), 1);
+	CHECK_EQ(FN("rt_cast_void")(0), 1);
+	/* msvcrt throws bad_cast / bad_typeid, caught by name / as std::exception. */
+	CHECK_EQ(FN("cxx64_badcast")(0), 77);
+	CHECK_EQ(FN("cxx64_badtypeid")(0), 77);
+
 	/* And again, to see nothing was left behind. */
 	CHECK_EQ(FN("cxx64_int")(6), 6);
 	CHECK_EQ(counter(0, 1), 1);

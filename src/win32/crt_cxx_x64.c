@@ -32,10 +32,13 @@
  */
 #if defined(__x86_64__)
 
+#include <pthread.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 
 #include "loader/modules.h"
 #include "runtime/builtin.h"
@@ -139,6 +142,9 @@ typedef void (WINAPI *funclet_fn)(void *unused, void *frame);
 typedef void *(WINAPI *catch_fn)(void *unused, void *frame);
 
 /* terminate() and its handler. */
+#define ARENA_SIZE 0x10000
+static BYTE *arena;
+
 static void (STUB_CDECL *terminate_handler)(void);
 
 CRTFN(void) crt_terminate(void)
@@ -501,6 +507,7 @@ vfw_cxx_throw(void *object, const struct throw_info *ti, CONTEXT *ctx)
 		rec.ExceptionRecord = NULL;
 	} else {
 		struct module *m = mod_from_address(ti);
+		const BYTE *a = (const BYTE *)ti;
 
 		rec.ExceptionCode = CXX_EXCEPTION;
 		rec.ExceptionFlags = EXCEPTION_NONCONTINUABLE;
@@ -508,11 +515,542 @@ vfw_cxx_throw(void *object, const struct throw_info *ti, CONTEXT *ctx)
 		rec.ExceptionInformation[0] = CXX_FRAME_MAGIC_VC6;
 		rec.ExceptionInformation[1] = (DWORD_PTR)object;
 		rec.ExceptionInformation[2] = (DWORD_PTR)ti;
-		rec.ExceptionInformation[3] = m ? (DWORD_PTR)m->base : 0;
+		rec.ExceptionInformation[3] = m ? (DWORD_PTR)m->base :
+			a >= arena && a < arena + ARENA_SIZE ? (DWORD_PTR)arena : 0;
 	}
 	rec.ExceptionAddress = (void *)(uintptr_t)ctx->Rip;
 	seh_dispatch(&rec, ctx);
 }
+
+
+/*
+ * The classes msvcrt itself throws and RTTI names (type_info and the
+ * std::exception family) need the same tables a compiler would make, all
+ * RVAs from one base. They are built at startup in one executable arena
+ * (RVAs to host functions go through small jump thunks inside it).
+ */
+static size_t arena_used;
+
+static void *arena_alloc(size_t n, size_t align)
+{
+	arena_used = (arena_used + align - 1) & ~(align - 1);
+	void *p = arena + arena_used;
+
+	arena_used += n;
+	return p;
+}
+
+static DWORD rva_of(const void *p)
+{
+	return (DWORD)((const BYTE *)p - arena);
+}
+
+/* An RVA for a host function: a thunk in the arena that jumps to it. */
+static DWORD thunk_for(void *fn)
+{
+	BYTE *t = arena_alloc(16, 16);
+
+	t[0] = 0x48; t[1] = 0xb8;		/* movabs rax, fn */
+	memcpy(t + 2, &fn, 8);
+	t[10] = 0xff; t[11] = 0xe0;		/* jmp rax */
+	return rva_of(t);
+}
+
+struct col {			/* the RTTI complete object locator */
+	UINT signature;		/* 1 */
+	int offset;		/* of this vftable's pointer in the complete object */
+	UINT cd_offset;
+	DWORD type, hierarchy, self;
+};
+
+struct chd {			/* class hierarchy descriptor */
+	UINT signature, attributes;
+	UINT nbases;
+	DWORD bases;		/* RVA of DWORD[nbases], RVAs of bcd */
+};
+
+struct bcd {			/* base class descriptor */
+	DWORD type;
+	UINT nbases;		/* the entries after it that are its bases */
+	struct this_offsets offsets;
+	UINT attributes;
+	DWORD hierarchy;
+};
+
+#define CHD_MULTINH    1
+#define BCD_NOTVISIBLE 1
+#define BCD_AMBIGUOUS  2
+
+/* std::exception's layout (vcruntime140): vftable, what, do_free. */
+struct exc {
+	const void *const *vtable;
+	const char *what;
+	BYTE do_free;
+};
+
+enum { C_TYPEINFO, C_EXCEPTION, C_BAD_ALLOC, C_BAD_CAST, C_BAD_TYPEID,
+       C_NON_RTTI, NCLASS };
+
+static const struct {
+	const char *mangled;
+	int parent;
+} classes[NCLASS] = {
+	[C_TYPEINFO]  = { ".?AVtype_info@@", -1 },
+	[C_EXCEPTION] = { ".?AVexception@std@@", -1 },
+	[C_BAD_ALLOC] = { ".?AVbad_alloc@std@@", C_EXCEPTION },
+	[C_BAD_CAST]  = { ".?AVbad_cast@std@@", C_EXCEPTION },
+	[C_BAD_TYPEID] = { ".?AVbad_typeid@std@@", C_EXCEPTION },
+	[C_NON_RTTI]  = { ".?AV__non_rtti_object@std@@", C_BAD_TYPEID },
+};
+
+static struct type_desc *class_td[NCLASS];
+static const struct throw_info *class_throw[NCLASS];
+/* vftables: the locator, then the virtual functions; objects point at [1]. */
+static const void *vftable[NCLASS][3];
+
+static void WINAPI exc_dtor_free(struct exc *e);
+static void *WINAPI exc_vdtor(struct exc *e, unsigned flags);
+static const char *WINAPI exc_what(const struct exc *e);
+static void *WINAPI ti_vdtor(void *ti, unsigned flags);
+
+static void build_class(int c)
+{
+	int chain[8], n = 0;
+
+	for (int k = c; k >= 0; k = classes[k].parent)
+		chain[n++] = k;
+
+	size_t len = strlen(classes[c].mangled) + 1;
+	struct type_desc *td = arena_alloc(sizeof(*td) + len, 8);
+
+	td->vtable = &vftable[C_TYPEINFO][1];
+	memcpy(td->name, classes[c].mangled, len);
+	class_td[c] = td;
+
+	struct chd *h = arena_alloc(sizeof(*h), 4);
+	DWORD *barr = arena_alloc(n * sizeof(DWORD), 4);
+
+	h->nbases = n;
+	h->bases = rva_of(barr);
+	for (int i = 0; i < n; i++) {
+		struct bcd *b = arena_alloc(sizeof(*b), 4);
+
+		b->type = rva_of(class_td[chain[i]]);
+		b->nbases = n - 1 - i;
+		b->offsets.vbase_descr = -1;
+		b->hierarchy = rva_of(h);
+		barr[i] = rva_of(b);
+	}
+
+	struct col *l = arena_alloc(sizeof(*l), 4);
+
+	l->signature = 1;
+	l->type = rva_of(td);
+	l->hierarchy = rva_of(h);
+	l->self = rva_of(l);
+	vftable[c][0] = l;
+	if (c == C_TYPEINFO) {
+		vftable[c][1] = (void *)ti_vdtor;
+	} else {
+		vftable[c][1] = (void *)exc_vdtor;
+		vftable[c][2] = (void *)exc_what;
+
+		/* ThrowInfo: the class, then each base it converts to. */
+		struct cxx_type_table *t =
+			arena_alloc(sizeof(*t) + n * sizeof(DWORD), 4);
+
+		t->count = n;
+		for (int i = 0; i < n; i++) {
+			struct cxx_type *ct = arena_alloc(sizeof(*ct), 4);
+
+			ct->type = rva_of(class_td[chain[i]]);
+			ct->offsets.vbase_descr = -1;
+			ct->size = sizeof(struct exc);
+			t->types[i] = rva_of(ct);
+		}
+		struct throw_info *ti = arena_alloc(sizeof(*ti), 4);
+
+		ti->destructor = thunk_for((void *)exc_dtor_free);
+		ti->table = rva_of(t);
+		class_throw[c] = ti;
+	}
+}
+
+static void __attribute__((constructor)) cxx_init(void)
+{
+	arena = mmap(NULL, ARENA_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC,
+		     MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+	if (arena == MAP_FAILED)
+		arena = mmap(NULL, ARENA_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC,
+			     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (arena == MAP_FAILED) {
+		arena = NULL;
+		return;
+	}
+	for (int c = 0; c < NCLASS; c++)
+		build_class(c);
+}
+
+/* std::exception. */
+
+static struct exc *WINAPI exc_init(struct exc *e, int c, const char *what)
+{
+	e->vtable = &vftable[c][1];
+	e->what = what;
+	e->do_free = 0;
+	return e;
+}
+
+#define EXC_CLASS(name, id) \
+static __attribute__((unused)) struct exc *WINAPI name##_ctor(struct exc *e, const char *what) \
+{ return exc_init(e, id, what); } \
+static __attribute__((unused)) struct exc *WINAPI name##_ctor_ref(struct exc *e, const char *const *what) \
+{ return exc_init(e, id, what ? *what : NULL); } \
+static __attribute__((unused)) struct exc *WINAPI name##_default(struct exc *e) \
+{ return exc_init(e, id, NULL); } \
+static __attribute__((unused)) struct exc *WINAPI name##_copy(struct exc *e, const struct exc *o) \
+{ exc_init(e, id, o->what); \
+  if (o->do_free && o->what) { e->what = strdup(o->what); e->do_free = 1; } \
+  return e; }
+
+EXC_CLASS(exc, C_EXCEPTION)
+EXC_CLASS(bad_alloc, C_BAD_ALLOC)
+EXC_CLASS(bad_cast, C_BAD_CAST)
+EXC_CLASS(bad_typeid, C_BAD_TYPEID)
+EXC_CLASS(non_rtti, C_NON_RTTI)
+
+static void WINAPI exc_dtor(struct exc *e)
+{
+	if (e->do_free)
+		free((void *)e->what);
+	e->what = NULL;
+	e->do_free = 0;
+}
+
+static struct exc *WINAPI exc_assign(struct exc *e, const struct exc *o)
+{
+	if (e != o) {
+		exc_dtor(e);
+		e->what = o->what;
+		if (o->do_free && o->what) {
+			e->what = strdup(o->what);
+			e->do_free = 1;
+		}
+	}
+	return e;
+}
+
+static const char *WINAPI exc_what(const struct exc *e)
+{
+	return e->what ? e->what : "Unknown exception";
+}
+
+/* The scalar deleting destructor. */
+static void *WINAPI exc_vdtor(struct exc *e, unsigned flags)
+{
+	exc_dtor(e);
+	if (flags & 1)
+		free(e);
+	return e;
+}
+
+/* A ThrowInfo's destructor for objects msvcrt allocated and throws. */
+static void WINAPI exc_dtor_free(struct exc *e)
+{
+	exc_dtor(e);
+	free(e);
+}
+
+/* vcruntime140's: the what() string of std::exception, copied or not. */
+struct std_exception_data {
+	const char *what;
+	BYTE do_free;
+};
+
+CRTFN(void) crt___std_exception_copy(const struct std_exception_data *src,
+				     struct std_exception_data *dst)
+{
+	if (src->do_free && src->what) {
+		dst->what = strdup(src->what);
+		dst->do_free = 1;
+	} else {
+		dst->what = src->what;
+		dst->do_free = 0;
+	}
+}
+
+CRTFN(void) crt___std_exception_destroy(struct std_exception_data *d)
+{
+	if (d->do_free)
+		free((void *)d->what);
+	d->what = NULL;
+	d->do_free = 0;
+}
+
+/* type_info. */
+
+static pthread_mutex_t name_lock = PTHREAD_MUTEX_INITIALIZER;
+char *crt_undecorate_type(const char *mangled);
+
+static const char *WINAPI ti_name(struct type_desc *ti)
+{
+	pthread_mutex_lock(&name_lock);
+	if (!ti->spare)
+		ti->spare = crt_undecorate_type(ti->name);
+	pthread_mutex_unlock(&name_lock);
+	return ti->spare;
+}
+
+static const char *WINAPI ti_raw_name(struct type_desc *ti) { return ti->name; }
+
+static int same_type(const struct type_desc *a, const struct type_desc *b)
+{
+	return a == b || !strcmp(a->name + 1, b->name + 1);
+}
+
+static BOOLEAN WINAPI ti_equal(const struct type_desc *a, const struct type_desc *b)
+{
+	return same_type(a, b);
+}
+
+static BOOLEAN WINAPI ti_not_equal(const struct type_desc *a, const struct type_desc *b)
+{
+	return !same_type(a, b);
+}
+
+static BOOLEAN WINAPI ti_before(const struct type_desc *a, const struct type_desc *b)
+{
+	return strcmp(a->name + 1, b->name + 1) < 0;
+}
+
+static void WINAPI ti_dtor(struct type_desc *ti) { }
+
+static void *WINAPI ti_vdtor(void *ti, unsigned flags)
+{
+	return ti;
+}
+
+/* The caller's context is the one to throw from: see throw_std. */
+void vfw_cxx_throw(void *object, const struct throw_info *ti, CONTEXT *ctx)
+	__attribute__((noreturn));
+
+static void __attribute__((noreturn))
+throw_std(int c, const char *what, CONTEXT *ctx)
+{
+	struct exc *e = malloc(sizeof(*e));
+
+	if (!e)
+		crt_terminate();
+	exc_init(e, c, what);
+	vfw_cxx_throw(e, class_throw[c], ctx);
+}
+
+/* RTTI: __RTtypeid, __RTDynamicCast, __RTCastToVoid. */
+
+struct rtti_query {
+	void *object;		/* where its vftable pointer is */
+	int vfdelta;		/* that pointer's offset in the source type */
+	const struct type_desc *src, *dst;
+	const void *result;
+};
+
+static const struct col *locator_of(void *object)
+{
+	return (*(const struct col *const *const *)object)[-1];
+}
+
+static BYTE *col_base(const struct col *l)
+{
+	return (BYTE *)l - l->self;
+}
+
+static void rtti_typeid(void *arg)
+{
+	struct rtti_query *q = arg;
+	const struct col *l = locator_of(q->object);
+
+	q->result = col_base(l) + l->type;
+}
+
+/*
+ * The complete object, as MSVC's runtime finds it: less the vftable
+ * pointer's offset in it, plus a construction displacement (stored just
+ * before that pointer, while a virtual base's constructor or destructor
+ * runs) if the locator says there is one.
+ */
+static BYTE *complete_of(void *object, const struct col *loc)
+{
+	BYTE *complete = (BYTE *)object - loc->offset;
+
+	if (loc->cd_offset)
+		complete += *(const int *)((BYTE *)object - loc->cd_offset);
+	return complete;
+}
+
+static void rtti_complete(void *arg)
+{
+	struct rtti_query *q = arg;
+
+	q->result = complete_of(q->object, locator_of(q->object));
+}
+
+/*
+ * The base descriptor a dynamic_cast lands on, as MSVC's runtime picks
+ * it. The source is found first, by its type (and with multiple
+ * inheritance its offset): none is allowed from a base that isn't public.
+ */
+static const struct bcd *find_target(const struct rtti_query *q, BYTE *base,
+				     const struct chd *h, BYTE *complete)
+{
+	const DWORD *b = (const void *)(base + h->bases);
+#define BASE(i) ((const struct bcd *)(base + b[i]))
+#define BTYPE(i) ((const struct type_desc *)(base + BASE(i)->type))
+	int multi = h->attributes & CHD_MULTINH;
+	int n = (int)h->nbases;
+	ptrdiff_t src_offset = (BYTE *)q->object - q->vfdelta - complete;
+	int src = -1;
+
+	for (int i = 0; i < n && src < 0 && q->src; i++)
+		if (same_type(BTYPE(i), q->src) &&
+		    (!multi || (BYTE *)this_pointer(&BASE(i)->offsets, complete) -
+			       complete == src_offset))
+			src = i;
+	if (src >= 0 && (BASE(src)->attributes & BCD_NOTVISIBLE))
+		return NULL;
+
+	if (!multi) {
+		/* Single inheritance: the one instance, if it is public. */
+		for (int i = 0; i < n; i++)
+			if (same_type(BTYPE(i), q->dst))
+				return BASE(i)->attributes & BCD_NOTVISIBLE ?
+				       NULL : BASE(i);
+		return NULL;
+	}
+
+	/* A down-cast: the instance whose subobjects hold the source. */
+	for (int i = 0; i < src; i++)
+		if (same_type(BTYPE(i), q->dst) &&
+		    src <= i + (int)BASE(i)->nbases)
+			return BASE(i);
+	/* Else a cross-cast: an instance that is public and the only one. */
+	for (int i = 0; i < n; i++)
+		if (same_type(BTYPE(i), q->dst) &&
+		    !(BASE(i)->attributes & (BCD_NOTVISIBLE | BCD_AMBIGUOUS)))
+			return BASE(i);
+	return NULL;
+#undef BASE
+#undef BTYPE
+}
+
+static void rtti_cast(void *arg)
+{
+	struct rtti_query *q = arg;
+	const struct col *loc = locator_of(q->object);
+	BYTE *base = col_base(loc);
+	BYTE *complete = complete_of(q->object, loc);
+	const struct bcd *b = find_target(q, base,
+					  (const void *)(base + loc->hierarchy),
+					  complete);
+
+	q->result = b ? this_pointer(&b->offsets, complete) : NULL;
+}
+
+/*
+ * Called from the entry stubs below with the caller's context, so that
+ * what they throw (bad_typeid, bad_cast, __non_rtti_object) starts in the
+ * caller's frame.
+ */
+const void * WINAPI vfw_rttypeid_c(void *object, CONTEXT *ctx)
+{
+	struct rtti_query q = { .object = object };
+
+	if (!object)
+		throw_std(C_BAD_TYPEID, "Attempted a typeid of NULL pointer!", ctx);
+	if (seh_guarded(rtti_typeid, &q))
+		throw_std(C_NON_RTTI, "Bad read pointer - no RTTI data!", ctx);
+	return q.result;
+}
+
+void * WINAPI vfw_rtdyncast_c(void *object, int vfdelta,
+			      const struct type_desc *src,
+			      const struct type_desc *dst, int is_reference,
+			      CONTEXT *ctx)
+{
+	struct rtti_query q = { object, vfdelta, src, dst, NULL };
+
+	if (!object)
+		return NULL;
+	if (seh_guarded(rtti_cast, &q))
+		throw_std(C_NON_RTTI, "Access violation - no RTTI data!", ctx);
+	if (!q.result && is_reference)
+		throw_std(C_BAD_CAST, "Bad dynamic_cast!", ctx);
+	return (void *)q.result;
+}
+
+void * WINAPI vfw_rtvoid_c(void *object, CONTEXT *ctx)
+{
+	struct rtti_query q = { .object = object };
+
+	if (!object)
+		return NULL;
+	if (seh_guarded(rtti_complete, &q))
+		throw_std(C_NON_RTTI, "Access violation - no RTTI data!", ctx);
+	return (void *)q.result;
+}
+
+/*
+ * Each entry point captures its caller's context (as _CxxThrowException
+ * does) in a frame of its own, spills the arguments, and calls the C
+ * function above with the context as its last argument.
+ */
+#define RTTI_STUB_HEAD \
+	"	subq $0x508, %rsp\n" \
+	"	movq %rcx, 0x510(%rsp)\n" \
+	"	movq %rdx, 0x518(%rsp)\n" \
+	"	movq %r8, 0x520(%rsp)\n" \
+	"	movq %r9, 0x528(%rsp)\n" \
+	"	leaq 0x30(%rsp), %rcx\n" \
+	"	call seh_RtlCaptureContext\n" \
+	"	leaq 0x510(%rsp), %rax\n" \
+	"	movq %rax, 0xc8(%rsp)\n" \
+	"	movq 0x508(%rsp), %rax\n" \
+	"	movq %rax, 0x128(%rsp)\n" \
+	"	movq 0x510(%rsp), %rcx\n"
+
+__asm__(
+	".text\n"
+	".globl crt___RTtypeid\n"
+	"crt___RTtypeid:\n"
+	RTTI_STUB_HEAD
+	"	leaq 0x30(%rsp), %rdx\n"
+	"	call vfw_rttypeid_c\n"
+	"	addq $0x508, %rsp\n"
+	"	ret\n"
+
+	".globl crt___RTCastToVoid\n"
+	"crt___RTCastToVoid:\n"
+	RTTI_STUB_HEAD
+	"	leaq 0x30(%rsp), %rdx\n"
+	"	call vfw_rtvoid_c\n"
+	"	addq $0x508, %rsp\n"
+	"	ret\n"
+
+	".globl crt___RTDynamicCast\n"
+	"crt___RTDynamicCast:\n"
+	RTTI_STUB_HEAD
+	"	movq 0x518(%rsp), %rdx\n"
+	"	movq 0x520(%rsp), %r8\n"
+	"	movq 0x528(%rsp), %r9\n"
+	"	movl 0x530(%rsp), %eax\n"
+	"	movl %eax, 0x20(%rsp)\n"
+	"	leaq 0x30(%rsp), %rax\n"
+	"	movq %rax, 0x28(%rsp)\n"
+	"	call vfw_rtdyncast_c\n"
+	"	addq $0x508, %rsp\n"
+	"	ret\n");
+
+extern void crt___RTtypeid(void), crt___RTCastToVoid(void),
+	crt___RTDynamicCast(void);
 
 /* No _set_new_mode on x86-64 yet, so malloc never retries. */
 int crt_malloc_retry(size_t size)
@@ -547,6 +1085,45 @@ const struct builtin_export crt_cxx_exports[] = {
 	M("??_V@YAXPEAX_K@Z", crt_operator_delete_sized),
 	M("_purecall", crt__purecall),
 	M("_CxxThrowException", crt__CxxThrowException),
+	M("__RTtypeid", crt___RTtypeid),
+	M("__RTDynamicCast", crt___RTDynamicCast),
+	M("__RTCastToVoid", crt___RTCastToVoid),
+	M("__std_exception_copy", crt___std_exception_copy),
+	M("__std_exception_destroy", crt___std_exception_destroy),
+	M("??_7type_info@@6B@", &vftable[C_TYPEINFO][1]),
+	M("?name@type_info@@QEBAPEBDXZ", ti_name),
+	M("?raw_name@type_info@@QEBAPEBDXZ", ti_raw_name),
+	M("??8type_info@@QEBA_NAEBV0@@Z", ti_equal),
+	M("??9type_info@@QEBA_NAEBV0@@Z", ti_not_equal),
+	M("?before@type_info@@QEBA_NAEBV1@@Z", ti_before),
+	M("??1type_info@@UEAA@XZ", ti_dtor),
+	M("?what@exception@std@@UEBAPEBDXZ", exc_what),
+	M("??_7exception@std@@6B@", &vftable[C_EXCEPTION][1]),
+	M("??0exception@std@@QEAA@XZ", exc_default),
+	M("??0exception@std@@QEAA@PEBD@Z", exc_ctor),
+	M("??0exception@std@@QEAA@AEBQEBD@Z", exc_ctor_ref),
+	M("??0exception@std@@QEAA@AEBV01@@Z", exc_copy),
+	M("??1exception@std@@UEAA@XZ", exc_dtor),
+	M("??4exception@std@@QEAAAEAV01@AEBV01@@Z", exc_assign),
+	M("??_7bad_alloc@std@@6B@", &vftable[C_BAD_ALLOC][1]),
+	M("??0bad_alloc@std@@QEAA@XZ", bad_alloc_default),
+	M("??0bad_alloc@std@@QEAA@PEBD@Z", bad_alloc_ctor),
+	M("??0bad_alloc@std@@QEAA@AEBV01@@Z", bad_alloc_copy),
+	M("??1bad_alloc@std@@UEAA@XZ", exc_dtor),
+	M("??_7bad_cast@std@@6B@", &vftable[C_BAD_CAST][1]),
+	M("??0bad_cast@std@@QEAA@XZ", bad_cast_default),
+	M("??0bad_cast@std@@QEAA@PEBD@Z", bad_cast_ctor),
+	M("??0bad_cast@std@@QEAA@AEBV01@@Z", bad_cast_copy),
+	M("??1bad_cast@std@@UEAA@XZ", exc_dtor),
+	M("??_7bad_typeid@std@@6B@", &vftable[C_BAD_TYPEID][1]),
+	M("??0bad_typeid@std@@QEAA@XZ", bad_typeid_default),
+	M("??0bad_typeid@std@@QEAA@PEBD@Z", bad_typeid_ctor),
+	M("??0bad_typeid@std@@QEAA@AEBV01@@Z", bad_typeid_copy),
+	M("??1bad_typeid@std@@UEAA@XZ", exc_dtor),
+	M("??_7__non_rtti_object@std@@6B@", &vftable[C_NON_RTTI][1]),
+	M("??0__non_rtti_object@std@@QEAA@PEBD@Z", non_rtti_ctor),
+	M("??0__non_rtti_object@std@@QEAA@AEBV01@@Z", non_rtti_copy),
+	M("??1__non_rtti_object@std@@UEAA@XZ", exc_dtor),
 	M("__CxxFrameHandler3", crt___CxxFrameHandler3),
 	M("?terminate@@YAXXZ", crt_terminate),
 	M("terminate", crt_terminate),

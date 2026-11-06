@@ -80,6 +80,7 @@ void seh_link_push(struct seh_link *l);
 void seh_link_pop(struct seh_link *l);
 int seh_unwind_run(void *target, void *target_ip, EXCEPTION_RECORD *rec,
 		   const CONTEXT *start, CONTEXT *out);
+int seh_guarded(void (*fn)(void *), void *arg);
 void seh_resume(CONTEXT *c) __attribute__((noreturn));
 void seh_dispatch(EXCEPTION_RECORD *rec, CONTEXT *ctx)
 	__attribute__((noreturn));

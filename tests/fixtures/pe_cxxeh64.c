@@ -210,6 +210,36 @@ __asm__(
 	".globl cxx64_wrongtype\n"
 	"catcher cxx64_wrongtype, inner_wrong, TdInt, 0, 32, 0, 0\n"
 
+	/*
+	 * RTTI: Base and Derived (single inheritance, with vftables and
+	 * locators), and calls of __RTtypeid, __RTDynamicCast and
+	 * __RTCastToVoid on them. rt_* return 1 when they got the right answer.
+	 */
+	".macro rtcall name, body\n"
+	".globl \\name\n"
+	".seh_proc \\name\n"
+	"\\name:\n"
+	"	subq $56, %rsp\n"
+	"	.seh_stackalloc 56\n"
+	"	.seh_endprologue\n"
+	"	\\body\n"
+	"	addq $56, %rsp\n"
+	"	ret\n"
+	"	.seh_endproc\n"
+	".endm\n"
+	"rtcall rt_typeid, \"leaq ObjDerived(%rip), %rcx; call *__imp___RTtypeid(%rip); leaq TdDerived(%rip), %rdx; xorl %ecx, %ecx; cmpq %rdx, %rax; sete %cl; movl %ecx, %eax\"\n"
+	"rtcall rt_cast_ok, \"leaq ObjDerived(%rip), %rcx; xorl %edx, %edx; leaq TdBase(%rip), %r8; leaq TdDerived(%rip), %r9; movl $0, 32(%rsp); call *__imp___RTDynamicCast(%rip); leaq ObjDerived(%rip), %rdx; xorl %ecx, %ecx; cmpq %rdx, %rax; sete %cl; movl %ecx, %eax\"\n"
+	"rtcall rt_cast_null, \"leaq ObjBase(%rip), %rcx; xorl %edx, %edx; leaq TdBase(%rip), %r8; leaq TdDerived(%rip), %r9; movl $0, 32(%rsp); call *__imp___RTDynamicCast(%rip); xorl %ecx, %ecx; testq %rax, %rax; sete %cl; movl %ecx, %eax\"\n"
+	"rtcall rt_cast_void, \"leaq ObjDerived(%rip), %rcx; call *__imp___RTCastToVoid(%rip); leaq ObjDerived(%rip), %rdx; xorl %ecx, %ecx; cmpq %rdx, %rax; sete %cl; movl %ecx, %eax\"\n"
+	/* Callees that throw from msvcrt: a failed reference cast, typeid(NULL). */
+	"rtcall rt_cast_ref, \"leaq ObjBase(%rip), %rcx; xorl %edx, %edx; leaq TdBase(%rip), %r8; leaq TdDerived(%rip), %r9; movl $1, 32(%rsp); call *__imp___RTDynamicCast(%rip)\"\n"
+	"rtcall rt_typeid_null, \"xorl %ecx, %ecx; call *__imp___RTtypeid(%rip)\"\n"
+	".globl cxx64_badcast\n"
+	"catcher cxx64_badcast, rt_cast_ref, TdBadCast, 8, 32, 2, 0\n"
+	/* ... caught as their base, std::exception. */
+	".globl cxx64_badtypeid\n"
+	"catcher cxx64_badtypeid, rt_typeid_null, TdExc, 8, 32, 2, 0\n"
+
 	".section .rdata,\"dr\"\n"
 	".balign 8\n"
 	".balign 8\n"
@@ -223,6 +253,30 @@ __asm__(
 	".balign 8\n"
 	"TdObj:  .quad 0, 0\n .asciz \".?AUExcObj@@\"\n"
 	".balign 4\n"
+	"TdBadCast: .quad 0, 0\n .asciz \".?AVbad_cast@std@@\"\n"
+	".balign 8\n"
+	"TdExc:  .quad 0, 0\n .asciz \".?AVexception@std@@\"\n"
+	".balign 4\n"
+	/* RTTI of Base and Derived. */
+	"ColBase:    .long 1, 0, 0\n .rva TdBase\n .rva ChdBase\n .rva ColBase\n"
+	"ChdBase:    .long 0, 0, 1\n .rva BcaBase\n"
+	"BcaBase:    .rva BcdBase0\n"
+	"BcdBase0:   .rva TdBase\n .long 0, 0, -1, 0, 0\n .rva ChdBase\n"
+	"ColDerived: .long 1, 0, 0\n .rva TdDerived\n .rva ChdDerived\n .rva ColDerived\n"
+	"ChdDerived: .long 0, 0, 2\n .rva BcaDerived\n"
+	"BcaDerived: .rva BcdD0\n .rva BcdD1\n"
+	"BcdD0:      .rva TdDerived\n .long 1, 0, -1, 0, 0\n .rva ChdDerived\n"
+	"BcdD1:      .rva TdBase\n .long 0, 0, -1, 0, 0\n .rva ChdBase\n"
+	".balign 8\n"
+	"VtBase:     .quad ColBase\n"
+	"VtBase1:    .quad 0\n"
+	"VtDerived:  .quad ColDerived\n"
+	"VtDerived1: .quad 0\n"
+	".data\n"
+	".balign 8\n"
+	"ObjBase:    .quad VtBase1\n"
+	"ObjDerived: .quad VtDerived1\n"
+	".section .rdata,\"dr\"\n"
 	/* CatchableType: flags, type, {mdisp, pdisp, vdisp}, size, copy. */
 	"CtInt:     .long 1\n .rva TdInt\n .long 0, -1, 0, 4, 0\n"
 	"CtDerived: .long 0\n .rva TdDerived\n .long 0, -1, 0, 8, 0\n"
@@ -241,7 +295,10 @@ __asm__(
 	"	.ascii \" -export:cxx64_int -export:cxx64_all\"\n"
 	"	.ascii \" -export:cxx64_base -export:cxx64_obj\"\n"
 	"	.ascii \" -export:cxx64_rethrow -export:cxx64_rethrow_obj\"\n"
-	"	.ascii \" -export:cxx64_wrongtype\"\n"
+	"	.ascii \" -export:cxx64_wrongtype -export:cxx64_badcast\"\n"
+	"	.ascii \" -export:cxx64_badtypeid -export:rt_typeid\"\n"
+	"	.ascii \" -export:rt_cast_ok -export:rt_cast_null\"\n"
+	"	.ascii \" -export:rt_cast_void\"\n"
 	".text\n");
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)

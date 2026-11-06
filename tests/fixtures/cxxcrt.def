@@ -9,6 +9,7 @@ EXPORTS
 	??_7type_info@@6B@ DATA
 	__RTtypeid
 	__RTDynamicCast
+	__RTCastToVoid
 	__CxxLongjmpUnwind
 	_setjmp3
 	longjmp

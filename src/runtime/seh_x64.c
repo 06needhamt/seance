@@ -306,6 +306,45 @@ static int host_link(CONTEXT *c, EXCEPTION_RECORD *unwinding)
 	return 0;
 }
 
+/*
+ * seh_guarded: fn(arg) as __try { fn(arg); } __except (an access violation
+ * in host code) {}. Host code has no unwind data to find a handler by, so
+ * dispatch looks here first for a fault whose pc is outside every module.
+ */
+#include <setjmp.h>
+
+static _Thread_local struct seh_guard {
+	struct seh_guard *next;
+	jmp_buf jump;
+} *guards;
+
+int __attribute__((no_sanitize_address))
+seh_guarded(void (*fn)(void *), void *arg)
+{
+	struct seh_guard g;
+
+	g.next = guards;
+	if (setjmp(g.jump)) {
+		guards = g.next;
+		return 1;
+	}
+	guards = &g;
+	fn(arg);
+	guards = g.next;
+	return 0;
+}
+
+static void guard_take(const EXCEPTION_RECORD *rec, const CONTEXT *ctx)
+{
+	if (rec->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || !guards ||
+	    mod_from_address((const void *)(uintptr_t)ctx->Rip))
+		return;
+	while (guards && (uintptr_t)guards < ctx->Rsp)
+		guards = guards->next;		/* stale */
+	if (guards)
+		longjmp(guards->jump, 1);
+}
+
 /* Is there any hope of unwinding from this pc: a function in a module? */
 static PRUNTIME_FUNCTION frame_entry(const CONTEXT *c, ULONGLONG *base,
 				     int *ok)
@@ -329,6 +368,7 @@ dispatch_exception(EXCEPTION_RECORD *rec, CONTEXT *ctx, int sig)
 	int level = dispatch_begin((uintptr_t)__builtin_frame_address(0), ctx);
 
 	trace_exception(rec, sig ? "fault" : "raised");
+	guard_take(rec, ctx);
 	if (level >= 0) {
 		CONTEXT c = *ctx;
 
