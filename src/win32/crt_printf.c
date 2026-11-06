@@ -407,7 +407,8 @@ static void format(struct sink *s, const void *fmt, win_va_list *ap)
 			sp.size = SZ_32;
 			i += 3;
 		} else if (c == 'I') {
-			sp.size = SZ_32;
+			/* Pointer-sized: 64 bits on Win64. */
+			sp.size = sizeof(void *) == 8 ? SZ_64 : SZ_32;
 			i++;
 		} else if (c == 'l' && fmt_at(fmt, wide, i + 1) == 'l') {
 			sp.size = SZ_64;
@@ -417,7 +418,7 @@ static void format(struct sink *s, const void *fmt, win_va_list *ap)
 			i += 2;
 		} else if ((c == 'z' || c == 't' || c == 'j') &&
 			   ucrt_way(s, 0)) {
-			sp.size = c == 'j' ? SZ_64 : SZ_32;
+			sp.size = c == 'j' || sizeof(void *) == 8 ? SZ_64 : SZ_32;
 			i++;
 		} else if (c == 'h' || c == 'l' || c == 'w' || c == 'L') {
 			sp.size = c == 'h' ? SZ_H : c == 'l' ? SZ_L :

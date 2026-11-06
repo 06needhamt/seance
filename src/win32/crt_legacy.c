@@ -98,29 +98,53 @@ CRTFN(int) crt_fscanf(crt_FILE *f, const char *fmt, ...)
 	/*
 	 * Win64's arguments can't go to the host's vfscanf as they are, but
 	 * scanf's are all pointers: one per conversion not suppressed by '*'.
+	 * The format is copied with each integer conversion's 'l' dropped,
+	 * since a Windows long is 32 bits and the host's is 64.
 	 */
-	void *a[32] = { 0 };
+	enum { MAXPTR = 32 };
+	void *a[MAXPTR] = { 0 };
+	size_t len = strlen(fmt);
+	char *hf = malloc(len + 1), *o = hf;
 	int n = 0;
-	for (const char *p = fmt; *p && n < 32; p++) {
-		if (*p != '%')
-			continue;
-		if (p[1] == '%') {
-			p++;
+	if (!hf) { fclose(host); return EOF; }
+	for (const char *p = fmt; *p; ) {
+		if (*p != '%') {
+			*o++ = *p++;
 			continue;
 		}
-		if (p[1] != '*')
+		*o++ = *p++;
+		if (*p == '%') {
+			*o++ = *p++;
+			continue;
+		}
+		if (*p == '*')
+			*o++ = *p++;
+		else
 			n++;
+		while (*p >= '0' && *p <= '9')
+			*o++ = *p++;
+		if (p[0] == 'l' && p[1] != 'l' && p[1] && strchr("diouxXn", p[1]))
+			p++;
+	}
+	*o = 0;
+	if (n > MAXPTR) {
+		/* More destinations than we forward: refuse, don't guess. */
+		free(hf);
+		fclose(host);
+		errno = EINVAL;
+		return EOF;
 	}
 	win_va_list ap;
 	win_va_start(ap, fmt);
 	for (int i = 0; i < n; i++)
 		a[i] = win_va_arg(ap, void *);
 	win_va_end(ap);
-	int r = fscanf(host, fmt, a[0], a[1], a[2], a[3], a[4], a[5], a[6],
+	int r = fscanf(host, hf, a[0], a[1], a[2], a[3], a[4], a[5], a[6],
 		       a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14],
 		       a[15], a[16], a[17], a[18], a[19], a[20], a[21], a[22],
 		       a[23], a[24], a[25], a[26], a[27], a[28], a[29], a[30],
 		       a[31]);
+	free(hf);
 #else
 	va_list ap; va_start(ap, fmt); int r = vfscanf(host, fmt, ap); va_end(ap);
 #endif

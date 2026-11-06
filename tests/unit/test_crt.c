@@ -360,6 +360,25 @@ static void test_msvcrt_semantics(void)
 		fclose_(f);
 	}
 
+	/* fscanf: %ld fills 32 bits, and %% and %*d take no pointer. */
+	int (CDECL *fscanf_)(void *, const char *, ...) = get("fscanf");
+	f = fopen_("C:\\WINDOWS\\TEMP\\test_crt.tmp", "wb");
+	CHECK(f != NULL);
+	if (f) {
+		CHECK_EQ(fwrite_("-12 % 7 34", 1, 10, f), 10);
+		fclose_(f);
+	}
+	f = fopen_("C:\\WINDOWS\\TEMP\\test_crt.tmp", "rb");
+	CHECK(f != NULL);
+	if (f) {
+		int32_t fl[2] = { 0, 0x55 };
+		int last = 0;
+		CHECK_EQ(fscanf_(f, "%ld %% %*d %d", &fl[0], &last), 2);
+		CHECK(fl[0] == -12 && fl[1] == 0x55);
+		CHECK_EQ(last, 34);
+		fclose_(f);
+	}
+
 	/* isprint and isgraph as MSVC's table has them. */
 	CHECK(isprint_('a') && isprint_(' ') && isprint_('~'));
 	CHECK(!isprint_('\t') && !isprint_(0x80) && !isprint_(0xff) && !isprint_(-1));
@@ -475,6 +494,12 @@ static void test_ucrt(void)
 	csp(vsprintf_, 0, b, sizeof(b), "%zu %td %jd %.1F", (size_t)7,
 	    (ptrdiff_t)-3, (long long)1 << 40, 2.5);
 	CHECK_STR(b, "7 -3 1099511627776 2.5");
+#ifdef __x86_64__
+	/* %I, %z and %t are pointer-sized on Win64. */
+	csp(vsprintf_, 0, b, sizeof(b), "%zu %Iu %Ix", (size_t)0x100000001ull,
+	    (size_t)0x100000002ull, (size_t)0x1234567890ull);
+	CHECK_STR(b, "4294967297 4294967298 1234567890");
+#endif
 
 	/* In the wide forms %s is narrow, unless legacy; %S is wide. */
 	CHECK_EQ(csp(vswprintf_, 0, w, 32, w16("%s|%S|%c"), "nar", w16("wid"),
@@ -539,6 +564,15 @@ static void test_scanf(void)
 	CHECK(big == -5000000000LL && hex == 0xffffffffffULL);
 	CHECK_EQ(tiny, -56);
 	CHECK_EQ(sh, -7);
+	/* %ld fills a Windows long, 32 bits, and nothing past it. */
+	int32_t lw[2] = { 0, 0x55 };
+	CHECK_EQ(sscanf_("-9", "%ld", &lw[0]), 1);
+	CHECK(lw[0] == -9 && lw[1] == 0x55);
+#ifdef __x86_64__
+	size_t zs = 0;
+	CHECK_EQ(sscanf_("4294967297", "%zu", &zs), 1);
+	CHECK(zs == 0x100000001ull);
+#endif
 	CHECK_EQ(sscanf_("1.5 2.25 3.125", "%f %lf %Lf", &f, &d, &ld), 3);
 	CHECK(f == 1.5f && d == 2.25 && ld == 3.125);
 	CHECK_EQ(sscanf_("abc123", "%[a-z]%n", set, &n), 1);

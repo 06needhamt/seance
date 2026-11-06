@@ -122,6 +122,9 @@ static int crt_vscan(unsigned options, const char *in, const char *fmt,
 		} else if (fmt[0] == 'I' && fmt[1] == '3' && fmt[2] == '2') {
 			fmt += 3;
 		} else if (fmt[0] == 'I' || fmt[0] == 'z' || fmt[0] == 't') {
+			/* Pointer-sized: 64 bits on Win64. */
+			if (sizeof(void *) == 8)
+				size = SZ_64;
 			fmt++;
 		} else if (fmt[0] == 'l' && fmt[1] == 'l') {
 			size = SZ_64;
@@ -190,7 +193,8 @@ static int crt_vscan(unsigned options, const char *in, const char *fmt,
 		case 'p': {
 			static const char *const sizes[] = {
 				[SZ_NONE] = "", [SZ_HH] = "hh", [SZ_H] = "h",
-				[SZ_L] = "l", [SZ_64] = "ll", [SZ_W] = "" };
+				/* A Windows long is 32 bits, also on Win64. */
+				[SZ_L] = "", [SZ_64] = "ll", [SZ_W] = "" };
 			char c = conv == 'X' ? 'x' : conv, w[16] = "";
 			if (width)
 				snprintf(w, sizeof(w), "%d", width);
