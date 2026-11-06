@@ -14,13 +14,68 @@
  * handler setters are called directly.
  */
 #if defined(__x86_64__)
-/* x86-64 has no counterpart of the i386 C++ exception model (docs/X64_PLAN.md, phases 4-5). */
-#include <stdio.h>
+/*
+ * x86-64: pe_cxxeh64.dll lays out C++ exceptions as cl does for Win64
+ * (__CxxFrameHandler3, FuncInfo and ThrowInfo as RVAs, funclets): throws
+ * and catches by type, by reference to a base, catch (...), rethrow, the
+ * destructors of the frames in between and of the exception object.
+ */
+#include <stdlib.h>
+#include <string.h>
+
+#include "loader/modules.h"
+#include "runtime/runtime.h"
+#include "test.h"
+
+typedef int (WINAPI *int_fn)(int);
+typedef LONG (WINAPI *counter_fn)(int which, int clear);
 
 int main(void)
 {
-	printf("i386 only\n");
-	return 77;
+	CHECK_EQ(runtime_enter(), 0);
+	struct module *m = mod_load(fixture("pe_cxxeh64.dll"), NULL);
+
+	CHECK(m != NULL);
+	if (!m)
+		return test_summary("test_cxxeh");
+
+#define FN(name) ((int_fn)mod_get_proc(m, name))
+	counter_fn counter = (counter_fn)mod_get_proc(m, "cxx64_counter");
+
+	CHECK(counter != NULL);
+	counter(0, 1);
+	counter(1, 1);
+
+	/* By type; the local between is destroyed on the way. */
+	CHECK_EQ(FN("cxx64_int")(5), 5);
+	CHECK_EQ(counter(0, 1), 1);
+	/* catch (...). */
+	CHECK_EQ(FN("cxx64_all")(5), 77);
+	CHECK_EQ(counter(0, 1), 1);
+	/* A Derived caught by reference to its Base: the base's offset. */
+	CHECK_EQ(FN("cxx64_base")(42), 42);
+	CHECK_EQ(counter(0, 1), 1);
+	/* An exception object with a destructor: once, after the catch. */
+	CHECK_EQ(FN("cxx64_obj")(9), 9);
+	CHECK_EQ(counter(0, 1), 1);
+	CHECK_EQ(counter(1, 1), 1);
+	/* throw; from a catch block reaches the outer catch. */
+	CHECK_EQ(FN("cxx64_rethrow")(7), 7);
+	CHECK_EQ(counter(0, 1), 1);
+	/* ... and does not destroy the object between. */
+	CHECK_EQ(FN("cxx64_rethrow_obj")(11), 11);
+	CHECK_EQ(counter(0, 1), 1);
+	CHECK_EQ(counter(1, 1), 1);
+	/* A catch for another type lets it pass. */
+	CHECK_EQ(FN("cxx64_wrongtype")(3), 3);
+	CHECK_EQ(counter(0, 1), 1);
+
+	/* And again, to see nothing was left behind. */
+	CHECK_EQ(FN("cxx64_int")(6), 6);
+	CHECK_EQ(counter(0, 1), 1);
+
+	mod_free(m);
+	return test_summary("test_cxxeh");
 }
 
 #else

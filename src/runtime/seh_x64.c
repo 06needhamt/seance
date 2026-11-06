@@ -261,6 +261,51 @@ static void report_unhandled_exception(const EXCEPTION_RECORD *rec)
 	fflush(stderr);
 }
 
+/*
+ * Host frames in the middle of a walk. A C++ catch block is called from
+ * our runtime, which has no unwind data; its caller registers a link so
+ * that an exception leaving the block continues in the context of the
+ * function whose catch it is. `unwound` is called when an unwind crosses
+ * the link (the block is being left by an exception).
+ */
+static _Thread_local struct seh_link *links;
+
+void seh_link_push(struct seh_link *l)
+{
+	l->marker = (uintptr_t)l;
+	l->next = links;
+	links = l;
+}
+
+void seh_link_pop(struct seh_link *l)
+{
+	for (struct seh_link **p = &links; *p; p = &(*p)->next)
+		if (*p == l) {
+			*p = l->next;
+			return;
+		}
+}
+
+static void links_prune(uintptr_t sp)
+{
+	while (links && links->marker < sp)
+		links = links->next;
+}
+
+/* c is in host code: continue in the parent of the innermost link above it. */
+static int host_link(CONTEXT *c, EXCEPTION_RECORD *unwinding)
+{
+	for (struct seh_link *l = links; l; l = l->next) {
+		if (l->marker < c->Rsp)
+			continue;
+		*c = l->parent;
+		if (unwinding && l->unwound)
+			l->unwound(l->arg, unwinding);
+		return 1;
+	}
+	return 0;
+}
+
 /* Is there any hope of unwinding from this pc: a function in a module? */
 static PRUNTIME_FUNCTION frame_entry(const CONTEXT *c, ULONGLONG *base,
 				     int *ok)
@@ -295,8 +340,11 @@ dispatch_exception(EXCEPTION_RECORD *rec, CONTEXT *ctx, int sig)
 			CONTEXT n = c;
 			PEXCEPTION_ROUTINE h;
 
-			if (!ok)
+			if (!ok) {
+				if (host_link(&c, NULL))
+					continue;
 				break;
+			}
 			h = seh_RtlVirtualUnwind(UNW_FLAG_EHANDLER, base, c.Rip,
 						 fe, &n, &hdata, &frame, NULL);
 			if (h) {
@@ -315,6 +363,7 @@ dispatch_exception(EXCEPTION_RECORD *rec, CONTEXT *ctx, int sig)
 				    !(rec->ExceptionFlags &
 				      EXCEPTION_NONCONTINUABLE)) {
 					nlive = level;
+					links_prune(ctx->Rsp);
 					vfw_restore_context(ctx);
 				}
 			}
@@ -366,18 +415,19 @@ vfw_raise_c(DWORD code, DWORD flags, DWORD nargs, const DWORD_PTR *args,
  * (STATUS_LONGJUMP, the jump buffer in the record's first parameter) the
  * registers come from the buffer instead.
  */
-void __attribute__((used, noreturn))
-vfw_unwind_c(void *target, void *target_ip, EXCEPTION_RECORD *rec,
-	     void *retval, CONTEXT *captured)
+/*
+ * The unwind phase's walk: from start outward, each frame's language
+ * handler called with EXCEPTION_UNWINDING (and EXCEPTION_TARGET_UNWIND at
+ * target), so __finally blocks and destructors run. Returns 1 with the
+ * context of the target frame in *out if it was reached, else 0. The
+ * stack is left as it is: C++ catch blocks run on top of it.
+ */
+int seh_unwind_run(void *target, void *target_ip, EXCEPTION_RECORD *rec,
+		   const CONTEXT *start, CONTEXT *out)
 {
 	struct win_teb *teb = teb_current();
 	EXCEPTION_RECORD ur;
-	CONTEXT c;
-	int found = 0;
-	int longjmp_ = rec && rec->ExceptionCode == STATUS_LONGJUMP;
-
-	drop_below(captured->Rsp);
-	c = nlive ? *live[nlive - 1].ctx : *captured;
+	CONTEXT c = *start;
 
 	if (rec) {
 		ur = *rec;
@@ -398,8 +448,11 @@ vfw_unwind_c(void *target, void *target_ip, EXCEPTION_RECORD *rec,
 		PEXCEPTION_ROUTINE h;
 		int is_target;
 
-		if (!ok)
+		if (!ok) {
+			if (host_link(&c, &ur))
+				continue;
 			break;
+		}
 		h = seh_RtlVirtualUnwind(UNW_FLAG_UHANDLER, base, c.Rip, fe,
 					 &n, &hdata, &frame, NULL);
 		is_target = target && frame == (ULONGLONG)(uintptr_t)target;
@@ -423,14 +476,48 @@ vfw_unwind_c(void *target, void *target_ip, EXCEPTION_RECORD *rec,
 			h(&ur, (void *)(uintptr_t)frame, &c, &dc);
 		}
 		if (is_target) {
-			found = 1;
-			break;
+			*out = c;
+			return 1;
 		}
 		if (n.Rsp <= c.Rsp || !n.Rip ||
 		    (teb && n.Rsp > (uintptr_t)teb->StackBase))
 			break;
 		c = n;
 	}
+	return 0;
+}
+
+/* Resumes ctx for good: the dispatches and links below it are over. */
+void __attribute__((noreturn)) seh_resume(CONTEXT *c)
+{
+	drop_below(c->Rsp);
+	links_prune(c->Rsp);
+	vfw_restore_context(c);
+}
+
+/* For the C++ runtime: dispatches a record raised with ctx (never returns). */
+void __attribute__((noreturn)) seh_dispatch(EXCEPTION_RECORD *rec, CONTEXT *ctx)
+{
+	dispatch_exception(rec, ctx, 0);
+}
+
+/*
+ * RtlUnwindEx: seh_unwind_run, then the registers of the target frame
+ * resumed at target_ip with retval in rax. For a longjmp
+ * (STATUS_LONGJUMP, the jump buffer in the record's first parameter) the
+ * registers come from the buffer instead.
+ */
+void __attribute__((used, noreturn))
+vfw_unwind_c(void *target, void *target_ip, EXCEPTION_RECORD *rec,
+	     void *retval, CONTEXT *captured)
+{
+	CONTEXT c;
+	int longjmp_ = rec && rec->ExceptionCode == STATUS_LONGJUMP;
+	int found;
+
+	drop_below(captured->Rsp);
+	found = seh_unwind_run(target, target_ip, rec,
+			       nlive ? live[nlive - 1].ctx : captured, &c);
 
 	if (!found && !longjmp_) {
 		if (target) {
@@ -445,6 +532,8 @@ vfw_unwind_c(void *target, void *target_ip, EXCEPTION_RECORD *rec,
 	}
 
 	if (longjmp_) {
+		if (!found)
+			c = *captured;
 		/* Without the frame on the stack this is a plain longjmp. */
 		const BYTE *jb = (const BYTE *)(uintptr_t)rec->ExceptionInformation[0];
 
@@ -464,8 +553,7 @@ vfw_unwind_c(void *target, void *target_ip, EXCEPTION_RECORD *rec,
 		c.Rip = (ULONGLONG)(uintptr_t)target_ip;
 		c.Rax = (ULONGLONG)(uintptr_t)retval;
 	}
-	drop_below(c.Rsp);
-	vfw_restore_context(&c);
+	seh_resume(&c);
 }
 
 /*

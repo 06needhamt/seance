@@ -148,6 +148,13 @@ if(VFW_FIXTURE_64)
 		OPTIONS -Wl,--disable-auto-import)
 endif()
 
+# x86-64 C++ exceptions: hand-written functions with __CxxFrameHandler3
+# tables as cl lays them out.
+if(VFW_FIXTURE_64)
+	fixture(pe_cxxeh64 pe_cxxeh64.c LIBS cxxcrt_imports kernel32
+		OPTIONS -fno-builtin)
+endif()
+
 # __try/__except/__finally as cl compiles them against msvcrt's
 # _except_handler3 and _except_handler4_common, frames written out by hand.
 if(NOT VFW_FIXTURE_64)

@@ -67,6 +67,22 @@ void WINAPI seh_RtlUnwindEx(void *target_frame, void *target_ip,
 void WINAPI seh_RtlUnwind(void *target_frame, void *target_ip,
 			  EXCEPTION_RECORD *rec, void *retval);
 PVOID WINAPI seh_RtlPcToFileHeader(PVOID pc, PVOID *base);
+
+/* For the C++ runtime (crt_cxx_x64.c). */
+struct seh_link {
+	struct seh_link *next;
+	uintptr_t marker;
+	CONTEXT parent;		/* where an exception leaving the host frame goes on */
+	void (*unwound)(void *arg, EXCEPTION_RECORD *unwinding);
+	void *arg;
+};
+void seh_link_push(struct seh_link *l);
+void seh_link_pop(struct seh_link *l);
+int seh_unwind_run(void *target, void *target_ip, EXCEPTION_RECORD *rec,
+		   const CONTEXT *start, CONTEXT *out);
+void seh_resume(CONTEXT *c) __attribute__((noreturn));
+void seh_dispatch(EXCEPTION_RECORD *rec, CONTEXT *ctx)
+	__attribute__((noreturn));
 EXCEPTION_DISPOSITION WINAPI
 seh_C_specific_handler(EXCEPTION_RECORD *rec, void *frame, CONTEXT *ctx,
 		       DISPATCHER_CONTEXT *dc);
