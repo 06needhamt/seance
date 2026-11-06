@@ -4,6 +4,8 @@
  * preferred base.
  */
 #include <stdint.h>
+#include <sys/mman.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "common/error.h"
@@ -211,15 +213,37 @@ static void check_reloc_fixture(struct pe_image *img)
 	CHECK_STR(msg, "relocated");
 }
 
+/*
+ * Whether this process can map the fixtures' base at all: not under ASan
+ * on x86-64, whose shadow memory reserves the range 0x180000000 is in.
+ */
+static int base_mappable(void)
+{
+	void *want = (void *)(uintptr_t)FIXTURE_BASE;
+	void *p = mmap(want, 0x10000, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS |
+		       MAP_FIXED_NOREPLACE, -1, 0);
+
+	if (p == MAP_FAILED)
+		return 0;
+	munmap(p, 0x10000);
+	return p == want;
+}
+
 static void test_map(void)
 {
+	int at_base = base_mappable();
+
+	if (!at_base)
+		printf("the fixtures' base 0x%llx is taken here: checking "
+		       "relocation only\n", (unsigned long long)FIXTURE_BASE);
+
 	/* The preferred base is free, so no relocation is needed. */
 	struct pe_image *basic = map_fixture("pe_basic.dll", 0);
 	CHECK(basic != NULL);
 	if (!basic)
 		return;
-	CHECK_EQ((uintptr_t)basic->base, FIXTURE_BASE);
-	CHECK_EQ(basic->relocated, 0);
+	CHECK_EQ((uintptr_t)basic->base == FIXTURE_BASE, at_base);
+	CHECK_EQ(basic->relocated, !at_base);
 	int_fn add = (int_fn)export_addr(basic, "basic_add");
 	CHECK(add != NULL);
 
@@ -247,8 +271,8 @@ static void test_map(void)
 	pe_free(basic);
 
 	/* With the base free again, pe_noreloc loads where it wants. */
-	img = map_fixture("pe_noreloc.dll", 0);
-	CHECK(img != NULL);
+	img = at_base ? map_fixture("pe_noreloc.dll", 0) : NULL;
+	CHECK(img != NULL || !at_base);
 	if (img) {
 		CHECK_EQ((uintptr_t)img->base, FIXTURE_BASE);
 		check_reloc_fixture(img);
