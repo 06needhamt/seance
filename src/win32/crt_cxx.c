@@ -854,9 +854,9 @@ static void *cxx_new(size_t size)
 }
 
 CRTFN(void *) crt_operator_new(size_t size) { return cxx_new(size); }
-CRTFN(void) crt_operator_delete(void *p) { free(p); }
+CRTFN(void) crt_operator_delete(void *p) { win_free(p); }
 /* The sized forms (/Zc:sizedDealloc) ignore the size. */
-CRTFN(void) crt_operator_delete_sized(void *p, size_t size) { free(p); }
+CRTFN(void) crt_operator_delete_sized(void *p, size_t size) { win_free(p); }
 
 CRTFN(new_handler_fn) crt__set_new_handler(new_handler_fn f)
 {

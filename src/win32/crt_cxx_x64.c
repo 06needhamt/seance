@@ -1064,8 +1064,8 @@ CRTFN(void *) crt_operator_new(size_t size)
 	return win_alloc(1, size ? size : 1);
 }
 
-CRTFN(void) crt_operator_delete(void *p) { free(p); }
-CRTFN(void) crt_operator_delete_sized(void *p, size_t size) { free(p); }
+CRTFN(void) crt_operator_delete(void *p) { win_free(p); }
+CRTFN(void) crt_operator_delete_sized(void *p, size_t size) { win_free(p); }
 
 CRTFN(void) crt__purecall(void)
 {

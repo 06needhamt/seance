@@ -265,3 +265,15 @@ Decisions:
   `test_cxxeh`, `test_crt_helpers`, `test_lowmem`) skip.
   `-DVFW_BUILD_X86_64=OFF` builds `seance` only; a directory configured
   with `-DVFW_ARCH=x86_64` builds `seance64` only.
+
+## Real 64-bit codecs
+
+Of the 224 files in the user's codec collection, one is x86-64:
+`cinevf2w.dll`. It loads and probes in `seance64` (and through the
+hand-off from `seance`). Running it found what the fixtures could not:
+no `rpcrt4.dll` (now built in, with the UUID functions), and a codec that
+truncates the driver instance to 32 bits, which needs heap memory below
+4 GB. `win32/winheap.c` now serves HeapAlloc, the CRT's malloc family and
+`operator new` (and VirtualAlloc, when it fits) from `MAP_32BIT` chunks on
+x86-64, falling back to libc when they run out; `VFW_LOWHEAP=0` turns it
+off.

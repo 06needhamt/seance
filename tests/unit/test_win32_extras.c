@@ -78,6 +78,49 @@ static void test_bcrypt(void)
 	mod_free(m);
 }
 
+static void test_rpcrt4(void)
+{
+	struct module *m = mod_load("rpcrt4.dll", NULL);
+	CHECK(m != NULL);
+	if (!m)
+		return;
+	FN(m, LONG, UuidCreate, GUID *);
+	FN(m, LONG, UuidToStringA, const GUID *, BYTE **);
+	FN(m, LONG, UuidFromStringA, const BYTE *, GUID *);
+	FN(m, LONG, RpcStringFreeA, BYTE **);
+	FN(m, int, UuidCompare, const GUID *, const GUID *, LONG *);
+	FN(m, int, UuidIsNil, const GUID *, LONG *);
+
+	GUID a, b, c;
+	LONG st = -1;
+	BYTE *str = NULL;
+
+	CHECK_EQ(UuidCreate(&a), 0);
+	CHECK_EQ(UuidCreate(&b), 0);
+	CHECK(memcmp(&a, &b, sizeof(a)) != 0);
+	CHECK_EQ(a.Data3 >> 12, 4);			/* version 4 */
+	CHECK_EQ(a.Data4[0] >> 6, 2);			/* RFC 4122 variant */
+	CHECK_EQ(UuidIsNil(&a, &st), 0);
+	CHECK_EQ(st, 0);
+
+	CHECK_EQ(UuidToStringA(&a, &str), 0);
+	CHECK(str && strlen((char *)str) == 36);
+	CHECK_EQ(UuidFromStringA(str, &c), 0);
+	CHECK_EQ(UuidCompare(&a, &c, &st), 0);
+	CHECK_EQ(RpcStringFreeA(&str), 0);
+	CHECK(str == NULL);
+
+	static const BYTE fixed[] = "00112233-4455-6677-8899-AABBCCDDEEFF";
+	CHECK_EQ(UuidFromStringA(fixed, &c), 0);
+	CHECK_EQ(c.Data1, 0x00112233u);
+	CHECK_EQ(c.Data3, 0x6677);
+	CHECK_EQ(c.Data4[7], 0xff);
+	CHECK_EQ(UuidFromStringA((const BYTE *)"{00112233-4455-6677-8899-AABBCCDDEEFF}", &c), 1705);
+	CHECK_EQ(UuidFromStringA((const BYTE *)"nonsense", &c), 1705);
+	CHECK(UuidCompare(&c, &a, &st) != 0);
+	mod_free(m);
+}
+
 static void test_crypt32(void)
 {
 	struct module *m = mod_load("crypt32.dll", NULL);
@@ -957,6 +1000,7 @@ int main(void)
 	CHECK_EQ(runtime_enter(), 0);
 
 	test_bcrypt();
+	test_rpcrt4();
 	test_crypt32();
 	test_d3d9();
 	test_msvcrt();

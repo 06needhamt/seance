@@ -417,7 +417,7 @@ CRTFN(LONG) crt_labs(LONG v) { return v < 0 ? -v : v; }
 /* The CRT heap: its own malloc/free/calloc/realloc, independent of
  * kernel32's HeapAlloc/GlobalAlloc family - a codec may use either. On
  * failure each asks the new handler under _set_new_mode(1). */
-CRTFN(size_t) crt__msize(void *p) { return malloc_usable_size(p); }
+CRTFN(size_t) crt__msize(void *p) { return win_usable(p); }
 
 CRTFN(void *) crt_malloc(size_t n)
 {
@@ -434,7 +434,7 @@ CRTFN(void *) crt_calloc(size_t n, size_t size)
 	void *p;
 	if (size && n > SIZE_MAX / size)
 		return NULL;	/* overflow: no handler would help */
-	while (!(p = calloc(n, size)) && crt_malloc_retry(n * size))
+	while (!(p = win_calloc(n, size)) && crt_malloc_retry(n * size))
 		;
 	return p;
 }
@@ -443,11 +443,11 @@ CRTFN(void *) crt_realloc(void *p, size_t n)
 {
 	void *q;
 	/* Size 0 frees p and has nothing to retry. */
-	while (!(q = realloc(p, n)) && n && crt_malloc_retry(n))
+	while (!(q = win_realloc(p, n)) && n && crt_malloc_retry(n))
 		;
 	return q;
 }
-CRTFN(void) crt_free(void *p) { free(p); }
+CRTFN(void) crt_free(void *p) { win_free(p); }
 
 #define E(name) { #name, 0, (void *)crt_##name }
 
