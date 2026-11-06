@@ -66,8 +66,8 @@ Foundation transforms, network access and hardware decoding.
 
 ## Prerequisites
 
-The codecs are i386 code, so the harness is built as a 32-bit Linux program.
-On a 64-bit x86 host the kernel must support running 32-bit programs, which
+Most codecs are i386 code, so `seance` is built as a 32-bit Linux program
+(`seance64`, for x86-64 codecs, is a 64-bit one). On a 64-bit x86 host the kernel must support running 32-bit programs, which
 most distributions enable by default.
 
 - A C compiler that builds i386 programs, one of:
@@ -104,8 +104,9 @@ cmake --preset asan && cmake --build --preset asan && ctest --preset asan
                               # in build-asan/
 ```
 
-The harness is always built as an i386 program. Before anything else,
-configuring picks a compiler for that ([`cmake/i386.cmake`](cmake/i386.cmake)),
+`seance` is always built as an i386 program (`seance64`, built alongside it,
+is the x86-64 one; see `VFW_ARCH`). Before anything else, configuring picks a
+compiler for the i386 build ([`cmake/i386.cmake`](cmake/i386.cmake)),
 trying each until one links a 32-bit program with the headers the harness
 needs:
 
@@ -142,7 +143,7 @@ Useful CMake options:
 | `VFW_BUILD_X86_64=OFF` | build only the i386 `seance`, not `seance64` too (on by default on an x86-64 host; elsewhere it needs an x86_64 Linux cross compiler) |
 | `VFW_ARCH=x86_64` | make this build directory build `seance64` alone |
 
-The `ci` preset turns on both `REQUIRE` options. Tests carry the CTest
+The `ci` preset turns on all three `REQUIRE` options. Tests carry the CTest
 labels `unit`, `abi`, `cli`, `media` and `samples`, so `ctest --preset default -L unit`
 runs only the unit tests and `-LE media` leaves out the FFmpeg checks.
 

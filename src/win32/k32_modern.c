@@ -20,9 +20,11 @@
 #include "win32/k32.h"
 
 /* The pointer-sized word behind a lock, as the integer we keep in it. */
-static uintptr_t *word(void *p)
+typedef uintptr_t __attribute__((may_alias)) lock_word;
+
+static lock_word *word(void *p)
 {
-	return (uintptr_t *)p;
+	return (lock_word *)p;
 }
 
 /*
@@ -40,7 +42,7 @@ WINFN(void) k32_InitializeSRWLock(PSRWLOCK l)
 
 static void srw_acquire(PSRWLOCK l, int exclusive)
 {
-	uintptr_t *w = word(&l->Ptr);
+	lock_word *w = word(&l->Ptr);
 
 	wait_lock();
 	while (exclusive ? *w != 0 : (*w & SRW_WRITER))
@@ -51,7 +53,7 @@ static void srw_acquire(PSRWLOCK l, int exclusive)
 
 static BOOL srw_try(PSRWLOCK l, int exclusive)
 {
-	uintptr_t *w = word(&l->Ptr);
+	lock_word *w = word(&l->Ptr);
 	BOOL got;
 
 	wait_lock();
@@ -65,7 +67,7 @@ static BOOL srw_try(PSRWLOCK l, int exclusive)
 /* With the wait lock held. */
 static void srw_release_locked(PSRWLOCK l, int exclusive)
 {
-	uintptr_t *w = word(&l->Ptr);
+	lock_word *w = word(&l->Ptr);
 
 	if (exclusive)
 		*w &= ~SRW_WRITER;
@@ -102,13 +104,13 @@ struct cv_waiter {
 	int signaled;
 };
 
-static struct cv_waiter *cv_first(uintptr_t *w)
+static struct cv_waiter *cv_first(lock_word *w)
 {
 	return (struct cv_waiter *)(uintptr_t)*w;
 }
 
 /* With the wait lock held. */
-static void cv_enqueue(uintptr_t *w, struct cv_waiter *n)
+static void cv_enqueue(lock_word *w, struct cv_waiter *n)
 {
 	struct cv_waiter *first = cv_first(w);
 
@@ -123,7 +125,7 @@ static void cv_enqueue(uintptr_t *w, struct cv_waiter *n)
 	first->prev = n;
 }
 
-static void cv_remove(uintptr_t *w, struct cv_waiter *n)
+static void cv_remove(lock_word *w, struct cv_waiter *n)
 {
 	if (n->next == n) {
 		*w = 0;
@@ -153,7 +155,7 @@ struct cv_lock {
 
 static BOOL cv_sleep(PCONDITION_VARIABLE cv, DWORD ms, const struct cv_lock *l)
 {
-	uintptr_t *w = word(&cv->Ptr);
+	lock_word *w = word(&cv->Ptr);
 	struct cv_waiter me = { NULL, NULL, 0 };
 	struct timespec deadline;
 	BOOL woken = TRUE;
@@ -223,7 +225,7 @@ WINFN(BOOL) k32_SleepConditionVariableCS(PCONDITION_VARIABLE cv,
 
 WINFN(void) k32_WakeConditionVariable(PCONDITION_VARIABLE cv)
 {
-	uintptr_t *w = word(&cv->Ptr);
+	lock_word *w = word(&cv->Ptr);
 	struct cv_waiter *first;
 
 	wait_lock();
@@ -237,7 +239,7 @@ WINFN(void) k32_WakeConditionVariable(PCONDITION_VARIABLE cv)
 
 WINFN(void) k32_WakeAllConditionVariable(PCONDITION_VARIABLE cv)
 {
-	uintptr_t *w = word(&cv->Ptr);
+	lock_word *w = word(&cv->Ptr);
 	struct cv_waiter *first;
 
 	wait_lock();
@@ -265,7 +267,7 @@ WINFN(void) k32_InitOnceInitialize(PINIT_ONCE once)
 WINFN(BOOL) k32_InitOnceBeginInitialize(PINIT_ONCE once, DWORD flags,
 					PBOOL pending, PVOID *context)
 {
-	uintptr_t *w = word(&once->Ptr);
+	lock_word *w = word(&once->Ptr);
 	BOOL ok = TRUE;
 
 	if (flags & ~(DWORD)(INIT_ONCE_CHECK_ONLY | INIT_ONCE_ASYNC)) {
@@ -299,7 +301,7 @@ WINFN(BOOL) k32_InitOnceBeginInitialize(PINIT_ONCE once, DWORD flags,
 
 WINFN(BOOL) k32_InitOnceComplete(PINIT_ONCE once, DWORD flags, PVOID context)
 {
-	uintptr_t *w = word(&once->Ptr);
+	lock_word *w = word(&once->Ptr);
 	BOOL ok = TRUE;
 
 	if ((flags & ~(DWORD)(INIT_ONCE_ASYNC | INIT_ONCE_INIT_FAILED)) ||

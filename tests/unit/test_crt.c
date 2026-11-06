@@ -115,7 +115,13 @@ static void test_printf(void)
 
 	/* Pointers, strings and characters. */
 	sprintf_(b, "%p [%12p]", (void *)0x1234abcd, (void *)0xff);
+#ifdef __x86_64__
+	CHECK_STR(b, "000000001234ABCD [00000000000000FF]");
+	sprintf_(b, "%p", (void *)0x7ffe12345678abcdull);
+	CHECK_STR(b, "7FFE12345678ABCD");
+#else
 	CHECK_STR(b, "1234ABCD [    000000FF]");
+#endif
 	sprintf_(b, "%s|%.2s|%5s|%-5s|%hs", "abc", "abc", "ab", "ab", "hs");
 	CHECK_STR(b, "abc|ab|   ab|ab   |hs");
 	CHECK_EQ(sprintf_(b, "%S|%ls|%ws|%.2S", euro_w, euro_w, euro_w,
@@ -333,8 +339,9 @@ static void test_msvcrt_semantics(void)
 	CHECK_EQ(memcmp_(NULL, buf, 0), 0);
 	CHECK(memchr_(NULL, 'x', 0) == NULL);
 
-	/* An empty write to stdout through _iob[1]. */
-	CHECK_EQ(fprintf_(iob + 32, "%s", ""), 0);
+	/* An empty write to stdout through _iob[1] (a FILE is 32 bytes, or
+	 * 48 on Win64). */
+	CHECK_EQ(fprintf_(iob + (sizeof(void *) == 8 ? 48 : 32), "%s", ""), 0);
 
 	/* A successful fseek clears end-of-file. */
 	void *f = fopen_("C:\\WINDOWS\\TEMP\\test_crt.tmp", "w+b");

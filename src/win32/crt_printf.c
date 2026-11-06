@@ -483,9 +483,11 @@ static void format(struct sink *s, const void *fmt, win_va_list *ap)
 			break;
 		}
 		case 'p': {
-			char a[16];
-			snprintf(a, sizeof(a), "%08X",
-				 (unsigned)(uintptr_t)win_va_arg(*ap, void *));
+			/* As many digits as a pointer has: 8, or 16 on Win64. */
+			char a[24];
+			snprintf(a, sizeof(a), "%0*llX", (int)(2 * sizeof(void *)),
+				 (unsigned long long)(uintptr_t)
+				 win_va_arg(*ap, void *));
 			sp.zero = 0;
 			put_padded_ascii(s, &sp, a, strlen(a), 0);
 			break;
