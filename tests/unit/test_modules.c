@@ -244,7 +244,9 @@ static const char *patched_delay_dll(const char *dir)
 	if (ok) {
 		size_t off = (size_t)((IMAGE_DOS_HEADER *)data)->e_lfanew + 4 +
 			     sizeof(IMAGE_FILE_HEADER) +
-			     offsetof(IMAGE_OPTIONAL_HEADER32, DataDirectory) +
+			     (img->pe64 ?
+			      offsetof(IMAGE_OPTIONAL_HEADER64, DataDirectory) :
+			      offsetof(IMAGE_OPTIONAL_HEADER32, DataDirectory)) +
 			     IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT * sizeof(IMAGE_DATA_DIRECTORY);
 		IMAGE_DATA_DIRECTORY d = { e.rva, 3 * sizeof(IMAGE_DELAYLOAD_DESCRIPTOR) };
 		memcpy((BYTE *)data + off, &d, sizeof(d));
@@ -368,8 +370,6 @@ int main(void)
 	test_search_path();
 	test_force_reloc();
 	CHECK_EQ(runtime_enter(), 0);
-#if !defined(__x86_64__)	/* pe_delay's tables are i386 only, so far */
 	test_delay_load();
-#endif
 	return test_summary("test_modules");
 }

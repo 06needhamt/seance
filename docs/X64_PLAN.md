@@ -172,18 +172,18 @@ Decisions:
    Milestone: a 64-bit C++ exception fixture laid out as cl compiles it
    throws, catches by type, rethrows and destroys on unwind; mingw's own
    `__gxx_personality_seh0` code works through phase 4.
-6. **Codecs.** (Fixtures and tests done.) The 64-bit fixture set is every
-   fixture but the i386-only `pe_seh`, `pe_sehcrt`, `pe_cxxeh`,
-   `pe_thunk` and `pe_delay` (hand-written i386 tables), including
-   `testcodec`, `testacm`, `testfilter` and `testdmo`. On x86-64 the
+6. **Codecs.** (Done.) The 64-bit fixture set is every fixture but the
+   i386-only `pe_seh`, `pe_sehcrt`, `pe_cxxeh` and `pe_thunk`, including
+   `testcodec`, `testacm`, `testfilter`, `testdmo` and `pe_delay` (whose
+   hand-written delay-load tables take the pointer width). On x86-64 the
    fixture build strips the stdcall decorations from the `.def` files and
    drops `-mpreferred-stack-boundary=2`, and every fixture has one
    absolute pointer so GNU ld gives it a `.reloc` (it leaves one out when
    nothing needs relocating). The VfW, ACM, DirectShow and DMO unit
    tests and `validate_media` pass with them under `seance64`.
    Milestone (reached): `seance64 probe`, `encode` and `decode` with each
-   64-bit test codec give what the i386 ones do. (Remaining: a smoke
-   test over the 64-bit fixtures, and `pe_delay` for x86-64.)
+   64-bit test codec give what the i386 ones do, and `seance64`'s
+   `smoke` runs over the 64-bit fixtures (all but its 2 GB checks).
 7. **One command for both.** (Done.) `src/handoff.c`: `src/main.c`
    checks the DLL that `probe`, `decode`, `encode`, `register` or
    `unregister` names with `pe_peek_machine` before running it, and

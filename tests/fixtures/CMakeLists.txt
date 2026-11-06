@@ -99,8 +99,7 @@ endfunction()
 import_library(pe_basic)
 
 # The 64-bit fixtures leave out what is i386 only: fs:[0] SEH frames
-# written by hand, cl's i386 C++ exception layout, Win9x thunks, and
-# pe_delay's hand-written (i386) delay-load tables.
+# written by hand, cl's i386 C++ exception layout and Win9x thunks.
 import_library(zz_nosuch)
 import_library(vfw_missing)
 import_library(sehcrt)
@@ -121,9 +120,7 @@ fixture(pe_fourccs pe_fourccs.c pe_fourccs.rc)
 fixture(pe_dep pe_dep.c pe_dep.def LIBS pe_basic_imports)
 fixture(pe_missing pe_missing.c LIBS zz_nosuch_imports pe_basic_imports)
 # Its own delay-load tables (GNU ld doesn't make them); see pe_delay.c.
-if(NOT VFW_FIXTURE_64)	# its tables are i386 asm
-	fixture(pe_delay pe_delay.c)
-endif()
+fixture(pe_delay pe_delay.c)
 
 # Links against kernel32 (the mingw import library) and a made-up function.
 fixture(pe_runtime pe_runtime.c LIBS vfw_missing_imports kernel32)

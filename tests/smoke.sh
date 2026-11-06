@@ -5,7 +5,9 @@
 # and probe on them.
 #
 # With lowmem=1 it also checks, through testcodec's strict mode, that the
-# codec never sees a pointer at or above 2 GB.
+# codec never sees a pointer at or above 2 GB, and how crashes in a codec
+# are reported. lowmem=x64 (seance64, whose codecs see pointers anywhere)
+# runs the same checks but the 2 GB ones.
 #
 # usage: tests/smoke.sh <seance> <not a DLL or AVI> [<fixture dir> [lowmem]]
 set -eu
@@ -15,6 +17,14 @@ harness=${1:?$usage}
 junk=${2:?$usage}
 fixtures=${3:-}
 lowmem=${4:-0}
+crash=0 low=0 more=0
+case $lowmem in
+1) crash=1 low=1 more=1 ;;
+x64) crash=1 more=1 ;;
+esac
+# The fixtures' strict modes, when the 2 GB checks apply.
+fstrict=
+[ "$low" = 0 ] || fstrict=VFW_ENV_TESTFILTER_STRICT=1
 # On a cross build, what runs i386 programs (qemu-i386), from CMake.
 emu=${VFW_EMULATOR:-}
 
@@ -209,7 +219,7 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	# filter's, each decoding the other's, in every mode of the DMOs.
 	d=$fixtures/testdmo.dll
 	strict=
-	[ "$lowmem" = 1 ] && strict=STRICT
+	[ "$low" = 1 ] && strict=STRICT
 	for mode in "" NOTACCEPTING $strict; do
 		env ${mode:+VFW_ENV_TESTDMO_$mode=1} $emu "$harness" encode "$d" \
 			"$work/in.wav" -o "$work/dmo.avi" 2>/dev/null
@@ -402,16 +412,19 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		-o "$work/x.avi" --clsid '{5E6C9B41-3A7D-4F0E-9C11-0D2B7A6E4F80}' \
 		2>&1 | grep -q "has only a video decoder, not an encoder"
 	# A Windows 9x DLL that thunks to a 16-bit one (Mvicod32.dll) is said
-	# to be one, and its DllMain isn't run.
-	out=$($emu "$harness" encode "$fixtures/pe_thunk.dll" "$work/v.y4m" \
-		-o "$work/x.avi" 2>&1 || true)
-	echo "$out" | grep -q "a Windows 9x DLL that runs through a 16-bit one (it imports ThunkConnect32"
-	if echo "$out" | grep -q "not implemented"; then
-		echo "pe_thunk.dll's DllMain ran" >&2
-		exit 1
+	# to be one, and its DllMain isn't run. (i386 only: there are no
+	# 64-bit ones.)
+	if [ -e "$fixtures/pe_thunk.dll" ]; then
+		out=$($emu "$harness" encode "$fixtures/pe_thunk.dll" "$work/v.y4m" \
+			-o "$work/x.avi" 2>&1 || true)
+		echo "$out" | grep -q "a Windows 9x DLL that runs through a 16-bit one (it imports ThunkConnect32"
+		if echo "$out" | grep -q "not implemented"; then
+			echo "pe_thunk.dll's DllMain ran" >&2
+			exit 1
+		fi
+		$emu "$harness" info "$fixtures/pe_thunk.dll" |
+			grep -q "ThunkConnect32: a Windows 9x DLL that thunks"
 	fi
-	$emu "$harness" info "$fixtures/pe_thunk.dll" |
-		grep -q "ThunkConnect32: a Windows 9x DLL that thunks"
 	# RealPlayer's codecs (rv203260.dll) are said to be what they are.
 	$emu "$harness" encode "$fixtures/pe_realcodec.dll" "$work/v.y4m" \
 		-o "$work/x.avi" 2>&1 | grep -q "a RealPlayer codec (it exports RV20"
@@ -534,7 +547,7 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		--compare "$work/sweep1.tsv" | grep -q "^  none$"
 	# A codec that crashes in ICM_*_END after the last frame still gives
 	# whole files (not under a sanitizer, which takes faults itself).
-	if [ "$lowmem" = 1 ]; then
+	if [ "$crash" = 1 ]; then
 		VFW_ENV_TESTCODEC_END_CRASH=1 $emu "$harness" encode \
 			"$fixtures/testcodec.dll" "$work/noise.y4m" \
 			-o "$work/end.avi" 2>&1 |
@@ -574,7 +587,7 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	unset VFW_REGISTRY
 	rm -rf "$work"
 
-	if [ "$lowmem" = 1 ]; then
+	if [ "$more" = 1 ]; then
 		work=$(mktemp -d)
 		trap 'rm -rf "$work"' EXIT
 		{
@@ -584,7 +597,9 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 				head -c 384 /dev/urandom
 			done
 		} >"$work/in.y4m"
-		export VFW_ENV_TESTCODEC_STRICT=1
+		if [ "$low" = 1 ]; then
+			export VFW_ENV_TESTCODEC_STRICT=1
+		fi
 		$emu "$harness" encode "$fixtures/testcodec.dll" "$work/in.y4m" \
 			-o "$work/t.avi" 2>/dev/null
 		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/t.avi" \
@@ -665,14 +680,14 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 			"$work/dshow-own.avi" -o /dev/null 2>&1 |
 			grep -q -- "-> raw frames"
 		# Every pointer the host gives a DirectShow filter is below 2 GB too.
-		VFW_ENV_TESTFILTER_STRICT=1 \
+		env $fstrict \
 			$emu "$harness" decode "$fixtures/testfilter.ax" "$work/t.avi" \
 			-o "$work/dshow-strict.y4m" 2>/dev/null
 		cmp -s "$work/in.y4m" "$work/dshow-strict.y4m" || {
 			echo "smoke: strict DirectShow decode differs" >&2
 			exit 1
 		}
-		VFW_ENV_TESTFILTER_STRICT=1 \
+		env $fstrict \
 			$emu "$harness" encode "$fixtures/testfilter.ax" "$work/in.y4m" \
 			-o "$work/dshow-strict.avi" 2>/dev/null
 		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/dshow-strict.avi" \
@@ -795,7 +810,7 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		# DMOs: the same stream decoded through testdmo.dll, in each of its
 		# modes, matches testcodec; its encoder's output decodes back
 		# exactly through testcodec and testfilter.
-		for mode in "" DELAY BURST NOTACCEPTING SWITCH STRICT; do
+		for mode in "" DELAY BURST NOTACCEPTING SWITCH $strict; do
 			env ${mode:+VFW_ENV_TESTDMO_$mode=1} $emu "$harness" decode \
 				"$fixtures/testdmo.dll" "$work/t.avi" \
 				-o "$work/dmo.y4m" 2>/dev/null
@@ -858,7 +873,7 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		# The check itself works: without the reservation it trips.
 		# Not under an emulator, where the guest's memory is all below
 		# 2 GB anyway (qemu-user maps it low).
-		if [ -z "$emu" ]; then
+		if [ -z "$emu" ] && [ "$low" = 1 ]; then
 			fails env VFW_LOW_MEMORY=0 $emu "$harness" encode \
 				"$fixtures/testcodec.dll" "$work/in.y4m" \
 				-o "$work/t2.avi"
@@ -866,7 +881,8 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 				$emu "$harness" decode "$fixtures/testfilter.ax" \
 				"$work/t.avi" -o "$work/t2.y4m"
 		fi
-		echo "smoke: the codec saw no pointers above 2 GB"
+		[ "$low" = 0 ] ||
+			echo "smoke: the codec saw no pointers above 2 GB"
 	fi
 fi
 echo "smoke: CLI ok"
