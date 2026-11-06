@@ -148,6 +148,21 @@ if(VFW_FIXTURE_64)
 		OPTIONS -Wl,--disable-auto-import)
 endif()
 
+# C++ exceptions from mingw-w64's g++ (libgcc's unwinder over the Rtl*
+# functions), when it is installed: the DLL links its own libgcc/libstdc++.
+if(VFW_FIXTURE_64)
+	include(CheckLanguage)
+	check_language(CXX)
+	if(CMAKE_CXX_COMPILER)
+		enable_language(CXX)
+		add_library(pe_gxx SHARED pe_gxx.cc)
+		target_compile_options(pe_gxx PRIVATE -O1 -Wall)
+		target_link_options(pe_gxx PRIVATE -static-libgcc -static-libstdc++)
+		set_target_properties(pe_gxx PROPERTIES PREFIX "" SUFFIX ".dll"
+			RUNTIME_OUTPUT_DIRECTORY ${VFW_FIXTURE_DIR})
+	endif()
+endif()
+
 # x86-64 C++ exceptions: hand-written functions with __CxxFrameHandler3
 # tables as cl lays them out.
 if(VFW_FIXTURE_64)

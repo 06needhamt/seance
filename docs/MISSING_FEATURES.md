@@ -329,7 +329,7 @@ what keeps the others from working.
 - **64-bit DLLs in the i386 `seance`:** they are handed to `seance64`
   (`VFW_ARCH=x86_64`), which dispatches `__try` SEH and C++ exceptions of
   `__CxxFrameHandler3` code; not yet `__CxxFrameHandler4` (VS 2019 and
-  later) or g++'s personality; see [X64_PLAN.md](X64_PLAN.md). The one
+  later); g++'s exceptions work; see [X64_PLAN.md](X64_PLAN.md). The one
   64-bit codec tried so far, CineForm's `cinevf2w.dll` (v5.8.1, 2009),
   needed `rpcrt4.dll` (`UuidCreate`) and heap addresses below 4 GB (its
   `DriverProc` keeps the instance it returns from `DRV_OPEN` in 32 bits,

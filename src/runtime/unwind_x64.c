@@ -121,7 +121,8 @@ BOOLEAN WINAPI seh_RtlDeleteFunctionTable(PRUNTIME_FUNCTION entries)
  * call)? Returns the length of the part before the pops, with *pops set to
  * their number, or -1 if not.
  */
-static int epilogue_at(const BYTE *p, int *pops, int *is_ret)
+static int epilogue_at(const BYTE *p, int *pops, int *is_ret,
+		       const BYTE *begin, const BYTE *end)
 {
 	int len = 0;
 
@@ -153,9 +154,19 @@ static int epilogue_at(const BYTE *p, int *pops, int *is_ret)
 		*is_ret = 1;
 		return len;
 	}
-	/* A tail call: jmp rel32/rel8, jmp [mem] or jmp reg. */
-	if (q[0] == 0xe9 || q[0] == 0xeb ||
-	    (q[0] == 0xff && (q[1] & 0x38) == 0x20) ||
+	/* A tail call: a jmp rel32/rel8 out of the function (one within it is
+	 * just a jump), jmp [mem] or jmp reg. */
+	if (q[0] == 0xe9 || q[0] == 0xeb) {
+		const BYTE *target = q[0] == 0xe9 ?
+			q + 5 + *(const int32_t *)(q + 1) :
+			q + 2 + (int8_t)q[1];
+
+		if (target >= begin && target < end)
+			return -1;
+		*is_ret = 0;
+		return len;
+	}
+	if ((q[0] == 0xff && (q[1] & 0x38) == 0x20) ||
 	    (q[0] == 0x48 && q[1] == 0xff && (q[2] & 0x38) == 0x20) ||
 	    (q[0] == 0x41 && q[1] == 0xff && (q[2] & 0x38) == 0x20)) {
 		*is_ret = 0;
@@ -234,7 +245,9 @@ seh_RtlVirtualUnwind(DWORD type, ULONGLONG base, ULONGLONG pc,
 	{
 		int pops, is_ret;
 		const BYTE *code = (const BYTE *)(uintptr_t)pc;
-		int len = epilogue_at(code, &pops, &is_ret);
+		int len = epilogue_at(code, &pops, &is_ret,
+				      (const BYTE *)(uintptr_t)(base + fe->BeginAddress),
+				      (const BYTE *)(uintptr_t)(base + fe->EndAddress));
 
 		info = (const UNWIND_INFO *)(uintptr_t)(base + fe->UnwindData);
 		prolog = info->SizeOfProlog;

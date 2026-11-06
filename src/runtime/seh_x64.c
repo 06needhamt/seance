@@ -361,7 +361,7 @@ static PRUNTIME_FUNCTION frame_entry(const CONTEXT *c, ULONGLONG *base,
  * not return if one does; otherwise reports the exception as unhandled
  * (after the top-level filter), exiting.
  */
-static void __attribute__((noreturn))
+static void __attribute__((noreturn, no_sanitize_address))
 dispatch_exception(EXCEPTION_RECORD *rec, CONTEXT *ctx, int sig)
 {
 	struct win_teb *teb = teb_current();
@@ -380,6 +380,16 @@ dispatch_exception(EXCEPTION_RECORD *rec, CONTEXT *ctx, int sig)
 			CONTEXT n = c;
 			PEXCEPTION_ROUTINE h;
 
+			if (vfw_trace_enabled) {
+				char where[160];
+
+				if (!mod_describe_address_try((void *)(uintptr_t)c.Rip,
+							      where, sizeof(where)))
+					snprintf(where, sizeof(where), "%#llx",
+						 (unsigned long long)c.Rip);
+				TRACE("  frame %s rsp %#llx%s", where,
+				      (unsigned long long)c.Rsp, fe ? "" : " (no unwind data)");
+			}
 			if (!ok) {
 				if (host_link(&c, NULL))
 					continue;
@@ -398,8 +408,31 @@ dispatch_exception(EXCEPTION_RECORD *rec, CONTEXT *ctx, int sig)
 				dc.ContextRecord = ctx;
 				dc.LanguageHandler = h;
 				dc.HandlerData = hdata;
-				if (h(rec, (void *)(uintptr_t)frame, ctx, &dc) ==
-				    ExceptionContinueExecution &&
+				/*
+				 * An exception raised inside the handler (libgcc
+				 * starts its second phase that way) goes on, from
+				 * here, from the context of this one.
+				 */
+				struct seh_link hl;
+				EXCEPTION_DISPOSITION d;
+
+				memset(&hl, 0, sizeof(hl));
+				hl.parent = *ctx;
+				seh_link_push(&hl);
+				d = h(rec, (void *)(uintptr_t)frame, ctx, &dc);
+				seh_link_pop(&hl);
+
+				if (vfw_trace_enabled) {
+					char where[160];
+
+					if (!mod_describe_address_try((void *)(uintptr_t)c.Rip,
+								      where, sizeof(where)))
+						snprintf(where, sizeof(where), "%#llx",
+							 (unsigned long long)c.Rip);
+					TRACE("  handler of %s (frame %#llx) -> %d",
+					      where, (unsigned long long)frame, (int)d);
+				}
+				if (d == ExceptionContinueExecution &&
 				    !(rec->ExceptionFlags &
 				      EXCEPTION_NONCONTINUABLE)) {
 					nlive = level;
@@ -462,7 +495,8 @@ vfw_raise_c(DWORD code, DWORD flags, DWORD nargs, const DWORD_PTR *args,
  * context of the target frame in *out if it was reached, else 0. The
  * stack is left as it is: C++ catch blocks run on top of it.
  */
-int seh_unwind_run(void *target, void *target_ip, EXCEPTION_RECORD *rec,
+int __attribute__((no_sanitize_address))
+seh_unwind_run(void *target, void *target_ip, EXCEPTION_RECORD *rec,
 		   const CONTEXT *start, CONTEXT *out)
 {
 	struct win_teb *teb = teb_current();
@@ -487,6 +521,7 @@ int seh_unwind_run(void *target, void *target_ip, EXCEPTION_RECORD *rec,
 		CONTEXT n = c;
 		PEXCEPTION_ROUTINE h;
 		int is_target;
+		struct seh_link hl;
 
 		if (!ok) {
 			if (host_link(&c, &ur))
@@ -513,7 +548,11 @@ int seh_unwind_run(void *target, void *target_ip, EXCEPTION_RECORD *rec,
 			dc.ContextRecord = &c;
 			dc.LanguageHandler = h;
 			dc.HandlerData = hdata;
+			memset(&hl, 0, sizeof(hl));
+			hl.parent = *start;
+			seh_link_push(&hl);
 			h(&ur, (void *)(uintptr_t)frame, &c, &dc);
+			seh_link_pop(&hl);
 		}
 		if (is_target) {
 			*out = c;

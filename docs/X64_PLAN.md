@@ -190,8 +190,13 @@ Decisions:
    - Not done: `__CxxFrameHandler4` (the compressed FuncInfo of
      VS 2019 and later), try blocks inside catch funclets (cl gives these
      their own handler data), exception specifications, the SE
-     translator, `std::bad_exception`, msvcp's `logic_error` family, and
-     mingw's `__gxx_personality_seh0` (g++-built codecs).
+     translator, `std::bad_exception`, and msvcp's `logic_error` family.
+   - Done: mingw g++'s exceptions (`__gxx_personality_seh0` over libgcc's
+     unwinder, as LAV Filters x64 uses): the `pe_gxx` fixture throws and
+     catches by type, as `std::exception&`, `catch (...)` and rethrow, with
+     destructors on the way. This needed an exception raised inside a
+     language handler (libgcc starts its second phase that way) to carry
+     on from the context of the one being dispatched.
    Milestone (reached for FrameHandler3): the hand-written `pe_cxxeh64`
    fixture, laid out as cl compiles it, throws and catches by type, as
    `catch (...)`, a base by reference, with an exception object's
@@ -277,3 +282,13 @@ truncates the driver instance to 32 bits, which needs heap memory below
 `operator new` (and VirtualAlloc, when it fits) from `MAP_32BIT` chunks on
 x86-64, falling back to libc when they run out; `VFW_LOWHEAP=0` turns it
 off.
+
+LAV Filters 0.83 (x64, built with mingw-w64 GCC) was the second: all 11 DLLs
+load with no unimplemented imports, and `LAVVideo.ax`/`LAVAudio.ax` are
+found as a video and an audio decoder (`samples.sh`: 11 DLLs, 0 failures).
+It needed msvcrt's `_time64`, `_stat64`, `_strtoi64`, `_aligned_malloc`
+family, `abort` and the locale accessors (`crt_modern.c`, for both
+architectures). It uses no `__CxxFrameHandler4`: GCC's exceptions go
+through the `Rtl*` unwinder, which the g++ fixture now covers, and which
+found a bug in epilogue detection (a `jmp` inside the function was taken
+for a tail call).

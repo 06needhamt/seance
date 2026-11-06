@@ -1067,6 +1067,13 @@ CRTFN(void *) crt_operator_new(size_t size)
 CRTFN(void) crt_operator_delete(void *p) { win_free(p); }
 CRTFN(void) crt_operator_delete_sized(void *p, size_t size) { win_free(p); }
 
+CRTFN(void) crt_abort(void)
+{
+	fprintf(stderr, "seance: a DLL called abort()\n");
+	fflush(stderr);
+	crash_exit(SIGABRT);
+}
+
 CRTFN(void) crt__purecall(void)
 {
 	fprintf(stderr, "seance: a DLL called a pure virtual function\n");
@@ -1084,6 +1091,7 @@ const struct builtin_export crt_cxx_exports[] = {
 	M("??3@YAXPEAX_K@Z", crt_operator_delete_sized),
 	M("??_V@YAXPEAX_K@Z", crt_operator_delete_sized),
 	M("_purecall", crt__purecall),
+	M("abort", crt_abort),
 	M("_CxxThrowException", crt__CxxThrowException),
 	M("__RTtypeid", crt___RTtypeid),
 	M("__RTDynamicCast", crt___RTDynamicCast),

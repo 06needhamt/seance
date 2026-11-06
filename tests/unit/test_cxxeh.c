@@ -22,6 +22,7 @@
  */
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "loader/modules.h"
 #include "runtime/runtime.h"
@@ -84,6 +85,28 @@ int main(void)
 	CHECK_EQ(counter(0, 1), 1);
 
 	mod_free(m);
+
+	/* g++'s exceptions (libgcc's unwinder over the Rtl* functions), when
+	 * the fixture was built. */
+	if (!access(fixture("pe_gxx.dll"), R_OK)) {
+		struct module *g = mod_load(fixture("pe_gxx.dll"), NULL);
+
+		CHECK(g != NULL);
+		if (g) {
+#define GFN(name) ((int_fn)mod_get_proc(g, name))
+			CHECK_EQ(GFN("gxx_int")(5), 5);
+			CHECK_EQ(GFN("gxx_int")(0), 1);
+			CHECK_EQ(GFN("gxx_std")(-1), 3);
+			CHECK_EQ(GFN("gxx_all")(-1), 77);
+			CHECK_EQ(GFN("gxx_all")(4), 77);
+			CHECK_EQ(GFN("gxx_nested")(6), 12);
+			/* Three throws destroyed two locals each, and gxx_int(0)
+			 * and the rest destroy theirs on return too. */
+			CHECK(((int (WINAPI *)(void))mod_get_proc(g, "gxx_dtors"))() > 0);
+			CHECK_EQ(((int (WINAPI *)(void))mod_get_proc(g, "gxx_dyn"))(), 1);
+			mod_free(g);
+		}
+	}
 	return test_summary("test_cxxeh");
 }
 
