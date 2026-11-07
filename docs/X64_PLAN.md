@@ -193,8 +193,17 @@ Decisions:
      `bad_function_call`; `bad_exception`), with constructors from a
      `const char *` and from an MSVC `std::string`, and the `std::_X...`
      helpers containers throw through.
-   - Not done: `__CxxFrameHandler4` (the compressed FuncInfo of
-     VS 2019 and later), try blocks inside catch funclets (cl gives these
+   - Done: `__CxxFrameHandler4` (the compressed FuncInfo4 of VS 2019 and
+     later, laid out as in Microsoft's `ehdata4_export.h`, read from the
+     MSCpp header mirror): FH3 and FH4 tables are decoded into one form and
+     share the catch/unwind code. The `pe_cxxeh64` fixture has FH4 twins
+     (`cxx64_*_v4`) with hand-encoded tables: catch by type, `...`, base
+     reference, rethrow, and continuation addresses in the table. Not
+     checked against a cl-built binary; unverified guesses are how a catch
+     funclet picks between two table continuations (taken: its return
+     value 2 means the second, anything else the first) and separated
+     (profile-guided) code.
+   - Not done: try blocks inside catch funclets (cl gives these
      their own handler data), exception specifications, the SE
      translator.
    - Done: mingw g++'s exceptions (`__gxx_personality_seh0` over libgcc's

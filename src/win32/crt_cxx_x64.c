@@ -26,7 +26,8 @@
  * function's context (a seh_link), in the state of the catch block, and
  * ends the block.
  *
- * Not done yet (docs/X64_PLAN.md, phase 5): __CxxFrameHandler4, try
+ * __CxxFrameHandler4 (cl 2019 and later) decodes its compressed FuncInfo4
+ * into the same tables. Not done yet (docs/X64_PLAN.md, phase 5): try
  * blocks inside catch funclets (cl gives these funclets their own handler
  * data), exception specifications, the SE translator, and RTTI.
  */
@@ -190,41 +191,318 @@ static _Thread_local struct {
 	int last;
 } target;
 
-static int ip_state(const struct func_info *d, ULONGLONG base, DWORD rva)
+/*
+ * A function's tables in one form whichever handler it has: __CxxFrameHandler3
+ * has them as structures in the image, __CxxFrameHandler4 as a byte stream of
+ * compressed integers. Both are decoded once, on the first exception to meet
+ * the function, and kept.
+ */
+enum uw_kind { UW_NONE, UW_FUNCLET, UW_DTOR_OBJ, UW_DTOR_PTR };
+
+struct n_uw {
+	int to_state;
+	enum uw_kind kind;
+	DWORD action;		/* RVA */
+	int object;		/* frame offset, for the dtor kinds */
+};
+
+struct n_catch {
+	UINT adjectives;
+	DWORD type;		/* RVA, 0 for catch (...) */
+	int obj_offset;
+	DWORD handler;		/* RVA of the funclet */
+	int ncont;		/* continuations given in the tables (FH4) */
+	DWORD cont[2];		/* RVAs */
+};
+
+struct n_try {
+	int try_low, try_high, catch_high;
+	int ncatch;
+	struct n_catch *catches;
+};
+
+struct n_info {
+	struct n_info *next;
+	const void *key;
+	DWORD begin;		/* of the function, for FH4 */
+	int max_state;
+	struct n_uw *uw;
+	UINT nip;
+	struct ip_state *ip;	/* absolute RVAs */
+	UINT ntry;
+	struct n_try *tries;
+	UINT flags;		/* FUNC_DESCR_* */
+	int is_catch;		/* a catch funclet (FH4) */
+	int bad;
+};
+
+static struct n_info *infos;
+static pthread_mutex_t infos_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static struct n_info *n_build3(const struct func_info *d, ULONGLONG base)
 {
-	const struct ip_state *m = (const void *)(uintptr_t)(base + d->ip_map);
+	struct n_info *n = calloc(1, sizeof(*n));
+	const struct unwind_entry *u =
+		(const void *)(uintptr_t)(base + d->unwind_map);
+	const struct try_block *t = (const void *)(uintptr_t)(base + d->try_map);
+
+	n->max_state = d->max_state;
+	n->flags = d->flags;
+	n->uw = calloc(d->max_state ? d->max_state : 1, sizeof(*n->uw));
+	for (int i = 0; i < d->max_state; i++) {
+		n->uw[i].to_state = u[i].to_state;
+		n->uw[i].action = u[i].action;
+		n->uw[i].kind = u[i].action ? UW_FUNCLET : UW_NONE;
+	}
+	n->nip = d->nip;
+	n->ip = (void *)(uintptr_t)(base + d->ip_map);	/* the same layout */
+	n->ntry = d->ntry;
+	n->tries = calloc(d->ntry ? d->ntry : 1, sizeof(*n->tries));
+	for (UINT i = 0; i < d->ntry; i++) {
+		const struct catch_block *c =
+			(const void *)(uintptr_t)(base + t[i].catches);
+
+		n->tries[i].try_low = t[i].try_low;
+		n->tries[i].try_high = t[i].try_high;
+		n->tries[i].catch_high = t[i].catch_high;
+		n->tries[i].ncatch = t[i].ncatch;
+		n->tries[i].catches = calloc(t[i].ncatch ? t[i].ncatch : 1,
+					     sizeof(struct n_catch));
+		for (int j = 0; j < t[i].ncatch; j++) {
+			n->tries[i].catches[j].adjectives = c[j].adjectives;
+			n->tries[i].catches[j].type = c[j].type;
+			n->tries[i].catches[j].obj_offset = c[j].obj_offset;
+			n->tries[i].catches[j].handler = c[j].handler;
+		}
+	}
+	return n;
+}
+
+/*
+ * The compressed integers of FuncInfo4: the low bits of the first byte give
+ * the length (xxx0 one byte, xx01 two, x011 three, 0111 four, 1111 five:
+ * the value being the bytes, little-endian, without those bits).
+ */
+static uint32_t rd_unsigned(const BYTE **p)
+{
+	const BYTE *b = *p;
+	uint32_t v;
+
+	if (!(b[0] & 1)) {
+		v = b[0] >> 1;
+		*p += 1;
+	} else if (!(b[0] & 2)) {
+		v = (b[0] | b[1] << 8) >> 2;
+		*p += 2;
+	} else if (!(b[0] & 4)) {
+		v = (b[0] | b[1] << 8 | b[2] << 16) >> 3;
+		*p += 3;
+	} else if (!(b[0] & 8)) {
+		v = (b[0] | b[1] << 8 | b[2] << 16 | (uint32_t)b[3] << 24) >> 4;
+		*p += 4;
+	} else {
+		v = b[1] | b[2] << 8 | b[3] << 16 | (uint32_t)b[4] << 24;
+		*p += 5;
+	}
+	return v;
+}
+
+static int32_t rd_int(const BYTE **p)
+{
+	int32_t v;
+
+	memcpy(&v, *p, 4);
+	*p += 4;
+	return v;
+}
+
+static struct n_info *n_build4(const BYTE *p, ULONGLONG base, DWORD begin)
+{
+	struct n_info *n = calloc(1, sizeof(*n));
+	BYTE hdr = *p++;
+	int is_sep = hdr >> 1 & 1, has_bbt = hdr >> 2 & 1;
+	DWORD uwmap = 0, trymap = 0, ipmap = 0;
+
+	n->is_catch = hdr & 1;
+	n->flags = (hdr >> 5 & 1 ? FUNC_DESCR_SYNCHRONOUS : 0) |
+		   (hdr >> 6 & 1 ? FUNC_DESCR_NOEXCEPT : 0);
+	if (has_bbt)
+		rd_unsigned(&p);
+	if (hdr >> 3 & 1)
+		uwmap = rd_int(&p);
+	if (hdr >> 4 & 1)
+		trymap = rd_int(&p);
+	if (is_sep) {
+		/* Code split into pieces (profile-guided layout): one IP map each. */
+		const BYTE *seg = (const BYTE *)(uintptr_t)(base + rd_int(&p));
+		uint32_t cnt = rd_unsigned(&seg);
+
+		for (uint32_t i = 0; i < cnt; i++) {
+			DWORD start = rd_int(&seg);
+			DWORD map = rd_int(&seg);
+
+			if (start == begin) {
+				ipmap = map;
+				break;
+			}
+		}
+	} else {
+		ipmap = rd_int(&p);
+	}
+	n->begin = begin;
+
+	if (uwmap) {
+		const BYTE *u = (const BYTE *)(uintptr_t)(base + uwmap);
+		uint32_t cnt = rd_unsigned(&u);
+		const BYTE *start = u;
+		const BYTE **offs = calloc(cnt ? cnt : 1, sizeof(*offs));
+
+		n->max_state = cnt;
+		n->uw = calloc(cnt ? cnt : 1, sizeof(*n->uw));
+		for (uint32_t i = 0; i < cnt; i++) {
+			const BYTE *at = u;
+			uint32_t v = rd_unsigned(&u);
+			uint32_t next = v >> 2;
+
+			offs[i] = at;
+			n->uw[i].kind = (enum uw_kind[]){ UW_NONE, UW_DTOR_OBJ,
+							  UW_DTOR_PTR, UW_FUNCLET }[v & 3];
+			if ((v & 3) == 1 || (v & 3) == 2) {
+				n->uw[i].action = rd_int(&u);
+				n->uw[i].object = rd_unsigned(&u);
+			} else if ((v & 3) == 3) {
+				n->uw[i].action = rd_int(&u);
+			}
+			/* nextOffset: back from this entry to the one it unwinds to. */
+			const BYTE *to = at - next;
+			int ts = -1;
+
+			if (to >= start)
+				for (uint32_t j = 0; j < i; j++)
+					if (offs[j] == to)
+						ts = j;
+			n->uw[i].to_state = ts;
+		}
+		free(offs);
+	}
+
+	if (ipmap) {
+		const BYTE *m = (const BYTE *)(uintptr_t)(base + ipmap);
+		uint32_t cnt = rd_unsigned(&m), rel = 0;
+
+		n->nip = cnt;
+		n->ip = calloc(cnt ? cnt : 1, sizeof(*n->ip));
+		for (uint32_t i = 0; i < cnt; i++) {
+			rel += rd_unsigned(&m);
+			n->ip[i].ip = begin + rel;
+			n->ip[i].state = (int)rd_unsigned(&m) - 1;
+		}
+	}
+
+	if (trymap) {
+		const BYTE *t = (const BYTE *)(uintptr_t)(base + trymap);
+		uint32_t cnt = rd_unsigned(&t);
+
+		n->ntry = cnt;
+		n->tries = calloc(cnt ? cnt : 1, sizeof(*n->tries));
+		for (uint32_t i = 0; i < cnt; i++) {
+			n->tries[i].try_low = rd_unsigned(&t);
+			n->tries[i].try_high = rd_unsigned(&t);
+			n->tries[i].catch_high = rd_unsigned(&t);
+			DWORD harr = rd_int(&t);
+			const BYTE *h = (const BYTE *)(uintptr_t)(base + harr);
+			uint32_t hc = rd_unsigned(&h);
+
+			n->tries[i].ncatch = hc;
+			n->tries[i].catches = calloc(hc ? hc : 1, sizeof(struct n_catch));
+			for (uint32_t j = 0; j < hc; j++) {
+				struct n_catch *c = &n->tries[i].catches[j];
+				BYTE ch = *h++;
+				int cont_rva = ch >> 3 & 1, nc = ch >> 4 & 3;
+
+				if (ch & 1)
+					c->adjectives = rd_unsigned(&h);
+				if (ch & 2)
+					c->type = rd_int(&h);
+				if (ch & 4)
+					c->obj_offset = rd_unsigned(&h);
+				c->handler = rd_int(&h);
+				if (nc == 3)
+					nc = 0;	/* reserved */
+				c->ncont = nc;
+				for (int k = 0; k < nc; k++)
+					c->cont[k] = cont_rva ? (DWORD)rd_int(&h) :
+						begin + rd_unsigned(&h);
+			}
+		}
+	}
+	return n;
+}
+
+static const struct n_info *n_get(const void *key, ULONGLONG base, DWORD begin,
+				  int v4)
+{
+	struct n_info *n;
+
+	pthread_mutex_lock(&infos_lock);
+	for (n = infos; n; n = n->next)
+		if (n->key == key && n->begin == (v4 ? begin : 0))
+			goto out;
+	n = v4 ? n_build4(key, base, begin) : n_build3(key, base);
+	n->key = key;
+	if (!v4)
+		n->begin = 0;
+	n->next = infos;
+	infos = n;
+out:
+	pthread_mutex_unlock(&infos_lock);
+	return n;
+}
+
+static int ip_state(const struct n_info *d, DWORD rva)
+{
 	int state = -1;
 
-	for (UINT i = 0; i < d->nip && m[i].ip <= rva; i++)
-		state = m[i].state;
+	for (UINT i = 0; i < d->nip && d->ip[i].ip <= rva; i++)
+		state = d->ip[i].state;
 	return state;
 }
 
 /* The state the function is in at pc: its catch block's, if one is running. */
-static int state_at(const struct func_info *d, ULONGLONG base,
+static int state_at(const struct n_info *d, ULONGLONG base,
 		    ULONGLONG frame, ULONGLONG pc)
 {
 	for (struct catch_rec *c = catching; c; c = c->outer)
 		if (c->frame == frame && c->pc == pc)
 			return c->state;
-	return ip_state(d, base, (DWORD)(pc - base));
+	return ip_state(d, (DWORD)(pc - base));
 }
 
 /* Runs the destroying actions from state cur down to last. */
-static void local_unwind(const struct func_info *d, ULONGLONG base,
+static void local_unwind(const struct n_info *d, ULONGLONG base,
 			 void *frame, int cur, int last)
 {
-	const struct unwind_entry *u =
-		(const void *)(uintptr_t)(base + d->unwind_map);
-
 	while (cur != last) {
 		if (cur < 0 || cur >= d->max_state)
 			return;
-		int next = u[cur].to_state;
+		const struct n_uw *u = &d->uw[cur];
+		int next = u->to_state;
 
-		if (u[cur].action)
-			((funclet_fn)(uintptr_t)(base + u[cur].action))(NULL,
-									frame);
+		switch (u->kind) {
+		case UW_FUNCLET:
+			((funclet_fn)(uintptr_t)(base + u->action))(NULL, frame);
+			break;
+		case UW_DTOR_OBJ:
+			((dtor_fn)(uintptr_t)(base + u->action))(
+				(BYTE *)frame + u->object);
+			break;
+		case UW_DTOR_PTR:
+			((dtor_fn)(uintptr_t)(base + u->action))(
+				*(void **)((BYTE *)frame + u->object));
+			break;
+		default:
+			break;
+		}
 		cur = next;
 	}
 }
@@ -350,7 +628,7 @@ static void catch_unwound(void *arg, EXCEPTION_RECORD *unwinding)
  */
 static void __attribute__((no_sanitize_address))
 find_catch(EXCEPTION_RECORD *rec, CONTEXT *ctx, void *frame,
-		       DISPATCHER_CONTEXT *dc, const struct func_info *d,
+		       DISPATCHER_CONTEXT *dc, const struct n_info *d,
 		       int state)
 {
 	ULONGLONG base = dc->ImageBase;
@@ -358,18 +636,14 @@ find_catch(EXCEPTION_RECORD *rec, CONTEXT *ctx, void *frame,
 		(const void *)(uintptr_t)rec->ExceptionInformation[2] : NULL;
 	ULONGLONG ibase = ti ? rec->ExceptionInformation[3] : 0;
 	void *object = ti ? (void *)rec->ExceptionInformation[1] : NULL;
-	const struct try_block *tries =
-		(const void *)(uintptr_t)(base + d->try_map);
-
 	for (UINT i = 0; i < d->ntry; i++) {
-		const struct try_block *t = &tries[i];
-		const struct catch_block *cb =
-			(const void *)(uintptr_t)(base + t->catches);
+		const struct n_try *t = &d->tries[i];
+		const struct n_catch *cb = t->catches;
 
 		if (state < t->try_low || state > t->try_high)
 			continue;
 		for (int j = 0; j < t->ncatch; j++) {
-			const struct catch_block *c = &cb[j];
+			const struct n_catch *c = &cb[j];
 			const struct type_desc *want = c->type ?
 				(const void *)(uintptr_t)(base + c->type) : NULL;
 
@@ -419,6 +693,13 @@ find_catch(EXCEPTION_RECORD *rec, CONTEXT *ctx, void *frame,
 			seh_link_pop(&cr.link);
 			catch_leave(&cr, NULL);
 
+			if (c->ncont) {
+				/* The funclet says which continuation, by number. */
+				uintptr_t r = (uintptr_t)cont;
+
+				cont = (void *)(uintptr_t)(base +
+					c->cont[c->ncont > 1 && r == 2 ? 1 : 0]);
+			}
 			parent.Rip = (ULONGLONG)(uintptr_t)cont;
 			parent.Rax = 0;
 			seh_resume(&parent);
@@ -426,17 +707,15 @@ find_catch(EXCEPTION_RECORD *rec, CONTEXT *ctx, void *frame,
 	}
 }
 
-EXCEPTION_DISPOSITION WINAPI
-crt___CxxFrameHandler3(EXCEPTION_RECORD *rec, void *frame, CONTEXT *ctx,
-		       DISPATCHER_CONTEXT *dc)
+static EXCEPTION_DISPOSITION
+frame_handler(EXCEPTION_RECORD *rec, void *frame, CONTEXT *ctx,
+	      DISPATCHER_CONTEXT *dc, const struct n_info *d)
 {
 	ULONGLONG base = dc->ImageBase;
-	const struct func_info *d = (const void *)(uintptr_t)
-		(base + *(const DWORD *)dc->HandlerData);
 	int state;
 
-	if (d->magic < CXX_FRAME_MAGIC_VC6 || d->magic > CXX_FRAME_MAGIC_VC8)
-		return ExceptionContinueSearch;
+	if (d->is_catch)
+		return ExceptionContinueSearch;	/* seen through a seh_link */
 	if ((d->flags & FUNC_DESCR_SYNCHRONOUS) && !is_cxx(rec) &&
 	    rec->ExceptionCode != CXX_EXCEPTION)
 		return ExceptionContinueSearch;
@@ -451,8 +730,7 @@ crt___CxxFrameHandler3(EXCEPTION_RECORD *rec, void *frame, CONTEXT *ctx,
 				last = target.last;
 			else if (dc->TargetIp >= base + dc->FunctionEntry->BeginAddress &&
 				 dc->TargetIp < base + dc->FunctionEntry->EndAddress)
-				last = ip_state(d, base,
-						(DWORD)(dc->TargetIp - base));
+				last = ip_state(d, (DWORD)(dc->TargetIp - base));
 		}
 		local_unwind(d, base, frame, state, last);
 		return ExceptionContinueSearch;
@@ -464,6 +742,32 @@ crt___CxxFrameHandler3(EXCEPTION_RECORD *rec, void *frame, CONTEXT *ctx,
 	if (d->flags & FUNC_DESCR_NOEXCEPT)
 		crt_terminate();	/* an exception leaving a noexcept function */
 	return ExceptionContinueSearch;
+}
+
+EXCEPTION_DISPOSITION WINAPI
+crt___CxxFrameHandler3(EXCEPTION_RECORD *rec, void *frame, CONTEXT *ctx,
+		       DISPATCHER_CONTEXT *dc)
+{
+	ULONGLONG base = dc->ImageBase;
+	const struct func_info *f = (const void *)(uintptr_t)
+		(base + *(const DWORD *)dc->HandlerData);
+
+	if (f->magic < CXX_FRAME_MAGIC_VC6 || f->magic > CXX_FRAME_MAGIC_VC8)
+		return ExceptionContinueSearch;
+	return frame_handler(rec, frame, ctx, dc, n_get(f, base, 0, 0));
+}
+
+/* cl 2019 and later: the FuncInfo is the compressed FuncInfo4. */
+EXCEPTION_DISPOSITION WINAPI
+crt___CxxFrameHandler4(EXCEPTION_RECORD *rec, void *frame, CONTEXT *ctx,
+		       DISPATCHER_CONTEXT *dc)
+{
+	ULONGLONG base = dc->ImageBase;
+	const BYTE *f = (const BYTE *)(uintptr_t)
+		(base + *(const DWORD *)dc->HandlerData);
+
+	return frame_handler(rec, frame, ctx, dc,
+			     n_get(f, base, dc->FunctionEntry->BeginAddress, 1));
 }
 
 /*
@@ -1241,6 +1545,7 @@ const struct builtin_export crt_cxx_exports[] = {
 	M("?_Xbad_function_call@std@@YAXXZ", crt__Xbad_function_call),
 
 	M("__CxxFrameHandler3", crt___CxxFrameHandler3),
+	M("__CxxFrameHandler4", crt___CxxFrameHandler4),
 	M("?terminate@@YAXXZ", crt_terminate),
 	M("terminate", crt_terminate),
 	M("?set_terminate@@YAP6AXXZP6AXXZ@Z", crt_set_terminate),

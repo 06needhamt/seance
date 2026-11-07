@@ -71,6 +71,18 @@ int main(void)
 	CHECK_EQ(FN("cxx64_wrongtype")(3), 3);
 	CHECK_EQ(counter(0, 1), 1);
 
+	/* The same through __CxxFrameHandler4's compressed tables. */
+	CHECK_EQ(FN("cxx64_int_v4")(5), 5);
+	CHECK_EQ(counter(0, 1), 1);
+	CHECK_EQ(FN("cxx64_all_v4")(5), 77);
+	CHECK_EQ(counter(0, 1), 1);
+	CHECK_EQ(FN("cxx64_base_v4")(42), 42);
+	CHECK_EQ(counter(0, 1), 1);
+	CHECK_EQ(FN("cxx64_cont_v4")(8), 8);
+	CHECK_EQ(counter(0, 1), 1);
+	CHECK_EQ(FN("cxx64_rethrow_v4")(7), 7);
+	CHECK_EQ(counter(0, 1), 1);
+
 	/* RTTI: typeid, dynamic_cast up/down, to void. */
 	CHECK_EQ(FN("rt_typeid")(0), 1);
 	CHECK_EQ(FN("rt_cast_ok")(0), 1);

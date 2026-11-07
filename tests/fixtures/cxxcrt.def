@@ -6,6 +6,7 @@ EXPORTS
 	_CxxThrowException@8
 	__CxxFrameHandler
 	__CxxFrameHandler3
+	__CxxFrameHandler4
 	??_7type_info@@6B@ DATA
 	__RTtypeid
 	__RTDynamicCast
