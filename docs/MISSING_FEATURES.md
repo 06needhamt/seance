@@ -429,8 +429,15 @@ what keeps the others from working.
   `DriverProc` keeps the instance it returns from `DRV_OPEN` in 32 bits,
   as Win64 heaps of that time allowed): both are now provided, and it
   probes fully from either binary. Its encoder is licence-locked ("This
-  installation is not licensed for 64-bit CineForm HD encoding"); decoding
-  wasn't tried, having no CFHD clip.
+  installation is not licensed for 64-bit CineForm HD encoding"; not worked
+  around), so the only CFHD clips to hand came from FFmpeg's `cfhd` encoder.
+  The decoder handles those at 320x240 and 640x360 (YUY2 output; PSNR
+  against FFmpeg's own decode ~35 dB for yuv422p10, ~25 dB for gbrp12 since
+  that is RGB-to-YUV). At 176x144 it overruns a heap buffer in its own
+  wavelet decode loop (a write past the output buffer lands in a neighbouring
+  object, and the failure then surfaces in its cleanup `free`); whether
+  that is FFmpeg's stream or an emulation gap isn't known, as there is no
+  genuine CineForm stream of that size to compare.
 - **RealPlayer codecs:** `*3260.dll`.
 - **Locked, or needs setup:**
   - `wmvdmoe2.dll` is a keyed DMO and needs an unlock key.
