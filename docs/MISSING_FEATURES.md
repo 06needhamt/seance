@@ -7,6 +7,37 @@ not a promise to support every component in a tested package: seance's
 DirectShow and DMO scope is transform decoders and encoders, of video and
 (since the DMO/audio plan) of audio.
 
+## LAVFilters 0.83 (64-bit)
+
+Tested on 2026-11-07 with the official `LAVFilters-0.83-x64.zip` release
+(built with mingw-w64 GCC), in `seance64` and through the hand-off from
+`seance`:
+
+```sh
+curl -L -o /tmp/lavfilters64.zip \
+  https://github.com/Nevcairiel/LAVFilters/releases/download/0.83/LAVFilters-0.83-x64.zip
+unzip /tmp/lavfilters64.zip -d /tmp/lavfilters64
+sh tests/samples.sh build/seance64 /tmp/lavfilters64 60
+```
+
+All 11 DLLs load with no unimplemented imports; `LAVVideo.ax` and
+`LAVAudio.ax` are found as a video and an audio decoder. Decoding 2-second
+clips made with ffmpeg (160x120 at 10 fps, and 44.1/48 kHz mono):
+
+| Stream | Through | Compared with ffmpeg's decode |
+|---|---|---|
+| H.264 (`H264`) | `LAVVideo.ax` | pixel-identical (PSNR inf on all 20 frames) |
+| MPEG-4 part 2 (`FMP4`) | `LAVVideo.ax` | pixel-identical |
+| AC-3 | `LAVAudio.ax` | sample-identical |
+| MPEG audio layer 2 | `LAVAudio.ax` | within rounding (mean difference 0.24 at a peak of about 4100) |
+
+`seance decode LAVVideo.ax clip.avi` from the i386 binary hands off and gives
+the same bytes. Getting here needed msvcrt additions
+(`_time64`, `_stat64`, `_aligned_malloc`, ...), nested exceptions raised from
+language handlers (libgcc's second phase), and a fix to epilogue detection in
+the unwinder. Not tried: `LAVSplitter.ax` (a source filter), hardware
+decoding, and anything but these four codecs.
+
 ## LAVFilters 0.83 (32-bit)
 
 Tested on 2026-10-04 with the official `LAVFilters-0.83-x86.zip` release:
