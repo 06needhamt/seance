@@ -32,13 +32,16 @@ clips made with ffmpeg (160x120 at 10 fps, and 44.1/48 kHz mono):
 | MPEG audio layer 2 | `LAVAudio.ax` | within rounding (mean difference 0.24 at a peak of about 4100) |
 | H.265 / HEVC (`HEVC`, Annex B, 160x120, 20 frames) | `LAVVideo.ax` | pixel-identical (all 20 frames byte-equal) |
 | AAC-LC (tag `0x00ff`, stereo 48 kHz, 128 kb/s) | `LAVAudio.ax` | sample-identical (97280 samples per channel) |
+| VP9 (`VP90`, 160x120, 20 frames) | `LAVVideo.ax` | pixel-identical (all 20 frames byte-equal) |
+| Opus (tag `0x704f`, `OpusHead` as extradata, stereo 48 kHz, 96 kb/s) | `LAVAudio.ax` | sample-identical over the 96000 frames ffmpeg gives; LAV also outputs the encoder's 648 frames of end padding, which ffmpeg trims from the Ogg end position (an AVI has none) |
 
 `seance decode LAVVideo.ax clip.avi` from the i386 binary hands off and gives
 the same bytes. Getting here needed msvcrt additions
 (`_time64`, `_stat64`, `_aligned_malloc`, ...), nested exceptions raised from
 language handlers (libgcc's second phase), and a fix to epilogue detection in
 the unwinder. Not tried: `LAVSplitter.ax` (a source filter), hardware
-decoding, and anything but these six codecs.
+decoding, and anything but these eight codecs. (ffmpeg's AVI muxer won't take Opus, so
+the Opus AVI was written by hand from the Ogg packets.)
 
 A test clip whose AVI header disagrees with its frame times (say, 20 fps in
 the header for frames 0.1 s apart, as `ffmpeg -c copy` from an MP4 can leave
