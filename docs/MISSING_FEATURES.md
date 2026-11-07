@@ -30,13 +30,20 @@ clips made with ffmpeg (160x120 at 10 fps, and 44.1/48 kHz mono):
 | MPEG-4 part 2 (`FMP4`) | `LAVVideo.ax` | pixel-identical |
 | AC-3 | `LAVAudio.ax` | sample-identical |
 | MPEG audio layer 2 | `LAVAudio.ax` | within rounding (mean difference 0.24 at a peak of about 4100) |
+| H.265 / HEVC (`HEVC`, Annex B, 160x120, 20 frames) | `LAVVideo.ax` | pixel-identical (all 20 frames byte-equal) |
+| AAC-LC (tag `0x00ff`, stereo 48 kHz, 128 kb/s) | `LAVAudio.ax` | sample-identical (97280 samples per channel) |
 
 `seance decode LAVVideo.ax clip.avi` from the i386 binary hands off and gives
 the same bytes. Getting here needed msvcrt additions
 (`_time64`, `_stat64`, `_aligned_malloc`, ...), nested exceptions raised from
 language handlers (libgcc's second phase), and a fix to epilogue detection in
 the unwinder. Not tried: `LAVSplitter.ax` (a source filter), hardware
-decoding, and anything but these four codecs.
+decoding, and anything but these six codecs.
+
+A test clip whose AVI header disagrees with its frame times (say, 20 fps in
+the header for frames 0.1 s apart, as `ffmpeg -c copy` from an MP4 can leave
+it) comes out with repeated frames: the output writer places frames by
+timestamp. Make the clip with a consistent rate (`-framerate`/`-r`).
 
 ## LAVFilters 0.83 (32-bit)
 
