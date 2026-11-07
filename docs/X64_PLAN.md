@@ -196,7 +196,7 @@ Decisions:
    - Not done: `__CxxFrameHandler4` (the compressed FuncInfo of
      VS 2019 and later), try blocks inside catch funclets (cl gives these
      their own handler data), exception specifications, the SE
-     translator, and try blocks in catch funclets (above).
+     translator.
    - Done: mingw g++'s exceptions (`__gxx_personality_seh0` over libgcc's
      unwinder, as LAV Filters x64 uses): the `pe_gxx` fixture throws and
      catches by type, as `std::exception&`, `catch (...)` and rethrow, with
