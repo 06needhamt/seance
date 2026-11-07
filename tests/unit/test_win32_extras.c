@@ -121,6 +121,63 @@ static void test_rpcrt4(void)
 	mod_free(m);
 }
 
+static void test_topology(void)
+{
+	struct module *m = mod_load("kernel32.dll", NULL);
+	CHECK(m != NULL);
+	if (!m)
+		return;
+	FN(m, BOOL, GetLogicalProcessorInformationEx, DWORD, void *, DWORD *);
+	FN(m, BOOL, GetLogicalProcessorInformation, void *, DWORD *);
+	FN(m, DWORD, GetActiveProcessorCount, WORD);
+
+	DWORD n = GetActiveProcessorCount(0), len = 0;
+	CHECK(n >= 1);
+	CHECK_EQ(GetActiveProcessorCount(1), 0);	/* there is one group */
+
+	/* Ask for the size, then the entries: each carries its own size. */
+	CHECK(!GetLogicalProcessorInformationEx(0xffff, NULL, &len));
+	CHECK(len > 0);
+	BYTE *buf = malloc(len);
+	CHECK(buf != NULL);
+	if (buf) {
+		DWORD got = len, cores = 0, numa = 0, l3 = 0, groups = 0, off = 0;
+
+		CHECK(GetLogicalProcessorInformationEx(0xffff, buf, &got));
+		CHECK_EQ(got, len);
+		while (off + 8 <= got) {
+			const DWORD *e = (const DWORD *)(buf + off);
+
+			CHECK(e[1] >= 8 && off + e[1] <= got);
+			if (e[0] == 0)
+				cores++;
+			else if (e[0] == 1)
+				numa++;
+			else if (e[0] == 4)
+				groups++;
+			else if (e[0] == 2 && buf[off + 8] == 3)
+				l3++;
+			off += e[1];
+		}
+		CHECK_EQ(off, got);
+		CHECK_EQ(cores, n);
+		CHECK_EQ(numa, 1);
+		CHECK_EQ(groups, 1);
+		CHECK_EQ(l3, 1);
+		free(buf);
+	}
+	/* Cores alone; a relationship that doesn't exist. */
+	len = 0;
+	CHECK(!GetLogicalProcessorInformationEx(0, NULL, &len));
+	CHECK(len >= n * 8);
+	CHECK(!GetLogicalProcessorInformationEx(77, NULL, &len));
+	/* The older form. */
+	len = 0;
+	CHECK(!GetLogicalProcessorInformation(NULL, &len));
+	CHECK(len > 0 && len % (sizeof(void *) == 8 ? 32 : 24) == 0);
+	mod_free(m);
+}
+
 static void test_crypt32(void)
 {
 	struct module *m = mod_load("crypt32.dll", NULL);
@@ -1001,6 +1058,7 @@ int main(void)
 
 	test_bcrypt();
 	test_rpcrt4();
+	test_topology();
 	test_crypt32();
 	test_d3d9();
 	test_msvcrt();

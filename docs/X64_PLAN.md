@@ -289,12 +289,15 @@ truncates the driver instance to 32 bits, which needs heap memory below
 x86-64, falling back to libc when they run out; `VFW_LOWHEAP=0` turns it
 off.
 
-LAV Filters 0.83 (x64, built with mingw-w64 GCC) was the second: all 11 DLLs
+LAV Filters 0.83 (x64; MSVC filters, GCC FFmpeg libraries) was the second: all 11 DLLs
 load with no unimplemented imports, and `LAVVideo.ax`/`LAVAudio.ax` are
 found as a video and an audio decoder (`samples.sh`: 11 DLLs, 0 failures).
 It needed msvcrt's `_time64`, `_stat64`, `_strtoi64`, `_aligned_malloc`
 family, `abort` and the locale accessors (`crt_modern.c`, for both
-architectures). It uses no `__CxxFrameHandler4`: GCC's exceptions go
-through the `Rtl*` unwinder, which the g++ fixture now covers, and which
-found a bug in epilogue detection (a `jmp` inside the function was taken
-for a tail call).
+architectures). It uses no `__CxxFrameHandler4`: the filters carry
+`__CxxFrameHandler3`-style tables in a statically linked handler, which
+run on the `Rtl*` unwinder (the g++ fixture covers libgcc's separately).
+That found a bug in epilogue detection (a `jmp` inside the function was
+taken for a tail call), and decoding every format (see
+`docs/MISSING_FEATURES.md`) found that `GetLogicalProcessorInformationEx`
+was a stub, which MSVC's Concurrency Runtime needs.
