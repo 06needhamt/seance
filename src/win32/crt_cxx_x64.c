@@ -229,6 +229,7 @@ struct n_info {
 	struct n_uw *uw;
 	UINT nip;
 	struct ip_state *ip;	/* absolute RVAs */
+	int ip_owned;
 	UINT ntry;
 	struct n_try *tries;
 	UINT flags;		/* FUNC_DESCR_* */
@@ -392,6 +393,7 @@ static struct n_info *n_build4(const BYTE *p, ULONGLONG base, DWORD begin)
 
 		n->nip = cnt;
 		n->ip = calloc(cnt ? cnt : 1, sizeof(*n->ip));
+		n->ip_owned = 1;
 		for (uint32_t i = 0; i < cnt; i++) {
 			rel += rd_unsigned(&m);
 			n->ip[i].ip = begin + rel;
@@ -457,6 +459,35 @@ static const struct n_info *n_get(const void *key, ULONGLONG base, DWORD begin,
 out:
 	pthread_mutex_unlock(&infos_lock);
 	return n;
+}
+
+/*
+ * A module unloaded: its tables are gone, and another image may be mapped
+ * at the same place with others. (Nothing runs from it by then.)
+ */
+void cxx_forget_image(const void *base, size_t len)
+{
+	const BYTE *lo = base, *hi = lo + len;
+
+	pthread_mutex_lock(&infos_lock);
+	for (struct n_info **p = &infos; *p;) {
+		struct n_info *n = *p;
+		const BYTE *k = n->key;
+
+		if (k >= lo && k < hi) {
+			*p = n->next;
+			free(n->uw);
+			for (UINT i = 0; i < n->ntry; i++)
+				free(n->tries[i].catches);
+			free(n->tries);
+			if (n->ip_owned)	/* FH3's points into the image */
+				free(n->ip);
+			free(n);
+			continue;
+		}
+		p = &n->next;
+	}
+	pthread_mutex_unlock(&infos_lock);
 }
 
 static int ip_state(const struct n_info *d, DWORD rva)

@@ -59,6 +59,9 @@ seh_RtlVirtualUnwind(DWORD type, ULONGLONG base, ULONGLONG pc,
 BOOLEAN WINAPI seh_RtlAddFunctionTable(PRUNTIME_FUNCTION entries, DWORD count,
 				       ULONGLONG base);
 BOOLEAN WINAPI seh_RtlDeleteFunctionTable(PRUNTIME_FUNCTION entries);
+
+/* Drops what the C++ runtime cached about functions of an unloaded image. */
+void cxx_forget_image(const void *base, size_t len);
 void WINAPI seh_RtlCaptureContext(CONTEXT *ctx);
 void WINAPI seh_RtlRestoreContext(CONTEXT *ctx, EXCEPTION_RECORD *rec);
 void WINAPI seh_RtlUnwindEx(void *target_frame, void *target_ip,
