@@ -129,7 +129,7 @@ for (label, enc, extra) in A:
     rc, o = run([SEANCE, "decode", LAV, avi, "--audio", "--sample-format", "s16", "-o", lavwav], 150)
     last = (o.strip().splitlines() or [""])[-1][:140]
     if rc != 0 or not os.path.exists(lavwav):
-        row.update(result="FAILED" + (" (crash/timeout)" if rc >= 124 else ""), detail=(o.strip().splitlines() or [""])[0][:140]); results.append(row); print(row, flush=True); continue
+        row.update(result="FAILED" + (" (crash/timeout)" if rc >= 124 or rc < 0 else ""), detail=(o.strip().splitlines() or [""])[0][:140]); results.append(row); print(row, flush=True); continue
     lavraw = f"{d}/lav.raw"
     rc, o2 = run(f"ffmpeg -hide_banner -loglevel error -y -i {lavwav} -f s16le -acodec pcm_s16le {lavraw}", 60)
     # channels of the reference stream
@@ -139,6 +139,8 @@ for (label, enc, extra) in A:
     lch = int(lc) if lc.isdigit() else ch
     if lch != ch:
         row.update(result=f"CHANNELS {lch} vs {ch}", detail=last); results.append(row); print(row, flush=True); continue
+    if rc != 0 or not os.path.exists(lavraw):
+        row.update(result="FAILED", detail="ffmpeg can't read lav.wav: " + o2.strip()[-80:]); results.append(row); print(row, flush=True); continue
     v, note = compare(load(ref), load(lavraw), ch)
     row.update(result=v, detail=note or last); results.append(row); print(row, flush=True)
 

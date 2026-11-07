@@ -151,9 +151,9 @@ endif()
 # C++ exceptions from mingw-w64's g++ (libgcc's unwinder over the Rtl*
 # functions), when it is installed: the DLL links its own libgcc/libstdc++.
 if(VFW_FIXTURE_64)
-	include(CheckLanguage)
-	check_language(CXX)
-	if(CMAKE_CXX_COMPILER)
+	find_program(VFW_MINGW64_CXX ${VFW_MINGW_PREFIX}g++)
+	if(VFW_MINGW64_CXX)
+		set(CMAKE_CXX_COMPILER ${VFW_MINGW64_CXX})
 		enable_language(CXX)
 		add_library(pe_gxx SHARED pe_gxx.cc)
 		target_compile_options(pe_gxx PRIVATE -O1 -Wall)

@@ -28,7 +28,9 @@ Work is split into phases; see [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION
 64-bit (x86-64) codecs run in `seance64`, which the default build makes
 beside `seance` ([docs/X64_PLAN.md](docs/X64_PLAN.md)).
 The 64-bit test codecs (VfW, ACM, DirectShow and DMO) work there;
-exception handling (SEH and C++ exceptions) is still to come. Either
+SEH and C++ exceptions (`__CxxFrameHandler3`/`4`, RTTI) work too; try
+blocks inside catch funclets, exception specifications and the SE
+translator are still to come. Either
 binary runs either kind of codec: given one of the other architecture,
 by path or by a FOURCC or CLSID that names one, `probe`, `decode`,
 `encode`, `register` and `unregister` run in the other binary, so

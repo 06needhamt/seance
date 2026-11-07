@@ -76,6 +76,9 @@ static void peb_init(void)
 	long cpus = sysconf(_SC_NPROCESSORS_ONLN);
 
 	/* Report Windows XP SP3, the last version most VfW codecs knew. */
+	/* No more than an affinity mask holds, as the topology APIs say. */
+	if (cpus > (long)(8 * sizeof(ULONG_PTR)))
+		cpus = 8 * sizeof(ULONG_PTR);
 	peb.NumberOfProcessors = cpus > 0 ? cpus : 1;
 	peb.OSMajorVersion = 5;
 	peb.OSMinorVersion = 1;

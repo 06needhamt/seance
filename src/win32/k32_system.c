@@ -550,8 +550,11 @@ WINFN(void) k32_GetSystemInfo(LPSYSTEM_INFO si)
 	si->lpMinimumApplicationAddress = (LPVOID)0x10000;
 	si->lpMaximumApplicationAddress = (LPVOID)0x7ffeffff;
 	si->dwNumberOfProcessors = peb_get()->NumberOfProcessors;
-	si->dwActiveProcessorMask = si->dwNumberOfProcessors >= 32 ? 0xffffffff :
-				    (1u << si->dwNumberOfProcessors) - 1;
+	{
+		DWORD n = si->dwNumberOfProcessors;
+
+		si->dwActiveProcessorMask = (n >= 8 * sizeof(DWORD_PTR) ? ~(DWORD_PTR)0 : (((DWORD_PTR)1 << n) - 1));
+	}
 	si->dwProcessorType = PROCESSOR_INTEL_PENTIUM;
 	si->dwAllocationGranularity = 0x10000;
 	si->wProcessorLevel = 6;

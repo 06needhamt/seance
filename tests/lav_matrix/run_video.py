@@ -231,7 +231,7 @@ for (label, size, pix, enc, tag, aliases) in V:
         ok, rc, last = lav_decode(avi, out)
         r = {"label": label, "tag": t, "stage": "lav", "result": "", "detail": last[:140]}
         if not ok:
-            r["result"] = "FAILED" + (" (crash/timeout)" if rc >= 124 else "")
+            r["result"] = "FAILED" + (" (crash/timeout)" if rc >= 124 or rc < 0 else "")
         else:
             nl, nr = frames_of(out), frames_of(ref)
             r["result"] = classify(psnr(out, ref), nl, nr)

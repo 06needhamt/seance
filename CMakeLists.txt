@@ -400,7 +400,7 @@ if(BUILD_TESTING)
 		set_tests_properties(x86_64 PROPERTIES LABELS x86_64
 			TIMEOUT 3600)
 		# Each binary hands the other's codecs over.
-		if(VFW_MINGW_CC)
+		if(VFW_MINGW_CC AND (VFW_MINGW64_CC OR VFW_EXTERNAL_FIXTURES))
 			add_test(NAME handoff
 				COMMAND sh ${PROJECT_SOURCE_DIR}/tests/handoff.sh
 					$<TARGET_FILE:seance> ${VFW_HARNESS_DIR}/seance64

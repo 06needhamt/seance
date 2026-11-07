@@ -1094,7 +1094,7 @@ static void *WINAPI exc_vdtor(struct exc *e, unsigned flags)
 {
 	exc_dtor(e);
 	if (flags & 1)
-		free(e);
+		win_free(e);	/* the guest's operator new made it */
 	return e;
 }
 

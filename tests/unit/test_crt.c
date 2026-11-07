@@ -317,7 +317,7 @@ static void test_long(void)
 	CHECK_STR(ltoa_(-1, b, 16), "ffffffff");
 	CHECK_STR(ltoa_(-42, b, 10), "-42");
 	CHECK_STR(ultoa_(0xfffffffeu, b, 10), "4294967294");
-	CHECK_STR(ltoa_(-1, b, 2), "-1");
+	CHECK_STR(ltoa_(-1, b, 2), "11111111111111111111111111111111");
 #ifdef __x86_64__
 	/* A Win64 caller may leave the upper half of a 32-bit argument as
 	 * anything: only the low 32 bits count. */

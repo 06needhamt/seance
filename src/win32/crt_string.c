@@ -337,7 +337,7 @@ static char *itoa_base(int32_t v, char *buf, int radix, int is_unsigned)
 		snprintf(buf, 34, "%" PRIo32, (uint32_t)v);
 	else {
 		/* An uncommon base: build it up a digit at a time. */
-		uint32_t u = is_unsigned || v >= 0 ? (uint32_t)v : -(uint32_t)v;
+		uint32_t u = (uint32_t)v;
 		char tmp[34];
 		int i = 0;
 		if (!u)
@@ -348,8 +348,6 @@ static char *itoa_base(int32_t v, char *buf, int radix, int is_unsigned)
 			u /= (unsigned)radix;
 		}
 		int j = 0;
-		if (!is_unsigned && v < 0)
-			buf[j++] = '-';
 		while (i)
 			buf[j++] = tmp[--i];
 		buf[j] = 0;

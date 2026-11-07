@@ -230,6 +230,29 @@ static DWORD code_from_fpe(int si_code)
 }
 
 /* With VFW_TRACE: each exception as it is dispatched. */
+struct cxx_name {
+	const EXCEPTION_RECORD *rec;
+	const char *name;
+};
+
+/* The type of a C++ exception from its ThrowInfo; may fault on bad tables. */
+static void cxx_type_name(void *arg)
+{
+	struct cxx_name *q = arg;
+	const BYTE *base = (const BYTE *)q->rec->ExceptionInformation[3];
+	const DWORD *ti = (const DWORD *)q->rec->ExceptionInformation[2];
+
+	if (base && ti && ti[3]) {
+		const DWORD *cta = (const DWORD *)(base + ti[3]);
+
+		if (cta[0] > 0) {
+			const DWORD *ct = (const DWORD *)(base + cta[1]);
+
+			q->name = (const char *)(base + ct[1]) + 16;
+		}
+	}
+}
+
 static void trace_exception(const EXCEPTION_RECORD *rec, const char *how)
 {
 	char where[160];
@@ -247,19 +270,12 @@ static void trace_exception(const EXCEPTION_RECORD *rec, const char *how)
 		      (unsigned long)rec->ExceptionInformation[1]);
 	else if (rec->ExceptionCode == 0xE06D7363 && rec->NumberParameters >= 4) {
 		/* A C++ exception: name the type from its ThrowInfo. */
-		const BYTE *base = (const BYTE *)rec->ExceptionInformation[3];
-		const DWORD *ti = (const DWORD *)rec->ExceptionInformation[2];
-		const char *name = "?";
+		struct cxx_name q = { rec, "?" };
 
-		if (base && ti && ti[3]) {
-			const DWORD *cta = (const DWORD *)(base + ti[3]);
+		/* The parameters are the raiser's: faults reading them are not ours. */
+		seh_guarded(cxx_type_name, &q);
+		const char *name = q.name;
 
-			if (cta[0] > 0) {
-				const DWORD *ct = (const DWORD *)(base + cta[1]);
-
-				name = (const char *)(base + ct[1]) + 16;
-			}
-		}
 		TRACE("exception 0x%08lX (%s) at %s: C++ %s",
 		      (unsigned long)rec->ExceptionCode, how, where, name);
 	} else
