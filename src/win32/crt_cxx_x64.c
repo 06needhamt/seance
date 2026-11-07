@@ -589,7 +589,10 @@ struct exc {
 };
 
 enum { C_TYPEINFO, C_EXCEPTION, C_BAD_ALLOC, C_BAD_CAST, C_BAD_TYPEID,
-       C_NON_RTTI, NCLASS };
+       C_NON_RTTI, C_BAD_EXCEPTION, C_BAD_FUNCTION_CALL,
+       C_LOGIC_ERROR, C_DOMAIN_ERROR, C_INVALID_ARGUMENT, C_LENGTH_ERROR,
+       C_OUT_OF_RANGE, C_RUNTIME_ERROR, C_OVERFLOW_ERROR, C_UNDERFLOW_ERROR,
+       C_RANGE_ERROR, NCLASS };
 
 static const struct {
 	const char *mangled;
@@ -601,6 +604,18 @@ static const struct {
 	[C_BAD_CAST]  = { ".?AVbad_cast@std@@", C_EXCEPTION },
 	[C_BAD_TYPEID] = { ".?AVbad_typeid@std@@", C_EXCEPTION },
 	[C_NON_RTTI]  = { ".?AV__non_rtti_object@std@@", C_BAD_TYPEID },
+	/* msvcp's, all of exception's layout. */
+	[C_BAD_EXCEPTION] = { ".?AVbad_exception@std@@", C_EXCEPTION },
+	[C_BAD_FUNCTION_CALL] = { ".?AVbad_function_call@std@@", C_EXCEPTION },
+	[C_LOGIC_ERROR] = { ".?AVlogic_error@std@@", C_EXCEPTION },
+	[C_DOMAIN_ERROR] = { ".?AVdomain_error@std@@", C_LOGIC_ERROR },
+	[C_INVALID_ARGUMENT] = { ".?AVinvalid_argument@std@@", C_LOGIC_ERROR },
+	[C_LENGTH_ERROR] = { ".?AVlength_error@std@@", C_LOGIC_ERROR },
+	[C_OUT_OF_RANGE] = { ".?AVout_of_range@std@@", C_LOGIC_ERROR },
+	[C_RUNTIME_ERROR] = { ".?AVruntime_error@std@@", C_EXCEPTION },
+	[C_OVERFLOW_ERROR] = { ".?AVoverflow_error@std@@", C_RUNTIME_ERROR },
+	[C_UNDERFLOW_ERROR] = { ".?AVunderflow_error@std@@", C_RUNTIME_ERROR },
+	[C_RANGE_ERROR] = { ".?AVrange_error@std@@", C_RUNTIME_ERROR },
 };
 
 static struct type_desc *class_td[NCLASS];
@@ -701,6 +716,15 @@ static struct exc *WINAPI exc_init(struct exc *e, int c, const char *what)
 	return e;
 }
 
+/* MSVC's std::string: a 16-byte buffer or a pointer, then size and capacity. */
+static const char *msvc_string_data(const void *str)
+{
+	const BYTE *b = str;
+
+	return *(const size_t *)(b + 24) >= 16 ? *(const char *const *)b :
+		(const char *)b;
+}
+
 #define EXC_CLASS(name, id) \
 static __attribute__((unused)) struct exc *WINAPI name##_ctor(struct exc *e, const char *what) \
 { return exc_init(e, id, what); } \
@@ -708,6 +732,11 @@ static __attribute__((unused)) struct exc *WINAPI name##_ctor_ref(struct exc *e,
 { return exc_init(e, id, what ? *what : NULL); } \
 static __attribute__((unused)) struct exc *WINAPI name##_default(struct exc *e) \
 { return exc_init(e, id, NULL); } \
+static __attribute__((unused)) struct exc *WINAPI name##_ctor_str(struct exc *e, const void *str) \
+{ exc_init(e, id, NULL); \
+  if (str) { char *c = strdup(msvc_string_data(str)); \
+	     if (c) { e->what = c; e->do_free = 1; } } \
+  return e; } \
 static __attribute__((unused)) struct exc *WINAPI name##_copy(struct exc *e, const struct exc *o) \
 { exc_init(e, id, o->what); \
   if (o->do_free && o->what) { e->what = strdup(o->what); e->do_free = 1; } \
@@ -718,6 +747,17 @@ EXC_CLASS(bad_alloc, C_BAD_ALLOC)
 EXC_CLASS(bad_cast, C_BAD_CAST)
 EXC_CLASS(bad_typeid, C_BAD_TYPEID)
 EXC_CLASS(non_rtti, C_NON_RTTI)
+EXC_CLASS(bad_exception, C_BAD_EXCEPTION)
+EXC_CLASS(bad_function_call, C_BAD_FUNCTION_CALL)
+EXC_CLASS(logic_error, C_LOGIC_ERROR)
+EXC_CLASS(domain_error, C_DOMAIN_ERROR)
+EXC_CLASS(invalid_argument, C_INVALID_ARGUMENT)
+EXC_CLASS(length_error, C_LENGTH_ERROR)
+EXC_CLASS(out_of_range, C_OUT_OF_RANGE)
+EXC_CLASS(runtime_error, C_RUNTIME_ERROR)
+EXC_CLASS(overflow_error, C_OVERFLOW_ERROR)
+EXC_CLASS(underflow_error, C_UNDERFLOW_ERROR)
+EXC_CLASS(range_error, C_RANGE_ERROR)
 
 static void WINAPI exc_dtor(struct exc *e)
 {
@@ -1052,6 +1092,44 @@ __asm__(
 extern void crt___RTtypeid(void), crt___RTCastToVoid(void),
 	crt___RTDynamicCast(void);
 
+/*
+ * msvcp's throwing helpers (std::_Xlength_error and the like, which its
+ * containers call): the class thrown, with the message they are given.
+ */
+#define XTHROW(name, id, msg) \
+void WINAPI vfw_##name##_c(const char *what, CONTEXT *ctx) \
+{ throw_std(id, (msg) ? (msg) : what, ctx); }
+XTHROW(Xlength_error, C_LENGTH_ERROR, NULL)
+XTHROW(Xout_of_range, C_OUT_OF_RANGE, NULL)
+XTHROW(Xinvalid_argument, C_INVALID_ARGUMENT, NULL)
+XTHROW(Xruntime_error, C_RUNTIME_ERROR, NULL)
+XTHROW(Xoverflow_error, C_OVERFLOW_ERROR, NULL)
+XTHROW(Xbad_alloc, C_BAD_ALLOC, "bad allocation")
+XTHROW(Xbad_function_call, C_BAD_FUNCTION_CALL, "bad function call")
+
+#define XSTUB(name) \
+	".globl crt__" #name "\n" \
+	"crt__" #name ":\n" \
+	RTTI_STUB_HEAD \
+	"	leaq 0x30(%rsp), %rdx\n" \
+	"	call vfw_" #name "_c\n" \
+	"	ud2\n"
+
+__asm__(
+	".text\n"
+	XSTUB(Xlength_error)
+	XSTUB(Xout_of_range)
+	XSTUB(Xinvalid_argument)
+	XSTUB(Xruntime_error)
+	XSTUB(Xoverflow_error)
+	XSTUB(Xbad_alloc)
+	XSTUB(Xbad_function_call));
+
+extern void crt__Xlength_error(void), crt__Xout_of_range(void),
+	crt__Xinvalid_argument(void), crt__Xruntime_error(void),
+	crt__Xoverflow_error(void), crt__Xbad_alloc(void),
+	crt__Xbad_function_call(void);
+
 /* No _set_new_mode on x86-64 yet, so malloc never retries. */
 int crt_malloc_retry(size_t size)
 {
@@ -1132,6 +1210,36 @@ const struct builtin_export crt_cxx_exports[] = {
 	M("??0__non_rtti_object@std@@QEAA@PEBD@Z", non_rtti_ctor),
 	M("??0__non_rtti_object@std@@QEAA@AEBV01@@Z", non_rtti_copy),
 	M("??1__non_rtti_object@std@@UEAA@XZ", exc_dtor),
+#define STD_EXPORTS(cls, id) \
+	M("??_7" #cls "@std@@6B@", &vftable[id][1]), \
+	M("??0" #cls "@std@@QEAA@PEBD@Z", cls##_ctor), \
+	M("??0" #cls "@std@@QEAA@AEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@1@@Z", cls##_ctor_str), \
+	M("??0" #cls "@std@@QEAA@AEBV01@@Z", cls##_copy), \
+	M("??1" #cls "@std@@UEAA@XZ", exc_dtor), \
+	M("??4" #cls "@std@@QEAAAEAV01@AEBV01@@Z", exc_assign), \
+	M("??_E" #cls "@std@@UEAAPEAXI@Z", exc_vdtor), \
+	M("??_G" #cls "@std@@UEAAPEAXI@Z", exc_vdtor)
+	STD_EXPORTS(logic_error, C_LOGIC_ERROR),
+	STD_EXPORTS(domain_error, C_DOMAIN_ERROR),
+	STD_EXPORTS(invalid_argument, C_INVALID_ARGUMENT),
+	STD_EXPORTS(length_error, C_LENGTH_ERROR),
+	STD_EXPORTS(out_of_range, C_OUT_OF_RANGE),
+	STD_EXPORTS(runtime_error, C_RUNTIME_ERROR),
+	STD_EXPORTS(overflow_error, C_OVERFLOW_ERROR),
+	STD_EXPORTS(underflow_error, C_UNDERFLOW_ERROR),
+	STD_EXPORTS(range_error, C_RANGE_ERROR),
+	STD_EXPORTS(bad_function_call, C_BAD_FUNCTION_CALL),
+	STD_EXPORTS(bad_exception, C_BAD_EXCEPTION),
+	M("?what@logic_error@std@@UEBAPEBDXZ", exc_what),
+	M("?what@runtime_error@std@@UEBAPEBDXZ", exc_what),
+	M("?_Xlength_error@std@@YAXPEBD@Z", crt__Xlength_error),
+	M("?_Xout_of_range@std@@YAXPEBD@Z", crt__Xout_of_range),
+	M("?_Xinvalid_argument@std@@YAXPEBD@Z", crt__Xinvalid_argument),
+	M("?_Xruntime_error@std@@YAXPEBD@Z", crt__Xruntime_error),
+	M("?_Xoverflow_error@std@@YAXPEBD@Z", crt__Xoverflow_error),
+	M("?_Xbad_alloc@std@@YAXXZ", crt__Xbad_alloc),
+	M("?_Xbad_function_call@std@@YAXXZ", crt__Xbad_function_call),
+
 	M("__CxxFrameHandler3", crt___CxxFrameHandler3),
 	M("?terminate@@YAXXZ", crt_terminate),
 	M("terminate", crt_terminate),

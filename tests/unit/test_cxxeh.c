@@ -80,6 +80,52 @@ int main(void)
 	CHECK_EQ(FN("cxx64_badcast")(0), 77);
 	CHECK_EQ(FN("cxx64_badtypeid")(0), 77);
 
+	/* msvcp's helpers throw the class, caught as a base or by its own type. */
+	CHECK_EQ(FN("cxx64_xrange")(0), 77);
+	CHECK_EQ(FN("cxx64_xruntime")(0), 77);
+	CHECK_EQ(FN("cxx64_xalloc")(0), 77);
+
+	/* The classes called directly: constructors, what(), the string form. */
+	{
+		struct module *crt = mod_load("msvcrt.dll", NULL);
+		struct exc_obj { const void *const *vtable; const char *what; char free; } e, c;
+		typedef struct exc_obj *(WINAPI *ctor_fn)(struct exc_obj *, const void *);
+		typedef const char *(WINAPI *what_fn)(const struct exc_obj *);
+		ctor_fn rt = (ctor_fn)mod_get_proc(crt, "??0runtime_error@std@@QEAA@PEBD@Z");
+		ctor_fn rts = (ctor_fn)mod_get_proc(crt, "??0runtime_error@std@@QEAA@AEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@1@@Z");
+		ctor_fn cp = (ctor_fn)mod_get_proc(crt, "??0runtime_error@std@@QEAA@AEBV01@@Z");
+		void (WINAPI *dtor)(struct exc_obj *) =
+			(void (WINAPI *)(struct exc_obj *))mod_get_proc(crt, "??1runtime_error@std@@UEAA@XZ");
+		CHECK(rt && rts && cp && dtor);
+		if (rt && rts && cp && dtor) {
+			rt(&e, "boom");
+			CHECK(e.vtable == mod_get_proc(crt, "??_7runtime_error@std@@6B@"));
+			CHECK_EQ(strcmp(((what_fn)e.vtable[1])(&e), "boom"), 0);
+			/* A long std::string (pointer form) and a short one (inline). */
+			struct { const char *ptr; char pad[8]; size_t size, res; } big =
+				{ "a string longer than sixteen", { 0 }, 28, 31 };
+			struct { char buf[16]; size_t size, res; } small = { "short", 5, 15 };
+			rts(&e, &big);
+			CHECK_EQ(strcmp(((what_fn)e.vtable[1])(&e), "a string longer than sixteen"), 0);
+			CHECK(e.free == 1);			/* it owns a copy */
+			cp(&c, &e);
+			CHECK(c.what != e.what);		/* ... which the copy duplicates */
+			CHECK_EQ(strcmp(c.what, e.what), 0);
+			dtor(&c);
+			dtor(&e);
+			rts(&e, &small);
+			CHECK_EQ(strcmp(((what_fn)e.vtable[1])(&e), "short"), 0);
+			dtor(&e);
+			/* Unknown exceptions say so. */
+			ctor_fn def = (ctor_fn)mod_get_proc(crt, "??0exception@std@@QEAA@XZ");
+			if (def) {
+				def(&e, NULL);
+				CHECK_EQ(strcmp(((what_fn)e.vtable[1])(&e), "Unknown exception"), 0);
+			}
+		}
+		mod_free(crt);
+	}
+
 	/* And again, to see nothing was left behind. */
 	CHECK_EQ(FN("cxx64_int")(6), 6);
 	CHECK_EQ(counter(0, 1), 1);

@@ -10,6 +10,9 @@ EXPORTS
 	__RTtypeid
 	__RTDynamicCast
 	__RTCastToVoid
+	?_Xout_of_range@std@@YAXPEBD@Z
+	?_Xruntime_error@std@@YAXPEBD@Z
+	?_Xbad_alloc@std@@YAXXZ
 	__CxxLongjmpUnwind
 	_setjmp3
 	longjmp

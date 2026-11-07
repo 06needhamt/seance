@@ -186,11 +186,17 @@ Decisions:
      i386); `type_info`; `std::exception`, `bad_alloc`, `bad_cast`,
      `bad_typeid` and `__non_rtti_object` with their ThrowInfo and RTTI,
      built at startup in one executable arena so their tables are RVAs
-     from a single base; `__std_exception_copy`/`_destroy`.
+     from a single base; `__std_exception_copy`/`_destroy`; and msvcp's
+     classes (`logic_error` with `domain_error`, `invalid_argument`,
+     `length_error` and `out_of_range`; `runtime_error` with
+     `overflow_error`, `underflow_error` and `range_error`;
+     `bad_function_call`; `bad_exception`), with constructors from a
+     `const char *` and from an MSVC `std::string`, and the `std::_X...`
+     helpers containers throw through.
    - Not done: `__CxxFrameHandler4` (the compressed FuncInfo of
      VS 2019 and later), try blocks inside catch funclets (cl gives these
      their own handler data), exception specifications, the SE
-     translator, `std::bad_exception`, and msvcp's `logic_error` family.
+     translator, and try blocks in catch funclets (above).
    - Done: mingw g++'s exceptions (`__gxx_personality_seh0` over libgcc's
      unwinder, as LAV Filters x64 uses): the `pe_gxx` fixture throws and
      catches by type, as `std::exception&`, `catch (...)` and rethrow, with
