@@ -144,11 +144,16 @@ int main(void)
 
 	/* Unloaded and loaded again, the cached tables (FH3 and FH4) of the
 	 * first image mustn't be used for the second, wherever it lands. */
+	const void *old_base = m->base;
+
 	mod_free(m);
 	m = mod_load(fixture("pe_cxxeh64.dll"), NULL);
 	CHECK(m != NULL);
-	if (m) {
-		counter = (counter_fn)mod_get_proc(m, "cxx64_counter");
+	if (m && m->base != old_base)
+		printf("test_cxxeh: reload mapped elsewhere; eviction not exercised\n");
+	counter = m ? (counter_fn)mod_get_proc(m, "cxx64_counter") : NULL;
+	CHECK(counter != NULL);
+	if (m && counter) {
 		counter(0, 1);
 		counter(1, 1);
 		CHECK_EQ(FN("cxx64_int")(4), 4);

@@ -536,7 +536,7 @@ WINFN(void) k32_GetCurrentProcessorNumberEx(PPROCESSOR_NUMBER n)
 	int cpu = sched_getcpu();
 
 	n->Group = 0;
-	n->Number = cpu < 0 ? 0 : cpu & 0x3f;
+	n->Number = cpu < 0 ? 0 : (DWORD)cpu % cpu_count();
 	n->Reserved = 0;
 }
 
