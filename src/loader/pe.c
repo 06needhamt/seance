@@ -512,8 +512,13 @@ int pe_map(struct pe_image *img, unsigned flags)
 		     img->pe64 ? " (seance64 runs it)" :
 				 " (the i386 seance runs it)");
 	foreign_hook = NULL;	/* a codec of ours: its imports stay here */
-	/* A preferred base the address space can't hold: relocate. */
-	if ((uint64_t)(uintptr_t)want != o->ImageBase)
+	/*
+	 * A preferred base the address space can't hold: relocate. So is one
+	 * past the 47 bits Windows gives a program (a host with 5-level
+	 * paging would map it, but no 64-bit Windows code expects that).
+	 */
+	if ((uint64_t)(uintptr_t)want != o->ImageBase ||
+	    o->ImageBase + len > 0x800000000000ull)
 		flags |= PE_MAP_FORCE_RELOC;
 
 	if (!(flags & PE_MAP_FORCE_RELOC))
