@@ -142,6 +142,21 @@ int main(void)
 	CHECK_EQ(FN("cxx64_int")(6), 6);
 	CHECK_EQ(counter(0, 1), 1);
 
+	/* Unloaded and loaded again, the cached tables (FH3 and FH4) of the
+	 * first image mustn't be used for the second, wherever it lands. */
+	mod_free(m);
+	m = mod_load(fixture("pe_cxxeh64.dll"), NULL);
+	CHECK(m != NULL);
+	if (m) {
+		counter = (counter_fn)mod_get_proc(m, "cxx64_counter");
+		counter(0, 1);
+		counter(1, 1);
+		CHECK_EQ(FN("cxx64_int")(4), 4);
+		CHECK_EQ(counter(0, 1), 1);
+		CHECK_EQ(FN("cxx64_int_v4")(4), 4);
+		CHECK_EQ(counter(0, 1), 1);
+	}
+
 	mod_free(m);
 
 	/* g++'s exceptions (libgcc's unwinder over the Rtl* functions), when
