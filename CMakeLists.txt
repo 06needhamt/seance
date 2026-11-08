@@ -258,16 +258,20 @@ if(BUILD_TESTING)
 	endfunction()
 
 	# The fixtures the harness can run: the 64-bit ones in seance64's
-	# build. That set is partial so far (docs/X64_PLAN.md), so tests
-	# needing the others skip there, and smoke runs without fixtures.
+	# build. That set leaves out the i386-only ones (docs/X64_PLAN.md), so
+	# tests needing those skip there. smoke's 2 GB checks are i386's; its
+	# crash checks, like the 2 GB ones, don't run under the sanitizers.
 	if(VFW_ARCH STREQUAL "x86_64")
 		set(vfw_run_fixtures ${VFW_FIXTURE64_DIR})
 		set(vfw_fixtures_required OFF)
-		set(vfw_smoke_fixtures "")
+		set(vfw_smoke_fixtures
+			$<$<BOOL:${VFW_MINGW64_CC}>:${VFW_FIXTURE64_DIR}>)
+		set(vfw_smoke_mode $<IF:$<BOOL:${VFW_SANITIZE}>,0,x64>)
 	else()
 		set(vfw_run_fixtures ${VFW_FIXTURE_DIR})
 		set(vfw_fixtures_required ${VFW_REQUIRE_MINGW})
 		set(vfw_smoke_fixtures $<$<BOOL:${VFW_MINGW_CC}>:${VFW_FIXTURE_DIR}>)
+		set(vfw_smoke_mode $<IF:$<BOOL:${VFW_SANITIZE}>,0,1>)
 	endif()
 
 	file(GLOB unit_sources CONFIGURE_DEPENDS tests/unit/test_*.c)
@@ -348,7 +352,7 @@ if(BUILD_TESTING)
 		COMMAND sh ${PROJECT_SOURCE_DIR}/tests/smoke.sh
 			$<TARGET_FILE:seance> ${PROJECT_SOURCE_DIR}/CMakeLists.txt
 			"${vfw_smoke_fixtures}"
-			$<IF:$<BOOL:${VFW_SANITIZE}>,0,1>)
+			${vfw_smoke_mode})
 	set_tests_properties(smoke PROPERTIES LABELS cli
 		ENVIRONMENT "VFW_EMULATOR=${vfw_emulator}")
 
@@ -395,6 +399,15 @@ if(BUILD_TESTING)
 				--output-on-failure --parallel ${vfw_cores})
 		set_tests_properties(x86_64 PROPERTIES LABELS x86_64
 			TIMEOUT 3600)
+		# Each binary hands the other's codecs over.
+		if(VFW_MINGW_CC AND (VFW_MINGW64_CC OR VFW_EXTERNAL_FIXTURES))
+			add_test(NAME handoff
+				COMMAND sh ${PROJECT_SOURCE_DIR}/tests/handoff.sh
+					$<TARGET_FILE:seance> ${VFW_HARNESS_DIR}/seance64
+					${VFW_FIXTURE_DIR} ${VFW_FIXTURE64_DIR})
+			set_tests_properties(handoff PROPERTIES LABELS "cli;x86_64"
+				ENVIRONMENT "VFW_EMULATOR=${vfw_emulator}")
+		endif()
 	endif()
 endif()
 

@@ -19,6 +19,7 @@
 #include "loader/modules.h"
 #include "runtime/crash.h"
 #include "runtime/runtime.h"
+#include "runtime/seh.h"
 #include "runtime/teb.h"
 #include "runtime/trap.h"
 
@@ -427,6 +428,10 @@ static void unload(struct module *m)
 
 	unlink_module(m);
 	forget(m);
+#if defined(__x86_64__)
+	if (m->img && m->base)
+		cxx_forget_image(m->base, m->img->map_len);
+#endif
 	if (m->img)
 		pe_free(m->img);
 	else

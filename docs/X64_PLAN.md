@@ -105,8 +105,8 @@ Decisions:
      pointer indices exist only as `GWLP_`/`DWLP_`.
    - The i386-only parts (the fs:[0] SEH in `seh.c` and `crt_seh.c`, the
      i386 C++ EH, `_allmul` and the other helpers, `_CI*`, `_EH_prolog`)
-     are left out of the x86-64 build; `seh_x64.c` sends exceptions to
-     the unhandled-exception filter until phase 4.
+     are left out of the x86-64 build; `seh_x64.c` and `unwind_x64.c` take
+     their place (phase 4).
 3. **Loading and running.** (Mostly done; what remains is marked.)
    - `src/runtime/teb_x64.c`: the x64 TEB and PEB (offsets checked with
      `_Static_assert`), installed with `arch_prctl(ARCH_SET_GS)`. glibc
@@ -125,21 +125,23 @@ Decisions:
      `RtlLookupFunctionEntry`, `RtlVirtualUnwind`, `RtlUnwindEx`,
      `RtlAddFunctionTable`, `RtlDeleteFunctionTable`,
      `__C_specific_handler`, `__chkstk`, `_setjmpex`.
-   - (Remaining.) The CRT's uses of the host's `long` (about 86 in
-     `src/win32/crt_*.c`: `strtol`, `fseek`, `ftell`, `_lseek`, ...)
-     become `LONG`: a Win64 caller leaves the upper half of a 32-bit
-     argument undefined.
+   - The CRT exports that take or return a Windows `long` (`strtol`,
+     `strtoul`, `atol`, `labs`, `_ltoa`, `_ultoa`, `fseek`, `ftell`,
+     `_lseek`, `_scalb`, `__p__timezone`) use `LONG`: a Win64 caller
+     leaves the upper half of a 32-bit argument undefined, and the
+     results clamp to 32 bits as MSVC's do. `scanf`'s `%l` integers are
+     32-bit too.
    - Varargs exports (`printf` and `scanf` families, `wsprintfA/W`,
      `_snprintf`, `_open`, the `v*` forms) take `win_va_list`
      (`src/win32/winva.h`: `__builtin_ms_va_list` on x86-64). `wsprintf`
-     reads 32-bit integers and pointer-sized `%p`. (Remaining: the CRT
-     printf dialect, where on Win64 `%I` alone and `z`/`t` are 64-bit and
-     `%p` has 16 digits.)
+     reads 32-bit integers and pointer-sized `%p`. In the CRT's `printf`
+     and `scanf`, `%I` alone and `z`/`t` are 64-bit on Win64, and `%p`
+     has 16 digits.
    - Callbacks the CRT makes into the DLL (`qsort` and `bsearch`
      comparators, `signal` handlers) use its convention; `qsort` goes
      through `qsort_r` rather than handing the comparator to glibc.
    - `_setjmp`, `_setjmpex` and `longjmp` with the Win64 `_JUMP_BUFFER`
-     (`src/win32/crt_seh_x64.c`), restoring registers without unwinding;
+     (`src/win32/crt_seh_x64.c`; `longjmp` unwinds, see phase 4);
      `operator new` and `delete` under their x64 names, and `_purecall`.
    - `WNDCLASS` is copied field by field, not as the tail of a
      `WNDCLASSEX` (the padding differs on x86-64); the lock words of SRW
@@ -147,8 +149,8 @@ Decisions:
    Milestone (reached): the 64-bit `pe_basic`, `pe_reloc`, `pe_tls`,
    `pe_dep` and `pe_crt` load in `seance64`, `DllMain` and TLS callbacks
    run, and their exports return the right values.
-4. **Table-based SEH.** `src/runtime/seh_x64.c`, beside the i386
-   `seh.c`: function lookup in each module's sorted `.pdata` and in tables
+4. **Table-based SEH.** (Done.) `src/runtime/seh_x64.c` and
+   `unwind_x64.c`, beside the i386 `seh.c`: function lookup in each module's sorted `.pdata` and in tables
    added with `RtlAddFunctionTable`; a virtual unwinder for every unwind
    code (`PUSH_NONVOL`, `ALLOC_*`, `SET_FPREG`, `SAVE_NONVOL*`,
    `SAVE_XMM128*`, `PUSH_MACHFRAME`), chained unwind info and epilogues;
@@ -158,41 +160,95 @@ Decisions:
    `CONTEXT` and dispatch on the thread's own stack, as on i386.
    `setjmp`/`longjmp` use the x64 `_JUMP_BUFFER`, and `longjmp` unwinds
    when its `Frame` is set.
-   Milestone: 64-bit SEH fixtures pass: `__try`/`__except` around an
-   access violation, `__finally` on unwind, `RaiseException` with a
-   filter, and `longjmp` across frames.
-5. **C++ exceptions and RTTI.** `src/win32/crt_cxx_x64.c`:
-   `_CxxThrowException` with the image base as the fourth parameter and
-   RVA-based `ThrowInfo`; `__CxxFrameHandler3` and `__CxxFrameHandler4`
-   (state maps, catch funclets, unwind actions); `__RTtypeid`,
-   `__RTDynamicCast` and `__RTCastToVoid` with the x64 complete object
-   locator.
-   Milestone: a 64-bit C++ exception fixture laid out as cl compiles it
-   throws, catches by type, rethrows and destroys on unwind; mingw's own
-   `__gxx_personality_seh0` code works through phase 4.
-6. **Codecs.** (Fixtures and tests done.) The 64-bit fixture set is every
-   fixture but the i386-only `pe_seh`, `pe_sehcrt`, `pe_cxxeh`,
-   `pe_thunk` and `pe_delay` (hand-written i386 tables), including
-   `testcodec`, `testacm`, `testfilter` and `testdmo`. On x86-64 the
+   Milestone (reached): the hand-written `pe_seh64` fixture (`.seh_*`
+   unwind data and `__C_specific_handler` scope tables, as cl compiles
+   `__try`) passes: `__except` around an access violation with rbx, r12
+   and xmm6 restored by the unwind, a frame-pointer function, filters
+   (execute, reject, continue execution), `__finally` on unwind,
+   `RaiseException`, `longjmp` out of a `__finally` scope, the top-level
+   filter resuming, and an unhandled fault crashing with the usual
+   report.
+   Limit: a frame in code the harness itself runs (a built-in DLL's
+   function) has no unwind data, so an exception cannot be caught by a
+   `__try` beyond one, and a fault inside such code is unhandled.
+5. **C++ exceptions and RTTI.** (Partly done.) `src/win32/crt_cxx_x64.c`:
+   - Done: `_CxxThrowException` (the image base as the fourth parameter,
+     RVA-based `ThrowInfo`, `throw;`) and `__CxxFrameHandler3`: the
+     state comes from the control pc (`IpToStateMap`), destructors are
+     unwind funclets, a catch block is a funclet called on top of the
+     stack the exception was thrown from (where the exception object
+     lives), and the function resumes at the address it returns. An
+     exception leaving a catch block goes on from its function's context
+     (`seh_link` in `seh_x64.c`) and ends the block. `noexcept` functions
+     terminate.
+   - Done: `__RTtypeid`, `__RTDynamicCast` and `__RTCastToVoid` over the
+     x64 complete object locator (single and multiple inheritance, as on
+     i386); `type_info`; `std::exception`, `bad_alloc`, `bad_cast`,
+     `bad_typeid` and `__non_rtti_object` with their ThrowInfo and RTTI,
+     built at startup in one executable arena so their tables are RVAs
+     from a single base; `__std_exception_copy`/`_destroy`; and msvcp's
+     classes (`logic_error` with `domain_error`, `invalid_argument`,
+     `length_error` and `out_of_range`; `runtime_error` with
+     `overflow_error`, `underflow_error` and `range_error`;
+     `bad_function_call`; `bad_exception`), with constructors from a
+     `const char *` and from an MSVC `std::string`, and the `std::_X...`
+     helpers containers throw through.
+   - Done: `__CxxFrameHandler4` (the compressed FuncInfo4 of VS 2019 and
+     later, laid out as in Microsoft's `ehdata4_export.h`, read from the
+     MSCpp header mirror): FH3 and FH4 tables are decoded into one form and
+     share the catch/unwind code. The `pe_cxxeh64` fixture has FH4 twins
+     (`cxx64_*_v4`) with hand-encoded tables: catch by type, `...`, base
+     reference, rethrow, and continuation addresses in the table. Not
+     checked against a cl-built binary; unverified guesses are how a catch
+     funclet picks between two table continuations (taken: its return
+     value 2 means the second, anything else the first) and separated
+     (profile-guided) code.
+   - Not done: try blocks inside catch funclets (cl gives these
+     their own handler data), exception specifications, the SE
+     translator.
+   - Done: mingw g++'s exceptions (`__gxx_personality_seh0` over libgcc's
+     unwinder, as LAV Filters x64 uses): the `pe_gxx` fixture throws and
+     catches by type, as `std::exception&`, `catch (...)` and rethrow, with
+     destructors on the way. This needed an exception raised inside a
+     language handler (libgcc starts its second phase that way) to carry
+     on from the context of the one being dispatched.
+   Milestone (reached for FrameHandler3): the hand-written `pe_cxxeh64`
+   fixture, laid out as cl compiles it, throws and catches by type, as
+   `catch (...)`, a base by reference, with an exception object's
+   destructor run once, rethrows, lets a catch for another type pass,
+   destroys on unwind, and has msvcrt throw `bad_cast` and `bad_typeid`
+   (caught by name and as `std::exception`).
+6. **Codecs.** (Done.) The 64-bit fixture set is every fixture but the
+   i386-only `pe_seh`, `pe_sehcrt`, `pe_cxxeh` and `pe_thunk`, including
+   `testcodec`, `testacm`, `testfilter`, `testdmo` and `pe_delay` (whose
+   hand-written delay-load tables take the pointer width). On x86-64 the
    fixture build strips the stdcall decorations from the `.def` files and
    drops `-mpreferred-stack-boundary=2`, and every fixture has one
    absolute pointer so GNU ld gives it a `.reloc` (it leaves one out when
    nothing needs relocating). The VfW, ACM, DirectShow and DMO unit
    tests and `validate_media` pass with them under `seance64`.
    Milestone (reached): `seance64 probe`, `encode` and `decode` with each
-   64-bit test codec give what the i386 ones do. (Remaining: a smoke
-   test over the 64-bit fixtures, and `pe_delay` for x86-64.)
-7. **One command for both.** `src/main.c` checks the DLL a command names
-   with `pe_peek_machine` before running it, and `exec`s the other
-   binary (`$VFW_SEANCE64`/`$VFW_SEANCE32`, else `seance64`/`seance`
-   beside itself, through `$VFW_EMULATOR` if set) for the other
-   architecture. Commands that find their codec later (`decode auto`, a
-   FourCC from `vfw.ini`, a CLSID from the registry) hand off where they
-   resolve the path. `sweep` picks the binary per DLL; `register` runs
+   64-bit test codec give what the i386 ones do, and `seance64`'s
+   `smoke` runs over the 64-bit fixtures (all but its 2 GB checks).
+7. **One command for both.** (Done.) `src/handoff.c`: `src/main.c`
+   checks the DLL that `probe`, `decode`, `encode`, `register` or
+   `unregister` names with `pe_peek_machine` before running it, and
+   `exec`s the other binary (`$VFW_SEANCE64`/`$VFW_SEANCE32`, else
+   `seance64`/`seance` beside itself, through `$VFW_EMULATOR64`/
+   `$VFW_EMULATOR32` if set; `VFW_EMULATOR` is this binary's own) for the
+   other architecture. A codec found later (a FourCC from `vfw.ini`, a
+   CLSID from the registry) hands off when `pe_map` meets it as the first
+   image it maps: a hook that the first native image disarms, so a
+   foreign dependency stays an error. `decode auto` tries every codec and
+   keeps to its own binary's. `VFW_HANDED_OFF` in the sibling's
+   environment stops a second hand-off. `sweep` runs `seance` per step,
+   so each step goes to the binary its DLL needs; `register` runs
    `DllRegisterServer` in the matching one; `list` shows each entry's
-   architecture.
-   Milestone: `seance probe` of a 64-bit codec works from the i386
-   binary, and `sweep` over a mixed directory runs both.
+   architecture and doesn't open the other kind.
+   Milestone (reached): `seance probe` of a 64-bit codec works from the
+   i386 binary and the reverse, a round trip through the 64-bit
+   `testcodec` from `seance` matches the i386 one, and `sweep` over both
+   runs both (`tests/handoff.sh`).
 8. **CI and real codecs.** (CI done: the default build makes and tests
    both binaries, so the existing `test`, `sanitizers` and `minimal` jobs
    cover `seance64`, and `install` puts both side by side.) Real 64-bit codecs
@@ -229,3 +285,28 @@ Decisions:
   `test_cxxeh`, `test_crt_helpers`, `test_lowmem`) skip.
   `-DVFW_BUILD_X86_64=OFF` builds `seance` only; a directory configured
   with `-DVFW_ARCH=x86_64` builds `seance64` only.
+
+## Real 64-bit codecs
+
+Of the 224 files in the user's codec collection, one is x86-64:
+`cinevf2w.dll`. It loads and probes in `seance64` (and through the
+hand-off from `seance`). Running it found what the fixtures could not:
+no `rpcrt4.dll` (now built in, with the UUID functions), and a codec that
+truncates the driver instance to 32 bits, which needs heap memory below
+4 GB. `win32/winheap.c` now serves HeapAlloc, the CRT's malloc family and
+`operator new` (and VirtualAlloc, when it fits) from `MAP_32BIT` chunks on
+x86-64, falling back to libc when they run out; `VFW_LOWHEAP=0` turns it
+off.
+
+LAV Filters 0.83 (x64; MSVC filters, GCC FFmpeg libraries) was the second: all 11 DLLs
+load with no unimplemented imports, and `LAVVideo.ax`/`LAVAudio.ax` are
+found as a video and an audio decoder (`samples.sh`: 11 DLLs, 0 failures).
+It needed msvcrt's `_time64`, `_stat64`, `_strtoi64`, `_aligned_malloc`
+family, `abort` and the locale accessors (`crt_modern.c`, for both
+architectures). It uses no `__CxxFrameHandler4`: the filters carry
+`__CxxFrameHandler3`-style tables in a statically linked handler, which
+run on the `Rtl*` unwinder (the g++ fixture covers libgcc's separately).
+That found a bug in epilogue detection (a `jmp` inside the function was
+taken for a tail call), and decoding every format (see
+`docs/MISSING_FEATURES.md`) found that `GetLogicalProcessorInformationEx`
+was a stub, which MSVC's Concurrency Runtime needs.

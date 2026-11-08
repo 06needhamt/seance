@@ -91,6 +91,8 @@ static int STUB_CDECL nt__snwprintf(WCHAR *buf, SIZE_T n, const WCHAR *fmt,
 
 #define E(name) { #name, 0, (void *)nt_##name }
 
+#define E2(name) { #name, 0, (void *)seh_##name }
+
 static const struct builtin_export exports[] = {
 	E(NtCurrentTeb),
 	E(_snprintf),
@@ -105,6 +107,17 @@ static const struct builtin_export exports[] = {
 	E(RtlZeroMemory),
 #if !defined(__x86_64__)
 	{ "RtlUnwind", 0, (void *)seh_RtlUnwind },
+#else
+	E2(RtlLookupFunctionEntry),
+	E2(RtlVirtualUnwind),
+	E2(RtlAddFunctionTable),
+	E2(RtlDeleteFunctionTable),
+	E2(RtlCaptureContext),
+	E2(RtlRestoreContext),
+	E2(RtlUnwindEx),
+	E2(RtlUnwind),
+	E2(RtlPcToFileHeader),
+	{ "__C_specific_handler", 0, (void *)seh_C_specific_handler },
 #endif
 	BUILTIN_END
 };

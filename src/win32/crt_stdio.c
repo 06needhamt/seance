@@ -235,9 +235,18 @@ CRTFN(int) crt_fflush(crt_FILE *f) { (void)f; return 0; }
 CRTFN(int) crt_feof(crt_FILE *f) { return (f->_flag & _IOEOF) != 0; }
 CRTFN(int) crt_ferror(crt_FILE *f) { return (f->_flag & _IOERR) != 0; }
 CRTFN(void) crt_clearerr(crt_FILE *f) { f->_flag &= ~(_IOEOF | _IOERR); }
-CRTFN(long) crt_ftell(crt_FILE *f) { return (long)lseek(f->_file, 0, SEEK_CUR); }
+/* ftell's LONG can't hold a position past 2 GB: EINVAL there, as MSVC. */
+CRTFN(LONG) crt_ftell(crt_FILE *f)
+{
+	off_t n = lseek(f->_file, 0, SEEK_CUR);
+	if (n > INT32_MAX) {
+		errno = EINVAL;
+		return -1;
+	}
+	return (LONG)n;
+}
 /* A successful seek clears end-of-file, as C requires. */
-CRTFN(int) crt_fseek(crt_FILE *f, long off, int whence)
+CRTFN(int) crt_fseek(crt_FILE *f, LONG off, int whence)
 {
 	if (lseek(f->_file, off, whence) < 0)
 		return -1;

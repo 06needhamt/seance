@@ -14,13 +14,178 @@
  * handler setters are called directly.
  */
 #if defined(__x86_64__)
-/* x86-64 has no counterpart of the i386 C++ exception model (docs/X64_PLAN.md, phases 4-5). */
-#include <stdio.h>
+/*
+ * x86-64: pe_cxxeh64.dll lays out C++ exceptions as cl does for Win64
+ * (__CxxFrameHandler3, FuncInfo and ThrowInfo as RVAs, funclets): throws
+ * and catches by type, by reference to a base, catch (...), rethrow, the
+ * destructors of the frames in between and of the exception object.
+ */
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#include "loader/modules.h"
+#include "runtime/runtime.h"
+#include "test.h"
+
+typedef int (WINAPI *int_fn)(int);
+typedef LONG (WINAPI *counter_fn)(int which, int clear);
 
 int main(void)
 {
-	printf("i386 only\n");
-	return 77;
+	CHECK_EQ(runtime_enter(), 0);
+	struct module *m = mod_load(fixture("pe_cxxeh64.dll"), NULL);
+
+	CHECK(m != NULL);
+	if (!m)
+		return test_summary("test_cxxeh");
+
+#define FN(name) ((int_fn)mod_get_proc(m, name))
+	counter_fn counter = (counter_fn)mod_get_proc(m, "cxx64_counter");
+
+	CHECK(counter != NULL);
+	counter(0, 1);
+	counter(1, 1);
+
+	/* By type; the local between is destroyed on the way. */
+	CHECK_EQ(FN("cxx64_int")(5), 5);
+	CHECK_EQ(counter(0, 1), 1);
+	/* catch (...). */
+	CHECK_EQ(FN("cxx64_all")(5), 77);
+	CHECK_EQ(counter(0, 1), 1);
+	/* A Derived caught by reference to its Base: the base's offset. */
+	CHECK_EQ(FN("cxx64_base")(42), 42);
+	CHECK_EQ(counter(0, 1), 1);
+	/* An exception object with a destructor: once, after the catch. */
+	CHECK_EQ(FN("cxx64_obj")(9), 9);
+	CHECK_EQ(counter(0, 1), 1);
+	CHECK_EQ(counter(1, 1), 1);
+	/* throw; from a catch block reaches the outer catch. */
+	CHECK_EQ(FN("cxx64_rethrow")(7), 7);
+	CHECK_EQ(counter(0, 1), 1);
+	/* ... and does not destroy the object between. */
+	CHECK_EQ(FN("cxx64_rethrow_obj")(11), 11);
+	CHECK_EQ(counter(0, 1), 1);
+	CHECK_EQ(counter(1, 1), 1);
+	/* A catch for another type lets it pass. */
+	CHECK_EQ(FN("cxx64_wrongtype")(3), 3);
+	CHECK_EQ(counter(0, 1), 1);
+
+	/* The same through __CxxFrameHandler4's compressed tables. */
+	CHECK_EQ(FN("cxx64_int_v4")(5), 5);
+	CHECK_EQ(counter(0, 1), 1);
+	CHECK_EQ(FN("cxx64_all_v4")(5), 77);
+	CHECK_EQ(counter(0, 1), 1);
+	CHECK_EQ(FN("cxx64_base_v4")(42), 42);
+	CHECK_EQ(counter(0, 1), 1);
+	CHECK_EQ(FN("cxx64_cont_v4")(8), 8);
+	CHECK_EQ(counter(0, 1), 1);
+	CHECK_EQ(FN("cxx64_rethrow_v4")(7), 7);
+	CHECK_EQ(counter(0, 1), 1);
+
+	/* RTTI: typeid, dynamic_cast up/down, to void. */
+	CHECK_EQ(FN("rt_typeid")(0), 1);
+	CHECK_EQ(FN("rt_cast_ok")(0), 1);
+	CHECK_EQ(FN("rt_cast_null")(0), 1);
+	CHECK_EQ(FN("rt_cast_void")(0), 1);
+	/* msvcrt throws bad_cast / bad_typeid, caught by name / as std::exception. */
+	CHECK_EQ(FN("cxx64_badcast")(0), 77);
+	CHECK_EQ(FN("cxx64_badtypeid")(0), 77);
+
+	/* msvcp's helpers throw the class, caught as a base or by its own type. */
+	CHECK_EQ(FN("cxx64_xrange")(0), 77);
+	CHECK_EQ(FN("cxx64_xruntime")(0), 77);
+	CHECK_EQ(FN("cxx64_xalloc")(0), 77);
+
+	/* The classes called directly: constructors, what(), the string form. */
+	{
+		struct module *crt = mod_load("msvcrt.dll", NULL);
+		struct exc_obj { const void *const *vtable; const char *what; char free; } e, c;
+		typedef struct exc_obj *(WINAPI *ctor_fn)(struct exc_obj *, const void *);
+		typedef const char *(WINAPI *what_fn)(const struct exc_obj *);
+		ctor_fn rt = (ctor_fn)mod_get_proc(crt, "??0runtime_error@std@@QEAA@PEBD@Z");
+		ctor_fn rts = (ctor_fn)mod_get_proc(crt, "??0runtime_error@std@@QEAA@AEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@1@@Z");
+		ctor_fn cp = (ctor_fn)mod_get_proc(crt, "??0runtime_error@std@@QEAA@AEBV01@@Z");
+		void (WINAPI *dtor)(struct exc_obj *) =
+			(void (WINAPI *)(struct exc_obj *))mod_get_proc(crt, "??1runtime_error@std@@UEAA@XZ");
+		CHECK(rt && rts && cp && dtor);
+		if (rt && rts && cp && dtor) {
+			rt(&e, "boom");
+			CHECK(e.vtable == mod_get_proc(crt, "??_7runtime_error@std@@6B@"));
+			CHECK_EQ(strcmp(((what_fn)e.vtable[1])(&e), "boom"), 0);
+			/* A long std::string (pointer form) and a short one (inline). */
+			struct { const char *ptr; char pad[8]; size_t size, res; } big =
+				{ "a string longer than sixteen", { 0 }, 28, 31 };
+			struct { char buf[16]; size_t size, res; } small = { "short", 5, 15 };
+			rts(&e, &big);
+			CHECK_EQ(strcmp(((what_fn)e.vtable[1])(&e), "a string longer than sixteen"), 0);
+			CHECK(e.free == 1);			/* it owns a copy */
+			cp(&c, &e);
+			CHECK(c.what != e.what);		/* ... which the copy duplicates */
+			CHECK_EQ(strcmp(c.what, e.what), 0);
+			dtor(&c);
+			dtor(&e);
+			rts(&e, &small);
+			CHECK_EQ(strcmp(((what_fn)e.vtable[1])(&e), "short"), 0);
+			dtor(&e);
+			/* Unknown exceptions say so. */
+			ctor_fn def = (ctor_fn)mod_get_proc(crt, "??0exception@std@@QEAA@XZ");
+			if (def) {
+				def(&e, NULL);
+				CHECK_EQ(strcmp(((what_fn)e.vtable[1])(&e), "Unknown exception"), 0);
+			}
+		}
+		mod_free(crt);
+	}
+
+	/* And again, to see nothing was left behind. */
+	CHECK_EQ(FN("cxx64_int")(6), 6);
+	CHECK_EQ(counter(0, 1), 1);
+
+	/* Unloaded and loaded again, the cached tables (FH3 and FH4) of the
+	 * first image mustn't be used for the second, wherever it lands. */
+	const void *old_base = m->base;
+
+	mod_free(m);
+	m = mod_load(fixture("pe_cxxeh64.dll"), NULL);
+	CHECK(m != NULL);
+	if (m && m->base != old_base)
+		printf("test_cxxeh: reload mapped elsewhere; eviction not exercised\n");
+	counter = m ? (counter_fn)mod_get_proc(m, "cxx64_counter") : NULL;
+	CHECK(counter != NULL);
+	if (m && counter) {
+		counter(0, 1);
+		counter(1, 1);
+		CHECK_EQ(FN("cxx64_int")(4), 4);
+		CHECK_EQ(counter(0, 1), 1);
+		CHECK_EQ(FN("cxx64_int_v4")(4), 4);
+		CHECK_EQ(counter(0, 1), 1);
+	}
+
+	mod_free(m);
+
+	/* g++'s exceptions (libgcc's unwinder over the Rtl* functions), when
+	 * the fixture was built. */
+	if (!access(fixture("pe_gxx.dll"), R_OK)) {
+		struct module *g = mod_load(fixture("pe_gxx.dll"), NULL);
+
+		CHECK(g != NULL);
+		if (g) {
+#define GFN(name) ((int_fn)mod_get_proc(g, name))
+			CHECK_EQ(GFN("gxx_int")(5), 5);
+			CHECK_EQ(GFN("gxx_int")(0), 1);
+			CHECK_EQ(GFN("gxx_std")(-1), 3);
+			CHECK_EQ(GFN("gxx_all")(-1), 77);
+			CHECK_EQ(GFN("gxx_all")(4), 77);
+			CHECK_EQ(GFN("gxx_nested")(6), 12);
+			/* Three throws destroyed two locals each, and gxx_int(0)
+			 * and the rest destroy theirs on return too. */
+			CHECK(((int (WINAPI *)(void))mod_get_proc(g, "gxx_dtors"))() > 0);
+			CHECK_EQ(((int (WINAPI *)(void))mod_get_proc(g, "gxx_dyn"))(), 1);
+			mod_free(g);
+		}
+	}
+	return test_summary("test_cxxeh");
 }
 
 #else

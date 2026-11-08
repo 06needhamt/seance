@@ -6,9 +6,14 @@ EXPORTS
 	_CxxThrowException@8
 	__CxxFrameHandler
 	__CxxFrameHandler3
+	__CxxFrameHandler4
 	??_7type_info@@6B@ DATA
 	__RTtypeid
 	__RTDynamicCast
+	__RTCastToVoid
+	?_Xout_of_range@std@@YAXPEBD@Z
+	?_Xruntime_error@std@@YAXPEBD@Z
+	?_Xbad_alloc@std@@YAXXZ
 	__CxxLongjmpUnwind
 	_setjmp3
 	longjmp

@@ -8,14 +8,16 @@
  *   96 Xmm6 ... 240 Xmm15 (16 each)            256 in all
  *
  * Code calls _setjmp(buf, frame), frame being its own frame (mingw passes
- * it; cl's _setjmpex reads it itself). On Windows a longjmp with a frame
- * unwinds the frames it leaves, running their __finally blocks and C++
- * destructors; without the table-based unwinder (docs/X64_PLAN.md, phase
- * 4) this one restores the registers only, which is all C code needs.
+ * it; cl's _setjmpex reads it itself). As on Windows a longjmp with a
+ * frame unwinds the frames it leaves, running their __finally blocks (and,
+ * once phase 5 of docs/X64_PLAN.md is in, C++ destructors).
  */
 #if defined(__x86_64__)
 
+#include <string.h>
+
 #include "runtime/builtin.h"
+#include "runtime/seh.h"
 #include "win32/internal.h"
 
 __asm__(
@@ -52,9 +54,9 @@ __asm__(
 	"	ret\n"
 	".size vfw_x64_setjmp, .-vfw_x64_setjmp\n"
 
-	".globl vfw_x64_longjmp\n"
-	".type vfw_x64_longjmp, @function\n"
-	"vfw_x64_longjmp:\n"		/* rcx = buf, edx = value (0 means 1) */
+	".globl vfw_x64_longjmp_plain\n"
+	".type vfw_x64_longjmp_plain, @function\n"
+	"vfw_x64_longjmp_plain:\n"		/* rcx = buf, edx = value (0 means 1) */
 	"	movl %edx, %eax\n"
 	"	testl %eax, %eax\n"
 	"	jnz 1f\n"
@@ -82,9 +84,54 @@ __asm__(
 	"	movdqu 240(%rcx), %xmm15\n"
 	"	movq 16(%rcx), %rsp\n"
 	"	jmpq *80(%rcx)\n"
-	".size vfw_x64_longjmp, .-vfw_x64_longjmp\n");
+	".size vfw_x64_longjmp_plain, .-vfw_x64_longjmp_plain\n");
 
 extern void vfw_x64_setjmp(void);
+extern void vfw_x64_longjmp_plain(void *buf, int value)
+	__attribute__((ms_abi, noreturn));
+
+/*
+ * longjmp: with a frame in the buffer, the frames it leaves are unwound
+ * first (their __finally blocks run) by RtlUnwindEx, which then restores
+ * the registers from the buffer; without one, only the registers are
+ * restored. The unwind must start in longjmp's caller, so this is a stub
+ * that ends in a jump to RtlUnwindEx rather than a C function: only the
+ * exception record (kept per thread, for the unwind's duration) is made
+ * in C.
+ */
+static _Thread_local EXCEPTION_RECORD jump_rec;
+
+EXCEPTION_RECORD *CDECL vfw_longjmp_record(BYTE *jb, int value)
+{
+	memset(&jump_rec, 0, sizeof(jump_rec));
+	jump_rec.ExceptionCode = STATUS_LONGJUMP;
+	jump_rec.NumberParameters = 1;
+	jump_rec.ExceptionInformation[0] = (DWORD_PTR)(uintptr_t)jb;
+	return &jump_rec;
+}
+
+__asm__(
+	".text\n"
+	".globl vfw_x64_longjmp\n"
+	".type vfw_x64_longjmp, @function\n"
+	"vfw_x64_longjmp:\n"		/* rcx = buf, edx = value */
+	"	cmpq $0, (%rcx)\n"
+	"	je vfw_x64_longjmp_plain\n"
+	"	subq $40, %rsp\n"
+	"	movq %rcx, %rsi\n"	/* all of these are given back by */
+	"	movl %edx, %edi\n"	/* the registers in the buffer */
+	"	call vfw_longjmp_record\n"
+	"	addq $40, %rsp\n"
+	"	movq %rax, %r8\n"
+	"	movq (%rsi), %rcx\n"
+	"	movq 80(%rsi), %rdx\n"
+	"	movslq %edi, %r9\n"
+	"	testq %r9, %r9\n"
+	"	jnz 1f\n"
+	"	movl $1, %r9d\n"
+	"1:	jmp seh_RtlUnwindEx\n"
+	".size vfw_x64_longjmp, .-vfw_x64_longjmp\n");
+
 extern void vfw_x64_longjmp(void);
 
 #define EASM(name, fn) { name, 0, (void *)fn }
@@ -93,6 +140,7 @@ const struct builtin_export crt_seh_exports[] = {
 	EASM("_setjmp", vfw_x64_setjmp),
 	EASM("_setjmpex", vfw_x64_setjmp),
 	EASM("longjmp", vfw_x64_longjmp),
+	{ "__C_specific_handler", 0, (void *)seh_C_specific_handler },
 	BUILTIN_END
 };
 

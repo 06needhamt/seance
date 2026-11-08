@@ -36,5 +36,10 @@ struct module *win_caller_module(const void *return_address);
  */
 int win_zero_memory(void);
 void *win_alloc(size_t n, size_t size);
+/* Always zeroed; free, realloc and the usable size of what these return. */
+void *win_calloc(size_t n, size_t size);
+void *win_realloc(void *p, size_t n);
+void win_free(void *p);
+size_t win_usable(void *p);
 
 #endif /* VFW_WIN32_INTERNAL_H */

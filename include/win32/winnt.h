@@ -535,6 +535,50 @@ _Static_assert(__builtin_offsetof(CONTEXT, FltSave) == 0x100,
 	       "CONTEXT.FltSave");
 _Static_assert(sizeof(CONTEXT) == 0x4d0, "CONTEXT");
 
+/* x86-64 unwind data (.xdata): what a RUNTIME_FUNCTION's UnwindData names. */
+#define UNW_FLAG_NHANDLER  0
+#define UNW_FLAG_EHANDLER  1
+#define UNW_FLAG_UHANDLER  2
+#define UNW_FLAG_CHAININFO 4
+
+#define UWOP_PUSH_NONVOL     0
+#define UWOP_ALLOC_LARGE     1
+#define UWOP_ALLOC_SMALL     2
+#define UWOP_SET_FPREG       3
+#define UWOP_SAVE_NONVOL     4
+#define UWOP_SAVE_NONVOL_FAR 5
+#define UWOP_EPILOG          6
+#define UWOP_SAVE_XMM128     8
+#define UWOP_SAVE_XMM128_FAR 9
+#define UWOP_PUSH_MACHFRAME  10
+
+typedef union _UNWIND_CODE {
+	struct {
+		BYTE CodeOffset;
+		BYTE UnwindOp : 4;
+		BYTE OpInfo : 4;
+	};
+	WORD FrameOffset;
+} UNWIND_CODE;
+
+typedef struct _UNWIND_INFO {
+	BYTE Version : 3;
+	BYTE Flags : 5;
+	BYTE SizeOfProlog;
+	BYTE CountOfCodes;
+	BYTE FrameRegister : 4;
+	BYTE FrameOffset : 4;
+	UNWIND_CODE UnwindCode[1];
+} UNWIND_INFO;
+
+typedef struct _KNONVOLATILE_CONTEXT_POINTERS {
+	M128A *Xmm[16];
+	ULONGLONG *Gpr[16];
+} KNONVOLATILE_CONTEXT_POINTERS;
+
+
+#define STATUS_LONGJUMP 0x80000026
+
 #else
 
 /* CONTEXT (i386): GetThreadContext/SetThreadContext's flags selecting which
@@ -597,6 +641,22 @@ typedef enum _EXCEPTION_DISPOSITION {
 typedef EXCEPTION_DISPOSITION (WINAPI *PEXCEPTION_ROUTINE)(
 	struct _EXCEPTION_RECORD *ExceptionRecord, void *EstablisherFrame,
 	struct _CONTEXT *ContextRecord, void *DispatcherContext);
+
+#if defined(__x86_64__)
+typedef struct _DISPATCHER_CONTEXT {
+	ULONGLONG ControlPc;
+	ULONGLONG ImageBase;
+	PRUNTIME_FUNCTION FunctionEntry;
+	ULONGLONG EstablisherFrame;
+	ULONGLONG TargetIp;
+	PCONTEXT ContextRecord;
+	PEXCEPTION_ROUTINE LanguageHandler;
+	PVOID HandlerData;
+	void *HistoryTable;
+	DWORD ScopeIndex;
+	DWORD Fill0;
+} DISPATCHER_CONTEXT;
+#endif
 
 /* The node type of the fs:[0] chain: every stack frame with a __try in it
  * pushes one of these (or, compiler-specific, something starting with

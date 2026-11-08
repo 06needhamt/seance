@@ -59,12 +59,12 @@ CRTFN(struct tm *) crt_localtime(const time_t *t) { return localtime(t); }
  * glibc's trailing fields.
  */
 static int tz_daylight, tz_dstbias;
-static long tz_timezone;
+static LONG tz_timezone;
 
 CRTFN(void) crt__tzset(void) { }
 CRTFN(int *) crt___p__daylight(void) { return &tz_daylight; }
 CRTFN(int *) crt___p__dstbias(void) { return &tz_dstbias; }
-CRTFN(long *) crt___p__timezone(void) { return &tz_timezone; }
+CRTFN(LONG *) crt___p__timezone(void) { return &tz_timezone; }
 
 CRTFN(struct tm *) crt_gmtime(const time_t *t)
 {
@@ -160,9 +160,14 @@ CRTFN(int) crt__write(int fd, const void *buf, unsigned count)
 	/* A DLL's stdout is our stderr (see crt_stdio.c). */
 	ssize_t n = write(fd == STDOUT_FILENO ? STDERR_FILENO : fd, buf, count); return n < 0 ? -1 : (int)n;
 }
-CRTFN(long) crt__lseek(int fd, long off, int origin)
+CRTFN(LONG) crt__lseek(int fd, LONG off, int origin)
 {
-	off_t n = lseek(fd, off, origin); return n < 0 ? -1 : (long)n;
+	off_t n = lseek(fd, off, origin);
+	if (n > INT32_MAX) {
+		errno = EINVAL;
+		return -1;
+	}
+	return n < 0 ? -1 : (LONG)n;
 }
 CRTFN(long long) crt__filelengthi64(int fd)
 {

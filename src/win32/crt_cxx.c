@@ -60,8 +60,7 @@
  */
 /*
  * The fs:[0] frames and i386 register conventions this implements don't
- * exist on x86-64, whose exceptions are table-based (docs/X64_PLAN.md,
- * phases 4 and 5).
+ * exist on x86-64, whose exceptions are table-based: crt_cxx_x64.c.
  */
 #if !defined(__x86_64__)
 
@@ -855,9 +854,9 @@ static void *cxx_new(size_t size)
 }
 
 CRTFN(void *) crt_operator_new(size_t size) { return cxx_new(size); }
-CRTFN(void) crt_operator_delete(void *p) { free(p); }
+CRTFN(void) crt_operator_delete(void *p) { win_free(p); }
 /* The sized forms (/Zc:sizedDealloc) ignore the size. */
-CRTFN(void) crt_operator_delete_sized(void *p, size_t size) { free(p); }
+CRTFN(void) crt_operator_delete_sized(void *p, size_t size) { win_free(p); }
 
 CRTFN(new_handler_fn) crt__set_new_handler(new_handler_fn f)
 {
@@ -886,147 +885,13 @@ int crt_malloc_retry(size_t size)
 
 static pthread_mutex_t name_lock = PTHREAD_MUTEX_INITIALIZER;
 
-struct out {
-	char buf[256];
-	size_t n;
-	int bad;
-};
-
-static void put(struct out *o, const char *s, size_t len)
-{
-	if (o->n + len >= sizeof(o->buf)) {
-		o->bad = 1;
-		return;
-	}
-	memcpy(o->buf + o->n, s, len);
-	o->n += len;
-	o->buf[o->n] = '\0';
-}
-
-static void puts_(struct out *o, const char *s)
-{
-	put(o, s, strlen(s));
-}
-
-/* A qualified name, "B@A@@" -> "A::B"; advances *p past it. */
-static void qualified(struct out *o, const char **p)
-{
-	const char *parts[8];
-	size_t lens[8];
-	int n = 0;
-
-	while (**p && **p != '@') {
-		const char *s = *p;
-		if (*s == '?' || (*s >= '0' && *s <= '9')) {
-			o->bad = 1;	/* templates, back references */
-			return;
-		}
-		while (**p && **p != '@')
-			(*p)++;
-		if (!**p || n == 8) {
-			o->bad = 1;
-			return;
-		}
-		parts[n] = s;
-		lens[n++] = (size_t)(*p - s);
-		(*p)++;
-	}
-	if (**p != '@' || !n) {
-		o->bad = 1;
-		return;
-	}
-	(*p)++;
-	for (int i = n - 1; i >= 0; i--) {
-		put(o, parts[i], lens[i]);
-		if (i)
-			puts_(o, "::");
-	}
-}
-
-/* A type in MSVC's mangling, the common forms; o->bad if not one. */
-static void type_name(struct out *o, const char **p)
-{
-	static const struct { char c; const char *name; } basic[] = {
-		{ 'C', "signed char" }, { 'D', "char" }, { 'E', "unsigned char" },
-		{ 'F', "short" }, { 'G', "unsigned short" }, { 'H', "int" },
-		{ 'I', "unsigned int" }, { 'J', "long" }, { 'K', "unsigned long" },
-		{ 'M', "float" }, { 'N', "double" }, { 'O', "long double" },
-		{ 'X', "void" },
-	};
-	static const struct { char c; const char *name; } ext[] = {
-		{ 'N', "bool" }, { 'J', "__int64" }, { 'K', "unsigned __int64" },
-		{ 'W', "wchar_t" },
-	};
-	char c = *(*p)++;
-
-	switch (c) {
-	case 'V': puts_(o, "class "); qualified(o, p); return;
-	case 'U': puts_(o, "struct "); qualified(o, p); return;
-	case 'T': puts_(o, "union "); qualified(o, p); return;
-	case 'W':
-		if (*(*p)++ != '4') {
-			o->bad = 1;
-			return;
-		}
-		puts_(o, "enum ");
-		qualified(o, p);
-		return;
-	case 'P':	/* pointer: A plain, B const, C volatile, D both */
-	case 'Q': {
-		char q = *(*p)++;
-		if (q < 'A' || q > 'D') {
-			o->bad = 1;
-			return;
-		}
-		type_name(o, p);
-		if (q == 'B' || q == 'D')
-			puts_(o, " const");
-		if (q == 'C' || q == 'D')
-			puts_(o, " volatile");
-		puts_(o, " *");
-		return;
-	}
-	case '_':
-		c = *(*p)++;
-		for (size_t i = 0; i < sizeof(ext) / sizeof(ext[0]); i++)
-			if (ext[i].c == c) {
-				puts_(o, ext[i].name);
-				return;
-			}
-		break;
-	default:
-		for (size_t i = 0; i < sizeof(basic) / sizeof(basic[0]); i++)
-			if (basic[i].c == c) {
-				puts_(o, basic[i].name);
-				return;
-			}
-	}
-	o->bad = 1;
-}
-
-/*
- * The undecorated name of a type descriptor's ".?AVfoo@@" (class foo) or
- * ".H" (int); unknown forms give the decorated name without its dot.
- */
-static char *undecorate(const char *mangled)
-{
-	struct out o = { .n = 0 };
-	const char *p = mangled;
-
-	if (*p == '.')
-		p++;
-	if (p[0] == '?' && p[1] == 'A')
-		p += 2;
-	type_name(&o, &p);
-	return strdup(o.bad || *p ? (mangled[0] == '.' ? mangled + 1 : mangled) :
-		      o.buf);
-}
+char *crt_undecorate_type(const char *mangled);
 
 static const char *ti_name(struct type_info *ti)
 {
 	pthread_mutex_lock(&name_lock);
 	if (!ti->name)
-		ti->name = undecorate(ti->mangled);
+		ti->name = crt_undecorate_type(ti->mangled);
 	pthread_mutex_unlock(&name_lock);
 	return ti->name;
 }
@@ -2021,57 +1886,4 @@ const struct builtin_export crt_cxx_exports[] = {
 };
 
 
-#else /* __x86_64__ */
-
-/*
- * Until the x64 C++ runtime (exceptions, RTTI, type_info, std::exception)
- * comes: operator new and delete under their x64 names, which code built
- * with any C++ compiler links, and _purecall.
- */
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
-
-#include "runtime/builtin.h"
-#include "runtime/crash.h"
-#include "win32/crt.h"
-#include "win32/internal.h"
-
-#define CRTFN(ret) static ret STUB_CDECL
-
-/* No _set_new_mode on x86-64 yet, so malloc never retries. */
-int crt_malloc_retry(size_t size)
-{
-	return 0;
-}
-
-CRTFN(void *) crt_operator_new(size_t size)
-{
-	/* Zeroed unless VFW_ZERO_MEMORY=0, as for the i386 one. */
-	return win_alloc(1, size ? size : 1);
-}
-
-CRTFN(void) crt_operator_delete(void *p) { free(p); }
-CRTFN(void) crt_operator_delete_sized(void *p, size_t size) { free(p); }
-
-CRTFN(void) crt__purecall(void)
-{
-	fprintf(stderr, "seance: a DLL called a pure virtual function\n");
-	fflush(stderr);
-	crash_exit(SIGABRT);
-}
-
-#define M(mangled, fn) { mangled, 0, (void *)fn }
-
-const struct builtin_export crt_cxx_exports[] = {
-	M("??2@YAPEAX_K@Z", crt_operator_new),
-	M("??_U@YAPEAX_K@Z", crt_operator_new),
-	M("??3@YAXPEAX@Z", crt_operator_delete),
-	M("??_V@YAXPEAX@Z", crt_operator_delete),
-	M("??3@YAXPEAX_K@Z", crt_operator_delete_sized),
-	M("??_V@YAXPEAX_K@Z", crt_operator_delete_sized),
-	M("_purecall", crt__purecall),
-	BUILTIN_END
-};
-
-#endif /* __x86_64__ */
+#endif /* !__x86_64__ */

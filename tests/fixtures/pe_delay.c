@@ -28,45 +28,73 @@ int delay_unbound(void)
 	return -1;
 }
 
+/*
+ * The tables' words: on x86-64 symbols lose their leading underscore, and
+ * the IAT, the name table and the module handle are 64-bit.
+ */
+#if defined(_WIN64)
+#define SYM(s) #s
+#define PTR ".quad"
+#define BY_ORDINAL_1 "0x8000000000000001"
+#define ALIGN ".balign 8\n"
+#else
+#define SYM(s) "_" #s
+#define PTR ".long"
+#define BY_ORDINAL_1 "0x80000001"
+#define ALIGN ".balign 4\n"
+#endif
+
 __asm__(
 	".data\n"
-	".balign 4\n"
-	".globl _delay_directory\n"
-	"_delay_directory:\n"
+	ALIGN
+	".globl " SYM(delay_directory) "\n"
+	SYM(delay_directory) ":\n"
 	/* pe_basic.dll */
 	"	.long 1\n"			/* Attributes: RVA-based */
 	"	.rva name_basic\n"
-	"	.rva _delay_hmod_basic\n"
-	"	.rva _delay_iat_basic\n"
+	"	.rva " SYM(delay_hmod_basic) "\n"
+	"	.rva " SYM(delay_iat_basic) "\n"
 	"	.rva int_basic\n"
 	"	.long 0, 0, 0\n"
 	/* zz_nosuch.dll */
 	"	.long 1\n"
 	"	.rva name_nosuch\n"
-	"	.rva _delay_hmod_nosuch\n"
-	"	.rva _delay_iat_nosuch\n"
+	"	.rva " SYM(delay_hmod_nosuch) "\n"
+	"	.rva " SYM(delay_iat_nosuch) "\n"
 	"	.rva int_nosuch\n"
 	"	.long 0, 0, 0\n"
 	/* the end */
 	"	.long 0, 0, 0, 0, 0, 0, 0, 0\n"
-	".globl _delay_hmod_basic\n"
-	"_delay_hmod_basic: .long 0\n"
-	".globl _delay_hmod_nosuch\n"
-	"_delay_hmod_nosuch: .long 0\n"
-	".globl _delay_iat_basic\n"
-	"_delay_iat_basic:\n"
-	"	.long _delay_unbound, _delay_unbound, _delay_unbound, 0\n"
-	".globl _delay_iat_nosuch\n"
-	"_delay_iat_nosuch:\n"
-	"	.long _delay_unbound, 0\n"
+	ALIGN
+	".globl " SYM(delay_hmod_basic) "\n"
+	SYM(delay_hmod_basic) ": " PTR " 0\n"
+	".globl " SYM(delay_hmod_nosuch) "\n"
+	SYM(delay_hmod_nosuch) ": " PTR " 0\n"
+	".globl " SYM(delay_iat_basic) "\n"
+	SYM(delay_iat_basic) ":\n"
+	"	" PTR " " SYM(delay_unbound) ", " SYM(delay_unbound) ", "
+		SYM(delay_unbound) ", 0\n"
+	".globl " SYM(delay_iat_nosuch) "\n"
+	SYM(delay_iat_nosuch) ":\n"
+	"	" PTR " " SYM(delay_unbound) ", 0\n"
+	/* The name table: RVAs of hint/name entries, in a pointer each. */
 	"int_basic:\n"
 	"	.rva hint_add\n"
-	"	.long 0x80000001\n"		/* basic_add, by ordinal */
-	"	.rva hint_gone\n"
+#if defined(_WIN64)
 	"	.long 0\n"
+#endif
+	"	" PTR " " BY_ORDINAL_1 "\n"	/* basic_add, by ordinal */
+	"	.rva hint_gone\n"
+#if defined(_WIN64)
+	"	.long 0\n"
+#endif
+	"	" PTR " 0\n"
 	"int_nosuch:\n"
 	"	.rva hint_nosuch\n"
+#if defined(_WIN64)
 	"	.long 0\n"
+#endif
+	"	" PTR " 0\n"
 	"hint_add: .short 0\n .asciz \"basic_add\"\n"
 	".balign 2\n"
 	"hint_gone: .short 0\n .asciz \"basic_gone\"\n"

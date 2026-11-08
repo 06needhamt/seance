@@ -78,6 +78,106 @@ static void test_bcrypt(void)
 	mod_free(m);
 }
 
+static void test_rpcrt4(void)
+{
+	struct module *m = mod_load("rpcrt4.dll", NULL);
+	CHECK(m != NULL);
+	if (!m)
+		return;
+	FN(m, LONG, UuidCreate, GUID *);
+	FN(m, LONG, UuidToStringA, const GUID *, BYTE **);
+	FN(m, LONG, UuidFromStringA, const BYTE *, GUID *);
+	FN(m, LONG, RpcStringFreeA, BYTE **);
+	FN(m, int, UuidCompare, const GUID *, const GUID *, LONG *);
+	FN(m, int, UuidIsNil, const GUID *, LONG *);
+
+	GUID a, b, c;
+	LONG st = -1;
+	BYTE *str = NULL;
+
+	CHECK_EQ(UuidCreate(&a), 0);
+	CHECK_EQ(UuidCreate(&b), 0);
+	CHECK(memcmp(&a, &b, sizeof(a)) != 0);
+	CHECK_EQ(a.Data3 >> 12, 4);			/* version 4 */
+	CHECK_EQ(a.Data4[0] >> 6, 2);			/* RFC 4122 variant */
+	CHECK_EQ(UuidIsNil(&a, &st), 0);
+	CHECK_EQ(st, 0);
+
+	CHECK_EQ(UuidToStringA(&a, &str), 0);
+	CHECK(str && strlen((char *)str) == 36);
+	CHECK_EQ(UuidFromStringA(str, &c), 0);
+	CHECK_EQ(UuidCompare(&a, &c, &st), 0);
+	CHECK_EQ(RpcStringFreeA(&str), 0);
+	CHECK(str == NULL);
+
+	static const BYTE fixed[] = "00112233-4455-6677-8899-AABBCCDDEEFF";
+	CHECK_EQ(UuidFromStringA(fixed, &c), 0);
+	CHECK_EQ(c.Data1, 0x00112233u);
+	CHECK_EQ(c.Data3, 0x6677);
+	CHECK_EQ(c.Data4[7], 0xff);
+	CHECK_EQ(UuidFromStringA((const BYTE *)"{00112233-4455-6677-8899-AABBCCDDEEFF}", &c), 1705);
+	CHECK_EQ(UuidFromStringA((const BYTE *)"nonsense", &c), 1705);
+	CHECK(UuidCompare(&c, &a, &st) != 0);
+	mod_free(m);
+}
+
+static void test_topology(void)
+{
+	struct module *m = mod_load("kernel32.dll", NULL);
+	CHECK(m != NULL);
+	if (!m)
+		return;
+	FN(m, BOOL, GetLogicalProcessorInformationEx, DWORD, void *, DWORD *);
+	FN(m, BOOL, GetLogicalProcessorInformation, void *, DWORD *);
+	FN(m, DWORD, GetActiveProcessorCount, WORD);
+
+	DWORD n = GetActiveProcessorCount(0), len = 0;
+	CHECK(n >= 1);
+	CHECK_EQ(GetActiveProcessorCount(1), 0);	/* there is one group */
+
+	/* Ask for the size, then the entries: each carries its own size. */
+	CHECK(!GetLogicalProcessorInformationEx(0xffff, NULL, &len));
+	CHECK(len > 0);
+	BYTE *buf = malloc(len);
+	CHECK(buf != NULL);
+	if (buf) {
+		DWORD got = len, cores = 0, numa = 0, l3 = 0, groups = 0, off = 0;
+
+		CHECK(GetLogicalProcessorInformationEx(0xffff, buf, &got));
+		CHECK_EQ(got, len);
+		while (off + 8 <= got) {
+			const DWORD *e = (const DWORD *)(buf + off);
+
+			CHECK(e[1] >= 8 && off + e[1] <= got);
+			if (e[0] == 0)
+				cores++;
+			else if (e[0] == 1)
+				numa++;
+			else if (e[0] == 4)
+				groups++;
+			else if (e[0] == 2 && buf[off + 8] == 3)
+				l3++;
+			off += e[1];
+		}
+		CHECK_EQ(off, got);
+		CHECK_EQ(cores, n);
+		CHECK_EQ(numa, 1);
+		CHECK_EQ(groups, 1);
+		CHECK_EQ(l3, 1);
+		free(buf);
+	}
+	/* Cores alone; a relationship that doesn't exist. */
+	len = 0;
+	CHECK(!GetLogicalProcessorInformationEx(0, NULL, &len));
+	CHECK(len >= n * 8);
+	CHECK(!GetLogicalProcessorInformationEx(77, NULL, &len));
+	/* The older form. */
+	len = 0;
+	CHECK(!GetLogicalProcessorInformation(NULL, &len));
+	CHECK(len > 0 && len % (sizeof(void *) == 8 ? 32 : 24) == 0);
+	mod_free(m);
+}
+
 static void test_crypt32(void)
 {
 	struct module *m = mod_load("crypt32.dll", NULL);
@@ -212,7 +312,7 @@ static void test_msvcrt(void)
 	/* Time: UTC, nine ints in MSVC's order. */
 	CFN(c, int *, gmtime, const time_t *);
 	CFN(c, int *, __p__daylight, void);
-	CFN(c, long *, __p__timezone, void);
+	CFN(c, LONG *, __p__timezone, void);
 	CFN(c, int *, __p__dstbias, void);
 	CFN(c, void, _tzset, void);
 	time_t when = 1700000000;	/* 2023-11-14 22:13:20 UTC, a Tuesday */
@@ -957,6 +1057,8 @@ int main(void)
 	CHECK_EQ(runtime_enter(), 0);
 
 	test_bcrypt();
+	test_rpcrt4();
+	test_topology();
 	test_crypt32();
 	test_d3d9();
 	test_msvcrt();

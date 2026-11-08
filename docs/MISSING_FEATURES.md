@@ -7,6 +7,100 @@ not a promise to support every component in a tested package: seance's
 DirectShow and DMO scope is transform decoders and encoders, of video and
 (since the DMO/audio plan) of audio.
 
+## LAVFilters 0.83 (64-bit)
+
+Tested on 2026-11-07 with the official `LAVFilters-0.83-x64.zip` release (the
+`.ax` filters are MSVC builds with a statically linked C++ runtime; the FFmpeg
+libraries are GCC builds), in `seance64` and through the hand-off from
+`seance`:
+
+```sh
+curl -L -o /tmp/lavfilters64.zip \
+  https://github.com/Nevcairiel/LAVFilters/releases/download/0.83/LAVFilters-0.83-x64.zip
+unzip /tmp/lavfilters64.zip -d /tmp/lavfilters64
+sh tests/samples.sh build/seance64 /tmp/lavfilters64 60
+```
+
+All 11 DLLs load with no unimplemented imports; `LAVVideo.ax` and
+`LAVAudio.ax` are found as a video and an audio decoder. Decoding 2-second
+clips made with ffmpeg (160x120 at 10 fps, and 44.1/48 kHz mono):
+
+| Stream | Through | Compared with ffmpeg's decode |
+|---|---|---|
+| H.264 (`H264`) | `LAVVideo.ax` | pixel-identical (PSNR inf on all 20 frames) |
+| MPEG-4 part 2 (`FMP4`) | `LAVVideo.ax` | pixel-identical |
+| AC-3 | `LAVAudio.ax` | sample-identical |
+| MPEG audio layer 2 | `LAVAudio.ax` | within rounding (mean difference 0.24 at a peak of about 4100) |
+| H.265 / HEVC (`HEVC`, Annex B, 160x120, 20 frames) | `LAVVideo.ax` | pixel-identical (all 20 frames byte-equal) |
+| AAC-LC (tag `0x00ff`, stereo 48 kHz, 128 kb/s) | `LAVAudio.ax` | sample-identical (97280 samples per channel) |
+| VP9 (`VP90`, 160x120, 20 frames) | `LAVVideo.ax` | pixel-identical (all 20 frames byte-equal) |
+| Opus (tag `0x704f`, `OpusHead` as extradata, stereo 48 kHz, 96 kb/s) | `LAVAudio.ax` | sample-identical over the 96000 frames ffmpeg gives; LAV also outputs the encoder's 648 frames of end padding, which ffmpeg trims from the Ogg end position (an AVI has none) |
+
+`seance decode LAVVideo.ax clip.avi` from the i386 binary hands off and gives
+the same bytes. Getting here needed msvcrt additions
+(`_time64`, `_stat64`, `_aligned_malloc`, ...) and the processor topology
+(`GetLogicalProcessorInformationEx`, which MSVC's Concurrency Runtime needs
+to start its scheduler), with the unwinder fixes found on the way. Not tried: `LAVSplitter.ax` (a source filter), hardware
+decoding, and anything but these eight codecs. (ffmpeg's AVI muxer won't take Opus, so
+the Opus AVI was written by hand from the Ogg packets.)
+
+A test clip whose AVI header disagrees with its frame times (say, 20 fps in
+the header for frames 0.1 s apart, as `ffmpeg -c copy` from an MP4 can leave
+it) comes out with repeated frames: the output writer places frames by
+timestamp. Make the clip with a consistent rate (`-framerate`/`-r`).
+
+## LAVFilters 0.83 (64-bit): every format
+
+Tested on 2026-11-07 with `tests/lav_matrix/run_video.py` and `run_audio.py`
+(the 0.83 x64 release in `seance64`; ffmpeg 6 makes the clips and gives the
+reference decodes). Each case is a short clip (10 frames of `testsrc2`, 176x144
+unless a codec needs another size; 1.5 s of stereo tones and noise) in an AVI.
+Video is compared by PSNR after both sides are converted to 8-bit 4:2:0, and
+RGB codecs also as BGR24 bytes; audio by its 16-bit samples. To repeat it:
+
+```sh
+SEANCE=build/seance64 LAV_DIR=/tmp/lavfilters64 WORK=/tmp/lav_matrix \
+  python3 tests/lav_matrix/run_video.py    # or run_audio.py, or a label name
+```
+
+The filters are MSVC builds whose exception handling is `__CxxFrameHandler3`
+tables in a statically linked handler (FuncInfo magic `0x19930522`), so they
+exercise the SEH core and not msvcrt's C++ runtime.
+
+**Video: 174 clips (covering 152 of the 262 FOURCCs LAV declares; the rest are formats
+ffmpeg can't encode).** Results where the decoder runs:
+
+| Result | Formats |
+|---|---|
+| Bit-identical to ffmpeg | H.264 (also with B-frames; `H264 h264 X264 x264 avc1 AVC1 CCV1`), HEVC (`HEVC HVC1 HM10 H265`), MPEG-1, MPEG-2 (`MPG2 mpg2 MP2V`), MPEG-4 ASP (24 FOURCCs: `FMP4 XVID DIVX DX50 MP4V M4S2 3IVX BLZ0 SEDG ...`), MS MPEG-4 v2 and v3 (19 FOURCCs, `DIV2`..`DIV6`, `MPG3`, `DVX3`), WMV1, WMV2, FLV1, H.263 and H.263+, H.261, JPEG 2000 (5 FOURCCs), DV PAL (12 FOURCCs), Theora, VP8, VP9, AV1 (libaom and SVT), FFVHuff, FFV1, Snow, Ut Video 4:2:0, ASV1, ASV2, WebP (as YV12), MJPEG (raw YUV planes) |
+| Bit-identical as BGR24 | PNG, TIFF, Targa, BMP, GIF, zlib, ZMBV, QuickTime RLE, Cinepak, MS Video 1 (`CRAM MSVC WHAM`), Apple RPZA, FFV1 RGB, Ut Video RGB and RGBA, Hap1, Hap5, HapY, lossless JPEG (`LJPG`) |
+| 42 to 62 dB (10-bit, 4:2:2 or 4:4:4 sources compared after conversion to 8-bit 4:2:0) | H.264, HEVC and VP9 at 10 bits, ProRes (all five profiles, `apch apcn apcs apco ap4h ap4x`), DNxHD at 1080p, CineForm (`CFHD`), MagicYUV, HuffYUV, Ut Video 4:2:2 and 4:4:4, JPEG-LS, DV 4:1:1 and DVCPRO50, SVQ1 |
+| Decodes; differs from ffmpeg | `smc` (Apple Graphics): the palette is in the container and the output isn't the picture. The 32-bit LAV on the i386 `seance` gives the same bytes. VC-2 (`drac`/`vcrd`): 30 dB from ffmpeg's decode, identical on the 32-bit LAV. `GEOV`: GeoVision's MPEG-4 variant, not the bitstream made |
+| Refused by LAV's input pin (on the 32-bit LAV too) | `v210`, uncompressed YUY2, UYVY, YV12, NV12, BGR24, `CLJR` |
+| Not testable | RealVideo 1.0 and 2.0 (`RV10`, `RV20`): ffmpeg can't decode the AVI it writes, and LAV rejects it. MS MPEG-4 v1 (`MPG4 MP41 DIV1`): ffmpeg has no encoder. `MJPB`, `VP70`, `VP8X`: these FOURCCs name other codecs, and the clips are not their bitstreams |
+
+Not generated (no ffmpeg encoder): VC-1 and WMV3 (`WVC1 WMV3 WMVA WVP2 WMVP`),
+VP6 and FLV4, RealVideo 3/4, SVQ3, Indeo, TechSmith screen codecs, Lagarith,
+Bink, Smacker, MVC and VVC, Ut Video and MagicYUV variants beyond those above,
+DVCPRO HD, and the rest of the long tail of game and screen codecs LAV
+declares (`8BPS LOCO VCR1 AASC VMnc G2M4 DUCK TM20 ...`).
+
+**Audio: 28 clips.**
+
+| Result | Formats |
+|---|---|
+| Sample-identical | AC-3 (stereo and 5.1), E-AC-3, MP3 (stereo; mono at 22 kHz), AAC-LC (stereo and 5.1), DTS, FLAC (16 and 24 bit), Vorbis, Opus, MS ADPCM, A-law, mu-law |
+| Within one LSB | MP2, Speex |
+| Decodes; differs from ffmpeg | IMA ADPCM (`0x0011`): max difference 42, mean 8 at a peak of 3000; identical on the 32-bit LAV |
+| Refused by LAV (32-bit too) | WMA 1 and 2 (`VFW_E_UNSUPPORTED_AUDIO`), G.726, G.722, Yamaha ADPCM (none is in its input list) |
+| Not run | PCM (`seance decode` won't take PCM), and formats ffmpeg can't put in an AVI or encode: ALAC, TrueHD, MLP, Nellymoser, WavPack, TTA, Real audio, AMR, ... |
+
+Two things this turned up besides the table: `GetLogicalProcessorInformationEx`
+was a stub (MSVC's Concurrency Runtime, behind `parallel_for`, threw
+`scheduler_resource_allocation_error` as soon as a filter converted colours
+in parallel), and every `--output-format` request for RGB from a YUV decoder
+crashed on it. Both fixed.
+
 ## LAVFilters 0.83 (32-bit)
 
 Tested on 2026-10-04 with the official `LAVFilters-0.83-x86.zip` release:
@@ -326,9 +420,24 @@ what keeps the others from working.
   `MVICOD16.DLL`, through `ThunkConnect32`. Such DLLs are now refused, with
   that reason, before their `DllMain` runs.
 - **16-bit DLLs:** 16-bit NE DLLs (`vp5r*`, `ativcr1`, `mvicod16`, ...).
-- **64-bit DLLs in the i386 `seance`:** `cinevf2w.dll` and the like run
-  in `seance64` (`VFW_ARCH=x86_64`), which doesn't yet dispatch SEH or
-  C++ exceptions; see [X64_PLAN.md](X64_PLAN.md).
+- **64-bit DLLs in the i386 `seance`:** they are handed to `seance64`
+  (`VFW_ARCH=x86_64`), which dispatches `__try` SEH and C++ exceptions of
+  `__CxxFrameHandler3` and `__CxxFrameHandler4` (VS 2019 and later; only
+  tested with hand-encoded tables) code; g++'s exceptions work; see [X64_PLAN.md](X64_PLAN.md). The one
+  64-bit codec tried so far, CineForm's `cinevf2w.dll` (v5.8.1, 2009),
+  needed `rpcrt4.dll` (`UuidCreate`) and heap addresses below 4 GB (its
+  `DriverProc` keeps the instance it returns from `DRV_OPEN` in 32 bits,
+  as Win64 heaps of that time allowed): both are now provided, and it
+  probes fully from either binary. Its encoder is licence-locked ("This
+  installation is not licensed for 64-bit CineForm HD encoding"; not worked
+  around), so the only CFHD clips to hand came from FFmpeg's `cfhd` encoder.
+  The decoder handles those at 320x240 and 640x360 (YUY2 output; PSNR
+  against FFmpeg's own decode ~35 dB for yuv422p10, ~25 dB for gbrp12 since
+  that is RGB-to-YUV). At 176x144 it overruns a heap buffer in its own
+  wavelet decode loop (a write past the output buffer lands in a neighbouring
+  object, and the failure then surfaces in its cleanup `free`); whether
+  that is FFmpeg's stream or an emulation gap isn't known, as there is no
+  genuine CineForm stream of that size to compare.
 - **RealPlayer codecs:** `*3260.dll`.
 - **Locked, or needs setup:**
   - `wmvdmoe2.dll` is a keyed DMO and needs an unlock key.

@@ -234,7 +234,7 @@ void *heap_alloc(HANDLE handle, DWORD flags, SIZE_T size)
 	b->size = size;
 	b->prev = NULL;
 	if (live_insert(b)) {
-		free(b);
+		win_free(b);
 		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
 		return NULL;
 	}
@@ -245,22 +245,6 @@ void *heap_alloc(HANDLE handle, DWORD flags, SIZE_T size)
 	h->blocks = b;
 	pthread_mutex_unlock(&h->lock);
 	return b + 1;
-}
-
-int win_zero_memory(void)
-{
-	static int zero = -1;
-
-	if (zero < 0) {
-		const char *env = getenv("VFW_ZERO_MEMORY");
-		zero = !(env && !strcmp(env, "0"));
-	}
-	return zero;
-}
-
-void *win_alloc(size_t n, size_t size)
-{
-	return win_zero_memory() ? calloc(n, size) : malloc(n * size);
 }
 
 static void unlink_block(struct heap *h, struct block *b)
@@ -294,7 +278,7 @@ BOOL heap_free(HANDLE handle, DWORD flags, void *p)
 		win_set_error(ERROR_INVALID_PARAMETER);
 		return FALSE;
 	}
-	free(b);
+	win_free(b);
 	return TRUE;
 }
 
@@ -347,7 +331,7 @@ void *heap_realloc(HANDLE handle, DWORD flags, void *p, SIZE_T size)
 
 	unlink_block(h, b);
 	live_find(p, 1);
-	struct block *nb = realloc(b, sizeof(*b) + size);
+	struct block *nb = win_realloc(b, sizeof(*b) + size);
 	struct block *keep = nb ? nb : b;	/* on failure b is untouched */
 	if (nb)
 		nb->size = size;
@@ -416,7 +400,7 @@ WINFN(BOOL) k32_HeapDestroy(HANDLE handle)
 	for (struct block *b = h->blocks, *next; b; b = next) {
 		next = b->next;
 		live_find(b + 1, 1);
-		free(b);
+		win_free(b);
 	}
 	h->blocks = NULL;
 	pthread_mutex_unlock(&h->lock);
@@ -735,8 +719,17 @@ static struct region *region_at(const void *addr)
 static void *reserve_anywhere(SIZE_T len, int prot)
 {
 	SIZE_T total = len + GRANULE;
-	BYTE *p = mmap(NULL, total, prot, MAP_PRIVATE | MAP_ANONYMOUS |
-		       MAP_NORESERVE, -1, 0);
+	BYTE *p = MAP_FAILED;
+
+#if defined(__x86_64__)
+	/* Below 4 GB if it fits there: see winheap.c. */
+	if (total <= ((SIZE_T)256 << 20))
+		p = mmap(NULL, total, prot, MAP_PRIVATE | MAP_ANONYMOUS |
+			 MAP_NORESERVE | MAP_32BIT, -1, 0);
+#endif
+	if (p == MAP_FAILED)
+		p = mmap(NULL, total, prot, MAP_PRIVATE | MAP_ANONYMOUS |
+			 MAP_NORESERVE, -1, 0);
 	if (p == MAP_FAILED)
 		return NULL;
 	uintptr_t start = ((uintptr_t)p + GRANULE - 1) & ~(uintptr_t)(GRANULE - 1);

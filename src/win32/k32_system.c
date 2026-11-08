@@ -239,12 +239,296 @@ WINFN(BOOL) k32_GetNumaHighestNodeNumber(ULONG *node)
 	return TRUE;
 }
 
+/*
+ * The processor topology: one group and one NUMA node, with every logical
+ * processor its own core (no SMT) in one package, a data, an instruction
+ * and a unified level 2 cache each, and a level 3 cache they share. What
+ * the Concurrency Runtime (MSVC's parallel_for and tasks) needs to start
+ * its scheduler, among others; the figures for the caches are typical, not
+ * read from the host.
+ */
+
+#define LPI_CORE    0
+#define LPI_NUMA    1
+#define LPI_CACHE   2
+#define LPI_PACKAGE 3
+#define LPI_GROUP   4
+#define LPI_ALL     0xffff
+
+#define CACHE_UNIFIED 0
+#define CACHE_INSTR   1
+#define CACHE_DATA    2
+
+struct lpi_affinity {
+	ULONG_PTR mask;
+	WORD group;
+	WORD reserved[3];
+};
+
+struct lpi_processor {			/* PROCESSOR_RELATIONSHIP */
+	BYTE flags, efficiency, reserved[20];
+	WORD group_count;
+	struct lpi_affinity mask;
+};
+
+struct lpi_numa {			/* NUMA_NODE_RELATIONSHIP */
+	DWORD node;
+	BYTE reserved[18];
+	WORD group_count;
+	struct lpi_affinity mask;
+};
+
+struct lpi_cache {			/* CACHE_RELATIONSHIP */
+	BYTE level, associativity;
+	WORD line_size;
+	DWORD size;
+	DWORD type;
+	BYTE reserved[18];
+	WORD group_count;
+	struct lpi_affinity mask;
+};
+
+struct lpi_group {			/* GROUP_RELATIONSHIP */
+	WORD maximum, active;
+	BYTE reserved[20];
+	struct {
+		BYTE maximum, active, reserved[38];
+		ULONG_PTR mask;
+	} info;
+};
+
+struct lpi_entry {			/* SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX */
+	DWORD relationship;
+	DWORD size;
+	union {
+		struct lpi_processor processor;
+		struct lpi_numa numa;
+		struct lpi_cache cache;
+		struct lpi_group group;
+	};
+};
+
+struct lpi_old {			/* SYSTEM_LOGICAL_PROCESSOR_INFORMATION */
+	ULONG_PTR mask;
+	DWORD relationship;
+	union {
+		BYTE flags;
+		DWORD node;
+		struct {
+			BYTE level, associativity;
+			WORD line_size;
+			DWORD size;
+			DWORD type;
+		} cache;
+		ULONGLONG reserved[2];
+	};
+};
+
+#if defined(__x86_64__)
+_Static_assert(sizeof(struct lpi_processor) == 40, "PROCESSOR_RELATIONSHIP");
+_Static_assert(sizeof(struct lpi_numa) == 40, "NUMA_NODE_RELATIONSHIP");
+_Static_assert(sizeof(struct lpi_cache) == 48, "CACHE_RELATIONSHIP");
+_Static_assert(sizeof(struct lpi_group) == 72, "GROUP_RELATIONSHIP");
+_Static_assert(sizeof(struct lpi_old) == 32, "SYSTEM_LOGICAL_PROCESSOR_INFORMATION");
+#else
+_Static_assert(sizeof(struct lpi_processor) == 36, "PROCESSOR_RELATIONSHIP");
+_Static_assert(sizeof(struct lpi_numa) == 36, "NUMA_NODE_RELATIONSHIP");
+_Static_assert(sizeof(struct lpi_cache) == 44, "CACHE_RELATIONSHIP");
+_Static_assert(sizeof(struct lpi_group) == 68, "GROUP_RELATIONSHIP");
+_Static_assert(sizeof(struct lpi_old) == 24, "SYSTEM_LOGICAL_PROCESSOR_INFORMATION");
+#endif
+
+static unsigned cpu_count(void)
+{
+	unsigned n = peb_get()->NumberOfProcessors;
+	unsigned max = 8 * sizeof(ULONG_PTR);
+
+	return n < 1 ? 1 : n > max ? max : n;
+}
+
+static ULONG_PTR cpu_mask(unsigned n)
+{
+	return n >= 8 * sizeof(ULONG_PTR) ? ~(ULONG_PTR)0 :
+	       ((ULONG_PTR)1 << n) - 1;
+}
+
+static const struct { BYTE level; DWORD size; DWORD type; BYTE assoc; } core_caches[] = {
+	{ 1, 32 * 1024, CACHE_DATA, 8 },
+	{ 1, 32 * 1024, CACHE_INSTR, 8 },
+	{ 2, 256 * 1024, CACHE_UNIFIED, 8 },
+};
+
+/* The entries wanted for relationship, in a malloc()ed buffer; NULL if it
+ * is unknown. */
+static struct lpi_entry *lpi_build(DWORD relationship, DWORD *total)
+{
+	unsigned n = cpu_count();
+	ULONG_PTR all = cpu_mask(n);
+	size_t cap = (size_t)(n * 5 + 8) * sizeof(struct lpi_entry);
+	BYTE *buf = calloc(1, cap), *at = buf;
+	int want_all = relationship == LPI_ALL;
+
+	if (!buf)
+		return NULL;
+	if (!want_all && relationship > LPI_GROUP) {
+		free(buf);
+		return NULL;
+	}
+#define NEXT(rel, field) \
+	({ struct lpi_entry *e = (struct lpi_entry *)at; \
+	   e->relationship = (rel); \
+	   e->size = (DWORD)(__builtin_offsetof(struct lpi_entry, field) + \
+			     sizeof(e->field)); \
+	   at += e->size; e; })
+	if (want_all || relationship == LPI_CORE)
+		for (unsigned i = 0; i < n; i++) {
+			struct lpi_entry *e = NEXT(LPI_CORE, processor);
+
+			e->processor.group_count = 1;
+			e->processor.mask.mask = (ULONG_PTR)1 << i;
+		}
+	if (want_all || relationship == LPI_NUMA) {
+		struct lpi_entry *e = NEXT(LPI_NUMA, numa);
+
+		e->numa.group_count = 1;
+		e->numa.mask.mask = all;
+	}
+	if (want_all || relationship == LPI_CACHE) {
+		for (unsigned i = 0; i < n; i++)
+			for (unsigned c = 0; c < 3; c++) {
+				struct lpi_entry *e = NEXT(LPI_CACHE, cache);
+
+				e->cache.level = core_caches[c].level;
+				e->cache.associativity = core_caches[c].assoc;
+				e->cache.line_size = 64;
+				e->cache.size = core_caches[c].size;
+				e->cache.type = core_caches[c].type;
+				e->cache.group_count = 1;
+				e->cache.mask.mask = (ULONG_PTR)1 << i;
+			}
+		struct lpi_entry *e = NEXT(LPI_CACHE, cache);
+
+		e->cache.level = 3;
+		e->cache.associativity = 16;
+		e->cache.line_size = 64;
+		e->cache.size = 8 * 1024 * 1024;
+		e->cache.type = CACHE_UNIFIED;
+		e->cache.group_count = 1;
+		e->cache.mask.mask = all;
+	}
+	if (want_all || relationship == LPI_PACKAGE) {
+		struct lpi_entry *e = NEXT(LPI_PACKAGE, processor);
+
+		e->processor.group_count = 1;
+		e->processor.mask.mask = all;
+	}
+	if (want_all || relationship == LPI_GROUP) {
+		struct lpi_entry *e = NEXT(LPI_GROUP, group);
+
+		e->group.maximum = 1;
+		e->group.active = 1;
+		e->group.info.maximum = (BYTE)n;
+		e->group.info.active = (BYTE)n;
+		e->group.info.mask = all;
+	}
+#undef NEXT
+	*total = (DWORD)(at - buf);
+	return (struct lpi_entry *)buf;
+}
+
 WINFN(BOOL) k32_GetLogicalProcessorInformationEx(DWORD relationship,
 						 PVOID buffer, PDWORD length)
 {
-	/* Callers that want the topology fall back to GetSystemInfo. */
-	win_set_error(ERROR_NOT_SUPPORTED);
-	return FALSE;
+	DWORD total = 0;
+	struct lpi_entry *e;
+
+	if (!length) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	e = lpi_build(relationship, &total);
+	if (!e) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	if (!buffer || *length < total) {
+		*length = total;
+		free(e);
+		win_set_error(ERROR_INSUFFICIENT_BUFFER);
+		return FALSE;
+	}
+	memcpy(buffer, e, total);
+	*length = total;
+	free(e);
+	return TRUE;
+}
+
+/* The same in the older, fixed-size form. */
+WINFN(BOOL) k32_GetLogicalProcessorInformation(PVOID buffer, PDWORD length)
+{
+	unsigned n = cpu_count();
+	ULONG_PTR all = cpu_mask(n);
+	DWORD count = n * 4 + 3;	/* cores, three caches each, L3, node, package */
+	struct lpi_old *o = buffer;
+	DWORD k = 0;
+
+	if (!length) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	if (!buffer || *length < count * sizeof(*o)) {
+		*length = count * sizeof(*o);
+		win_set_error(ERROR_INSUFFICIENT_BUFFER);
+		return FALSE;
+	}
+	memset(o, 0, count * sizeof(*o));
+	for (unsigned i = 0; i < n; i++) {
+		o[k].mask = (ULONG_PTR)1 << i;
+		o[k++].relationship = LPI_CORE;
+	}
+	for (unsigned i = 0; i < n; i++)
+		for (unsigned c = 0; c < 3; c++) {
+			o[k].mask = (ULONG_PTR)1 << i;
+			o[k].relationship = LPI_CACHE;
+			o[k].cache.level = core_caches[c].level;
+			o[k].cache.associativity = core_caches[c].assoc;
+			o[k].cache.line_size = 64;
+			o[k].cache.size = core_caches[c].size;
+			o[k++].cache.type = core_caches[c].type;
+		}
+	o[k].mask = all;
+	o[k].relationship = LPI_CACHE;
+	o[k].cache.level = 3;
+	o[k].cache.associativity = 16;
+	o[k].cache.line_size = 64;
+	o[k].cache.size = 8 * 1024 * 1024;
+	o[k++].cache.type = CACHE_UNIFIED;
+	o[k].mask = all;
+	o[k++].relationship = LPI_NUMA;
+	o[k].mask = all;
+	o[k++].relationship = LPI_PACKAGE;
+	*length = k * sizeof(*o);
+	return TRUE;
+}
+
+WINFN(DWORD) k32_GetActiveProcessorCount(WORD group)
+{
+	return group == 0 || group == 0xffff ? cpu_count() : 0;
+}
+
+WINFN(DWORD) k32_GetMaximumProcessorCount(WORD group)
+{
+	return k32_GetActiveProcessorCount(group);
+}
+
+WINFN(WORD) k32_GetActiveProcessorGroupCount(void) { return 1; }
+WINFN(WORD) k32_GetMaximumProcessorGroupCount(void) { return 1; }
+
+WINFN(DWORD) k32_GetCurrentProcessorNumber(void)
+{
+	int cpu = sched_getcpu();
+
+	return cpu < 0 ? 0 : (DWORD)cpu % cpu_count();
 }
 
 WINFN(void) k32_GetCurrentProcessorNumberEx(PPROCESSOR_NUMBER n)
@@ -252,7 +536,7 @@ WINFN(void) k32_GetCurrentProcessorNumberEx(PPROCESSOR_NUMBER n)
 	int cpu = sched_getcpu();
 
 	n->Group = 0;
-	n->Number = cpu < 0 ? 0 : cpu & 0x3f;
+	n->Number = cpu < 0 ? 0 : (DWORD)cpu % cpu_count();
 	n->Reserved = 0;
 }
 
@@ -266,8 +550,11 @@ WINFN(void) k32_GetSystemInfo(LPSYSTEM_INFO si)
 	si->lpMinimumApplicationAddress = (LPVOID)0x10000;
 	si->lpMaximumApplicationAddress = (LPVOID)0x7ffeffff;
 	si->dwNumberOfProcessors = peb_get()->NumberOfProcessors;
-	si->dwActiveProcessorMask = si->dwNumberOfProcessors >= 32 ? 0xffffffff :
-				    (1u << si->dwNumberOfProcessors) - 1;
+	{
+		DWORD n = si->dwNumberOfProcessors;
+
+		si->dwActiveProcessorMask = (n >= 8 * sizeof(DWORD_PTR) ? ~(DWORD_PTR)0 : (((DWORD_PTR)1 << n) - 1));
+	}
 	si->dwProcessorType = PROCESSOR_INTEL_PENTIUM;
 	si->dwAllocationGranularity = 0x10000;
 	si->wProcessorLevel = 6;
@@ -970,7 +1257,13 @@ const struct builtin_export k32_system_exports[] = {
 	E(GetEnvironmentVariableA),
 	E(GetEnvironmentVariableW),
 	E(GetErrorMode),
+	E(GetLogicalProcessorInformation),
 	E(GetLogicalProcessorInformationEx),
+	E(GetActiveProcessorCount),
+	E(GetMaximumProcessorCount),
+	E(GetActiveProcessorGroupCount),
+	E(GetMaximumProcessorGroupCount),
+	E(GetCurrentProcessorNumber),
 	E(GetNativeSystemInfo),
 	E(GetNumaHighestNodeNumber),
 	E(GetStartupInfoA),

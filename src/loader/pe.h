@@ -130,6 +130,14 @@ const IMAGE_DATA_DIRECTORY *pe_dir(const struct pe_image *img, int index);
 int pe_map(struct pe_image *img, unsigned flags);
 
 /*
+ * Called by pe_map() for an image of the other architecture, before it
+ * fails, if no image has been mapped yet: the first image mapped is the
+ * codec a command named, so seance can run its sibling build instead.
+ * The hook may not return (it execs); if it does, pe_map() fails.
+ */
+void pe_set_foreign_hook(void (*hook)(WORD machine));
+
+/*
  * Applies base relocations to an in-memory image of image_len bytes, given
  * the .reloc data. delta is the new base less the preferred one, modulo
  * 2^64; HIGHLOW and the 16-bit types use its low 32 bits, DIR64 all of it.

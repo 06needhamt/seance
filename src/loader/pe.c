@@ -483,6 +483,13 @@ static void *map_anywhere(size_t len)
 	return (void *)start;
 }
 
+static void (*foreign_hook)(WORD machine);
+
+void pe_set_foreign_hook(void (*hook)(WORD machine))
+{
+	foreign_hook = hook;
+}
+
 int pe_map(struct pe_image *img, unsigned flags)
 {
 	const struct pe_optional *o = opt(img);
@@ -493,14 +500,25 @@ int pe_map(struct pe_image *img, unsigned flags)
 
 	if (img->base)
 		FAIL("image is already mapped");
+	if (img->nt.FileHeader.Machine != PE_HOST_MACHINE && foreign_hook) {
+		void (*hook)(WORD) = foreign_hook;
+		foreign_hook = NULL;
+		hook(img->nt.FileHeader.Machine);
+	}
 	if (img->nt.FileHeader.Machine != PE_HOST_MACHINE)
 		FAIL("an %s DLL, which this %s build of seance cannot run%s",
 		     pe_machine_name(img->nt.FileHeader.Machine),
 		     pe_machine_name(PE_HOST_MACHINE),
 		     img->pe64 ? " (seance64 runs it)" :
 				 " (the i386 seance runs it)");
-	/* A preferred base the address space can't hold: relocate. */
-	if ((uint64_t)(uintptr_t)want != o->ImageBase)
+	foreign_hook = NULL;	/* a codec of ours: its imports stay here */
+	/*
+	 * A preferred base the address space can't hold: relocate. So is one
+	 * past the 47 bits Windows gives a program (a host with 5-level
+	 * paging would map it, but no 64-bit Windows code expects that).
+	 */
+	if ((uint64_t)(uintptr_t)want != o->ImageBase ||
+	    o->ImageBase + len > 0x800000000000ull)
 		flags |= PE_MAP_FORCE_RELOC;
 
 	if (!(flags & PE_MAP_FORCE_RELOC))

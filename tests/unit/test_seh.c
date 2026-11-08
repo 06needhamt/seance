@@ -14,13 +14,130 @@
  * RaiseException path, which never touches a signal, still applies there.
  */
 #if defined(__x86_64__)
-/* x86-64 has no counterpart of the fs:[0] chain (docs/X64_PLAN.md, phases 4-5). */
-#include <stdio.h>
+/*
+ * x86-64 has no fs:[0] chain: pe_seh64.dll has functions with .pdata/.xdata
+ * unwind tables and __C_specific_handler scope tables, as cl compiles
+ * __try. Faults and RaiseException are searched for a handler by unwinding
+ * the stack, then unwound to the __except that took them (running the
+ * __finally blocks between); a longjmp with a frame unwinds as well.
+ */
+#include <signal.h>
+#include <sys/wait.h>
+
+#include "common/sanitizer.h"
+#include "loader/modules.h"
+#include "runtime/crash.h"
+#include "runtime/runtime.h"
+#include "test.h"
+
+typedef int (WINAPI *int_fn)(void);
+typedef LONG (WINAPI *counter_fn)(int which, int clear);
+
+static void *get(struct module *m, const char *name)
+{
+	void *p = mod_get_proc(m, name);
+	if (!p) {
+		fprintf(stderr, "pe_seh64.dll has no %s\n", name);
+		exit(1);
+	}
+	return p;
+}
+
+/* Runs seh_unhandled_crash in a child; returns the wait status and stderr. */
+static int run_unhandled(const char *dll, char *err, size_t size)
+{
+	int fds[2];
+	if (pipe(fds))
+		return -1;
+	pid_t pid = fork();
+	if (pid < 0)
+		return -1;
+	if (!pid) {
+		dup2(fds[1], STDERR_FILENO);
+		close(fds[0]);
+		close(fds[1]);
+		if (crash_install() || runtime_enter())
+			_exit(90);
+		struct module *m = mod_load(dll, NULL);
+		if (!m)
+			_exit(91);
+		((int_fn)get(m, "seh_unhandled_crash"))();
+		_exit(92);	/* it should not come back */
+	}
+	close(fds[1]);
+	size_t n = 0;
+	ssize_t r;
+	while (n + 1 < size && (r = read(fds[0], err + n, size - 1 - n)) > 0)
+		n += (size_t)r;
+	err[n] = 0;
+	close(fds[0]);
+	int status = 0;
+	waitpid(pid, &status, 0);
+	return status;
+}
 
 int main(void)
 {
-	printf("i386 only\n");
-	return 77;
+	unsetenv("VFW_CORE");
+	const char *dll = fixture("pe_seh64.dll");
+
+	CHECK_EQ(runtime_enter(), 0);
+	CHECK_EQ(crash_install(), 0);
+
+	struct module *m = mod_load(dll, NULL);
+	CHECK(m != NULL);
+	if (m) {
+		counter_fn counter = get(m, "seh64_counter");
+
+		/* RaiseException, which never touches a signal. */
+		counter(2, 1);
+		CHECK_EQ(((int_fn)get(m, "seh64_continue"))(), 0);
+		CHECK_EQ(counter(2, 1), 1);	/* the filter ran, and resumed */
+		/* Refused by the inner filter, caught by the outer __except. */
+		CHECK_EQ(((int_fn)get(m, "seh64_nested"))(), 1);
+
+		/* A longjmp out of a __finally scope: that runs. */
+		counter(0, 1);
+		CHECK_EQ(((int_fn)get(m, "seh64_longjmp"))(), 7);
+		CHECK_EQ(counter(0, 1), 1);
+		CHECK_EQ(counter(1, 1), 1);
+
+		if (!VFW_SANITIZER_BUILD) {
+			/* Faults in a callee, caught after unwinding it:
+			 * rbx, r12 and xmm6 come back. */
+			CHECK_EQ(((int_fn)get(m, "seh64_except"))(), 1);
+			CHECK_EQ(((int_fn)get(m, "seh64_filter"))(), 1);
+			CHECK_EQ(((int_fn)get(m, "seh64_fpreg"))(), 1);
+
+			counter(0, 1);
+			CHECK_EQ(((int_fn)get(m, "seh64_finally"))(), 1);
+			CHECK_EQ(counter(0, 1), 1);	/* the __finally ran */
+			CHECK_EQ(counter(1, 1), 1);	/* abnormally */
+
+			/* Nothing handles it: the top-level filter resumes. */
+			((void (WINAPI *)(void))get(m, "seh64_install_top"))();
+			CHECK_EQ(((int_fn)get(m, "seh64_top"))(), 1);
+			CHECK_EQ(counter(3, 1), 1);
+			((void (WINAPI *)(void))get(m, "seh64_remove_top"))();
+		} else {
+			printf("sanitizer build: skipping the fault-based checks\n");
+		}
+		mod_free(m);
+	}
+
+	if (VFW_SANITIZER_BUILD) {
+		printf("sanitizer build: skipping the unhandled-fault check\n");
+	} else {
+		char err[4096];
+		int st = run_unhandled(dll, err, sizeof(err));
+		CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 128 + SIGSEGV);
+		CHECK(strstr(err, "seance: crash: SIGSEGV at pe_seh64.dll+0x"));
+		CHECK(strstr(err, "accessing (nil)") || strstr(err, "accessing 0x0"));
+		if (test_failures)
+			fprintf(stderr, "child said:\n%s", err);
+	}
+
+	return test_summary("test_seh");
 }
 
 #else

@@ -99,8 +99,7 @@ endfunction()
 import_library(pe_basic)
 
 # The 64-bit fixtures leave out what is i386 only: fs:[0] SEH frames
-# written by hand, cl's i386 C++ exception layout, Win9x thunks, and
-# pe_delay's hand-written (i386) delay-load tables.
+# written by hand, cl's i386 C++ exception layout and Win9x thunks.
 import_library(zz_nosuch)
 import_library(vfw_missing)
 import_library(sehcrt)
@@ -121,9 +120,7 @@ fixture(pe_fourccs pe_fourccs.c pe_fourccs.rc)
 fixture(pe_dep pe_dep.c pe_dep.def LIBS pe_basic_imports)
 fixture(pe_missing pe_missing.c LIBS zz_nosuch_imports pe_basic_imports)
 # Its own delay-load tables (GNU ld doesn't make them); see pe_delay.c.
-if(NOT VFW_FIXTURE_64)	# its tables are i386 asm
-	fixture(pe_delay pe_delay.c)
-endif()
+fixture(pe_delay pe_delay.c)
 
 # Links against kernel32 (the mingw import library) and a made-up function.
 fixture(pe_runtime pe_runtime.c LIBS vfw_missing_imports kernel32)
@@ -142,6 +139,35 @@ fixture(pe_sse pe_sse.c LIBS kernel32
 # __try/__except into _except_handler3 frames) and faults under them.
 if(NOT VFW_FIXTURE_64)
 	fixture(pe_seh pe_seh.c LIBS kernel32 OPTIONS -mpreferred-stack-boundary=2)
+endif()
+
+# x86-64 table-based SEH: hand-written functions with .seh_* unwind data and
+# __C_specific_handler scope tables (msvcrt's), as cl compiles __try.
+if(VFW_FIXTURE_64)
+	fixture(pe_seh64 pe_seh64.c LIBS kernel32 msvcrt
+		OPTIONS -Wl,--disable-auto-import)
+endif()
+
+# C++ exceptions from mingw-w64's g++ (libgcc's unwinder over the Rtl*
+# functions), when it is installed: the DLL links its own libgcc/libstdc++.
+if(VFW_FIXTURE_64)
+	find_program(VFW_MINGW64_CXX ${VFW_MINGW_PREFIX}g++)
+	if(VFW_MINGW64_CXX)
+		set(CMAKE_CXX_COMPILER ${VFW_MINGW64_CXX})
+		enable_language(CXX)
+		add_library(pe_gxx SHARED pe_gxx.cc)
+		target_compile_options(pe_gxx PRIVATE -O1 -Wall)
+		target_link_options(pe_gxx PRIVATE -static-libgcc -static-libstdc++)
+		set_target_properties(pe_gxx PROPERTIES PREFIX "" SUFFIX ".dll"
+			RUNTIME_OUTPUT_DIRECTORY ${VFW_FIXTURE_DIR})
+	endif()
+endif()
+
+# x86-64 C++ exceptions: hand-written functions with __CxxFrameHandler3
+# tables as cl lays them out.
+if(VFW_FIXTURE_64)
+	fixture(pe_cxxeh64 pe_cxxeh64.c LIBS cxxcrt_imports kernel32
+		OPTIONS -fno-builtin)
 endif()
 
 # __try/__except/__finally as cl compiles them against msvcrt's

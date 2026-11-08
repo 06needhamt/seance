@@ -369,7 +369,7 @@ WINFN(BOOL) k32_SetThreadPriority(HANDLE h, int priority)
 WINFN(DWORD_PTR) k32_SetThreadAffinityMask(HANDLE h, DWORD_PTR mask)
 {
 	DWORD n = peb_get()->NumberOfProcessors;
-	return n >= 32 ? 0xffffffff : (1u << n) - 1;
+	return (n >= 8 * sizeof(DWORD_PTR) ? ~(DWORD_PTR)0 : (((DWORD_PTR)1 << n) - 1));
 }
 
 WINFN(DWORD) k32_SetThreadIdealProcessor(HANDLE h, DWORD cpu) { return 0; }
@@ -378,7 +378,7 @@ WINFN(BOOL) k32_GetProcessAffinityMask(HANDLE process, PDWORD_PTR proc_mask,
 				       PDWORD_PTR sys_mask)
 {
 	DWORD n = peb_get()->NumberOfProcessors;
-	DWORD_PTR mask = n >= 32 ? 0xffffffff : (1u << n) - 1;
+	DWORD_PTR mask = (n >= 8 * sizeof(DWORD_PTR) ? ~(DWORD_PTR)0 : (((DWORD_PTR)1 << n) - 1));
 
 	if (proc_mask)
 		*proc_mask = mask;
@@ -557,7 +557,7 @@ WINFN(BOOL) k32_GetThreadGroupAffinity(HANDLE thread, PGROUP_AFFINITY a)
 	DWORD n = peb_get()->NumberOfProcessors;
 
 	memset(a, 0, sizeof(*a));
-	a->Mask = n >= 32 ? 0xffffffff : (1u << n) - 1;
+	a->Mask = (n >= 8 * sizeof(DWORD_PTR) ? ~(DWORD_PTR)0 : (((DWORD_PTR)1 << n) - 1));
 	return TRUE;
 }
 
