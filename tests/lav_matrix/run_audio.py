@@ -10,8 +10,15 @@ LAV = os.path.join(os.environ.get("LAV_DIR", "."), "LAVAudio.ax")
 W = os.path.join(os.environ.get("WORK", "/tmp/lav_matrix"), "a")
 os.makedirs(W, exist_ok=True)
 
+# LAV Audio has its WMA decoders off until the registry says otherwise.
+REG = f"{W}/lav.reg"
+with open(REG, "w") as f:
+    f.write('Windows Registry Editor Version 5.00\n\n'
+            '[HKEY_CURRENT_USER\\Software\\LAV\\Audio\\Formats]\n'
+            '"wma"=dword:00000001\n')
+
 def run(cmd, timeout=120):
-    e = dict(os.environ); e["VFW_TIMEOUT"] = "60"
+    e = dict(os.environ); e["VFW_TIMEOUT"] = "60"; e["VFW_REGISTRY"] = REG
     try:
         p = subprocess.run(cmd, shell=isinstance(cmd, str), capture_output=True, text=True, timeout=timeout, env=e)
         return p.returncode, p.stdout + p.stderr

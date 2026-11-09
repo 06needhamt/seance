@@ -258,6 +258,7 @@ struct n_info {
 static struct n_info *infos;
 static pthread_mutex_t infos_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* Normalises an FH3 FuncInfo (plain RVA tables) into an n_info. */
 static struct n_info *n_build3(const struct func_info *d, ULONGLONG base)
 {
 	struct n_info *n = calloc(1, sizeof(*n));
@@ -326,6 +327,7 @@ static uint32_t rd_unsigned(const BYTE **p)
 	return v;
 }
 
+/* Reads a raw little-endian 32-bit int (an RVA) from a FuncInfo4 stream. */
 static int32_t rd_int(const BYTE **p)
 {
 	int32_t v;
@@ -335,6 +337,10 @@ static int32_t rd_int(const BYTE **p)
 	return v;
 }
 
+/*
+ * Decodes a compressed FH4 FuncInfo4 at p into an n_info. begin is the
+ * function's start RVA, which the IP-to-state map is relative to.
+ */
 static struct n_info *n_build4(const BYTE *p, ULONGLONG base, DWORD begin)
 {
 	struct n_info *n = calloc(1, sizeof(*n));
@@ -461,6 +467,10 @@ static struct n_info *n_build4(const BYTE *p, ULONGLONG base, DWORD begin)
 	return n;
 }
 
+/*
+ * Returns the cached n_info for a FuncInfo (key), building it on first use;
+ * v4 selects the FH4 decoder. Entries live until cxx_forget_image().
+ */
 static const struct n_info *n_get(const void *key, ULONGLONG base, DWORD begin,
 				  int v4)
 {
@@ -510,6 +520,7 @@ void cxx_forget_image(const void *base, size_t len)
 	pthread_mutex_unlock(&infos_lock);
 }
 
+/* The EH state in force at rva, or -1 before the first IP map entry. */
 static int ip_state(const struct n_info *d, DWORD rva)
 {
 	int state = -1;
@@ -558,6 +569,7 @@ static void local_unwind(const struct n_info *d, ULONGLONG base,
 	}
 }
 
+/* Adjusts a thrown object's address to a base class subobject (PMD). */
 static void *this_pointer(const struct this_offsets *off, void *object)
 {
 	if (!object)
@@ -625,6 +637,7 @@ static void copy_object(void *object, void **dest, UINT flags,
 	}
 }
 
+/* Whether rec is a C++ exception thrown by _CxxThrowException. */
 static int is_cxx(const EXCEPTION_RECORD *rec)
 {
 	return rec->ExceptionCode == CXX_EXCEPTION &&
@@ -864,6 +877,10 @@ __asm__(
 
 extern void crt__CxxThrowException(void);
 
+/*
+ * The body of _CxxThrowException: raises 0xE06D7363 with the image base of
+ * the ThrowInfo as the 4th parameter. A null object and ThrowInfo rethrows.
+ */
 void __attribute__((used, noreturn))
 vfw_cxx_throw(void *object, const struct throw_info *ti, CONTEXT *ctx)
 {
@@ -901,6 +918,7 @@ vfw_cxx_throw(void *object, const struct throw_info *ti, CONTEXT *ctx)
  */
 static size_t arena_used;
 
+/* Bump-allocates from the arena that holds the built-in RTTI and EH data. */
 static void *arena_alloc(size_t n, size_t align)
 {
 	arena_used = (arena_used + align - 1) & ~(align - 1);
@@ -910,6 +928,7 @@ static void *arena_alloc(size_t n, size_t align)
 	return p;
 }
 
+/* The arena-relative RVA of p, as the x64 EH and RTTI tables want it. */
 static DWORD rva_of(const void *p)
 {
 	return (DWORD)((const BYTE *)p - arena);
@@ -998,6 +1017,7 @@ static void *WINAPI exc_vdtor(struct exc *e, unsigned flags);
 static const char *WINAPI exc_what(const struct exc *e);
 static void *WINAPI ti_vdtor(void *ti, unsigned flags);
 
+/* Builds the RTTI, vftable and ThrowInfo of built-in exception class c. */
 static void build_class(int c)
 {
 	int chain[8], n = 0;
@@ -1061,6 +1081,7 @@ static void build_class(int c)
 	}
 }
 
+/* Maps the arena (below 4 GB when it can) and builds every built-in class. */
 static void __attribute__((constructor)) cxx_init(void)
 {
 	arena = mmap(NULL, ARENA_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC,
@@ -1078,6 +1099,7 @@ static void __attribute__((constructor)) cxx_init(void)
 
 /* std::exception. */
 
+/* Initialises e as an object of class c carrying the message what. */
 static struct exc *WINAPI exc_init(struct exc *e, int c, const char *what)
 {
 	e->vtable = &vftable[c][1];
@@ -1244,6 +1266,7 @@ static void *WINAPI ti_vdtor(void *ti, unsigned flags)
 void vfw_cxx_throw(void *object, const struct throw_info *ti, CONTEXT *ctx)
 	__attribute__((noreturn));
 
+/* Throws a new std:: exception of class c, as the CRT's _X* helpers do. */
 static void __attribute__((noreturn))
 throw_std(int c, const char *what, CONTEXT *ctx)
 {
@@ -1264,16 +1287,19 @@ struct rtti_query {
 	const void *result;
 };
 
+/* The complete object locator, which sits just before the vftable. */
 static const struct col *locator_of(void *object)
 {
 	return (*(const struct col *const *const *)object)[-1];
 }
 
+/* The image base of a locator, from its own pSelf RVA. */
 static BYTE *col_base(const struct col *l)
 {
 	return (BYTE *)l - l->self;
 }
 
+/* __RTtypeid under seh_guarded: the object's type_info. */
 static void rtti_typeid(void *arg)
 {
 	struct rtti_query *q = arg;
@@ -1297,6 +1323,7 @@ static BYTE *complete_of(void *object, const struct col *loc)
 	return complete;
 }
 
+/* __RTCastToVoid under seh_guarded: the complete object. */
 static void rtti_complete(void *arg)
 {
 	struct rtti_query *q = arg;
@@ -1352,6 +1379,7 @@ static const struct bcd *find_target(const struct rtti_query *q, BYTE *base,
 #undef BTYPE
 }
 
+/* __RTDynamicCast under seh_guarded: walks the class hierarchy for dst. */
 static void rtti_cast(void *arg)
 {
 	struct rtti_query *q = arg;
@@ -1381,6 +1409,10 @@ const void * WINAPI vfw_rttypeid_c(void *object, CONTEXT *ctx)
 	return q.result;
 }
 
+/*
+ * __RTDynamicCast: null for a failed pointer cast, std::bad_cast for a
+ * failed reference cast, std::__non_rtti_object for a bad object.
+ */
 void * WINAPI vfw_rtdyncast_c(void *object, int vfdelta,
 			      const struct type_desc *src,
 			      const struct type_desc *dst, int is_reference,
@@ -1397,6 +1429,7 @@ void * WINAPI vfw_rtdyncast_c(void *object, int vfdelta,
 	return (void *)q.result;
 }
 
+/* __RTCastToVoid: the most-derived object, or __non_rtti_object. */
 void * WINAPI vfw_rtvoid_c(void *object, CONTEXT *ctx)
 {
 	struct rtti_query q = { .object = object };
