@@ -85,6 +85,9 @@ int main(void)
 	/* A try block inside a catch block (a funclet with its own tables). */
 	CHECK_EQ(FN("cxx64_nested_v4")(5), 123);
 	CHECK_EQ(counter(0, 1), 1);
+	/* The same with FrameHandler3, where the funclet shares the tables. */
+	CHECK_EQ(FN("cxx64_nested")(5), 123);
+	CHECK_EQ(counter(0, 1), 1);
 	/* _set_se_translator: a structured exception becomes a C++ one. */
 	FN("cxx64_xl_set")(1);
 	CHECK_EQ(FN("cxx64_xl")(0), 0x42);
@@ -211,6 +214,7 @@ int main(void)
 
 static struct module *crt;
 
+/* An export of the built-in msvcrt, or exit if it is missing. */
 static void *get(const char *name)
 {
 	void *p = mod_get_proc(crt, name);

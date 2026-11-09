@@ -208,7 +208,12 @@ Decisions:
      keeps its parent's; its states carry on from the parent's, and its
      unwinding stops at the state it starts in). The `cxx64_nested_v4`
      fixture, hand-encoded, catches inside a catch block and carries on
-     in the funclet. FH3's funclet data isn't decoded: not done.
+     in the funclet. FH3 gives a catch funclet its function's FuncInfo,
+     whose maps cover the funclet too: the handler knows the funclet by
+     its start being a catch block's handler, finds the parent's frame at
+     that catch block's `frame_offset` (`dispFrame`) in the funclet's, and
+     likewise stops unwinding at the state the funclet starts in
+     (`cxx64_nested`).
    - Done: `_set_se_translator` (per thread): a structured exception met
      by a /EHa function with a try block goes to the translator, which
      may throw a C++ exception; if it returns, the search goes on.

@@ -228,6 +228,7 @@ struct n_catch {
 	DWORD type;		/* RVA, 0 for catch (...) */
 	int obj_offset;
 	DWORD handler;		/* RVA of the funclet */
+	int frame;		/* where it keeps its parent's frame (FH3) */
 	int ncont;		/* continuations given in the tables (FH4) */
 	DWORD cont[2];		/* RVAs */
 };
@@ -251,6 +252,7 @@ struct n_info {
 	struct n_try *tries;
 	UINT flags;		/* FUNC_DESCR_* */
 	int is_catch;		/* a catch funclet (FH4) */
+	int shared;		/* its catch funclets use it too (FH3) */
 	int frame_disp;		/* ... where its parent's frame is kept, from its own */
 	int bad;
 };
@@ -268,6 +270,7 @@ static struct n_info *n_build3(const struct func_info *d, ULONGLONG base)
 
 	n->max_state = d->max_state;
 	n->flags = d->flags;
+	n->shared = 1;
 	n->uw = calloc(d->max_state ? d->max_state : 1, sizeof(*n->uw));
 	for (int i = 0; i < d->max_state; i++) {
 		n->uw[i].to_state = u[i].to_state;
@@ -293,6 +296,7 @@ static struct n_info *n_build3(const struct func_info *d, ULONGLONG base)
 			n->tries[i].catches[j].type = c[j].type;
 			n->tries[i].catches[j].obj_offset = c[j].obj_offset;
 			n->tries[i].catches[j].handler = c[j].handler;
+			n->tries[i].catches[j].frame = c[j].frame_offset;
 		}
 	}
 	return n;
@@ -771,6 +775,19 @@ find_catch(EXCEPTION_RECORD *rec, CONTEXT *ctx, void *frame, void *objframe,
 	}
 }
 
+/*
+ * FH3 gives a catch funclet its function's FuncInfo, whose maps cover the
+ * funclet too: the catch block whose handler begins at begin, if any.
+ */
+static const struct n_catch *funclet_of(const struct n_info *d, DWORD begin)
+{
+	for (UINT i = 0; i < d->ntry; i++)
+		for (int j = 0; j < d->tries[i].ncatch; j++)
+			if (d->tries[i].catches[j].handler == begin)
+				return &d->tries[i].catches[j];
+	return NULL;
+}
+
 static EXCEPTION_DISPOSITION
 frame_handler(EXCEPTION_RECORD *rec, void *frame, CONTEXT *ctx,
 	      DISPATCHER_CONTEXT *dc, const struct n_info *d)
@@ -783,9 +800,20 @@ frame_handler(EXCEPTION_RECORD *rec, void *frame, CONTEXT *ctx,
 	 * place in its own frame; a function's is its own.
 	 */
 	void *objframe = frame;
+	/* The state a funclet starts in, below which unwinding is its parent's. */
+	int start = -1;
 
-	if (d->is_catch)
+	if (d->is_catch) {
 		objframe = *(void **)((BYTE *)frame + d->frame_disp);
+		start = d->nip ? d->ip[0].state : -1;
+	} else if (d->shared) {
+		const struct n_catch *f = funclet_of(d, dc->FunctionEntry->BeginAddress);
+
+		if (f) {
+			objframe = *(void **)((BYTE *)frame + f->frame);
+			start = ip_state(d, dc->FunctionEntry->BeginAddress);
+		}
+	}
 	if ((d->flags & FUNC_DESCR_SYNCHRONOUS) && !is_cxx(rec) &&
 	    rec->ExceptionCode != CXX_EXCEPTION)
 		return ExceptionContinueSearch;
@@ -802,7 +830,7 @@ frame_handler(EXCEPTION_RECORD *rec, void *frame, CONTEXT *ctx,
 
 	if (rec->ExceptionFlags & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND)) {
 		/* A funclet starts in its catch's state: not the parent's to undo. */
-		int last = d->is_catch && d->nip ? d->ip[0].state : -1;
+		int last = start;
 
 		if (rec->ExceptionFlags & EXCEPTION_TARGET_UNWIND) {
 			if (target.frame == (ULONGLONG)(uintptr_t)frame)
@@ -1151,6 +1179,7 @@ EXC_CLASS(overflow_error, C_OVERFLOW_ERROR)
 EXC_CLASS(underflow_error, C_UNDERFLOW_ERROR)
 EXC_CLASS(range_error, C_RANGE_ERROR)
 
+/* std::exception::~exception: frees the message if the object owns it. */
 static void WINAPI exc_dtor(struct exc *e)
 {
 	if (e->do_free)
@@ -1159,6 +1188,7 @@ static void WINAPI exc_dtor(struct exc *e)
 	e->do_free = 0;
 }
 
+/* std::exception::operator=: copies the message, owning a copy if o did. */
 static struct exc *WINAPI exc_assign(struct exc *e, const struct exc *o)
 {
 	if (e != o) {
@@ -1172,6 +1202,7 @@ static struct exc *WINAPI exc_assign(struct exc *e, const struct exc *o)
 	return e;
 }
 
+/* std::exception::what. */
 static const char *WINAPI exc_what(const struct exc *e)
 {
 	return e->what ? e->what : "Unknown exception";
@@ -1224,6 +1255,7 @@ CRTFN(void) crt___std_exception_destroy(struct std_exception_data *d)
 static pthread_mutex_t name_lock = PTHREAD_MUTEX_INITIALIZER;
 char *crt_undecorate_type(const char *mangled);
 
+/* type_info::name: the undecorated name, made once and kept in spare. */
 static const char *WINAPI ti_name(struct type_desc *ti)
 {
 	pthread_mutex_lock(&name_lock);
@@ -1235,28 +1267,34 @@ static const char *WINAPI ti_name(struct type_desc *ti)
 
 static const char *WINAPI ti_raw_name(struct type_desc *ti) { return ti->name; }
 
+/* Whether two type_infos name one type (compared by decorated name). */
 static int same_type(const struct type_desc *a, const struct type_desc *b)
 {
 	return a == b || !strcmp(a->name + 1, b->name + 1);
 }
 
+/* type_info::operator==. */
 static BOOLEAN WINAPI ti_equal(const struct type_desc *a, const struct type_desc *b)
 {
 	return same_type(a, b);
 }
 
+/* type_info::operator!=. */
 static BOOLEAN WINAPI ti_not_equal(const struct type_desc *a, const struct type_desc *b)
 {
 	return !same_type(a, b);
 }
 
+/* type_info::before: orders by decorated name. */
 static BOOLEAN WINAPI ti_before(const struct type_desc *a, const struct type_desc *b)
 {
 	return strcmp(a->name + 1, b->name + 1) < 0;
 }
 
+/* type_info's destructor: nothing to do. */
 static void WINAPI ti_dtor(struct type_desc *ti) { }
 
+/* type_info's deleting destructor: type_infos are static data; frees nothing. */
 static void *WINAPI ti_vdtor(void *ti, unsigned flags)
 {
 	return ti;
