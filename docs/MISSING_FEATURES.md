@@ -440,11 +440,17 @@ what keeps the others from working.
   around), so the only CFHD clips to hand came from FFmpeg's `cfhd` encoder.
   The decoder handles those at 320x240 and 640x360 (YUY2 output; PSNR
   against FFmpeg's own decode ~35 dB for yuv422p10, ~25 dB for gbrp12 since
-  that is RGB-to-YUV). At 176x144 it overruns a heap buffer in its own
-  wavelet decode loop (a write past the output buffer lands in a neighbouring
-  object, and the failure then surfaces in its cleanup `free`); whether
-  that is FFmpeg's stream or an emulation gap isn't known, as there is no
-  genuine CineForm stream of that size to compare.
+  that is RGB-to-YUV). Of 28 sizes from 64x64 to 640x360, it decodes 13
+  (272x208, 288x208, 288x216, 304x208, 304x224, 224x288, 160x400,
+  400x160, 304x224, 320x200, 320x240, 640x360 ...) and fails the rest,
+  by crashing in its own Huffman decode loop (`+0x37dbb`: reading past the
+  end of the frame, or with 4 MB of padding after it writing through a
+  wild index) or by returning `ICERR_ERROR`. It isn't a size threshold
+  (272x208 works, 240x240 and 256x192 don't, 304x216 errors) and the loop is
+  plain integer code run natively, so it looks like a property of
+  FFmpeg's (experimental) encoder output, which only its own decoder is known to take; `VFW_LOWHEAP=0`, `VFW_ZERO_MEMORY=0`
+  and `VFW_FORCE_RELOC=1` change nothing. No genuine CineForm stream is
+  available to confirm.
 - **RealPlayer codecs:** `*3260.dll`.
 - **Locked, or needs setup:**
   - `wmvdmoe2.dll` is a keyed DMO and needs an unlock key.
