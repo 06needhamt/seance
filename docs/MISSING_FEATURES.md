@@ -95,6 +95,13 @@ declares (`8BPS LOCO VCR1 AASC VMnc G2M4 DUCK TM20 ...`).
 | Refused by LAV (32-bit too) | WMA 1 and 2 (`VFW_E_UNSUPPORTED_AUDIO`), G.726, G.722, Yamaha ADPCM (none is in its input list) |
 | Not run | PCM (`seance decode` won't take PCM), and formats ffmpeg can't put in an AVI or encode: ALAC, TrueHD, MLP, Nellymoser, WavPack, TTA, Real audio, AMR, ... |
 
+Longer clips and seeking (LAV x64): a 12 s H.264 AVI with B-frames and a
+keyframe every second decodes 300 frames sample-for-sample like ffmpeg, and
+`--start 5s --frames 50` gives frames 125 to 174 of that decode exactly
+(the seek starts at the keyframe before it). A 40 s AC-3 5.1 stream decodes
+byte-identical to ffmpeg (1.92 M samples). The IMA ADPCM difference above
+is the libavcodec version one: ffmpeg 6.1 here, LAV's is 8.x.
+
 Two things this turned up besides the table: `GetLogicalProcessorInformationEx`
 was a stub (MSVC's Concurrency Runtime, behind `parallel_for`, threw
 `scheduler_resource_allocation_error` as soon as a filter converted colours
