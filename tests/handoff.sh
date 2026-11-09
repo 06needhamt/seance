@@ -14,6 +14,7 @@ s64=${2:?$usage}
 f32=${3:?$usage}
 f64=${4:?$usage}
 emu=${VFW_EMULATOR:-}
+# The x86-64 binary run directly needs its own emulator on a host that can't run it.
 
 fail() {
 	echo "handoff: $*" >&2
@@ -30,7 +31,13 @@ export VFW_SEANCE64="$s64" VFW_SEANCE32="$s32"
 # By path, both ways.
 $emu "$s32" probe "$f64/testcodec.dll" | grep -q "handler 'TST0'" ||
 	fail "seance didn't probe the x86-64 testcodec"
-"$s64" probe "$f32/testcodec.dll" | grep -q "handler 'TST0'" ||
+# An option whose value is "auto" doesn't hide the DLL from the hand-off: the
+# x86-64 binary runs it (and the test codec refuses a FOURCC it doesn't know).
+rc=0
+out=$($emu "$s32" probe --fourcc auto "$f64/testcodec.dll" 2>&1) || rc=$?
+[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "refused DRV_OPEN" ||
+	fail "probe --fourcc auto wasn't handed off ($rc: $out)"
+${VFW_EMULATOR64:-} "$s64" probe "$f32/testcodec.dll" | grep -q "handler 'TST0'" ||
 	fail "seance64 didn't probe the i386 testcodec"
 
 # A round trip through each testcodec, from the i386 binary: the same.
