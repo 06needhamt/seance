@@ -157,6 +157,23 @@ CRTFN(void) crt_terminate(void)
 	crash_exit(SIGABRT);
 }
 
+/*
+ * _set_se_translator: a function (per thread) that gets a structured
+ * exception, as /EHa code with a try block meets it, and may throw a C++
+ * exception for it; if it returns, the search goes on.
+ */
+typedef void (STUB_CDECL *translator_fn)(unsigned code, EXCEPTION_POINTERS *ep);
+
+static _Thread_local translator_fn se_translator;
+
+CRTFN(translator_fn) crt__set_se_translator(translator_fn f)
+{
+	translator_fn old = se_translator;
+
+	se_translator = f;
+	return old;
+}
+
 CRTFN(void *) crt_set_terminate(void (STUB_CDECL *f)(void))
 {
 	void *prev = (void *)terminate_handler;
@@ -234,6 +251,7 @@ struct n_info {
 	struct n_try *tries;
 	UINT flags;		/* FUNC_DESCR_* */
 	int is_catch;		/* a catch funclet (FH4) */
+	int frame_disp;		/* ... where its parent's frame is kept, from its own */
 	int bad;
 };
 
@@ -350,6 +368,8 @@ static struct n_info *n_build4(const BYTE *p, ULONGLONG base, DWORD begin)
 	} else {
 		ipmap = rd_int(&p);
 	}
+	if (n->is_catch)
+		n->frame_disp = rd_unsigned(&p);
 	n->begin = begin;
 
 	if (uwmap) {
@@ -658,7 +678,7 @@ static void catch_unwound(void *arg, EXCEPTION_RECORD *unwinding)
  * put locals, is kept away from it.
  */
 static void __attribute__((no_sanitize_address))
-find_catch(EXCEPTION_RECORD *rec, CONTEXT *ctx, void *frame,
+find_catch(EXCEPTION_RECORD *rec, CONTEXT *ctx, void *frame, void *objframe,
 		       DISPATCHER_CONTEXT *dc, const struct n_info *d,
 		       int state)
 {
@@ -686,7 +706,7 @@ find_catch(EXCEPTION_RECORD *rec, CONTEXT *ctx, void *frame,
 					continue;
 				if (want && c->obj_offset)
 					copy_object(object,
-						    (void **)((BYTE *)frame + c->obj_offset),
+						    (void **)((BYTE *)objframe + c->obj_offset),
 						    c->adjectives, ct, ibase);
 			} else if (want) {
 				continue;	/* only catch (...) takes these */
@@ -720,7 +740,7 @@ find_catch(EXCEPTION_RECORD *rec, CONTEXT *ctx, void *frame,
 			catching = &cr;
 			seh_link_push(&cr.link);
 			void *cont = ((catch_fn)(uintptr_t)(base + c->handler))(
-				NULL, frame);
+				NULL, objframe);
 			seh_link_pop(&cr.link);
 			catch_leave(&cr, NULL);
 
@@ -744,17 +764,32 @@ frame_handler(EXCEPTION_RECORD *rec, void *frame, CONTEXT *ctx,
 {
 	ULONGLONG base = dc->ImageBase;
 	int state;
+	/*
+	 * A catch funclet keeps the frame of the function it belongs to, which
+	 * is where the catch variables and the states' objects are, at a fixed
+	 * place in its own frame; a function's is its own.
+	 */
+	void *objframe = frame;
 
 	if (d->is_catch)
-		return ExceptionContinueSearch;	/* seen through a seh_link */
+		objframe = *(void **)((BYTE *)frame + d->frame_disp);
 	if ((d->flags & FUNC_DESCR_SYNCHRONOUS) && !is_cxx(rec) &&
 	    rec->ExceptionCode != CXX_EXCEPTION)
 		return ExceptionContinueSearch;
+	if (se_translator && d->ntry && !is_cxx(rec) &&
+	    rec->ExceptionCode != CXX_EXCEPTION &&
+	    !(rec->ExceptionFlags & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND))) {
+		/* A throw from the translator carries on from this frame. */
+		EXCEPTION_POINTERS ep = { rec, ctx };
+
+		se_translator(rec->ExceptionCode, &ep);
+	}
 
 	state = state_at(d, base, (ULONGLONG)(uintptr_t)frame, dc->ControlPc);
 
 	if (rec->ExceptionFlags & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND)) {
-		int last = -1;
+		/* A funclet starts in its catch's state: not the parent's to undo. */
+		int last = d->is_catch && d->nip ? d->ip[0].state : -1;
 
 		if (rec->ExceptionFlags & EXCEPTION_TARGET_UNWIND) {
 			if (target.frame == (ULONGLONG)(uintptr_t)frame)
@@ -763,12 +798,12 @@ frame_handler(EXCEPTION_RECORD *rec, void *frame, CONTEXT *ctx,
 				 dc->TargetIp < base + dc->FunctionEntry->EndAddress)
 				last = ip_state(d, (DWORD)(dc->TargetIp - base));
 		}
-		local_unwind(d, base, frame, state, last);
+		local_unwind(d, base, objframe, state, last);
 		return ExceptionContinueSearch;
 	}
 
 	if (d->ntry)
-		find_catch(rec, ctx, frame, dc, d, state);
+		find_catch(rec, ctx, frame, objframe, dc, d, state);
 
 	if (d->flags & FUNC_DESCR_NOEXCEPT)
 		crt_terminate();	/* an exception leaving a noexcept function */
@@ -1577,6 +1612,9 @@ const struct builtin_export crt_cxx_exports[] = {
 
 	M("__CxxFrameHandler3", crt___CxxFrameHandler3),
 	M("__CxxFrameHandler4", crt___CxxFrameHandler4),
+	M("?_set_se_translator@@YAP6AXIPEAU_EXCEPTION_POINTERS@@@ZP6AXI0@Z@Z",
+	  crt__set_se_translator),
+	M("_set_se_translator", crt__set_se_translator),
 	M("?terminate@@YAXXZ", crt_terminate),
 	M("terminate", crt_terminate),
 	M("?set_terminate@@YAP6AXXZP6AXXZ@Z", crt_set_terminate),
