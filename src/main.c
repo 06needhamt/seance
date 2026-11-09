@@ -110,7 +110,14 @@ int main(int argc, char **argv)
 				codec = argv[a];
 		if (codec)
 			handoff_if_foreign(codec);
-		if (c->takes_codec && !(argc > 2 && !strcmp(argv[2], "auto")))
+		/* ... wherever it stands among the options. */
+		int auto_target = 0;
+		for (int a = 2; a < argc; a++)
+			if (!strcmp(argv[a], "auto") &&
+			    strcmp(argv[a - 1], "--fourcc") &&
+			    strcmp(argv[a - 1], "--clsid"))
+				auto_target = 1;
+		if (c->takes_codec && !auto_target)
 			handoff_arm();
 		/* Crashes and hangs in DLL code get reported. */
 		if (crash_install())
