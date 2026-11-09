@@ -92,7 +92,8 @@ declares (`8BPS LOCO VCR1 AASC VMnc G2M4 DUCK TM20 ...`).
 | Sample-identical | AC-3 (stereo and 5.1), E-AC-3, MP3 (stereo; mono at 22 kHz), AAC-LC (stereo and 5.1), DTS, FLAC (16 and 24 bit), Vorbis, Opus, MS ADPCM, A-law, mu-law |
 | Within one LSB | MP2, Speex |
 | Decodes; differs from ffmpeg | IMA ADPCM (`0x0011`): max difference 42, mean 8 at a peak of 3000; identical on the 32-bit LAV |
-| Refused by LAV (32-bit too) | WMA 1 and 2 (`VFW_E_UNSUPPORTED_AUDIO`), G.726, G.722, Yamaha ADPCM (none is in its input list) |
+| Sample-identical once enabled | WMA 1 and 2: LAV Audio has them off by default (its changelog: "Disabled the WMA codecs by default"), hence `VFW_E_UNSUPPORTED_AUDIO`; `HKCU\Software\LAV\Audio\Formats` `wma`=1 (what `tests/lav_matrix/run_audio.py` sets) turns them on, and every sample then matches ffmpeg's (LAV gives 2048 frames fewer at the end) |
+| Refused by LAV (32-bit too) | G.726, G.722, Yamaha ADPCM (none is in its input list) |
 | Not run | PCM (`seance decode` won't take PCM), and formats ffmpeg can't put in an AVI or encode: ALAC, TrueHD, MLP, Nellymoser, WavPack, TTA, Real audio, AMR, ... |
 
 Longer clips and seeking (LAV x64): a 12 s H.264 AVI with B-frames and a
