@@ -196,12 +196,14 @@ static _Thread_local struct {
 } live[MAX_DISPATCH];
 static _Thread_local int nlive;
 
+/* Forgets dispatches whose stack frames have been unwound past sp. */
 static void drop_below(uintptr_t sp)
 {
 	while (nlive && live[nlive - 1].marker < sp)
 		nlive--;
 }
 
+/* Records a new dispatch at marker; -1 when they nest too deep. */
 static int dispatch_begin(uintptr_t marker, const CONTEXT *ctx)
 {
 	drop_below(marker);
@@ -214,6 +216,7 @@ static int dispatch_begin(uintptr_t marker, const CONTEXT *ctx)
 
 static volatile LPTOP_LEVEL_EXCEPTION_FILTER top_filter;
 
+/* The Windows exception code for a SIGFPE si_code. */
 static DWORD code_from_fpe(int si_code)
 {
 	switch (si_code) {
@@ -253,6 +256,7 @@ static void cxx_type_name(void *arg)
 	}
 }
 
+/* Logs an exception (with its C++ type name, if any) under VFW_TRACE. */
 static void trace_exception(const EXCEPTION_RECORD *rec, const char *how)
 {
 	char where[160];
@@ -283,6 +287,7 @@ static void trace_exception(const EXCEPTION_RECORD *rec, const char *how)
 		      (unsigned long)rec->ExceptionCode, how, where);
 }
 
+/* Prints an exception no handler took, with the module and offset. */
 static void report_unhandled_exception(const EXCEPTION_RECORD *rec)
 {
 	char where[160], line[256];
@@ -303,6 +308,7 @@ static void report_unhandled_exception(const EXCEPTION_RECORD *rec)
  */
 static _Thread_local struct seh_link *links;
 
+/* Links a host frame into this thread's chain of seance-side handlers. */
 void seh_link_push(struct seh_link *l)
 {
 	l->marker = (uintptr_t)l;
@@ -310,6 +316,7 @@ void seh_link_push(struct seh_link *l)
 	links = l;
 }
 
+/* Unlinks l, wherever it is in the chain. */
 void seh_link_pop(struct seh_link *l)
 {
 	for (struct seh_link **p = &links; *p; p = &(*p)->next)
@@ -319,6 +326,7 @@ void seh_link_pop(struct seh_link *l)
 		}
 }
 
+/* Drops host links whose frames lie below sp (already unwound). */
 static void links_prune(uintptr_t sp)
 {
 	while (links && links->marker < sp)
@@ -351,6 +359,7 @@ static _Thread_local struct seh_guard {
 	jmp_buf jump;
 } *guards;
 
+/* Returns 1 if fn(arg) faulted (and was cut short), else 0. */
 int __attribute__((no_sanitize_address))
 seh_guarded(void (*fn)(void *), void *arg)
 {
@@ -367,6 +376,7 @@ seh_guarded(void (*fn)(void *), void *arg)
 	return 0;
 }
 
+/* Resumes the innermost seh_guarded call if a host access faulted. */
 static void guard_take(const EXCEPTION_RECORD *rec, const CONTEXT *ctx)
 {
 	if (rec->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || !guards ||
@@ -750,6 +760,10 @@ static void __attribute__((noreturn)) seh_run_fault(void)
 	dispatch_exception(&rec, &ctx, sig);
 }
 
+/*
+ * The signal handler's way in: turns a fault in guest code into a Windows
+ * exception and dispatches it. Returns 0 if the fault isn't the guest's.
+ */
 int seh_take_fault(int sig, siginfo_t *si, void *ucontext)
 {
 	ucontext_t *uc = ucontext;
@@ -823,11 +837,13 @@ int seh_take_fault(int sig, siginfo_t *si, void *ucontext)
 	return 1;
 }
 
+/* RtlRestoreContext: resumes at ctx (rec is unused here). */
 void WINAPI seh_RtlRestoreContext(CONTEXT *ctx, EXCEPTION_RECORD *rec)
 {
 	vfw_restore_context(ctx);
 }
 
+/* RtlPcToFileHeader: the base of the module containing pc. */
 PVOID WINAPI seh_RtlPcToFileHeader(PVOID pc, PVOID *base)
 {
 	struct module *m = mod_from_address(pc);
@@ -844,6 +860,7 @@ seh_SetUnhandledExceptionFilter(LPTOP_LEVEL_EXCEPTION_FILTER filter)
 	return prev;
 }
 
+/* UnhandledExceptionFilter: calls the guest's top-level filter, if any. */
 LONG WINAPI seh_UnhandledExceptionFilter(EXCEPTION_POINTERS *ep)
 {
 	LPTOP_LEVEL_EXCEPTION_FILTER f = top_filter;

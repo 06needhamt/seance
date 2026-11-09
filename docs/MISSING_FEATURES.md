@@ -75,7 +75,7 @@ ffmpeg can't encode).** Results where the decoder runs:
 | Bit-identical to ffmpeg | H.264 (also with B-frames; `H264 h264 X264 x264 avc1 AVC1 CCV1`), HEVC (`HEVC HVC1 HM10 H265`), MPEG-1, MPEG-2 (`MPG2 mpg2 MP2V`), MPEG-4 ASP (24 FOURCCs: `FMP4 XVID DIVX DX50 MP4V M4S2 3IVX BLZ0 SEDG ...`), MS MPEG-4 v2 and v3 (19 FOURCCs, `DIV2`..`DIV6`, `MPG3`, `DVX3`), WMV1, WMV2, FLV1, H.263 and H.263+, H.261, JPEG 2000 (5 FOURCCs), DV PAL (12 FOURCCs), Theora, VP8, VP9, AV1 (libaom and SVT), FFVHuff, FFV1, Snow, Ut Video 4:2:0, ASV1, ASV2, WebP (as YV12), MJPEG (raw YUV planes) |
 | Bit-identical as BGR24 | PNG, TIFF, Targa, BMP, GIF, zlib, ZMBV, QuickTime RLE, Cinepak, MS Video 1 (`CRAM MSVC WHAM`), Apple RPZA, FFV1 RGB, Ut Video RGB and RGBA, Hap1, Hap5, HapY, lossless JPEG (`LJPG`) |
 | 42 to 62 dB (10-bit, 4:2:2 or 4:4:4 sources compared after conversion to 8-bit 4:2:0) | H.264, HEVC and VP9 at 10 bits, ProRes (all five profiles, `apch apcn apcs apco ap4h ap4x`), DNxHD at 1080p, CineForm (`CFHD`), MagicYUV, HuffYUV, Ut Video 4:2:2 and 4:4:4, JPEG-LS, DV 4:1:1 and DVCPRO50, SVQ1 |
-| Decodes; differs from ffmpeg | `smc` (Apple Graphics): the palette is in the container and the output isn't the picture. The 32-bit LAV on the i386 `seance` gives the same bytes. VC-2 (`drac`/`vcrd`): 30 dB from ffmpeg's decode, identical on the 32-bit LAV. `GEOV`: GeoVision's MPEG-4 variant, not the bitstream made |
+| Decodes; differs from ffmpeg | `smc` (Apple Graphics): all black, on the 32-bit LAV too (see below). VC-2 (`drac`/`vcrd`) from a 10-bit source: 30 dB from ffmpeg's decode, the same on the 32-bit LAV (see below). `GEOV`: GeoVision's MPEG-4 variant, not the bitstream made |
 | Refused by LAV's input pin (on the 32-bit LAV too) | `v210`, uncompressed YUY2, UYVY, YV12, NV12, BGR24, `CLJR` |
 | Not testable | RealVideo 1.0 and 2.0 (`RV10`, `RV20`): ffmpeg can't decode the AVI it writes, and LAV rejects it. MS MPEG-4 v1 (`MPG4 MP41 DIV1`): ffmpeg has no encoder. `MJPB`, `VP70`, `VP8X`: these FOURCCs name other codecs, and the clips are not their bitstreams |
 
@@ -92,8 +92,11 @@ declares (`8BPS LOCO VCR1 AASC VMnc G2M4 DUCK TM20 ...`).
 | Sample-identical | AC-3 (stereo and 5.1), E-AC-3, MP3 (stereo; mono at 22 kHz), AAC-LC (stereo and 5.1), DTS, FLAC (16 and 24 bit), Vorbis, Opus, MS ADPCM, A-law, mu-law |
 | Within one LSB | MP2, Speex |
 | Decodes; differs from ffmpeg | IMA ADPCM (`0x0011`): max difference 42, mean 8 at a peak of 3000; identical on the 32-bit LAV |
-| Refused by LAV (32-bit too) | WMA 1 and 2 (`VFW_E_UNSUPPORTED_AUDIO`), G.726, G.722, Yamaha ADPCM (none is in its input list) |
-| Not run | PCM (`seance decode` won't take PCM), and formats ffmpeg can't put in an AVI or encode: ALAC, TrueHD, MLP, Nellymoser, WavPack, TTA, Real audio, AMR, ... |
+| Sample-identical once enabled | WMA 1 and 2: LAV Audio has them off by default (its changelog: "Disabled the WMA codecs by default"), hence `VFW_E_UNSUPPORTED_AUDIO`; `HKCU\Software\LAV\Audio\Formats` `wma`=1 (what `tests/lav_matrix/run_audio.py` sets) turns them on, and every sample then matches ffmpeg's (LAV gives 2048 frames fewer at the end) |
+| Refused by LAV (32-bit too) | G.726, G.722, Yamaha ADPCM (none is in its input list) |
+| Not run | PCM (`seance decode` won't take PCM), and formats ffmpeg can't put in an AVI or encode: ALAC, TrueHD and MLP (their subtypes are FOURCC-based, which an AVI's 16-bit wave format tag can't hold), Nellymoser, Real audio, AMR, ... |
+| Sample-identical, hand-tagged | WavPack: `ffmpeg -c:a wavpack -tag:a 0x5756 -strict unofficial` makes an AVI its own demuxer doesn't know but LAV takes; the PCM is the source's, bit for bit |
+| Refused even enabled | TTA (`-tag:a 0x77a1`, `HKCU\Software\LAV\Audio\Formats` `tta`=1): `VFW_E_UNSUPPORTED_AUDIO`; not looked into further |
 
 Longer clips and seeking (LAV x64): a 12 s H.264 AVI with B-frames and a
 keyframe every second decodes 300 frames sample-for-sample like ffmpeg, and
@@ -101,6 +104,18 @@ keyframe every second decodes 300 frames sample-for-sample like ffmpeg, and
 (the seek starts at the keyframe before it). A 40 s AC-3 5.1 stream decodes
 byte-identical to ffmpeg (1.92 M samples). The IMA ADPCM difference above
 is the libavcodec version one: ffmpeg 6.1 here, LAV's is 8.x.
+
+Neither video difference is seance's. LAV Video
+(`decoder/LAVVideo/decoders/avcodec.cpp`) builds a palette from the
+format block only for MSVIDEO1, MSRLE, Cinepak, 8BPS, QPEG, QTRLE and
+TSCC, and only when LAV Splitter isn't upstream. seance passes the
+AVI's 256-colour table in the `VIDEOINFOHEADER`, but SMC isn't on that
+list, so libavcodec decodes it against an all-zero palette. VC-2 from an
+8-bit source (176x144 and 352x288, 4:2:0) decodes bit-identically to
+ffmpeg. The matrix's 10-bit 4:2:2 stream at 176x144 is already 20 dB
+from the source in both decoders (ffmpeg 6.1's encoder at that size).
+At 352x288 the two decodes are 50 dB apart, which is LAV dithering 10
+bits down to YV12.
 
 Two things this turned up besides the table: `GetLogicalProcessorInformationEx`
 was a stub (MSVC's Concurrency Runtime, behind `parallel_for`, threw
@@ -440,11 +455,17 @@ what keeps the others from working.
   around), so the only CFHD clips to hand came from FFmpeg's `cfhd` encoder.
   The decoder handles those at 320x240 and 640x360 (YUY2 output; PSNR
   against FFmpeg's own decode ~35 dB for yuv422p10, ~25 dB for gbrp12 since
-  that is RGB-to-YUV). At 176x144 it overruns a heap buffer in its own
-  wavelet decode loop (a write past the output buffer lands in a neighbouring
-  object, and the failure then surfaces in its cleanup `free`); whether
-  that is FFmpeg's stream or an emulation gap isn't known, as there is no
-  genuine CineForm stream of that size to compare.
+  that is RGB-to-YUV). Of 28 sizes from 64x64 to 640x360, it decodes 13
+  (272x208, 288x208, 288x216, 304x208, 304x224, 224x288, 160x400,
+  400x160, 304x224, 320x200, 320x240, 640x360 ...) and fails the rest,
+  by crashing in its own Huffman decode loop (`+0x37dbb`: reading past the
+  end of the frame, or with 4 MB of padding after it writing through a
+  wild index) or by returning `ICERR_ERROR`. It isn't a size threshold
+  (272x208 works, 240x240 and 256x192 don't, 304x216 errors) and the loop is
+  plain integer code run natively, so it looks like a property of
+  FFmpeg's (experimental) encoder output, which only its own decoder is known to take; `VFW_LOWHEAP=0`, `VFW_ZERO_MEMORY=0`
+  and `VFW_FORCE_RELOC=1` change nothing. No genuine CineForm stream is
+  available to confirm.
 - **RealPlayer codecs:** `*3260.dll`.
 - **Locked, or needs setup:**
   - `wmvdmoe2.dll` is a keyed DMO and needs an unlock key.
