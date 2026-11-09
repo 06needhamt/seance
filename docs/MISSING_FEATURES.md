@@ -75,7 +75,7 @@ ffmpeg can't encode).** Results where the decoder runs:
 | Bit-identical to ffmpeg | H.264 (also with B-frames; `H264 h264 X264 x264 avc1 AVC1 CCV1`), HEVC (`HEVC HVC1 HM10 H265`), MPEG-1, MPEG-2 (`MPG2 mpg2 MP2V`), MPEG-4 ASP (24 FOURCCs: `FMP4 XVID DIVX DX50 MP4V M4S2 3IVX BLZ0 SEDG ...`), MS MPEG-4 v2 and v3 (19 FOURCCs, `DIV2`..`DIV6`, `MPG3`, `DVX3`), WMV1, WMV2, FLV1, H.263 and H.263+, H.261, JPEG 2000 (5 FOURCCs), DV PAL (12 FOURCCs), Theora, VP8, VP9, AV1 (libaom and SVT), FFVHuff, FFV1, Snow, Ut Video 4:2:0, ASV1, ASV2, WebP (as YV12), MJPEG (raw YUV planes) |
 | Bit-identical as BGR24 | PNG, TIFF, Targa, BMP, GIF, zlib, ZMBV, QuickTime RLE, Cinepak, MS Video 1 (`CRAM MSVC WHAM`), Apple RPZA, FFV1 RGB, Ut Video RGB and RGBA, Hap1, Hap5, HapY, lossless JPEG (`LJPG`) |
 | 42 to 62 dB (10-bit, 4:2:2 or 4:4:4 sources compared after conversion to 8-bit 4:2:0) | H.264, HEVC and VP9 at 10 bits, ProRes (all five profiles, `apch apcn apcs apco ap4h ap4x`), DNxHD at 1080p, CineForm (`CFHD`), MagicYUV, HuffYUV, Ut Video 4:2:2 and 4:4:4, JPEG-LS, DV 4:1:1 and DVCPRO50, SVQ1 |
-| Decodes; differs from ffmpeg | `smc` (Apple Graphics): the palette is in the container and the output isn't the picture. The 32-bit LAV on the i386 `seance` gives the same bytes. VC-2 (`drac`/`vcrd`): 30 dB from ffmpeg's decode, identical on the 32-bit LAV. `GEOV`: GeoVision's MPEG-4 variant, not the bitstream made |
+| Decodes; differs from ffmpeg | `smc` (Apple Graphics): all black, on the 32-bit LAV too (see below). VC-2 (`drac`/`vcrd`) from a 10-bit source: 30 dB from ffmpeg's decode, the same on the 32-bit LAV (see below). `GEOV`: GeoVision's MPEG-4 variant, not the bitstream made |
 | Refused by LAV's input pin (on the 32-bit LAV too) | `v210`, uncompressed YUY2, UYVY, YV12, NV12, BGR24, `CLJR` |
 | Not testable | RealVideo 1.0 and 2.0 (`RV10`, `RV20`): ffmpeg can't decode the AVI it writes, and LAV rejects it. MS MPEG-4 v1 (`MPG4 MP41 DIV1`): ffmpeg has no encoder. `MJPB`, `VP70`, `VP8X`: these FOURCCs name other codecs, and the clips are not their bitstreams |
 
@@ -104,6 +104,18 @@ keyframe every second decodes 300 frames sample-for-sample like ffmpeg, and
 (the seek starts at the keyframe before it). A 40 s AC-3 5.1 stream decodes
 byte-identical to ffmpeg (1.92 M samples). The IMA ADPCM difference above
 is the libavcodec version one: ffmpeg 6.1 here, LAV's is 8.x.
+
+Neither video difference is seance's. LAV Video
+(`decoder/LAVVideo/decoders/avcodec.cpp`) builds a palette from the
+format block only for MSVIDEO1, MSRLE, Cinepak, 8BPS, QPEG, QTRLE and
+TSCC, and only when LAV Splitter isn't upstream. seance passes the
+AVI's 256-colour table in the `VIDEOINFOHEADER`, but SMC isn't on that
+list, so libavcodec decodes it against an all-zero palette. VC-2 from an
+8-bit source (176x144 and 352x288, 4:2:0) decodes bit-identically to
+ffmpeg. The matrix's 10-bit 4:2:2 stream at 176x144 is already 20 dB
+from the source in both decoders (ffmpeg 6.1's encoder at that size).
+At 352x288 the two decodes are 50 dB apart, which is LAV dithering 10
+bits down to YV12.
 
 Two things this turned up besides the table: `GetLogicalProcessorInformationEx`
 was a stub (MSVC's Concurrency Runtime, behind `parallel_for`, threw

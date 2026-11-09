@@ -51,6 +51,7 @@ static const struct command commands[] = {
 	  "unregister a DirectShow filter server's filters", cmd_register, 1 },
 };
 
+/* Prints the command summary. */
 static void usage(FILE *out)
 {
 	fprintf(out,
@@ -65,6 +66,10 @@ static void usage(FILE *out)
 	}
 }
 
+/*
+ * Hands off to the sibling binary if the codec is the other architecture,
+ * then runs the command on a low-memory stack.
+ */
 int main(int argc, char **argv)
 {
 	if (argc < 2) {

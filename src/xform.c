@@ -282,12 +282,11 @@ static HRESULT from_sample(void *opaque, IMediaSample *sample,
 	o.sync = sample->lpVtbl->IsSyncPoint(sample) == S_OK;
 	o.preroll = sample->lpVtbl->IsPreroll(sample) == S_OK;
 	o.timed = SUCCEEDED(sample->lpVtbl->GetTime(sample, &o.start, &o.stop));
-	TRACE("xform: output %zu bytes%s%s%s%s", o.size,
-	      o.timed ? "" : ", untimed", o.sync ? ", sync" : "",
-	      o.preroll ? ", preroll" : "", new_type ? ", new type" : "");
-	if (o.timed)
-		TRACE("xform:   time %lld..%lld", (long long)o.start,
-		      (long long)o.stop);
+	TRACE("xform: output %zu bytes at %lld..%lld%s%s%s%s", o.size,
+	      o.timed ? (long long)o.start : -1LL,
+	      o.timed ? (long long)o.stop : -1LL, o.timed ? "" : " (untimed)",
+	      o.sync ? ", sync" : "", o.preroll ? ", preroll" : "",
+	      new_type ? ", new type" : "");
 	return x->callback ? x->callback(x->opaque, &o, new_type) : S_OK;
 }
 
