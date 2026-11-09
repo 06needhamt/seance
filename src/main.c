@@ -99,14 +99,19 @@ int main(int argc, char **argv)
 		 * tries every codec and keeps to this binary's.
 		 */
 		handoff_init(argc, argv);
+		/*
+		 * The codec is the first word that isn't an option or "auto"
+		 * (the value of --fourcc auto is no file). Only the positional
+		 * "auto" of decode keeps to this binary's codecs.
+		 */
 		const char *codec = NULL;
 		for (int a = 2; c->takes_codec && a < argc && !codec; a++)
-			if (argv[a][0] != '-')
+			if (argv[a][0] != '-' && strcmp(argv[a], "auto"))
 				codec = argv[a];
-		if (codec && strcmp(codec, "auto")) {
+		if (codec)
 			handoff_if_foreign(codec);
+		if (c->takes_codec && !(argc > 2 && !strcmp(argv[2], "auto")))
 			handoff_arm();
-		}
 		/* Crashes and hangs in DLL code get reported. */
 		if (crash_install())
 			return 2;
