@@ -203,9 +203,26 @@ Decisions:
      funclet picks between two table continuations (taken: its return
      value 2 means the second, anything else the first) and separated
      (profile-guided) code.
-   - Not done: try blocks inside catch funclets (cl gives these
-     their own handler data), exception specifications, the SE
-     translator.
+   - Done: try blocks inside catch funclets, for FH4 (a funclet has its
+     own FuncInfo4, `isCatch`, with `dispFrame`: where its own frame
+     keeps its parent's; its states carry on from the parent's, and its
+     unwinding stops at the state it starts in). The `cxx64_nested_v4`
+     fixture, hand-encoded, catches inside a catch block and carries on
+     in the funclet. FH3 gives a catch funclet its function's FuncInfo,
+     whose maps cover the funclet too: the handler knows the funclet by
+     its start being a catch block's handler, finds the parent's frame at
+     that catch block's `frame_offset` (`dispFrame`) in the funclet's, and
+     likewise stops unwinding at the state the funclet starts in
+     (`cxx64_nested`).
+   - Done: `_set_se_translator` (per thread): a structured exception met
+     by a /EHa function with a try block goes to the translator, which
+     may throw a C++ exception; if it returns, the search goes on.
+   - Left out: dynamic exception specifications (`throw(X)`), which the
+     runtime of VS 2015 and later ignores too. The handler terminates
+     only where the compiler set the FuncInfo's noexcept flag: for
+     `noexcept`, and for `throw()` under `/std:c++17` (VS 2017 15.5 and
+     later), where cl treats it as `noexcept`. Under `/std:c++14`,
+     `throw()` is `__declspec(nothrow)`, sets no flag, and isn't enforced.
    - Done: mingw g++'s exceptions (`__gxx_personality_seh0` over libgcc's
      unwinder, as LAV Filters x64 uses): the `pe_gxx` fixture throws and
      catches by type, as `std::exception&`, `catch (...)` and rethrow, with
