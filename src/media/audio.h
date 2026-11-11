@@ -114,11 +114,27 @@ HRESULT audio_wfx_to_mt(const WAVEFORMATEX *wf, size_t size,
  * have them) as Vorbis2 with a VORBISFORMAT2. A compressed format wrapped
  * in a WAVEFORMATEXTENSIBLE (FFmpeg writes more than two channels so) is
  * offered unwrapped first, a WAVEFORMATEX of its tag with the codec's own
- * extra bytes, as decoders expect it, then as it is. S_OK with the type,
+ * extra bytes, as decoders expect it, then as it is. After
+ * audio_set_input_subtype there is only the one it set. S_OK with the type,
  * S_FALSE when there are no more variants.
  */
 HRESULT audio_input_variant(const WAVEFORMATEX *wf, size_t size,
 			    unsigned variant, AM_MEDIA_TYPE *mt);
+
+/*
+ * A subtype from its name: four characters are a FOURCC ('alac' is
+ * {63616C61-0000-0010-8000-00AA00389B71}), anything else a {GUID}. 0, or
+ * -1 for neither.
+ */
+int audio_subtype_from_name(const char *name, GUID *subtype);
+
+/*
+ * The one subtype audio_input_variant offers from now on, for a format no
+ * wave format tag stands for (ALAC, TrueHD, MLP): the stream's format,
+ * unwrapped if it is extensible, is given under it and no other way. NULL
+ * goes back to the usual variants.
+ */
+void audio_set_input_subtype(const GUID *subtype);
 
 /*
  * An audio media type's format, malloc()ed, as at least 18 bytes with

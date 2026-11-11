@@ -719,6 +719,7 @@ build/seance decode auto clip.avi -o clip.wav --sample-format f32
 build/seance encode encoder.ax music.wav -o music.avi --bitrate 192
 build/seance encode encoder.ax clip.avi -o sound.wav --audio
 build/seance decode wmadmod.dll music.avi -o music.wav --clsid '{GUID}'
+build/seance decode decoder.ax music.avi -o music.wav --subtype alac
 build/seance encode imaadp32.acm music.wav -o music.avi
 build/seance encode codecs.acm music.wav -o music.avi --format-tag 0x55
 ```
@@ -747,6 +748,11 @@ decoder that changes to other PCM of the same channels and rate mid-stream
 is followed, converting back; a change of rate or channels stops with a
 message, since the file can't follow it. `--start` and `--duration` take
 sample counts or times and cut to the sample.
+
+A format no wave format tag stands for (ALAC, TrueHD, MLP: decoders know
+them by a subtype of their own) is named with `--subtype`, a FOURCC
+(`alac`, `'MLP '`) or a `{GUID}`: the stream's format is then offered
+under that subtype and no other.
 
 An encoder is given the PCM as it is, else the same samples in the other
 form (plain `WAVEFORMATEX` or extensible), else the first other sample

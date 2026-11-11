@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "common/error.h"
+#include "win32/codepage.h"
 #include "dshow/dshow.h"
 #include "media/audio.h"
 #include "win32/ole.h"
@@ -497,12 +498,60 @@ static WAVEFORMATEX *unwrap(const WAVEFORMATEX *wf, size_t size, WORD tag,
 	return plain;
 }
 
+static GUID forced_subtype;
+static int subtype_forced;
+
+int audio_subtype_from_name(const char *name, GUID *subtype)
+{
+	if (strlen(name) == 4) {
+		*subtype = (GUID)WAVE_FORMAT_SUBTYPE_INIT(0);
+		subtype->Data1 = mmioFOURCC(name[0], name[1], name[2], name[3]);
+		return 0;
+	}
+	WCHAR *w = utf8_to_utf16_dup(name);
+	int bad = !w || ole_guid_parse(w, subtype);
+	free(w);
+	return bad ? -1 : 0;
+}
+
+void audio_set_input_subtype(const GUID *subtype)
+{
+	subtype_forced = subtype != NULL;
+	if (subtype)
+		forced_subtype = *subtype;
+}
+
+/* The format under the subtype asked for (audio_set_input_subtype). */
+static HRESULT forced_variant(const WAVEFORMATEX *wf, size_t size,
+			      AM_MEDIA_TYPE *mt)
+{
+	WORD tag = audio_format_tag(wf, size);
+	WAVEFORMATEX *plain = NULL;
+	size_t psize;
+	HRESULT hr;
+
+	if (is_extensible(wf, size) && tag != WAVE_FORMAT_EXTENSIBLE &&
+	    audio_format_sample(wf, size) == AUDIO_NONE) {
+		if (!(plain = unwrap(wf, size, tag, &psize)))
+			return E_OUTOFMEMORY;
+		wf = plain;
+		size = psize;
+	}
+	hr = audio_wfx_to_mt(wf, size, mt);
+	if (SUCCEEDED(hr))
+		mt->subtype = forced_subtype;
+	free(plain);
+	return hr;
+}
+
 HRESULT audio_input_variant(const WAVEFORMATEX *wf, size_t size,
 			    unsigned variant, AM_MEDIA_TYPE *mt)
 {
 	memset(mt, 0, sizeof(*mt));
 	if (!wf || size < 16)
 		return E_INVALIDARG;
+	if (subtype_forced)
+		return variant ? S_FALSE : forced_variant(wf, size, mt);
 
 	WORD tag = audio_format_tag(wf, size);
 	if (!is_extensible(wf, size) || tag == WAVE_FORMAT_EXTENSIBLE ||

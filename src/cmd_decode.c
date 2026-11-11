@@ -86,6 +86,9 @@ static int usage(void)
 		"  --audio              the first audio stream of an AVI\n"
 		"  --sample-format <f>  the PCM to write: u8, s16, s24, s32, f32 or\n"
 		"                       f64 (default: what the decoder gives)\n"
+		"  --subtype <s>        what to call the stream's format for the\n"
+		"                       decoder, a FOURCC (alac) or a {GUID}, when\n"
+		"                       no wave format tag stands for it\n"
 		"  --start <pos>        first sample to write, or a time\n"
 		"  --duration <len>     how much to write, as samples or a time\n"
 		"  --clsid, --stream, --state, --keep-going  as for video\n"
@@ -764,6 +767,15 @@ int cmd_decode(int argc, char **argv)
 				fprintf(stderr, "seance: %s\n", vfw_error());
 				return 2;
 			}
+		} else if (!strcmp(a, "--subtype") && v) {
+			GUID subtype;
+			if (audio_subtype_from_name(argv[++i], &subtype)) {
+				fprintf(stderr, "seance: --subtype wants a FOURCC "
+					"or a GUID, not '%s'\n", argv[i]);
+				return 2;
+			}
+			audio_set_input_subtype(&subtype);
+			want_audio = 1;
 		} else if (!strcmp(a, "--frames") && v) {
 			if (cli_parse_count(a, argv[++i], &count))
 				return 2;
