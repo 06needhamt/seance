@@ -752,7 +752,8 @@ sample counts or times and cut to the sample.
 A format no wave format tag stands for (ALAC, TrueHD, MLP: decoders know
 them by a subtype of their own) is named with `--subtype`, a FOURCC
 (`alac`, `'MLP '`) or a `{GUID}`: the stream's format is then offered
-under that subtype and no other.
+under that subtype and no other. `probe` takes it too, for the outputs a
+decoder accepts for the file.
 
 An encoder is given the PCM as it is, else the same samples in the other
 form (plain `WAVEFORMATEX` or extensible), else the first other sample

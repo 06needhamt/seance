@@ -55,7 +55,13 @@ A = [
  ("pcm_u8", "-c:a pcm_u8", ""),
  ("pcm_alaw", "-c:a pcm_alaw", ""),
  ("pcm_mulaw", "-c:a pcm_mulaw", ""),
+ # No wave format tag stands for these, and ffmpeg won't put them in an
+ # AVI: mkavi_audio.py does, and --subtype says what they are.
+ ("alac",  "-c:a alac", "", "alac"),
+ ("truehd", "-c:a truehd -strict -2", "", "{EB27CEC4-163E-4CA3-8B74-8E25F91B517E}"),
+ ("mlp",   "-c:a mlp -strict -2", "", "MLP "),
 ]
+MKAVI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mkavi_audio.py")
 
 def load(path):
     a = array("h")
@@ -118,29 +124,34 @@ only = set(sys.argv[1:])
 os.makedirs(W, exist_ok=True)
 src = f"{W}/src.wav"
 run(f'ffmpeg -hide_banner -loglevel error -y -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=1.5" -f lavfi -i "anoisesrc=color=pink:sample_rate=48000:duration=1.5:amplitude=0.1" -f lavfi -i "sine=frequency=1100:sample_rate=48000:duration=1.5" -filter_complex "[0][1]amix=inputs=2:duration=first[l];[2][1]amix=inputs=2:duration=first[r];[l][r]amerge=inputs=2[a]" -map "[a]" -c:a pcm_s16le {src}')
-for (label, enc, extra) in A:
+for (label, enc, extra, *subtype) in A:
     if only and label not in only: continue
     d = f"{W}/{label}"
     shutil.rmtree(d, ignore_errors=True); os.makedirs(d)
     avi = f"{d}/x.avi"
-    rc, o = run(f"ffmpeg -hide_banner -loglevel error -y -i {src} {extra} {enc} {avi}", 120)
+    # What ffmpeg reads back: the AVI, or the Matroska the AVI is made from.
+    media = f"{d}/x.mka" if subtype else avi
+    rc, o = run(f"ffmpeg -hide_banner -loglevel error -y -i {src} {extra} {enc} {media}", 120)
+    if rc == 0 and subtype:
+        rc, o = run([sys.executable, MKAVI, media, avi], 120)
     row = {"label": label, "result": "", "detail": ""}
     if rc != 0 or not os.path.exists(avi) or os.path.getsize(avi) < 100:
         row.update(result="NOT GENERATED", detail=(o.strip().splitlines() or [""])[-1][:110]); results.append(row); print(row, flush=True); continue
-    pr = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=channels,sample_rate,codec_tag", "-of", "csv=p=0", avi], capture_output=True, text=True).stdout.strip()
+    pr = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=channels,sample_rate,codec_tag", "-of", "csv=p=0", media], capture_output=True, text=True).stdout.strip()
     ref = f"{d}/ref.raw"
-    rc, o = run(f"ffmpeg -hide_banner -loglevel error -y -i {avi} -f s16le -acodec pcm_s16le {ref}", 120)
+    rc, o = run(f"ffmpeg -hide_banner -loglevel error -y -i {media} -f s16le -acodec pcm_s16le {ref}", 120)
     if rc != 0:
         row.update(result="NOT GENERATED", detail="ffmpeg can't decode: " + o.strip()[-80:]); results.append(row); print(row, flush=True); continue
     lavwav = f"{d}/lav.wav"
-    rc, o = run([SEANCE, "decode", LAV, avi, "--audio", "--sample-format", "s16", "-o", lavwav], 150)
+    rc, o = run([SEANCE, "decode", LAV, avi, "--audio", "--sample-format", "s16", "-o", lavwav] +
+                (["--subtype", subtype[0]] if subtype else []), 150)
     last = (o.strip().splitlines() or [""])[-1][:140]
     if rc != 0 or not os.path.exists(lavwav):
         row.update(result="FAILED" + (" (crash/timeout)" if rc >= 124 or rc < 0 else ""), detail=(o.strip().splitlines() or [""])[0][:140]); results.append(row); print(row, flush=True); continue
     lavraw = f"{d}/lav.raw"
     rc, o2 = run(f"ffmpeg -hide_banner -loglevel error -y -i {lavwav} -f s16le -acodec pcm_s16le {lavraw}", 60)
     # channels of the reference stream
-    cc = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels", "-of", "csv=p=0", avi], capture_output=True, text=True).stdout.strip()
+    cc = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels", "-of", "csv=p=0", media], capture_output=True, text=True).stdout.strip()
     ch = int(cc) if cc.isdigit() else 2
     lc = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels", "-of", "csv=p=0", lavwav], capture_output=True, text=True).stdout.strip()
     lch = int(lc) if lc.isdigit() else ch
