@@ -387,6 +387,43 @@ static void test_input_variants(void)
 	CHECK_STR(audio_tag_name(0x566f), "Vorbis");
 }
 
+static void test_forced_subtype(void)
+{
+	static const GUID truehd = { 0xeb27cec4, 0x163e, 0x4ca3,
+		{ 0x8b, 0x74, 0x8e, 0x25, 0xf9, 0x1b, 0x51, 0x7e } };
+	GUID alac = WAVE_FORMAT_SUBTYPE_INIT(0), got;
+	struct { WAVEFORMATEX wf; BYTE extra[4]; } f = {
+		{ 0x4143, 2, 48000, 80000, 4096, 16, 4 }, { 1, 2, 3, 4 } };
+	AM_MEDIA_TYPE mt;
+
+	/* A FOURCC is its GUID; a GUID itself; anything else neither. */
+	alac.Data1 = mmioFOURCC('a', 'l', 'a', 'c');
+	CHECK_EQ(audio_subtype_from_name("alac", &got), 0);
+	CHECK(!memcmp(&got, &alac, sizeof(GUID)));
+	CHECK_EQ(audio_subtype_from_name(
+			 "{EB27CEC4-163E-4CA3-8B74-8E25F91B517E}", &got), 0);
+	CHECK(!memcmp(&got, &truehd, sizeof(GUID)));
+	CHECK_EQ(audio_subtype_from_name("truehd", &got), -1);
+
+	/* The format as it is under that subtype, and no other way. */
+	audio_set_input_subtype(&alac);
+	CHECK_EQ(audio_input_variant(&f.wf, sizeof(f), 0, &mt), S_OK);
+	CHECK(!memcmp(&mt.subtype, &alac, sizeof(GUID)));
+	CHECK(!memcmp(&mt.formattype, &FORMAT_WaveFormatEx, sizeof(GUID)));
+	CHECK_EQ(mt.cbFormat, sizeof(f));
+	CHECK(!memcmp(mt.pbFormat, &f, sizeof(f)));
+	ole_taskmem_free(mt.pbFormat);
+	CHECK_EQ(audio_input_variant(&f.wf, sizeof(f), 1, &mt), S_FALSE);
+	/* Even for a format that has aliases of its own. */
+	f.wf.wFormatTag = 0x2000;
+	CHECK_EQ(audio_input_variant(&f.wf, sizeof(f), 1, &mt), S_FALSE);
+
+	audio_set_input_subtype(NULL);
+	CHECK_EQ(audio_input_variant(&f.wf, sizeof(f), 1, &mt), S_OK);
+	CHECK(!memcmp(&mt.subtype, &MEDIASUBTYPE_DOLBY_AC3, sizeof(GUID)));
+	ole_taskmem_free(mt.pbFormat);
+}
+
 static void test_convert(void)
 {
 	int16_t s16[] = { 0, 1, -1, 32767, -32768, 12345, -12345, 256 };
@@ -477,6 +514,7 @@ int main(void)
 	test_preferences();
 	test_media_types();
 	test_input_variants();
+	test_forced_subtype();
 	test_convert();
 	test_ticks();
 	return test_summary("test_audio");

@@ -42,6 +42,8 @@ static int usage(void)
 		"  --fourcc <XXXX>    the handler to open a DLL as (default: from\n"
 		"                     vfw.ini, else 0, then what the codec reports)\n"
 		"  --clsid <{GUID}>   the filter or DMO when a DLL has several\n"
+		"  --subtype <s>      what to call the file's audio format, a FOURCC\n"
+		"                     (alac) or a {GUID}, as for decode\n"
 		"  --size <WxH>       frame size for the format checks (default\n"
 		"                     320x240, or the AVI's)\n"
 		"  --fourccs          list the FOURCCs found in a VfW codec DLL,\n"
@@ -136,7 +138,9 @@ static void probe_audio(const char *path, const struct xform_class *c,
 	size_t size;
 	const WAVEFORMATEX *wf = audio_source_format(src, &size);
 	AM_MEDIA_TYPE in = {0};
-	HRESULT hr = audio_wfx_to_mt(wf, size, &in);
+	/* A decoder's input as decode offers it first (audio_input_variant). */
+	HRESULT hr = encoder ? audio_wfx_to_mt(wf, size, &in) :
+			       audio_input_variant(wf, size, 0, &in);
 
 	if (encoder) {
 		struct xform *x = NULL;
@@ -649,6 +653,14 @@ int cmd_probe(int argc, char **argv)
 			fourccs = 1;
 		} else if (!strcmp(a, "--clsid") && i + 1 < argc) {
 			clsid = argv[++i];
+		} else if (!strcmp(a, "--subtype") && i + 1 < argc) {
+			GUID subtype;
+			if (audio_subtype_from_name(argv[++i], &subtype)) {
+				fprintf(stderr, "seance: --subtype wants a FOURCC "
+					"or a GUID, not '%s'\n", argv[i]);
+				return 2;
+			}
+			audio_set_input_subtype(&subtype);
 		} else if (!strcmp(a, "--size") && i + 1 < argc) {
 			if (cli_parse_size(a, argv[++i], &w, &h))
 				return 2;
