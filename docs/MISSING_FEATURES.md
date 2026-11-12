@@ -420,7 +420,7 @@ what keeps the others from working.
 | `SN4Codec.dll`, `Sif1_vfw.dll`, `vsslight.dll`, `frwd.dll`, `frwt.dll` | encode with `--pad 16` | they take only heights that are a multiple of 16; `encode` names the nearest size a codec takes, and `--pad N` / `--crop N` reach it |
 | `ADV601.dll` | encodes at 640x480 only | `encode` names that size |
 | `icmw_32.dll`, `WavCWAIP.dll` | frame 0 is now a keyframe | they flag no keyframes; frame 0 is always written as one |
-| `avimszh.dll` | should no longer overrun (not yet re-run) | the slack Windows' heap leaves after a block (its 32-byte header), now kept after guarded output buffers |
+| `avimszh.dll` | round-trips losslessly, clean under ASan; FFmpeg decodes its BGR24 stream to the source too | the slack Windows' heap leaves after a block (its 32-byte header), now kept after guarded output buffers; and top-down RGB input turned over to bottom-up, since it copies a top-down input's negative height into its MSZH format |
 | `msvidc32.dll` (Microsoft Video 1), `mcmjpg32.dll` and other NT 4 codecs | load | built-in `crtdll.dll` |
 | `cinevfw3.dll` | loads | built-in `psapi.dll` |
 | Morgan `M3JP2K322.dll` | round-trips with `VFW_DATE=2001-06-01` | an expired trial build |
