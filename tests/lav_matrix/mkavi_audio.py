@@ -12,10 +12,24 @@ TAG = 0x4143  # nobody's
 
 
 def chunk(name, data):
+    """A RIFF chunk: its name, its size, the data and a pad to even."""
     return name + struct.pack("<I", len(data)) + data + b"\0" * (len(data) & 1)
 
 
+def samples_per_packet(src, pts, rate):
+    """How many samples a packet holds: the average over their times
+    (Matroska gives no durations, and rounds times to a millisecond), or
+    for a lone packet, what decoding it gives."""
+    if len(pts) > 1:
+        return round((pts[-1] - pts[0]) * rate / (len(pts) - 1))
+    frames = json.loads(subprocess.check_output(
+        ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
+         "frame=nb_samples", "-of", "json", src]))["frames"]
+    return int(frames[0]["nb_samples"])
+
+
 def build(src, dst):
+    """Writes dst, an AVI of src's first audio stream, one packet a chunk."""
     info = json.loads(subprocess.check_output(
         ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_streams",
          "-show_packets", "-show_data", "-of", "json", src]))
@@ -28,10 +42,8 @@ def build(src, dst):
         if ":" in line:
             extra += bytes.fromhex(line.split(":", 1)[1][:41].replace(" ", ""))
     sizes = [int(p["size"]) for p in info["packets"]]
-    # Matroska gives no durations and rounds times to a millisecond:
-    # the packets' length is the average over them all.
     pts = [float(p["pts_time"]) for p in info["packets"]]
-    frame = round((pts[-1] - pts[0]) * rate / (len(pts) - 1))
+    frame = samples_per_packet(src, pts, rate)
     data = subprocess.check_output(
         ["ffmpeg", "-v", "fatal", "-i", src, "-map", "0:a:0", "-c", "copy",
          "-f", "data", "-"])
