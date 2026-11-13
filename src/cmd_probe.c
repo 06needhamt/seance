@@ -97,7 +97,7 @@ static void probe_connections(const char *path, const struct xform_class *c,
 			continue;
 		struct vfw_format f;
 		const char *name;
-		for (unsigned i = 0; (name = vfw_std_format(i, bih->biWidth, h, &f)); i++) {
+		for (unsigned i = 0; (name = vfw_out_format(i, bih->biWidth, h, &f)); i++) {
 			struct xform *x = NULL;
 			AM_MEDIA_TYPE output = {0};
 			/* A fresh object each time: a refusal may leave it upset. */
@@ -462,7 +462,7 @@ static void print_outputs(HIC hic, const BITMAPINFOHEADER *in)
 	LONG h = in->biHeight < 0 ? -in->biHeight : in->biHeight;
 
 	printf("    outputs accepted:");
-	for (unsigned i = 0; (name = vfw_std_format(i, in->biWidth, h, &f)); i++)
+	for (unsigned i = 0; (name = vfw_out_format(i, in->biWidth, h, &f)); i++)
 		if (ic_send(hic, ICM_DECOMPRESS_QUERY, (DWORD_PTR)in,
 			    (DWORD_PTR)&f.bih) == ICERR_OK) {
 			printf(" %s", name);

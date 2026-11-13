@@ -34,6 +34,8 @@ struct xform {
 	/* the caller's */
 	xform_output_fn callback;
 	void *opaque;
+	xform_accept_fn accept;	/* a filter's reconnections to take */
+	void *accept_opaque;
 };
 
 /*
@@ -393,6 +395,8 @@ HRESULT xform_connect(struct xform *x, const AM_MEDIA_TYPE *in,
 		return dmo_host_create(x->mo, in, out, from_dmo, x, &x->dmo_host);
 	hr = dshow_host_create(x->filter, in, out, callback ? from_sample : NULL,
 			       x, &x->host);
+	if (SUCCEEDED(hr) && x->accept)
+		dshow_host_set_accept(x->host, x->accept, x->accept_opaque);
 	/* The type connected: a partial one, completed by the filter. */
 	if (SUCCEEDED(hr))
 		hr = dshow_copy_media_type(&x->out,
@@ -403,6 +407,12 @@ HRESULT xform_connect(struct xform *x, const AM_MEDIA_TYPE *in,
 		dshow_free_media_type(&x->out);
 	}
 	return hr;
+}
+
+void xform_set_accept(struct xform *x, xform_accept_fn accept, void *opaque)
+{
+	x->accept = accept;
+	x->accept_opaque = opaque;
 }
 
 const AM_MEDIA_TYPE *xform_output_type(const struct xform *x)

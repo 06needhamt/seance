@@ -521,6 +521,50 @@ const char *vfw_std_format(unsigned i, LONG w, LONG h, struct vfw_format *f)
 	return fmts[i].name;
 }
 
+const char *vfw_out_format(unsigned i, LONG w, LONG h, struct vfw_format *f)
+{
+	static const struct {
+		const char *name;
+		DWORD comp;
+		WORD bits;
+	} more[] = {
+		{ "NV12", mmioFOURCC('N', 'V', '1', '2'), 12 },
+		{ "YV16", mmioFOURCC('Y', 'V', '1', '6'), 16 },
+		{ "YV24", mmioFOURCC('Y', 'V', '2', '4'), 24 },
+		{ "P010", mmioFOURCC('P', '0', '1', '0'), 24 },
+		{ "P016", mmioFOURCC('P', '0', '1', '6'), 24 },
+		{ "P210", mmioFOURCC('P', '2', '1', '0'), 32 },
+		{ "P216", mmioFOURCC('P', '2', '1', '6'), 32 },
+		{ "AYUV", mmioFOURCC('A', 'Y', 'U', 'V'), 32 },
+		{ "Y410", mmioFOURCC('Y', '4', '1', '0'), 32 },
+		{ "Y416", mmioFOURCC('Y', '4', '1', '6'), 64 },
+		{ "v210", mmioFOURCC('v', '2', '1', '0'), 20 },
+		{ "v410", mmioFOURCC('v', '4', '1', '0'), 32 },
+	};
+	const char *name = vfw_std_format(i, w, h, f);
+	unsigned n = 0;
+
+	if (name)
+		return name;
+	while (vfw_std_format(n, w, h, f))
+		n++;
+	i -= n;
+	if (i >= sizeof(more) / sizeof(more[0]))
+		return NULL;
+	memset(f, 0, sizeof(*f));
+	BITMAPINFOHEADER *b = &f->bih;
+	b->biSize = sizeof(*b);
+	b->biWidth = w;
+	b->biHeight = h;
+	b->biPlanes = 1;
+	b->biBitCount = more[i].bits;
+	b->biCompression = more[i].comp;
+	struct image_conv *c = image_conv_new(b, sizeof(*b));
+	b->biSizeImage = c ? (DWORD)image_frame_size(c) : 0;
+	image_conv_free(c);
+	return more[i].name;
+}
+
 BITMAPINFOHEADER *ic_get_format(HIC hic, UINT msg, const BITMAPINFOHEADER *in,
 				 size_t *fmt_size, LRESULT *err)
 {
@@ -595,7 +639,7 @@ BITMAPINFOHEADER *ic_negotiate_output(HIC hic, const BITMAPINFOHEADER *in,
 	free(out);
 
 	LONG h = in->biHeight < 0 ? -in->biHeight : in->biHeight;
-	for (unsigned i = 0; vfw_std_format(i, in->biWidth, h, &f); i++)
+	for (unsigned i = 0; vfw_out_format(i, in->biWidth, h, &f); i++)
 		if (ic_send(hic, ICM_DECOMPRESS_QUERY, (DWORD_PTR)in,
 			    (DWORD_PTR)&f.bih) == ICERR_OK) {
 			if (!(out = malloc(sizeof(f)))) {

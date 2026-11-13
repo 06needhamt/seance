@@ -7,6 +7,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "common/log.h"
 #include "common/padding.h"
 #include "dshow/dshow.h"
 #include "win32/ole.h"
@@ -28,6 +29,7 @@ struct host_pin {
   IPin *peer;
   AM_MEDIA_TYPE type;
   int connected;
+  int reconnected;	/* type changed by ReceiveConnection, not yet passed on */
 };
 
 struct host_graph {
@@ -46,6 +48,9 @@ struct dshow_host {
   struct host_graph graph;
   dshow_output_fn callback;
   void *opaque;
+  dshow_accept_fn accept;	/* reconnections the sink takes */
+  void *accept_opaque;
+  IMemAllocator *sink_allocator;	/* the output's, as notified */
   pthread_mutex_t mutex;
   pthread_cond_t changed;
   LONG event_code;
@@ -106,6 +111,44 @@ static HRESULT WINAPI pin_connect(IPin *p, IPin *receiver,
                                   const AM_MEDIA_TYPE *mt) {
   return E_NOTIMPL;
 }
+/*
+ * The connected filter changing the type, as a video renderer lets it:
+ * if the host's accept function takes it, with room in the samples.
+ */
+static HRESULT reconnect(struct host_pin *pin, const AM_MEDIA_TYPE *mt) {
+  struct dshow_host *h = pin->host;
+  TRACE("dshow: the filter reconnects the output, subtype %08lx",
+        (unsigned long)mt->subtype.Data1);
+  if (!h->accept(h->accept_opaque, mt))
+    return VFW_E_TYPE_NOT_ACCEPTED;
+  LONG need = (LONG)mt->lSampleSize;
+  BITMAPINFOHEADER *bih = NULL;
+  size_t size = 0;
+  if (SUCCEEDED(dshow_mt_to_bih(mt, &bih, &size))) {
+    if ((LONG)bih->biSizeImage > need)
+      need = (LONG)bih->biSizeImage;
+    free(bih);
+  }
+  IMemAllocator *a = h->sink_allocator;
+  ALLOCATOR_PROPERTIES now, got;
+  if (a && SUCCEEDED(a->lpVtbl->GetProperties(a, &now)) && now.cbBuffer < need) {
+    now.cbBuffer = need;
+    HRESULT hr = a->lpVtbl->Decommit(a);
+    if (SUCCEEDED(hr))
+      hr = a->lpVtbl->SetProperties(a, &now, &got);
+    HRESULT committed = a->lpVtbl->Commit(a);
+    if (FAILED(hr) || FAILED(committed) || got.cbBuffer < need)
+      return FAILED(hr) ? hr : FAILED(committed) ? committed : E_FAIL;
+  }
+  AM_MEDIA_TYPE next;
+  HRESULT hr = dshow_copy_media_type(&next, mt);
+  if (FAILED(hr))
+    return hr;
+  dshow_free_media_type(&pin->type);
+  pin->type = next;
+  pin->reconnected = 1;
+  return S_OK;
+}
 static HRESULT WINAPI pin_receive_connection(IPin *p, IPin *peer,
                                              const AM_MEDIA_TYPE *mt) {
   struct host_pin *pin = (void *)p;
@@ -113,6 +156,9 @@ static HRESULT WINAPI pin_receive_connection(IPin *p, IPin *peer,
     return E_POINTER;
   if (pin->direction != PINDIR_INPUT)
     return VFW_E_INVALID_DIRECTION;
+  if (pin->connected && peer == pin->peer && pin->host &&
+      pin->host->accept && &pin->host->sink == pin)
+    return reconnect(pin, mt);
   if (pin->connected)
     return VFW_E_ALREADY_CONNECTED;
   HRESULT hr = dshow_copy_media_type(&pin->type, mt);
@@ -188,6 +234,7 @@ static HRESULT WINAPI pin_accept(IPin *p, const AM_MEDIA_TYPE *mt) {
   struct host_pin *pin = (void *)p;
   if (!mt)
     return E_POINTER;
+  TRACE("dshow: sink QueryAccept, subtype %08lx", (unsigned long)mt->subtype.Data1);
   if (pin->connected)
     return guid_eq(&mt->majortype, &pin->type.majortype) ? S_OK : S_FALSE;
   return guid_eq(&mt->majortype, &MEDIATYPE_Video) ||
@@ -405,7 +452,16 @@ static HRESULT WINAPI mem_allocator(IMemInputPin *p, IMemAllocator **out) {
   return dshow_allocator_create(out);
 }
 static HRESULT WINAPI mem_notify(IMemInputPin *p, IMemAllocator *a, BOOL ro) {
-  return a ? S_OK : E_POINTER;
+  if (!a)
+    return E_POINTER;
+  struct dshow_host *h = from_mem(p)->host;
+  if (h && &h->sink == from_mem(p)) {
+    a->lpVtbl->AddRef(a);
+    if (h->sink_allocator)
+      h->sink_allocator->lpVtbl->Release(h->sink_allocator);
+    h->sink_allocator = a;
+  }
+  return S_OK;
 }
 static HRESULT WINAPI mem_require(IMemInputPin *p, ALLOCATOR_PROPERTIES *a) {
   if (!a)
@@ -423,6 +479,16 @@ static HRESULT WINAPI mem_receive(IMemInputPin *p, IMediaSample *s) {
     return S_FALSE;
   AM_MEDIA_TYPE *dynamic = NULL;
   s->lpVtbl->GetMediaType(s, &dynamic);
+  /*
+   * A type the filter reconnected with comes with the next sample, which
+   * it needn't mark with it (LAV Video doesn't), as a change does.
+   */
+  struct host_pin *pin = from_mem(p);
+  if (pin->reconnected && !dynamic) {
+    pin->reconnected = 0;
+    return h->callback ? h->callback(h->opaque, s, &pin->type) : S_OK;
+  }
+  pin->reconnected = 0;
   HRESULT hr = h->callback ? h->callback(h->opaque, s, dynamic) : S_OK;
   if (dynamic && SUCCEEDED(hr)) {
     /* From here on the connection has this type. */
@@ -630,6 +696,12 @@ static HRESULT connect_output(struct dshow_host *h, const AM_MEDIA_TYPE *out) {
   return dshow_call_pin_connect(h->output, &h->sink.pin, out);
 }
 
+void dshow_host_set_accept(struct dshow_host *h, dshow_accept_fn accept,
+                           void *opaque) {
+  h->accept = accept;
+  h->accept_opaque = opaque;
+}
+
 HRESULT dshow_host_create(IBaseFilter *f, const AM_MEDIA_TYPE *in,
                           const AM_MEDIA_TYPE *out, dshow_output_fn callback,
                           void *opaque, struct dshow_host **result) {
@@ -818,6 +890,8 @@ void dshow_host_destroy(struct dshow_host *h) {
     return;
   if (h->running)
     dshow_call_filter_stop(h->filter);
+  if (h->sink_allocator)
+    h->sink_allocator->lpVtbl->Release(h->sink_allocator);
   if (h->allocator) {
     h->allocator->lpVtbl->Decommit(h->allocator);
     h->allocator->lpVtbl->Release(h->allocator);

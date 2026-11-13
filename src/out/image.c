@@ -23,6 +23,14 @@ enum kind {
 	K_PLANAR,	/* I420, YV12 */
 	K_NV,		/* NV12, NV21 */
 	K_GREY,
+	/* Deeper or less subsampled YUV, converted by way of its planes. */
+	K_PLANES,	/* YV16, YV24: Y, V, U planes */
+	K_SEMI,		/* P010, P016, P210, P216: Y, then UV pairs, 16 bits */
+	K_AYUV,		/* V, U, Y, A bytes */
+	K_Y410,		/* U, Y, V, A in 10, 10, 10, 2 bits of a DWORD */
+	K_Y416,		/* U, Y, V, A words */
+	K_V410,		/* 2 bits unused, then U, Y, V in 10 bits each */
+	K_V210,		/* 6 pixels in 4 DWORDs of three 10-bit values */
 };
 
 struct image_conv {
@@ -37,9 +45,11 @@ struct image_conv {
 
 	int y0, u, y1, v;	/* packed: byte offsets in a group */
 	int swap_uv;		/* YV12: V before U; NV21: VU pairs */
+	struct image_layout native;	/* as image_to_planar gives it */
 
 	BYTE *rle;		/* RLE: palette indices, bottom row first */
 	BYTE *scratch;		/* intermediate frame */
+	BYTE *planar;		/* deep kinds: the frame in planes */
 	WORD *nearest;		/* 8-bit packing: colour -> index, or 0xffff */
 	int nearest_grey;	/* nearest is by brightness */
 };
@@ -52,6 +62,29 @@ static int clamp8(int v)
 static int is_rgb(const struct image_conv *c)
 {
 	return c->kind <= K_MASKS;
+}
+
+/* Kinds converted by way of their native planes. */
+static int is_deep(const struct image_conv *c)
+{
+	return c->kind >= K_PLANES;
+}
+
+/* A plane's samples across (or down) for n luma ones, s = log2 step. */
+static size_t sub(int n, int s)
+{
+	return ((size_t)n + (1u << s) - 1) >> s;
+}
+
+static unsigned rd16(const BYTE *p)
+{
+	return p[0] | p[1] << 8;
+}
+
+static DWORD rd32(const BYTE *p)
+{
+	return (DWORD)p[0] | (DWORD)p[1] << 8 | (DWORD)p[2] << 16 |
+	       (DWORD)p[3] << 24;
 }
 
 size_t image_bgr24_size(int w, int h)
@@ -239,10 +272,73 @@ static int setup_yuv(struct image_conv *c, FOURCC f)
 		c->kind = K_GREY;
 		name = "Y800";
 		break;
+	case FCC('Y', 'V', '1', '6'):
+		c->kind = K_PLANES;
+		c->swap_uv = 1;
+		c->native = (struct image_layout){ 1, 0, 8, 3 };
+		name = "YV16";
+		break;
+	case FCC('Y', 'V', '2', '4'):
+		c->kind = K_PLANES;
+		c->swap_uv = 1;
+		c->native = (struct image_layout){ 0, 0, 8, 3 };
+		name = "YV24";
+		break;
+	case FCC('P', '0', '1', '0'):
+		c->kind = K_SEMI;
+		c->native = (struct image_layout){ 1, 1, 10, 3 };
+		name = "P010";
+		break;
+	case FCC('P', '0', '1', '6'):
+		c->kind = K_SEMI;
+		c->native = (struct image_layout){ 1, 1, 16, 3 };
+		name = "P016";
+		break;
+	case FCC('P', '2', '1', '0'):
+		c->kind = K_SEMI;
+		c->native = (struct image_layout){ 1, 0, 10, 3 };
+		name = "P210";
+		break;
+	case FCC('P', '2', '1', '6'):
+		c->kind = K_SEMI;
+		c->native = (struct image_layout){ 1, 0, 16, 3 };
+		name = "P216";
+		break;
+	case FCC('A', 'Y', 'U', 'V'):
+		c->kind = K_AYUV;
+		c->native = (struct image_layout){ 0, 0, 8, 3 };
+		name = "AYUV";
+		break;
+	case FCC('Y', '4', '1', '0'):
+		c->kind = K_Y410;
+		c->native = (struct image_layout){ 0, 0, 10, 3 };
+		name = "Y410";
+		break;
+	case FCC('Y', '4', '1', '6'):
+		c->kind = K_Y416;
+		c->native = (struct image_layout){ 0, 0, 16, 3 };
+		name = "Y416";
+		break;
+	case FCC('V', '4', '1', '0'):
+		c->kind = K_V410;
+		c->native = (struct image_layout){ 0, 0, 10, 3 };
+		name = "v410";
+		break;
+	case FCC('V', '2', '1', '0'):
+		c->kind = K_V210;
+		c->native = (struct image_layout){ 1, 0, 10, 3 };
+		name = "v210";
+		break;
 	default:
 		return -1;
 	}
 	snprintf(c->name, sizeof(c->name), "%s", name);
+	if (c->kind == K_PACKED)
+		c->native = (struct image_layout){ 1, 0, 8, 3 };
+	else if (c->kind == K_PLANAR || c->kind == K_NV)
+		c->native = (struct image_layout){ 1, 1, 8, 3 };
+	else if (c->kind == K_GREY)
+		c->native = (struct image_layout){ 1, 1, 8, 1 };
 
 	switch (c->kind) {
 	case K_PACKED:
@@ -253,6 +349,32 @@ static int setup_yuv(struct image_conv *c, FOURCC f)
 	case K_NV:
 		c->stride = c->w;
 		c->frame_size = (size_t)c->w * c->h + 2 * cw * ch;
+		break;
+	case K_PLANES:
+		c->stride = c->w;
+		c->frame_size = (size_t)c->w * c->h + 2 *
+				sub(c->w, c->native.sx) * sub(c->h, c->native.sy);
+		break;
+	case K_SEMI:
+		/* Luma rows of 2w bytes; chroma rows of UV pairs, 4 bytes each. */
+		c->stride = (size_t)c->w * 2;
+		c->frame_size = c->stride * c->h +
+				4 * cw * sub(c->h, c->native.sy);
+		break;
+	case K_AYUV:
+	case K_Y410:
+	case K_V410:
+		c->stride = (size_t)c->w * 4;
+		c->frame_size = c->stride * c->h;
+		break;
+	case K_Y416:
+		c->stride = (size_t)c->w * 8;
+		c->frame_size = c->stride * c->h;
+		break;
+	case K_V210:
+		/* Rows padded to 128 bytes, 48 pixels. */
+		c->stride = ((size_t)c->w + 47) / 48 * 128;
+		c->frame_size = c->stride * c->h;
 		break;
 	default:
 		c->stride = c->w;
@@ -310,9 +432,13 @@ struct image_conv *image_conv_new(const BITMAPINFOHEADER *bih,
 		return NULL;
 	}
 
+	if (is_rgb(c) || c->kind == K_RLE)
+		c->native = (struct image_layout){ 0, 0, 8, 3 };
 	size_t scratch = image_i420_size(c->w, c->h) > image_bgr24_size(c->w, c->h) ?
 			 image_i420_size(c->w, c->h) : image_bgr24_size(c->w, c->h);
-	if (!(c->scratch = malloc(scratch))) {
+	if (!(c->scratch = malloc(scratch)) ||
+	    (is_deep(c) &&
+	     !(c->planar = malloc(image_layout_size(&c->native, c->w, c->h))))) {
 		vfw_set_error("out of memory");
 		image_conv_free(c);
 		return NULL;
@@ -326,8 +452,29 @@ void image_conv_free(struct image_conv *c)
 		return;
 	free(c->rle);
 	free(c->scratch);
+	free(c->planar);
 	free(c->nearest);
 	free(c);
+}
+
+int image_conv_crop(struct image_conv *c, int width)
+{
+	if (width == c->w)
+		return 0;
+	switch (c->kind) {
+	case K_PAL: case K_RGB24: case K_RGB32: case K_MASKS: case K_PACKED:
+	case K_AYUV: case K_Y410: case K_Y416: case K_V410: case K_V210:
+		if (width > 0 && width < c->w) {
+			c->w = width;	/* stride and frame size stay */
+			return 0;
+		}
+		break;
+	default:
+		break;
+	}
+	vfw_set_error("can't show %d of the %d pixels of a %s row", width, c->w,
+		      c->name);
+	return -1;
 }
 
 int image_width(const struct image_conv *c) { return c->w; }
@@ -534,6 +681,21 @@ static void yuv_to_i420(const struct image_conv *c, const BYTE *s, BYTE *d)
 	}
 }
 
+static void to_planar(struct image_conv *c, const BYTE *s, BYTE *d);
+static void planar_to_i420(const BYTE *p, const struct image_layout *l,
+			   int w, int h, BYTE *d);
+
+/* Any YUV-family frame to I420. */
+static void any_yuv_to_i420(struct image_conv *c, const BYTE *s, BYTE *d)
+{
+	if (is_deep(c)) {
+		to_planar(c, s, c->planar);
+		planar_to_i420(c->planar, &c->native, c->w, c->h, d);
+	} else {
+		yuv_to_i420(c, s, d);
+	}
+}
+
 int image_feed(struct image_conv *c, const void *src, size_t len)
 {
 	if (c->kind == K_RLE)
@@ -554,7 +716,7 @@ int image_to_bgr24(struct image_conv *c, const void *src, size_t len,
 	if (is_rgb(c)) {
 		rgb_to_bgr24(c, src, dst);
 	} else {
-		yuv_to_i420(c, src, c->scratch);
+		any_yuv_to_i420(c, src, c->scratch);
 		image_i420_to_bgr24(c->scratch, c->w, c->h, dst);
 	}
 	return 0;
@@ -575,8 +737,43 @@ int image_to_i420(struct image_conv *c, const void *src, size_t len,
 		rgb_to_bgr24(c, src, c->scratch);
 		image_bgr24_to_i420(c->scratch, c->w, c->h, dst);
 	} else {
-		yuv_to_i420(c, src, dst);
+		any_yuv_to_i420(c, src, dst);
 	}
+	return 0;
+}
+
+void image_native_layout(const struct image_conv *c, struct image_layout *l)
+{
+	*l = c->native;
+}
+
+int image_layout_equal(const struct image_layout *a,
+		       const struct image_layout *b)
+{
+	return a->sx == b->sx && a->sy == b->sy && a->bits == b->bits &&
+	       a->planes == b->planes;
+}
+
+size_t image_layout_size(const struct image_layout *l, int w, int h)
+{
+	size_t n = (size_t)w * h;
+
+	if (l->planes > 1)
+		n += 2 * sub(w, l->sx) * sub(h, l->sy);
+	return l->bits > 8 ? 2 * n : n;
+}
+
+int image_to_planar(struct image_conv *c, const void *src, size_t len,
+		    BYTE *dst)
+{
+	if (c->kind == K_RLE) {
+		decode_rle(c, src, len);
+		to_planar(c, NULL, dst);
+		return 0;
+	}
+	if (check_len(c, len))
+		return -1;
+	to_planar(c, src, dst);
 	return 0;
 }
 
@@ -638,12 +835,182 @@ void image_i420_to_bgr24(const BYTE *yuv, int w, int h, BYTE *d)
 		}
 }
 
+/*
+ * Native planes. A plane's sample i, at 8 bits a byte, else a little-
+ * endian word.
+ */
+static void put(BYTE *plane, size_t i, int bits, unsigned v)
+{
+	if (bits > 8) {
+		plane[2 * i] = (BYTE)v;
+		plane[2 * i + 1] = (BYTE)(v >> 8);
+	} else {
+		plane[i] = (BYTE)v;
+	}
+}
+
+static unsigned get(const BYTE *plane, size_t i, int bits)
+{
+	return bits > 8 ? rd16(plane + 2 * i) : plane[i];
+}
+
+/* v210: component k (0-11) of the 6-pixel group at g. */
+static unsigned v210_at(const BYTE *g, int k)
+{
+	return rd32(g + 4 * (k / 3)) >> (10 * (k % 3)) & 0x3ff;
+}
+
+static void to_planar(struct image_conv *c, const BYTE *s, BYTE *d)
+{
+	const struct image_layout *l = &c->native;
+	int w = c->w, h = c->h, bits = l->bits, b = bits > 8 ? 2 : 1;
+	size_t cw = sub(w, l->sx), ch = sub(h, l->sy);
+	BYTE *dy = d, *du = d + (size_t)w * h * b, *dv = du + cw * ch * b;
+
+	if (is_rgb(c) || c->kind == K_RLE) {
+		/* 4:4:4, each pixel's own colour. */
+		rgb_to_bgr24(c, s, c->scratch);
+		for (size_t i = 0; i < (size_t)w * h; i++) {
+			const BYTE *p = c->scratch + 3 * i;
+			int r = p[2], g = p[1], bl = p[0];
+			dy[i] = rgb_y(r, g, bl);
+			du[i] = (BYTE)(((-38 * r - 74 * g + 112 * bl + 128) >> 8) + 128);
+			dv[i] = (BYTE)(((112 * r - 94 * g - 18 * bl + 128) >> 8) + 128);
+		}
+		return;
+	}
+	switch (c->kind) {
+	case K_PLANAR:
+	case K_NV:
+		yuv_to_i420(c, s, d);
+		return;
+	case K_GREY:
+		memcpy(d, s, (size_t)w * h);
+		return;
+	case K_PACKED:
+		for (int y = 0; y < h; y++) {
+			const BYTE *row = s + y * c->stride;
+			for (int x = 0; x < w; x++)
+				dy[(size_t)y * w + x] =
+					row[4 * (x / 2) + (x & 1 ? c->y1 : c->y0)];
+			for (size_t x = 0; x < cw; x++) {
+				du[y * cw + x] = row[4 * x + c->u];
+				dv[y * cw + x] = row[4 * x + c->v];
+			}
+		}
+		return;
+	case K_PLANES: {
+		const BYTE *s1 = s + (size_t)w * h, *s2 = s1 + cw * ch;
+		memcpy(dy, s, (size_t)w * h);
+		memcpy(du, c->swap_uv ? s2 : s1, cw * ch);
+		memcpy(dv, c->swap_uv ? s1 : s2, cw * ch);
+		return;
+	}
+	case K_SEMI: {
+		int shift = 16 - bits;
+		const BYTE *uv = s + c->stride * h;
+		for (int y = 0; y < h; y++)
+			for (int x = 0; x < w; x++)
+				put(dy, (size_t)y * w + x, bits,
+				    rd16(s + y * c->stride + 2 * x) >> shift);
+		for (size_t i = 0; i < cw * ch; i++) {
+			put(du, i, bits, rd16(uv + 4 * i) >> shift);
+			put(dv, i, bits, rd16(uv + 4 * i + 2) >> shift);
+		}
+		return;
+	}
+	default:
+		break;
+	}
+	for (int y = 0; y < h; y++) {
+		const BYTE *row = s + y * c->stride;
+		for (int x = 0; x < w; x++) {
+			size_t i = (size_t)y * w + x;
+			const BYTE *p = row + 4 * x;
+			unsigned Y, U, V;
+			DWORD px;
+			switch (c->kind) {
+			case K_AYUV:
+				V = p[0]; U = p[1]; Y = p[2];
+				break;
+			case K_Y410:
+				px = rd32(p);
+				U = px & 0x3ff; Y = px >> 10 & 0x3ff; V = px >> 20 & 0x3ff;
+				break;
+			case K_V410:
+				px = rd32(p);
+				U = px >> 2 & 0x3ff; Y = px >> 12 & 0x3ff; V = px >> 22;
+				break;
+			case K_Y416:
+				p = row + 8 * x;
+				U = rd16(p); Y = rd16(p + 2); V = rd16(p + 4);
+				break;
+			default: {	/* K_V210 */
+				const BYTE *g = row + 16 * (x / 6);
+				Y = v210_at(g, 2 * (x % 6) + 1);
+				put(dy, i, bits, Y);
+				if (!(x & 1)) {
+					int j = x / 2 % 3;
+					size_t ci = (size_t)y * cw + x / 2;
+					put(du, ci, bits, v210_at(g, 4 * j));
+					put(dv, ci, bits, v210_at(g, 4 * j + 2));
+				}
+				continue;
+			}
+			}
+			put(dy, i, bits, Y);
+			put(du, i, bits, U);
+			put(dv, i, bits, V);
+		}
+	}
+}
+
+/*
+ * Native planes to I420: chroma averaged over the samples each 2x2 block
+ * of pixels covers, then every sample rounded to 8 bits.
+ */
+static void planar_to_i420(const BYTE *p, const struct image_layout *l,
+			   int w, int h, BYTE *d)
+{
+	int bits = l->bits, b = bits > 8 ? 2 : 1;
+	size_t cw = sub(w, l->sx), ch = sub(h, l->sy);
+	int ow = (w + 1) / 2, oh = (h + 1) / 2;
+	const BYTE *pu = p + (size_t)w * h * b, *pv = pu + cw * ch * b;
+	BYTE *du = d + (size_t)w * h, *dv = du + (size_t)ow * oh;
+	unsigned half = bits > 8 ? 1u << (bits - 9) : 0;
+
+#define TO8(v) ((BYTE)clamp8((int)(((v) + half) >> (bits - 8))))
+	for (size_t i = 0; i < (size_t)w * h; i++)
+		d[i] = TO8(get(p, i, bits));
+	if (l->planes < 3) {
+		memset(du, 128, 2 * (size_t)ow * oh);
+		return;
+	}
+	for (int y = 0; y < oh; y++)
+		for (int x = 0; x < ow; x++) {
+			size_t x0 = (size_t)(2 * x) >> l->sx;
+			size_t x1 = (size_t)(2 * x + 1 < w ? 2 * x + 1 : 2 * x) >> l->sx;
+			size_t y0 = (size_t)(2 * y) >> l->sy;
+			size_t y1 = (size_t)(2 * y + 1 < h ? 2 * y + 1 : 2 * y) >> l->sy;
+			unsigned su = 0, sv = 0, n = 0;
+			for (size_t cy = y0; cy <= y1; cy++)
+				for (size_t cx = x0; cx <= x1; cx++) {
+					su += get(pu, cy * cw + cx, bits);
+					sv += get(pv, cy * cw + cx, bits);
+					n++;
+				}
+			du[(size_t)y * ow + x] = TO8((su + n / 2) / n);
+			dv[(size_t)y * ow + x] = TO8((sv + n / 2) / n);
+		}
+#undef TO8
+}
+
 /* Packing: the inverse of the conversions above. */
 
 int image_can_pack(const struct image_conv *c)
 {
 	return (c->kind == K_PAL && c->bpp == 8) ||
-	       (c->kind != K_PAL && c->kind != K_RLE);
+	       (c->kind != K_PAL && c->kind != K_RLE && !is_deep(c));
 }
 
 void image_cube_palette(RGBQUAD pal[256])

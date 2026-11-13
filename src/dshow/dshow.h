@@ -106,6 +106,16 @@ typedef HRESULT (*dshow_output_fn)(void *opaque, IMediaSample *sample,
 HRESULT dshow_host_create(IBaseFilter *filter, const AM_MEDIA_TYPE *input,
 			  const AM_MEDIA_TYPE *output, dshow_output_fn callback,
 			  void *opaque, struct dshow_host **host);
+/*
+ * Lets the filter change the output connection's type while connected,
+ * as it does by calling the sink's ReceiveConnection again (LAV Video,
+ * once it knows the stream's pixel format): to a type accept says yes
+ * to. The sink's samples grow to the new type's size. Without it, such
+ * a reconnection is refused, and the filter keeps the type it has.
+ */
+typedef int (*dshow_accept_fn)(void *opaque, const AM_MEDIA_TYPE *mt);
+void dshow_host_set_accept(struct dshow_host *host, dshow_accept_fn accept,
+			   void *opaque);
 /* The output connection's type, as changed by any dynamic change since. */
 const AM_MEDIA_TYPE *dshow_host_output_type(const struct dshow_host *host);
 HRESULT dshow_host_push(struct dshow_host *host, const void *data, size_t size,

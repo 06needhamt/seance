@@ -726,6 +726,19 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 			echo "smoke: decoder's own output layout differs" >&2
 			exit 1
 		}
+		# --native: frames in the decoder's own layout, RGB as 4:4:4 YUV,
+		# the same through the codec and the filter; Y4M and YUV only.
+		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/rgb.avi" \
+			-o "$work/n1.y4m" --native 2>/dev/null
+		head -n 1 "$work/n1.y4m" | grep -q " C444\$"
+		$emu "$harness" decode "$fixtures/testfilter.ax" "$work/rgb.avi" \
+			-o "$work/n2.y4m" --native --output-format BGR24 2>/dev/null
+		cmp -s "$work/n1.y4m" "$work/n2.y4m" || {
+			echo "smoke: --native differs between codec and filter" >&2
+			exit 1
+		}
+		fails $emu "$harness" decode "$fixtures/testcodec.dll" \
+			"$work/rgb.avi" -o "$work/n.bgr" --native
 		# A filter that announces a new output format mid-stream (here YV12,
 		# with its chroma swapped) must be followed, not rejected; and one that
 		# doesn't flag its preroll frames must not leak them into the output.

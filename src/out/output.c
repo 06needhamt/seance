@@ -28,6 +28,8 @@ struct output {
 	DWORD rate, scale;	/* Y4M: for the header, written first */
 	char field_order;
 	int header_done;
+	int native;		/* Y4M, YUV: frames in `layout`, not I420 */
+	struct image_layout layout;
 };
 
 static const struct {
@@ -200,6 +202,28 @@ static int reserve(struct output *o, size_t len)
 	return 0;
 }
 
+/* A black frame in o's layout. */
+static void black(struct output *o)
+{
+	const struct image_layout *l = &o->layout;
+	size_t y = (size_t)o->w * o->h;
+
+	if (!o->native) {
+		memset(o->buf, 16, y);
+		memset(o->buf + y, 128, o->buf_len - y);
+		return;
+	}
+	for (size_t i = 0; i < o->buf_len >> (l->bits > 8); i++) {
+		unsigned v = (i < y ? 16u : 128u) << (l->bits - 8);
+		if (l->bits > 8) {
+			o->buf[2 * i] = (BYTE)v;
+			o->buf[2 * i + 1] = (BYTE)(v >> 8);
+		} else {
+			o->buf[i] = (BYTE)v;
+		}
+	}
+}
+
 struct output *output_open(const char *path, enum output_kind kind,
 			   int width, int height, DWORD rate, DWORD scale,
 			   int single)
@@ -220,12 +244,10 @@ struct output *output_open(const char *path, enum output_kind kind,
 
 	/* Start from a black frame, which output_repeat() can use. */
 	if (kind == OUT_Y4M || kind == OUT_YUV) {
-		size_t y = (size_t)width * height;
 		o->buf_len = image_i420_size(width, height);
 		if (reserve(o, o->buf_len))
 			goto fail;
-		memset(o->buf, 16, y);
-		memset(o->buf + y, 128, o->buf_len - y);
+		black(o);
 	} else if (kind == OUT_BGR || kind == OUT_BMP) {
 		o->buf_len = image_bgr24_size(width, height);
 		if (reserve(o, o->buf_len))
@@ -329,10 +351,23 @@ static int y4m_header(struct output *o)
 	o->header_done = 1;
 	if (!g)
 		g = 1;
+	char cs[16] = "420jpeg";
+	const struct image_layout *l = &o->layout;
+	if (o->native) {
+		const char *sub = l->sx ? (l->sy ? "420" : "422") : "444";
+		if (l->planes < 3 && l->bits > 8)
+			snprintf(cs, sizeof(cs), "mono%d", l->bits);
+		else if (l->planes < 3)
+			snprintf(cs, sizeof(cs), "mono");
+		else if (l->bits > 8)
+			snprintf(cs, sizeof(cs), "%sp%d", sub, l->bits);
+		else
+			snprintf(cs, sizeof(cs), "%s", l->sy ? "420jpeg" : sub);
+	}
 	int n = snprintf(hdr, sizeof(hdr),
-			 "YUV4MPEG2 W%d H%d F%lu:%lu I%c A1:1 C420jpeg\n",
+			 "YUV4MPEG2 W%d H%d F%lu:%lu I%c A1:1 C%s\n",
 			 o->w, o->h, o->rate ? o->rate / g : 25,
-			 o->rate ? o->scale / g : 1, o->field_order);
+			 o->rate ? o->scale / g : 1, o->field_order, cs);
 	if (write_all(o->fd, hdr, n, o->path)) {
 		o->failed = 1;
 		return -1;
@@ -352,6 +387,30 @@ void output_set_rate(struct output *o, DWORD rate, DWORD scale)
 		o->rate = rate;
 		o->scale = scale;
 	}
+}
+
+int output_set_layout(struct output *o, const struct image_layout *l)
+{
+	if (o->kind != OUT_Y4M && o->kind != OUT_YUV) {
+		vfw_set_error("only Y4M and raw YUV keep the decoder's layout");
+		return -1;
+	}
+	if (o->header_done || o->frames) {
+		vfw_set_error("the layout is set before the first frame");
+		return -1;
+	}
+	if (l->planes != 1 && l->planes != 3) {
+		vfw_set_error("bad layout");
+		return -1;
+	}
+	size_t len = image_layout_size(l, o->w, o->h);
+	if (reserve(o, len))
+		return -1;
+	o->native = 1;
+	o->layout = *l;
+	o->buf_len = len;
+	black(o);
+	return 0;
 }
 
 static int emit(struct output *o)
@@ -390,7 +449,19 @@ int output_write(struct output *o, struct image_conv *conv, const void *raw,
 	switch (o->kind) {
 	case OUT_Y4M:
 	case OUT_YUV:
-		r = image_to_i420(conv, raw, raw_len, o->buf);
+		if (!o->native) {
+			r = image_to_i420(conv, raw, raw_len, o->buf);
+			break;
+		}
+		struct image_layout l;
+		image_native_layout(conv, &l);
+		if (!image_layout_equal(&l, &o->layout)) {
+			vfw_set_error("the frames changed to a format of another "
+				      "layout (%s)", image_format_name(conv));
+			r = -1;
+			break;
+		}
+		r = image_to_planar(conv, raw, raw_len, o->buf);
 		break;
 	case OUT_BGR:
 	case OUT_BMP:

@@ -459,6 +459,364 @@ static void test_yuv_formats(void)
 	}
 }
 
+/*
+ * The deeper and less subsampled YUV formats, 6x2 pixels: each made from
+ * known planes, which image_to_planar() should give back exactly, and
+ * I420 (each 2x2 block's chroma the same, values exact at 8 bits).
+ */
+static unsigned y8(int x, int y) { return 16 + x + 6 * y; }
+static unsigned u8(int x, int y) { (void)y; return 100 + x / 2; }
+static unsigned v8(int x, int y) { (void)y; return 200 + x / 2; }
+
+static void put16(BYTE *p, unsigned v) { p[0] = (BYTE)v; p[1] = (BYTE)(v >> 8); }
+static void putn(BYTE *p, unsigned v, int b)
+{
+	if (b > 1)
+		put16(p, v);
+	else
+		*p = (BYTE)v;
+}
+
+static void put32(BYTE *p, DWORD v)
+{
+	put16(p, v & 0xffff);
+	put16(p + 2, v >> 16);
+}
+
+/* A sample of the picture at `bits`, as the format stores it. */
+static unsigned at(unsigned (*f)(int, int), int x, int y, int bits)
+{
+	return f(x, y) << (bits - 8);
+}
+
+/* Builds the 6x2 frame of fcc into d; returns its size. */
+static size_t make_deep(FOURCC fcc, BYTE *d)
+{
+	const int w = 6, h = 2;
+	size_t n = 0;
+
+	switch (fcc) {
+	case FCC('Y', 'V', '1', '6'):
+	case FCC('Y', 'V', '2', '4'): {
+		int sx = fcc == FCC('Y', 'V', '1', '6');
+		for (int y = 0; y < h; y++)
+			for (int x = 0; x < w; x++)
+				d[n++] = (BYTE)y8(x, y);
+		for (int p = 0; p < 2; p++)	/* V, then U */
+			for (int y = 0; y < h; y++)
+				for (int x = 0; x < w >> sx; x++)
+					d[n++] = (BYTE)(p ? u8 : v8)(x << sx, y);
+		return n;
+	}
+	case FCC('P', '0', '1', '0'): case FCC('P', '0', '1', '6'):
+	case FCC('P', '2', '1', '0'): case FCC('P', '2', '1', '6'): {
+		int bits = fcc == FCC('P', '0', '1', '0') ||
+			   fcc == FCC('P', '2', '1', '0') ? 10 : 16;
+		int sy = fcc == FCC('P', '0', '1', '0') || fcc == FCC('P', '0', '1', '6');
+		/* The value in the top bits. */
+		for (int y = 0; y < h; y++)
+			for (int x = 0; x < w; x++, n += 2)
+				put16(d + n, at(y8, x, y, bits) << (16 - bits));
+		for (int y = 0; y < h >> sy; y++)
+			for (int x = 0; x < w / 2; x++, n += 4) {
+				put16(d + n, at(u8, 2 * x, y << sy, bits) << (16 - bits));
+				put16(d + n + 2, at(v8, 2 * x, y << sy, bits) << (16 - bits));
+			}
+		return n;
+	}
+	case FCC('v', '2', '1', '0'):
+		/* One group of 6 a row, rows of 128 bytes. */
+		memset(d, 0, 256);
+		for (int y = 0; y < h; y++) {
+			unsigned c[12];
+			for (int k = 0; k < 6; k++)
+				c[2 * k + 1] = at(y8, k, y, 10);
+			for (int j = 0; j < 3; j++) {
+				c[4 * j] = at(u8, 2 * j, y, 10);
+				c[4 * j + 2] = at(v8, 2 * j, y, 10);
+			}
+			for (int k = 0; k < 4; k++)
+				put32(d + 128 * y + 4 * k, c[3 * k] | c[3 * k + 1] << 10 |
+					      (DWORD)c[3 * k + 2] << 20);
+		}
+		return 256;
+	default:
+		break;
+	}
+	for (int y = 0; y < h; y++)
+		for (int x = 0; x < w; x++) {
+			BYTE *p = d + n;
+			switch (fcc) {
+			case FCC('A', 'Y', 'U', 'V'):
+				p[0] = (BYTE)v8(x, y); p[1] = (BYTE)u8(x, y);
+				p[2] = (BYTE)y8(x, y); p[3] = 255;
+				n += 4;
+				break;
+			case FCC('Y', '4', '1', '0'):
+				put32(p, at(u8, x, y, 10) | at(y8, x, y, 10) << 10 |
+				      (DWORD)at(v8, x, y, 10) << 20 | 3u << 30);
+				n += 4;
+				break;
+			case FCC('v', '4', '1', '0'):
+				put32(p, at(u8, x, y, 10) << 2 | at(y8, x, y, 10) << 12 |
+				      (DWORD)at(v8, x, y, 10) << 22);
+				n += 4;
+				break;
+			default:	/* Y416 */
+				put16(p, at(u8, x, y, 16));
+				put16(p + 2, at(y8, x, y, 16));
+				put16(p + 4, at(v8, x, y, 16));
+				put16(p + 6, 0xffff);
+				n += 8;
+				break;
+			}
+		}
+	return n;
+}
+
+static void test_deep_formats(void)
+{
+	static const struct {
+		FOURCC fcc;
+		WORD bits;
+		struct image_layout l;
+	} fmts[] = {
+		{ FCC('Y', 'V', '1', '6'), 16, { 1, 0, 8, 3 } },
+		{ FCC('Y', 'V', '2', '4'), 24, { 0, 0, 8, 3 } },
+		{ FCC('P', '0', '1', '0'), 24, { 1, 1, 10, 3 } },
+		{ FCC('P', '0', '1', '6'), 24, { 1, 1, 16, 3 } },
+		{ FCC('P', '2', '1', '0'), 32, { 1, 0, 10, 3 } },
+		{ FCC('P', '2', '1', '6'), 32, { 1, 0, 16, 3 } },
+		{ FCC('A', 'Y', 'U', 'V'), 32, { 0, 0, 8, 3 } },
+		{ FCC('Y', '4', '1', '0'), 32, { 0, 0, 10, 3 } },
+		{ FCC('Y', '4', '1', '6'), 64, { 0, 0, 16, 3 } },
+		{ FCC('v', '4', '1', '0'), 32, { 0, 0, 10, 3 } },
+		{ FCC('v', '2', '1', '0'), 20, { 1, 0, 10, 3 } },
+	};
+	const int w = 6, h = 2;
+	BYTE frame[256], planes[6 * 2 * 3 * 2], want[sizeof(planes)];
+	BYTE i420[12 + 3 + 3], want420[sizeof(i420)];
+
+	/* I420: Y, then a U and V for each 2x2 block. */
+	for (int y = 0; y < h; y++)
+		for (int x = 0; x < w; x++)
+			want420[y * w + x] = (BYTE)y8(x, y);
+	for (int b = 0; b < 3; b++) {
+		want420[12 + b] = (BYTE)u8(2 * b, 0);
+		want420[15 + b] = (BYTE)v8(2 * b, 0);
+	}
+	for (size_t i = 0; i < sizeof(fmts) / sizeof(fmts[0]); i++) {
+		struct fmt f = make_fmt(w, h, fmts[i].bits, fmts[i].fcc);
+		struct image_conv *c = conv_for(&f);
+		CHECK(c);
+		if (!c)
+			continue;
+		const struct image_layout *l = &fmts[i].l;
+		struct image_layout got;
+		image_native_layout(c, &got);
+		CHECK(image_layout_equal(&got, l));
+		size_t len = make_deep(fmts[i].fcc, frame);
+		CHECK_EQ(image_frame_size(c), len);
+
+		/* The planes it is made from. */
+		size_t n = 0, cw = (size_t)w >> l->sx, ch = (size_t)h >> l->sy;
+		int b = l->bits > 8 ? 2 : 1;
+		for (int y = 0; y < h; y++)
+			for (int x = 0; x < w; x++, n += b)
+				putn(want + n, at(y8, x, y, l->bits), b);
+		for (int p = 0; p < 2; p++)
+			for (size_t y = 0; y < ch; y++)
+				for (size_t x = 0; x < cw; x++, n += b)
+					putn(want + n, at(p ? v8 : u8, (int)x << l->sx,
+							  (int)y << l->sy, l->bits), b);
+		CHECK_EQ(image_layout_size(l, w, h), n);
+		memset(planes, 0xee, sizeof(planes));
+		CHECK_EQ(image_to_planar(c, frame, len, planes), 0);
+		if (memcmp(planes, want, n)) {
+			fprintf(stderr, "%s: planes differ\n", image_format_name(c));
+			CHECK(0);
+		}
+		memset(i420, 0, sizeof(i420));
+		CHECK_EQ(image_to_i420(c, frame, len, i420), 0);
+		if (memcmp(i420, want420, sizeof(i420))) {
+			fprintf(stderr, "%s: I420 differs\n", image_format_name(c));
+			CHECK(0);
+		}
+		CHECK_EQ(image_to_planar(c, frame, len - 1, planes), -1);
+		/* Read as a source, but not written as one. */
+		CHECK(!image_can_pack(c));
+		image_conv_free(c);
+	}
+
+	/* Rounding to 8 bits, and 4:4:4 chroma averaged over a 2x2 block. */
+	struct fmt f = make_fmt(2, 2, 32, FCC('Y', '4', '1', '0'));
+	struct image_conv *c = conv_for(&f);
+	if (c) {
+		BYTE src[16];
+		const unsigned u[4] = { 400, 401, 402, 405 };	/* mean 402 */
+		for (int i = 0; i < 4; i++)
+			put32(src + 4 * i, u[i] | (DWORD)(1021 + i % 2) << 10 |
+			      (DWORD)1023 << 20);
+		CHECK_EQ(image_to_i420(c, src, 16, i420), 0);
+		CHECK_EQ(i420[0], 255);		/* 1021 / 4 = 255.25 */
+		CHECK_EQ(i420[1], 255);		/* 1022 / 4, up, held at 255 */
+		CHECK_EQ(i420[4], 101);		/* 402 / 4 = 100.5, up */
+		CHECK_EQ(i420[5], 255);
+		image_conv_free(c);
+	}
+
+	/* RGB natively: 4:4:4 at 8 bits, each pixel its own colour. */
+	f = make_fmt(2, 1, 24, BI_RGB);
+	c = conv_for(&f);
+	if (c) {
+		BYTE src[8] = { 0, 0, 255, 255, 255, 255 };	/* red, white */
+		struct image_layout l;
+		image_native_layout(c, &l);
+		CHECK(l.sx == 0 && l.sy == 0 && l.bits == 8 && l.planes == 3);
+		CHECK_EQ(image_to_planar(c, src, sizeof(src), planes), 0);
+		CHECK_EQ(planes[0], 82);	/* red: Y 82, U 90, V 240 */
+		CHECK_EQ(planes[1], 235);
+		CHECK_EQ(planes[2], 90);
+		CHECK_EQ(planes[3], 128);
+		CHECK_EQ(planes[4], 240);
+		CHECK_EQ(planes[5], 128);
+		image_conv_free(c);
+	}
+
+	/* Grey: one plane. */
+	f = make_fmt(2, 2, 8, FCC('Y', '8', '0', '0'));
+	c = conv_for(&f);
+	if (c) {
+		struct image_layout l;
+		image_native_layout(c, &l);
+		CHECK_EQ(l.planes, 1);
+		CHECK_EQ(image_layout_size(&l, 2, 2), 4);
+		image_conv_free(c);
+	}
+
+	/* Rows wider than the picture: cropped, for formats of whole rows. */
+	f = make_fmt(8, 2, 32, FCC('Y', '4', '1', '0'));
+	c = conv_for(&f);
+	if (c) {
+		BYTE wide[8 * 2 * 4], six[6 * 2 * 4];
+		make_deep(FCC('Y', '4', '1', '0'), six);
+		memset(wide, 0x55, sizeof(wide));
+		memcpy(wide, six, 24);
+		memcpy(wide + 32, six + 24, 24);
+		CHECK_EQ(image_conv_crop(c, 9), -1);
+		CHECK_EQ(image_conv_crop(c, 6), 0);
+		CHECK_EQ(image_width(c), 6);
+		CHECK_EQ(image_frame_size(c), sizeof(wide));
+		struct fmt g = make_fmt(6, 2, 32, FCC('Y', '4', '1', '0'));
+		struct image_conv *narrow = conv_for(&g);
+		BYTE a[6 * 2 * 3 * 2], b[sizeof(a)];
+		CHECK_EQ(image_to_planar(c, wide, sizeof(wide), a), 0);
+		if (narrow) {
+			CHECK_EQ(image_to_planar(narrow, six, sizeof(six), b), 0);
+			CHECK(!memcmp(a, b, sizeof(a)));
+			image_conv_free(narrow);
+		}
+		image_conv_free(c);
+	}
+	f = make_fmt(8, 2, 24, FCC('P', '0', '1', '0'));
+	c = conv_for(&f);
+	if (c) {
+		CHECK_EQ(image_conv_crop(c, 6), -1);
+		CHECK_EQ(image_conv_crop(c, 8), 0);
+		image_conv_free(c);
+	}
+}
+
+/* Y4M and raw YUV in a converter's own layout. */
+static void test_native_output(void)
+{
+	static const struct {
+		struct image_layout l;
+		const char *cs;
+	} layouts[] = {
+		{ { 1, 1, 8, 3 }, "C420jpeg" },
+		{ { 1, 0, 8, 3 }, "C422" },
+		{ { 0, 0, 8, 3 }, "C444" },
+		{ { 1, 1, 10, 3 }, "C420p10" },
+		{ { 1, 0, 10, 3 }, "C422p10" },
+		{ { 0, 0, 10, 3 }, "C444p10" },
+		{ { 0, 0, 16, 3 }, "C444p16" },
+		{ { 1, 1, 8, 1 }, "Cmono" },
+	};
+	char want[128];
+	void *data;
+	size_t len;
+
+	for (size_t i = 0; i < sizeof(layouts) / sizeof(layouts[0]); i++) {
+		struct output *o = output_open(path_of("n.y4m"), OUT_Y4M, 6, 2,
+					       25, 1, 0);
+		CHECK(o);
+		if (!o)
+			continue;
+		CHECK_EQ(output_set_layout(o, &layouts[i].l), 0);
+		/* Black in that layout, repeated as for a dropped frame. */
+		CHECK_EQ(output_repeat(o), 0);
+		CHECK_EQ(output_close(o), 0);
+		int n = snprintf(want, sizeof(want),
+				 "YUV4MPEG2 W6 H2 F25:1 Ip A1:1 %s\nFRAME\n",
+				 layouts[i].cs);
+		size_t size = image_layout_size(&layouts[i].l, 6, 2);
+		CHECK_EQ(vfw_read_file(path_of("n.y4m"), &data, &len), 0);
+		CHECK_EQ(len, (size_t)n + size);
+		if (len == (size_t)n + size) {
+			const BYTE *p = (const BYTE *)data + n;
+			CHECK(!memcmp(data, want, n));
+			int b = layouts[i].l.bits > 8 ? 2 : 1;
+			unsigned sh = layouts[i].l.bits - 8;
+			CHECK_EQ(b > 1 ? p[0] | p[1] << 8 : p[0], 16u << sh);
+			p += size - b;	/* the last chroma sample, or luma */
+			CHECK_EQ(b > 1 ? p[0] | p[1] << 8 : p[0],
+				 (layouts[i].l.planes > 1 ? 128u : 16u) << sh);
+		}
+		free(data);
+	}
+
+	/* Frames: a Y410 one written as C444p10 planes. */
+	struct fmt f = make_fmt(6, 2, 32, FCC('Y', '4', '1', '0'));
+	struct image_conv *c = conv_for(&f);
+	struct fmt g = make_fmt(6, 2, 16, FCC('Y', 'U', 'Y', '2'));
+	struct image_conv *yuy2 = conv_for(&g);
+	BYTE frame[48], planes[72], yuy2_frame[24] = { 0 };
+	struct image_layout l;
+	if (c && yuy2) {
+		make_deep(FCC('Y', '4', '1', '0'), frame);
+		CHECK_EQ(image_to_planar(c, frame, sizeof(frame), planes), 0);
+		image_native_layout(c, &l);
+		struct output *o = output_open(path_of("n.yuv"), OUT_YUV, 6, 2,
+					       25, 1, 0);
+		CHECK(o);
+		if (o) {
+			CHECK_EQ(output_set_layout(o, &l), 0);
+			CHECK_EQ(output_write(o, c, frame, sizeof(frame)), 0);
+			/* Too late to change, and a frame of another layout. */
+			CHECK_EQ(output_set_layout(o, &l), -1);
+			CHECK_EQ(output_write(o, yuy2, yuy2_frame,
+					      sizeof(yuy2_frame)), -1);
+			output_close(o);
+			CHECK_EQ(vfw_read_file(path_of("n.yuv"), &data, &len), 0);
+			CHECK_EQ(len, sizeof(planes));
+			CHECK(len == sizeof(planes) && !memcmp(data, planes, len));
+			free(data);
+		}
+		/* Only Y4M and raw YUV take a layout. */
+		o = output_open(path_of("n.bgr"), OUT_BGR, 6, 2, 25, 1, 0);
+		if (o) {
+			CHECK_EQ(output_set_layout(o, &l), -1);
+			output_close(o);
+		}
+	}
+	image_conv_free(c);
+	image_conv_free(yuy2);
+	cleanup("n.y4m");
+	cleanup("n.yuv");
+	cleanup("n.bgr");
+}
+
 static void test_refused(void)
 {
 	struct fmt f = make_fmt(16, 16, 24, FCC('M', 'J', 'P', 'G'));
@@ -903,6 +1261,8 @@ int main(void)
 	test_palette();
 	test_rle();
 	test_yuv_formats();
+	test_deep_formats();
+	test_native_output();
 	test_refused();
 	test_bmp_paths();
 	test_outputs();

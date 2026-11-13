@@ -8,10 +8,19 @@
  *   or top-down by the sign of biHeight; BI_BITFIELDS 16 and 32 bits;
  *   BI_RLE8 and BI_RLE4 (Microsoft RLE, delta frames included);
  *   YUV FOURCCs: YUY2 (YUYV, YUNV, V422), UYVY (Y422, UYNV, HDYC), YVYU,
- *   I420 (IYUV), YV12, NV12, NV21, and Y800 (Y8, GREY).
+ *   I420 (IYUV), YV12, NV12, NV21, and Y800 (Y8, GREY);
+ *   deeper or less subsampled YUV: P010, P016 (4:2:0) and P210, P216
+ *   (4:2:2), 16-bit samples with the value in the top bits; YV16 (4:2:2)
+ *   and YV24 (4:4:4) planar; AYUV, Y410, Y416 and v410 (4:4:4 packed,
+ *   Y410 and v410 10 bits); and v210 (4:2:2, 10 bits).
  *
  * YUV is BT.601 limited range. Chroma is subsampled by averaging each 2x2
  * block (centred siting, as Y4M's C420jpeg says); odd sizes are allowed.
+ * Deeper samples are rounded to 8 bits.
+ *
+ * Besides the two output layouts, a frame can be had in planes as the
+ * input has it (image_to_planar): its own chroma subsampling and depth,
+ * RGB as 4:4:4 YUV.
  */
 #ifndef VFW_OUT_IMAGE_H
 #define VFW_OUT_IMAGE_H
@@ -30,6 +39,14 @@ struct image_conv;
 struct image_conv *image_conv_new(const BITMAPINFOHEADER *bih,
 				  size_t fmt_size);
 void image_conv_free(struct image_conv *c);
+
+/*
+ * Narrows the picture to its first width pixels (no more than it has),
+ * frames keeping their rows: a DirectShow type whose rows are wider than
+ * its picture (rcTarget), as LAV Video pads v210. For formats stored as
+ * whole rows (RGB, packed YUV); the planar ones refuse. Returns 0 or -1.
+ */
+int image_conv_crop(struct image_conv *c, int width);
 
 int image_width(const struct image_conv *c);
 int image_height(const struct image_conv *c);
@@ -94,6 +111,30 @@ void image_cube_palette(RGBQUAD pal[256]);
  */
 int image_resample(const BYTE *src, int iw, int ih, BYTE *dst, int ow,
 		   int oh, int bpp);
+
+/*
+ * A planar YUV layout: the Y plane, then U and V (none for grey), each
+ * plane's rows packed. Samples take a byte at 8 bits, else two (little-
+ * endian, the value in the low bits, as Y4M's C420p10 and the like have).
+ */
+struct image_layout {
+	int sx, sy;	/* chroma subsampling: log2 of its step across, down */
+	int bits;	/* 8, 10 or 16 */
+	int planes;	/* 3, or 1 for grey */
+};
+
+/* The layout the input has (RGB: 4:4:4 at 8 bits). */
+void image_native_layout(const struct image_conv *c, struct image_layout *l);
+int image_layout_equal(const struct image_layout *a,
+		       const struct image_layout *b);
+size_t image_layout_size(const struct image_layout *l, int width, int height);
+
+/*
+ * Converts one frame of len bytes to its native layout, written to dst
+ * (image_layout_size() bytes). Returns 0 or -1.
+ */
+int image_to_planar(struct image_conv *c, const void *src, size_t len,
+		    BYTE *dst);
 
 /* Direct conversions between the two output layouts. */
 void image_bgr24_to_i420(const BYTE *bgr, int width, int height, BYTE *dst);

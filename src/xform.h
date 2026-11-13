@@ -92,6 +92,13 @@ HRESULT xform_encoder_options(struct xform *x,
 HRESULT xform_connect(struct xform *x, const AM_MEDIA_TYPE *in,
 		      const AM_MEDIA_TYPE *out, xform_output_fn callback,
 		      void *opaque);
+/*
+ * For filters connected from here on: the output types the filter may
+ * change to by reconnecting (dshow_host_set_accept). DMOs and ACM
+ * drivers don't reconnect.
+ */
+typedef int (*xform_accept_fn)(void *opaque, const AM_MEDIA_TYPE *mt);
+void xform_set_accept(struct xform *x, xform_accept_fn accept, void *opaque);
 /* The output type connected, with any codec data a DMO encoder added. */
 const AM_MEDIA_TYPE *xform_output_type(const struct xform *x);
 void xform_disconnect(struct xform *x);

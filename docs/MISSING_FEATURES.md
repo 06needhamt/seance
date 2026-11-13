@@ -74,7 +74,7 @@ ffmpeg can't encode).** Results where the decoder runs:
 |---|---|
 | Bit-identical to ffmpeg | H.264 (also with B-frames; `H264 h264 X264 x264 avc1 AVC1 CCV1`), HEVC (`HEVC HVC1 HM10 H265`), MPEG-1, MPEG-2 (`MPG2 mpg2 MP2V`), MPEG-4 ASP (24 FOURCCs: `FMP4 XVID DIVX DX50 MP4V M4S2 3IVX BLZ0 SEDG ...`), MS MPEG-4 v2 and v3 (19 FOURCCs, `DIV2`..`DIV6`, `MPG3`, `DVX3`), WMV1, WMV2, FLV1, H.263 and H.263+, H.261, JPEG 2000 (5 FOURCCs), DV PAL (12 FOURCCs), Theora, VP8, VP9, AV1 (libaom and SVT), FFVHuff, FFV1, Snow, Ut Video 4:2:0, ASV1, ASV2, WebP (as YV12), MJPEG (raw YUV planes) |
 | Bit-identical as BGR24 | PNG, TIFF, Targa, BMP, GIF, zlib, ZMBV, QuickTime RLE, Cinepak, MS Video 1 (`CRAM MSVC WHAM`), Apple RPZA, FFV1 RGB, Ut Video RGB and RGBA, Hap1, Hap5, HapY, lossless JPEG (`LJPG`) |
-| 42 to 62 dB (10-bit, 4:2:2 or 4:4:4 sources compared after conversion to 8-bit 4:2:0) | H.264, HEVC and VP9 at 10 bits, ProRes (all five profiles, `apch apcn apcs apco ap4h ap4x`), DNxHD at 1080p, CineForm (`CFHD`), MagicYUV, HuffYUV, Ut Video 4:2:2 and 4:4:4, JPEG-LS, DV 4:1:1 and DVCPRO50, SVQ1 |
+| 42 to 62 dB (10-bit, 4:2:2 or 4:4:4 sources compared after conversion to 8-bit 4:2:0; with `--native`, bit-identical, see below) | H.264, HEVC and VP9 at 10 bits, ProRes (all five profiles, `apch apcn apcs apco ap4h ap4x`), DNxHD at 1080p, CineForm (`CFHD`), MagicYUV, HuffYUV, Ut Video 4:2:2 and 4:4:4, JPEG-LS, DV 4:1:1 and DVCPRO50, SVQ1 |
 | Decodes; differs from ffmpeg | `smc` (Apple Graphics): all black, on the 32-bit LAV too (see below). VC-2 (`drac`/`vcrd`) from a 10-bit source: 30 dB from ffmpeg's decode, the same on the 32-bit LAV (see below). `GEOV`: GeoVision's MPEG-4 variant, not the bitstream made |
 | Refused by LAV's input pin (on the 32-bit LAV too) | `v210`, uncompressed YUY2, UYVY, YV12, NV12, BGR24, `CLJR` |
 | Not testable | RealVideo 1.0 and 2.0 (`RV10`, `RV20`): ffmpeg can't decode the AVI it writes, and LAV rejects it. MS MPEG-4 v1 (`MPG4 MP41 DIV1`): ffmpeg has no encoder. `MJPB`, `VP70`, `VP8X`: these FOURCCs name other codecs, and the clips are not their bitstreams |
@@ -261,10 +261,29 @@ the stream's rate). After `--start`, the first frame's fields differ, as
 YADIF has no earlier frame there. An AVI of two video streams decodes
 either, identically, with `--stream`.
 
+With `decode --native` (seance64, LAV Video 64-bit), the decoder's own
+format is written as it is: 10-bit and 12-bit, 4:2:2 and 4:4:4 come out
+as `C420p10`, `C422p10`, `C444p10`, `C444p16`, `C422` and `C444`, and are
+bit-identical to ffmpeg's decode at the same pixel format for H.264
+(10-bit; 4:2:2 and 4:4:4, 8 and 10 bits), HEVC (10-bit 4:2:0 and 4:2:2,
+12-bit 4:4:4, which LAV gives as Y416), VP9 10-bit, ProRes (all five
+profiles; 4444 as Y416), CineForm, DNxHD, DVCPRO50, HuffYUV, MagicYUV and
+Ut Video 4:2:2 and 4:4:4. DV NTSC (4:1:1) and SVQ1 (4:1:0) aren't layouts
+LAV gives, so it converts them, to 4:2:2 and 4:2:0 (45 and 49 dB). The
+32-bit LAV gives the same for the H.264 streams. LAV connects as NV12
+before it has seen the stream, then calls the sink's `ReceiveConnection`
+with its own format (P010, P210, YV24, Y410, Y416, YUY2) and sends the
+frames in it without marking them: `--native` takes that reconnection, as
+a renderer does. Forced with `--output-format`, LAV's P010, P016, P210,
+P216, YV24, Y410, Y416 and v410 are read exactly (identical where the
+format keeps the stream's sampling and depth); it refuses YV16 and AYUV.
+Its v210 is delivered only at widths that are a multiple of 48 (192x144
+identical): at 176 its own type is 208 pixels wide in 512-byte rows, and
+it sends nothing, which decode now reports as a failure.
+
 Not yet exercised: VC-1 / WMV3 (no encoder to make a stream with here),
-field-coded streams (ffmpeg makes no PAFF or MPEG-2 field pictures), 10-bit
-and 4:4:4 output (the standard output list is 8-bit), and LAV Video's other
-settings (format selection, dithering, the other deinterlacers).
+field-coded streams (ffmpeg makes no PAFF or MPEG-2 field pictures), and
+LAV Video's other settings (dithering, the other deinterlacers).
 
 ### LAV Audio (DMO/audio plan, Phase 6)
 
