@@ -403,7 +403,10 @@ static int is_rgb(const BITMAPINFOHEADER *b)
 
 /*
  * The input the codec gets: the source's format if it takes it, else the
- * first standard one it does. Given again, for a codec that wouldn't
+ * first standard one it does. Top-down RGB goes as the bottom-up standard
+ * format of its depth if the codec takes that: hosts give codecs bottom-up
+ * RGB, and some that say they take top-down copy its negative height into
+ * the format they make (avimszh.dll), which nothing then decodes. Given again, for a codec that wouldn't
  * begin with the one given (retry), it goes on past those f->tried, RGB
  * first: one that takes YUV when asked but won't begin with it may take it
  * in name only (iscc.dll reads YUY2 as 16-bit RGB).
@@ -422,7 +425,18 @@ static int choose_input(HIC hic, const struct source *src, const char *forced,
 	int unsupported = 1;
 	LRESULT r;
 
-	if (!forced && !retry) {
+	int top_down = native->biCompression == BI_RGB &&
+		       native->biBitCount >= 24 && native->biHeight < 0;
+
+	/*
+	 * Passes: -1, the bottom-up twin of top-down RGB; 0 (on a retry
+	 * only), RGB; 1, the source's own format and then every standard one.
+	 */
+	for (int pass = retry ? 0 : !forced && top_down ? -1 : 1; pass < 2;
+	     pass++) {
+	if (pass == 0 && !retry)
+		continue;
+	if (pass == 1 && !forced && !retry) {
 		r = ic_send(hic, ICM_COMPRESS_QUERY, (DWORD_PTR)native, 0);
 		if (r == ICERR_OK) {
 			memcpy(&f->fmt, native, n);
@@ -431,10 +445,13 @@ static int choose_input(HIC hic, const struct source *src, const char *forced,
 			f->tried |= NATIVE;
 			return 0;
 		}
-		unsupported = r == ICERR_UNSUPPORTED;
+		if (r != ICERR_UNSUPPORTED)
+			unsupported = 0;
 	}
-	for (int pass = retry ? 0 : 1; pass < 2; pass++)
 	for (unsigned i = 0; (name = vfw_std_format(i, w, h, &t)); i++) {
+		if (pass < 0 && (t.bih.biCompression != BI_RGB ||
+				 t.bih.biBitCount != native->biBitCount))
+			continue;
 		if (retry && ((f->tried & (1u << i)) ||
 			      (!pass && !is_rgb(&t.bih))))
 			continue;
@@ -483,6 +500,7 @@ static int choose_input(HIC hic, const struct source *src, const char *forced,
 			return -1;
 		}
 		return 0;
+	}
 	}
 	if (forced)
 		vfw_set_error("unknown codec input format '%s'", forced);

@@ -3,9 +3,11 @@
 """An AVI of audio ffmpeg won't write into one (ALAC, TrueHD, MLP: no wave
 format tag stands for them): ffmpeg encodes into Matroska, and the packets
 and the codec's extra data go into an AVI by hand, one packet a chunk,
-under a tag of no meaning. seance's decode --subtype says what it is.
+under a tag of no meaning (seance's decode --subtype then says what it
+is), or under the codec's own tag. ffmpeg's own AVI of TTA, say, lacks
+the TTA1 header its decoder needs: Matroska's demuxer rebuilds it.
 
-usage: mkavi_audio.py <in.mka> <out.avi>"""
+usage: mkavi_audio.py <in.mka> <out.avi> [tag]"""
 import json, struct, subprocess, sys
 
 TAG = 0x4143  # nobody's
@@ -28,8 +30,9 @@ def samples_per_packet(src, pts, rate):
     return int(frames[0]["nb_samples"])
 
 
-def build(src, dst):
-    """Writes dst, an AVI of src's first audio stream, one packet a chunk."""
+def build(src, dst, tag=TAG):
+    """Writes dst, an AVI of src's first audio stream, one packet a chunk,
+    under wave format tag tag."""
     info = json.loads(subprocess.check_output(
         ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_streams",
          "-show_packets", "-show_data", "-of", "json", src]))
@@ -58,7 +61,7 @@ def build(src, dst):
         at += len(c)
 
     byte_rate = sum(sizes) * rate // (len(sizes) * frame)
-    wfx = struct.pack("<HHIIHHH", TAG, channels, rate, byte_rate, frame,
+    wfx = struct.pack("<HHIIHHH", tag, channels, rate, byte_rate, frame,
                       bits, len(extra)) + extra
     strh = struct.pack("<4s4sIHHIIIIIIIIHHHH", b"auds", b"\0\0\0\0", 0, 0, 0,
                        0, frame, rate, 0, len(sizes), max(sizes), 0xffffffff,
@@ -74,6 +77,6 @@ def build(src, dst):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
+    if len(sys.argv) not in (3, 4):
         sys.exit(__doc__)
-    build(sys.argv[1], sys.argv[2])
+    build(sys.argv[1], sys.argv[2], *[int(t, 0) for t in sys.argv[3:]])

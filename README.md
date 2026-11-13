@@ -665,7 +665,10 @@ area it covers when shrinking (up to 30 times smaller).
 
 Frames go to the codec as they are if it takes them
 (`ICM_COMPRESS_QUERY`); otherwise they are converted to the first standard
-format it takes, or to `--codec-input`. A codec that takes an input when
+format it takes, or to `--codec-input`. Top-down RGB (raw frames, FFmpeg's
+`rawvideo` AVIs) is first turned over into bottom-up RGB of its depth, as
+Windows hosts give codecs: some say they take top-down and then write its
+negative height into the format they make, which nothing decodes. A codec that takes an input when
 asked but won't begin with it (`ICM_COMPRESS_BEGIN`) is given another it
 takes, RGB first; one that begins with none at the picture's size is said
 to, with the `--pad` or `--crop` that helps. PAL8, the last tried, gets each

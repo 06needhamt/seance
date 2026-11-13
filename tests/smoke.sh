@@ -493,6 +493,14 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		"$fixtures/testcodec.dll" "$work/h24.bgr" --input-format BGR24 \
 		--size 16x24 -o "$work/crop.avi" --crop 16 2>/dev/null
 	$emu "$harness" avi "$work/crop.avi" | grep -q "16x16, 24 bits, 'TST0'"
+	# Top-down RGB goes to a codec as bottom-up, whose format then has a
+	# positive height, and comes back as it went in.
+	$emu "$harness" encode "$fixtures/testcodec.dll" "$work/h24.bgr" \
+		--input-format BGR24 --size 16x24 -o "$work/up.avi" 2>/dev/null
+	$emu "$harness" avi "$work/up.avi" | grep -q "16x24, 24 bits, 'TST0'"
+	$emu "$harness" decode "$fixtures/testcodec.dll" "$work/up.avi" \
+		-o "$work/up.bgr" 2>/dev/null
+	cmp -s "$work/h24.bgr" "$work/up.bgr"
 	fails $emu "$harness" encode "$fixtures/testcodec.dll" "$work/h24.y4m" \
 		-o "$work/x.avi" --pad 3
 	# One that takes a single size names it, and --scale resizes to it.
