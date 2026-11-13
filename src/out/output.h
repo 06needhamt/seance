@@ -66,6 +66,15 @@ struct output *output_open(const char *path, enum output_kind kind,
 int output_write(struct output *o, struct image_conv *conv, const void *raw,
 		 size_t raw_len);
 
+/*
+ * A Y4M file's field order, given before its first frame: 'p'
+ * (progressive, the default), 't' (top field first) or 'b'.
+ */
+void output_set_field_order(struct output *o, char order);
+
+/* A Y4M file's frame rate, given before its first frame. */
+void output_set_rate(struct output *o, DWORD rate, DWORD scale);
+
 /* Writes the last frame again (for dropped, zero-length frames). */
 int output_repeat(struct output *o);
 

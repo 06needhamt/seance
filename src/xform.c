@@ -282,11 +282,22 @@ static HRESULT from_sample(void *opaque, IMediaSample *sample,
 	o.sync = sample->lpVtbl->IsSyncPoint(sample) == S_OK;
 	o.preroll = sample->lpVtbl->IsPreroll(sample) == S_OK;
 	o.timed = SUCCEEDED(sample->lpVtbl->GetTime(sample, &o.start, &o.stop));
-	TRACE("xform: output %zu bytes at %lld..%lld%s%s%s%s", o.size,
-	      o.timed ? (long long)o.start : -1LL,
+	IMediaSample2 *s2 = NULL;
+	if (SUCCEEDED(sample->lpVtbl->QueryInterface(sample, &IID_IMediaSample2,
+						     (void **)&s2))) {
+		AM_SAMPLE2_PROPERTIES p = { 0 };
+		if (SUCCEEDED(s2->lpVtbl->GetProperties(s2, sizeof(p),
+							(BYTE *)&p))) {
+			o.has_type_flags = 1;
+			o.type_flags = p.dwTypeSpecificFlags;
+		}
+		s2->lpVtbl->Release(s2);
+	}
+	TRACE("xform: output %zu bytes at %lld..%lld%s%s%s%s, type flags 0x%lx",
+	      o.size, o.timed ? (long long)o.start : -1LL,
 	      o.timed ? (long long)o.stop : -1LL, o.timed ? "" : " (untimed)",
 	      o.sync ? ", sync" : "", o.preroll ? ", preroll" : "",
-	      new_type ? ", new type" : "");
+	      new_type ? ", new type" : "", (unsigned long)o.type_flags);
 	return x->callback ? x->callback(x->opaque, &o, new_type) : S_OK;
 }
 

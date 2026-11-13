@@ -638,7 +638,12 @@ is used. A sample that carries a new media type is followed when only the pixel
 format changes. For `--start`, the DirectShow graph is flushed and given a new
 segment before frames are preroll-fed from the preceding keyframe; frames
 before the start (by time stamp) or past `--frames` are dropped even if the
-filter doesn't flag them as preroll. Output and EOS may arrive
+filter doesn't flag them as preroll. A filter whose output type is
+interlaced (`VIDEOINFOHEADER2`) says how each frame is: a Y4M file takes
+the first frame's field order (`It`, `Ib`, or `Ip` for progressive). A
+filter that makes several frames of each, such as LAV Video's deinterlacer
+giving a frame per field, is followed by its first frame's length: the Y4M
+rate is multiplied, and `--frames` counts the stream's frames. Output and EOS may arrive
 from a filter worker thread; EOS waits are bounded by `VFW_TIMEOUT` (five
 seconds by default).
 

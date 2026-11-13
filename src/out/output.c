@@ -25,6 +25,9 @@ struct output {
 	size_t buf_len, buf_cap;
 	unsigned long frames;
 	int failed;
+	DWORD rate, scale;	/* Y4M: for the header, written first */
+	char field_order;
+	int header_done;
 };
 
 static const struct {
@@ -247,18 +250,9 @@ struct output *output_open(const char *path, enum output_kind kind,
 		}
 	}
 
-	if (kind == OUT_Y4M) {
-		char hdr[128];
-		unsigned long g = gcd(rate, scale);
-		if (!g)
-			g = 1;
-		int n = snprintf(hdr, sizeof(hdr),
-				 "YUV4MPEG2 W%d H%d F%lu:%lu Ip A1:1 C420jpeg\n",
-				 width, height, rate ? rate / g : 25,
-				 rate ? scale / g : 1);
-		if (write_all(o->fd, hdr, n, path))
-			goto fail;
-	}
+	o->rate = rate;
+	o->scale = scale;
+	o->field_order = 'p';
 	return o;
 
 fail:
@@ -324,9 +318,48 @@ static int write_bmp(struct output *o)
 }
 
 /* Writes o->buf as the next frame. */
+/* A Y4M file's header, before its first frame (or at the end). */
+static int y4m_header(struct output *o)
+{
+	char hdr[128];
+	unsigned long g = gcd(o->rate, o->scale);
+
+	if (o->kind != OUT_Y4M || o->header_done)
+		return 0;
+	o->header_done = 1;
+	if (!g)
+		g = 1;
+	int n = snprintf(hdr, sizeof(hdr),
+			 "YUV4MPEG2 W%d H%d F%lu:%lu I%c A1:1 C420jpeg\n",
+			 o->w, o->h, o->rate ? o->rate / g : 25,
+			 o->rate ? o->scale / g : 1, o->field_order);
+	if (write_all(o->fd, hdr, n, o->path)) {
+		o->failed = 1;
+		return -1;
+	}
+	return 0;
+}
+
+void output_set_field_order(struct output *o, char order)
+{
+	if (!o->header_done)
+		o->field_order = order;
+}
+
+void output_set_rate(struct output *o, DWORD rate, DWORD scale)
+{
+	if (!o->header_done) {
+		o->rate = rate;
+		o->scale = scale;
+	}
+}
+
 static int emit(struct output *o)
 {
 	int r;
+
+	if (y4m_header(o))
+		return -1;
 
 	switch (o->kind) {
 	case OUT_BMP:
@@ -386,7 +419,7 @@ unsigned long output_frames(const struct output *o)
 
 int output_close(struct output *o)
 {
-	int r = o->failed ? -1 : 0;
+	int r = o->failed || y4m_header(o) ? -1 : 0;
 
 	if (o->fd > STDOUT_FILENO && close(o->fd) && !r) {
 		vfw_set_error("%s: %s", o->path, strerror(errno));

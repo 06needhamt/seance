@@ -248,10 +248,23 @@ wrong layout in `_fstat` and is now MSVCRT's.
 | CryptoAPI hashes, keys; NCrypt | There is no hashing algorithm to create and no key storage provider to open. |
 | Hardware decoding | Every route (DXVA2, D3D11, Quick Sync, CUDA) reports no hardware and LAV decodes in software. |
 
+Interlaced streams (`run_video.py`'s `h264-mbaff`, `mpeg2-interlaced`, at
+352x288) are bit-identical to ffmpeg on the 64-bit LAV, and the Y4M takes
+the field order LAV gives each frame (`It` for the MPEG-2, `Ib` for x264's
+MBAFF, as ffmpeg's own frames say). On the 32-bit LAV they are 98 dB: its
+older FFmpeg decodes interlaced MPEG-2 a few pixels differently, though
+progressive MPEG-2 is identical. LAV's YADIF (`SWDeintMode`=1 in
+`HKCU\Software\LAV\Video`) is bit-identical to ffmpeg's `yadif` in both
+output modes: a frame for two fields, and a frame for each field, at twice
+the rate, which `decode` follows (before that, it wrote half the frames at
+the stream's rate). After `--start`, the first frame's fields differ, as
+YADIF has no earlier frame there. An AVI of two video streams decodes
+either, identically, with `--stream`.
+
 Not yet exercised: VC-1 / WMV3 (no encoder to make a stream with here),
-interlaced and field-coded streams, 10-bit and 4:4:4 sources (the standard
-output list is 8-bit), more than one video stream, and LAV Video's other
-settings (format selection, deinterlacing, dithering).
+field-coded streams (ffmpeg makes no PAFF or MPEG-2 field pictures), 10-bit
+and 4:4:4 output (the standard output list is 8-bit), and LAV Video's other
+settings (format selection, dithering, the other deinterlacers).
 
 ### LAV Audio (DMO/audio plan, Phase 6)
 

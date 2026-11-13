@@ -29,6 +29,9 @@ struct xform_output {
 	size_t size;
 	int sync, preroll, timed;
 	REFERENCE_TIME start, stop;
+	/* A DirectShow sample's dwTypeSpecificFlags, if it has them. */
+	int has_type_flags;
+	DWORD type_flags;
 };
 
 /* Called for each output, with the new type when it has changed. */

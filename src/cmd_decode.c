@@ -204,7 +204,46 @@ struct com_decode_output {
 	struct image_conv **conv;	/* replaced when the format changes */
 	REFERENCE_TIME first_time;	/* earlier samples are before --start */
 	unsigned long limit;		/* frames to write */
+	int interlaced;			/* the type says samples say (VIH2) */
+	DWORD rate, scale;		/* the stream's frame rate */
 };
+
+/*
+ * A decoder that makes several frames of each (a deinterlacer giving a
+ * frame per field) says so in its first frame's length, a whole fraction
+ * of the stream's frame: k frames each, at k times the rate.
+ */
+static void frames_per_frame(struct com_decode_output *d,
+			     const struct xform_output *o)
+{
+	if (!d->rate || d->limit == 1)	/* one picture asked for: the first */
+		return;
+	REFERENCE_TIME frame = (REFERENCE_TIME)d->scale * 10000000 / d->rate;
+	REFERENCE_TIME len = o->stop - o->start;
+
+	if (!o->timed || len <= 0 || !frame)
+		return;
+	REFERENCE_TIME k = (frame + len / 2) / len;
+	if (k < 2 || k > 8 || llabs(k * len - frame) > frame / 100)
+		return;
+	TRACE("decode: %lld frames for each of the stream's", (long long)k);
+	output_set_rate(d->output, d->rate * (DWORD)k, d->scale);
+	d->limit *= (unsigned long)k;
+}
+
+/*
+ * Whether a type is a VIDEOINFOHEADER2 of interlaced frames, whose samples
+ * then say how each is (AM_VIDEO_FLAG_*): one with both fields in a sample.
+ */
+static int interlaced_type(const AM_MEDIA_TYPE *mt)
+{
+	if (!mt || memcmp(&mt->formattype, &FORMAT_VideoInfo2, sizeof(GUID)) ||
+	    mt->cbFormat < sizeof(VIDEOINFOHEADER2) || !mt->pbFormat)
+		return 0;
+	DWORD f = ((const VIDEOINFOHEADER2 *)mt->pbFormat)->dwInterlaceFlags;
+	return (f & AMINTERLACE_IsInterlaced) &&
+	       !(f & AMINTERLACE_1FieldPerSample);
+}
 
 /*
  * A sample carrying a new media type changes the format of it and of every
@@ -245,6 +284,8 @@ static HRESULT com_write_output(void *opaque, const struct xform_output *o,
 	}
 	if (dynamic && !*d->conv)
 		return VFW_E_INVALIDMEDIATYPE;
+	if (dynamic)
+		d->interlaced = interlaced_type(dynamic);
 	/*
 	 * Decoders needn't pass the preroll flag on, and may hold back frames
 	 * (to reorder them) that come out after the ones asked for, so the
@@ -254,6 +295,15 @@ static HRESULT com_write_output(void *opaque, const struct xform_output *o,
 			   o->start < d->first_time) ||
 	    output_frames(d->output) >= d->limit)
 		return S_OK;
+	if (!output_frames(d->output))
+		frames_per_frame(d, o);
+	if (output_frames(d->output) >= d->limit)
+		return S_OK;
+	/* A Y4M file's field order: the first frame's, as the decoder says. */
+	if (!output_frames(d->output) && d->interlaced && o->has_type_flags)
+		output_set_field_order(d->output,
+			o->type_flags & AM_VIDEO_FLAG_WEAVE ? 'p' :
+			o->type_flags & AM_VIDEO_FLAG_FIELD1FIRST ? 't' : 'b');
 	if (output_write(d->output, *d->conv, o->data, o->size))
 		return E_FAIL;
 	return S_OK;
@@ -527,6 +577,9 @@ static int decode_com(const char *target, const CLSID *selected,
 	sink.output = output;
 	sink.conv = &conv;
 	sink.limit = want;
+	sink.interlaced = interlaced_type(xform_output_type(x));
+	sink.rate = rate;
+	sink.scale = scale;
 	sink.first_time = start ?
 		(REFERENCE_TIME)start * scale * 10000000 / rate : 0;
 
@@ -534,8 +587,9 @@ static int decode_com(const char *target, const CLSID *selected,
 	unsigned long decoded = 0, errors = 0;
 	double busy = 0;
 	frame = first_frame;
-	for (size_t c = first_chunk; c < s->nchunks && output_frames(output) < want;
-	     c++) {
+	/* Until the frames asked for: more, from a decoder that makes more. */
+	for (size_t c = first_chunk;
+	     c < s->nchunks && output_frames(output) < sink.limit; c++) {
 		const struct avi_chunk *chunk = &s->chunks[c];
 		if (!avi_chunk_is_frame(chunk))
 			continue;

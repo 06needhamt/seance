@@ -662,6 +662,36 @@ static void test_outputs(void)
 	}
 	CHECK(!output_open("/nonexistent/dir/x.y4m", OUT_Y4M, w, h, 1, 1, 0));
 
+	/*
+	 * A field order given before the first frame goes in the header; one
+	 * given after is too late. An empty Y4M file still gets its header.
+	 */
+	const char *tff = "YUV4MPEG2 W33 H17 F25:1 It A1:1 C420jpeg\n";
+	o = output_open(path_of("tff.y4m"), OUT_Y4M, w, h, 25, 1, 0);
+	CHECK(o);
+	if (o) {
+		output_set_field_order(o, 't');
+		CHECK_EQ(output_write(o, c, dib, dib_size), 0);
+		output_set_field_order(o, 'b');
+		CHECK_EQ(output_close(o), 0);
+		CHECK_EQ(vfw_read_file(path_of("tff.y4m"), &data, &len), 0);
+		CHECK_EQ(len, strlen(tff) + 6 + fs);
+		CHECK(len > strlen(tff) && !memcmp(data, tff, strlen(tff)));
+		free(data);
+	}
+	const char *bff = "YUV4MPEG2 W33 H17 F25:1 Ib A1:1 C420jpeg\n";
+	o = output_open(path_of("tff.y4m"), OUT_Y4M, w, h, 25, 1, 0);
+	CHECK(o);
+	if (o) {
+		output_set_field_order(o, 'b');
+		CHECK_EQ(output_close(o), 0);
+		CHECK_EQ(vfw_read_file(path_of("tff.y4m"), &data, &len), 0);
+		CHECK_EQ(len, strlen(bff));
+		CHECK(len == strlen(bff) && !memcmp(data, bff, len));
+		free(data);
+	}
+	cleanup("tff.y4m");
+
 	cleanup("out.yuv");
 	cleanup("out.bgr");
 	cleanup("out.raw");

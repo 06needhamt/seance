@@ -28,6 +28,10 @@ V = [
  ("h264-avc1", "176x144", "yuv420p", "-c:v libx264 -preset ultrafast -g 5 -bf 0", "avc1", ["AVC1","CCV1"]),
  ("h264-bframes", "176x144", "yuv420p", "-c:v libx264 -preset fast -g 10 -bf 2", "H264", []),
  ("h264-10bit", "176x144", "yuv420p10le", "-c:v libx264 -preset ultrafast -profile:v high10 -g 5 -bf 0", "H264", []),
+ # Interlaced frames: MBAFF H.264 and MPEG-2 with interlaced DCT and motion
+ # (ffmpeg makes no field pictures, PAFF or MPEG-2's).
+ ("h264-mbaff", "352x288", "yuv420p", "-c:v libx264 -preset ultrafast -g 5 -bf 0 -flags +ildct -x264-params interlaced=1:tff=1", "H264", []),
+ ("mpeg2-interlaced", "352x288", "yuv420p", "-c:v mpeg2video -g 5 -bf 0 -flags +ildct+ilme -top 1", "MPG2", []),
  ("hevc",   "176x144", "yuv420p", "-c:v libx265 -preset ultrafast -x265-params log-level=none:keyint=5:bframes=0 -f hevc", "HEVC", ["HVC1","HM10","H265"]),
  ("hevc-10bit", "176x144", "yuv420p10le", "-c:v libx265 -preset ultrafast -x265-params log-level=none:keyint=5:bframes=0 -f hevc", "HEVC", []),
  ("mpeg1",  "176x144", "yuv420p", "-c:v mpeg1video -g 5 -bf 0", "MPG1", ["mpg1"]),
@@ -107,7 +111,7 @@ V = [
  ("rawvideo-bgr24", "176x144", "bgr24", "-c:v rawvideo", "\0\0\0\0", []),
 ]
 
-RATE25 = {"mpeg1", "mpeg2"}
+RATE25 = {"mpeg1", "mpeg2", "mpeg2-interlaced"}
 FORCE = {"rv10": "rv10", "rv20": "rv20", "bmp": "bmp", "webp": "webp", "roq": "roqvideo"}
 RGBISH = {"png","tiff","targa","bmp","zlib","zmbv","qtrle","cinepak","msvideo1","rpza","smc","gif","ffv1-rgb",
           "utvideo-rgb","utvideo-rgba","hap1","hap5","hapy","mjpeg","ljpeg","webp","roq"}
@@ -238,5 +242,33 @@ for (label, size, pix, enc, tag, aliases) in V:
             if label in RGBISH:
                 r["rgb"] = rgb_compare(avi, refsrc, d, cases.index((t, avi)))
         results.append(r); print(r, flush=True)
+
+# LAV's software deinterlacer (YADIF), set in the registry, against
+# ffmpeg's yadif: a frame for two fields, and one for each field (the
+# rate doubled, which decode follows).
+for (mode, out, filt) in (("frame", 1, "send_frame"), ("field", 0, "send_field")):
+    label = f"yadif-{mode}"
+    if only and label not in only: continue
+    base = f"{W}/mpeg2-interlaced/base.avi"
+    if not os.path.exists(base):
+        continue
+    d = f"{W}/{label}"
+    shutil.rmtree(d, ignore_errors=True); os.makedirs(d)
+    reg = f"{d}/lav.reg"
+    with open(reg, "w") as f:
+        f.write('Windows Registry Editor Version 5.00\n\n'
+                '[HKEY_CURRENT_USER\\Software\\LAV\\Video]\n'
+                '"SWDeintMode"=dword:00000001\n'
+                f'"SWDeintOutput"=dword:{out:08x}\n')
+    ref = f"{d}/ref.y4m"
+    run(f"ffmpeg -hide_banner -loglevel error -y -i {base} -vf yadif=mode={filt} -pix_fmt yuv420p {ref}", 120)
+    lav = f"{d}/lav.y4m"
+    rc, o = run([SEANCE, "decode", LAV, base, "-o", lav], 150, env={"VFW_REGISTRY": reg})
+    r = {"label": label, "tag": "MPG2", "stage": "lav", "result": "", "detail": (o.strip().splitlines() or [""])[-1][:140]}
+    if rc != 0 or not os.path.exists(lav):
+        r["result"] = "FAILED"
+    else:
+        r["result"] = classify(psnr(lav, ref), frames_of(lav), frames_of(ref))
+    results.append(r); print(r, flush=True)
 
 json.dump(results, open(os.path.join(os.environ.get("WORK", "/tmp/lav_matrix"), "video_results.json" if not only else "video_results_partial.json"), "w"), indent=1)
