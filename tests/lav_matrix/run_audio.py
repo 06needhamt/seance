@@ -61,8 +61,11 @@ A = [
  ("alac",  "-c:a alac", "", "alac"),
  ("truehd", "-c:a truehd -strict -2", "", "{EB27CEC4-163E-4CA3-8B74-8E25F91B517E}"),
  ("mlp",   "-c:a mlp -strict -2", "", "MLP "),
+ ("ra_144", "-c:a real_144", "-ac 1 -ar 8000", "14_4"),
+ # Matroska won't take Nellymoser: it comes from FLV, its own container.
+ ("nellymoser", "-c:a nellymoser", "-ac 1 -ar 22050", "NELL", None, "flv"),
  # Under its own tag, with the TTA1 header ffmpeg leaves out of an AVI.
- ("tta",   "-c:a tta", "", None, "0x77a1"),
+ ("tta",   "-c:a tta", "", None, 0x77a1),
 ]
 MKAVI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mkavi_audio.py")
 
@@ -128,17 +131,19 @@ os.makedirs(W, exist_ok=True)
 src = f"{W}/src.wav"
 run(f'ffmpeg -hide_banner -loglevel error -y -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=1.5" -f lavfi -i "anoisesrc=color=pink:sample_rate=48000:duration=1.5:amplitude=0.1" -f lavfi -i "sine=frequency=1100:sample_rate=48000:duration=1.5" -filter_complex "[0][1]amix=inputs=2:duration=first[l];[2][1]amix=inputs=2:duration=first[r];[l][r]amerge=inputs=2[a]" -map "[a]" -c:a pcm_s16le {src}')
 for (label, enc, extra, *by_hand) in A:
-    subtype = by_hand[0] if by_hand else None
-    tag = by_hand[1:]
+    # By hand: the subtype to name, the wave format tag, the container.
+    subtype, tag, container = (by_hand + [None, None, "mka"][len(by_hand):]
+                               if by_hand else (None, None, None))
     if only and label not in only: continue
     d = f"{W}/{label}"
     shutil.rmtree(d, ignore_errors=True); os.makedirs(d)
     avi = f"{d}/x.avi"
-    # What ffmpeg reads back: the AVI, or the Matroska the AVI is made from.
-    media = f"{d}/x.mka" if by_hand else avi
+    # What ffmpeg reads back: the AVI, or the file the AVI is made from.
+    media = f"{d}/x.{container}" if by_hand else avi
     rc, o = run(f"ffmpeg -hide_banner -loglevel error -y -i {src} {extra} {enc} {media}", 120)
     if rc == 0 and by_hand:
-        rc, o = run([sys.executable, MKAVI, media, avi] + tag, 120)
+        rc, o = run([sys.executable, MKAVI, media, avi] +
+                    ([hex(tag)] if tag else []), 120)
     row = {"label": label, "result": "", "detail": ""}
     if rc != 0 or not os.path.exists(avi) or os.path.getsize(avi) < 100:
         row.update(result="NOT GENERATED", detail=(o.strip().splitlines() or [""])[-1][:110]); results.append(row); print(row, flush=True); continue
