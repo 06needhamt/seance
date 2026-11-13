@@ -437,6 +437,12 @@ what keeps the others from working.
 - `m3jp2k32.dll` encodes but fails to decode frame 1.
 - `m3jpeg32.dll`'s own decoder gets chroma and RGB wrong. FFmpeg decodes
   its files correctly.
+- Both Morgan codecs are trial builds whose trial has run out ("The trial
+  period has expired !"): at today's date they put up that dialog and
+  refuse `ICM_COMPRESS_BEGIN` and `ICM_DECOMPRESS_BEGIN` with
+  `ICERR_BADFORMAT`, even for FFmpeg's MJPEG. The two faults above were
+  seen before then and can't be looked into again without getting around
+  the trial, which seance doesn't do.
 
 **Can't work in seance:**
 
