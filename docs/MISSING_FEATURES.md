@@ -550,6 +550,30 @@ the above:
   (`aslcodec_vfw.dll` decodes it).
 - `nsrt2432.acm` (Voxware RT24) takes none of the PCM layouts offered.
 
+### The codec zip, November 2026: per-codec investigations
+
+The sweep over the zip (504 codecs, catalogued separately) left codecs
+whose failures needed a closer look. Each was traced (`VFW_TRACE=1`, gdb)
+to a cause; what was seance's is fixed, and the rest is recorded here.
+
+- **LEAD DirectShow filters** (`LEncAAC`, `LEncAC3`, `LEncAMR`, `LEncVP8`,
+  `LEncmpga2`, `LENCSCR2`, `LMVMtnDet2` and their `x` variants):
+  - They look up a class of `DSKernel2.dll` while being created, with
+    `CoGetClassObject`. seance ran registration under `CoInitialize` but
+    created and ran filters and DMOs with COM down, so this failed with
+    `CO_E_NOTINITIALIZED` (0x800401f0). A host application has COM
+    initialised, so now seance does too, for as long as a filter or DMO
+    is open.
+  - The class is `DSKernel2.dll`'s (`{E2B7DDA9-38C5-11D5-91F6-00104BDB8FF9}`),
+    which LEAD's installer registers. Without it the open fails with
+    `REGDB_E_CLASSNOTREG`; a class that isn't registered is now named in
+    the trace. `seance register DSKernel2.dll` registers it; its
+    `DllRegisterServer` then fails at the type library
+    (`TYPE_E_CANTLOADLIBRARY`), after writing the classes.
+  - With that done they reach LEAD's licence check ("The evaluation
+    period has expired"), and fail with 0x80050010. That isn't worked
+    around.
+
 ## In-repository baseline
 
 For comparison, the same command over `build/fixtures` examined 23 fixture

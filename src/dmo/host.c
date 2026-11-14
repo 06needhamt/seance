@@ -531,6 +531,7 @@ void dmo_host_destroy(struct dmo_host *h)
 
 struct dmo_object {
 	struct module *module;
+	int com;		/* ole_host_enter() initialised COM */
 };
 
 HRESULT dmo_object_open(const char *path, const CLSID *clsid,
@@ -552,6 +553,7 @@ HRESULT dmo_object_open(const char *path, const CLSID *clsid,
 		free(o);
 		return E_FAIL;
 	}
+	o->com = ole_host_enter();
 	LPFNGETCLASSOBJECT get = (LPFNGETCLASSOBJECT)mod_get_proc(
 		o->module, "DllGetClassObject");
 	if (get)
@@ -567,6 +569,8 @@ HRESULT dmo_object_open(const char *path, const CLSID *clsid,
 		factory->lpVtbl->Release(factory);
 	if (FAILED(hr)) {
 		*mo = NULL;
+		if (o->com)
+			ole_host_leave();
 		mod_free(o->module);
 		free(o);
 		return hr;
@@ -580,6 +584,8 @@ void dmo_object_close(struct dmo_object *object, IMediaObject *mo)
 	if (mo)
 		mo->lpVtbl->Release(mo);
 	if (object) {
+		if (object->com)
+			ole_host_leave();
 		mod_free(object->module);
 		free(object);
 	}

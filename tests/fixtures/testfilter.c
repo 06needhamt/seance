@@ -364,9 +364,19 @@ static ULONG WINAPI cf_release(IClassFactory *cf) { return 1; }
 static HRESULT WINAPI cf_create(IClassFactory *cf, IUnknown *outer,
 				REFIID riid, void **ppv)
 {
+	IClassFactory *mapper;
+
 	*ppv = NULL;
-	return outer ? CLASS_E_NOAGGREGATION :
-		testfilter_create(factory_from(cf)->encoder,
+	if (outer)
+		return CLASS_E_NOAGGREGATION;
+	/* As the LEAD filters do, look a helper class up while being made:
+	 * that fails unless the host has initialised COM on this thread. */
+	HRESULT hr = CoGetClassObject(&clsid_mapper2, CLSCTX_INPROC_SERVER,
+				      NULL, &iid_factory, (void **)&mapper);
+	if (FAILED(hr))
+		return hr;
+	mapper->lpVtbl->Release(mapper);
+	return testfilter_create(factory_from(cf)->encoder,
 				  factory_from(cf)->audio, riid, ppv);
 }
 

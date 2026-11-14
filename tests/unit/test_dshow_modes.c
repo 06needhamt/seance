@@ -13,6 +13,7 @@
 #include "loader/modules.h"
 #include "runtime/runtime.h"
 #include "test.h"
+#include "win32/ole.h"
 
 struct received_sample {
 	int calls;
@@ -46,6 +47,9 @@ static void fixture_notify_error(void)
 		{ 0x9c, 0x11, 0x0d, 0x2b, 0x7a, 0x6e, 0x4f, 0x80 } };
 	IClassFactory *factory = NULL;
 	IBaseFilter *filter = NULL;
+	/* The fixture, as some real filters do, needs COM while it is made. */
+	int com = ole_host_enter();
+	CHECK(com);
 	setenv("VFW_ENV_TESTFILTER_NOTIFY_ERROR", "1", 1);
 	setenv("VFW_ENV_TESTFILTER_OWN_ALLOCATOR", "1", 1);
 	CHECK(get && get(&decoder, &IID_IClassFactory, (void **)&factory) == S_OK);
@@ -99,6 +103,8 @@ static void fixture_notify_error(void)
 	typedef HRESULT (WINAPI *unload_fn)(void);
 	unload_fn unload=(unload_fn)mod_get_proc(m,"DllCanUnloadNow");
 	CHECK(unload && unload()==S_OK);
+	if (com)
+		ole_host_leave();
 	mod_free(m);
 }
 

@@ -92,11 +92,23 @@ WINFN(void) ole_CoUninitialize(void)
 {
 	if (!apt_count || --apt_count)
 		return;
+	TRACE("CoUninitialize: thread %lu leaves the %s", (unsigned long)
+	      thread_current_id(), apt_sta ? "STA" : "MTA");
 	if (!apt_sta) {
 		pthread_mutex_lock(&apt_lock);
 		mta_threads--;
 		pthread_mutex_unlock(&apt_lock);
 	}
+}
+
+int ole_host_enter(void)
+{
+	return SUCCEEDED(ole_CoInitializeEx(NULL, COINIT_APARTMENTTHREADED));
+}
+
+void ole_host_leave(void)
+{
+	ole_CoUninitialize();
 }
 
 WINFN(HRESULT) ole_OleInitialize(LPVOID reserved)
@@ -456,8 +468,10 @@ WINFN(HRESULT) ole_CoRegisterClassObject(REFCLSID clsid, LPUNKNOWN obj,
 	if (!clsid || !obj || !cookie)
 		return E_INVALIDARG;
 	*cookie = 0;
-	if (!initialized())
+	if (!initialized()) {
+		TRACE("CoRegisterClassObject: COM is not initialised");
 		return CO_E_NOTINITIALIZED;
+	}
 	if (!(r = calloc(1, sizeof(*r))))
 		return E_OUTOFMEMORY;
 	r->clsid = *clsid;
@@ -608,8 +622,10 @@ static HRESULT inproc_class_object(REFCLSID clsid, REFIID riid, void **ppv)
 		free(dll);
 		dll = system_class_dll(clsid);
 	}
-	if (!dll)
+	if (!dll) {
+		TRACE("CoGetClassObject(%s): not registered", g);
 		return REGDB_E_CLASSNOTREG;
+	}
 
 	struct module *m = load_server(dll);
 	if (!m) {
@@ -641,8 +657,10 @@ WINFN(HRESULT) ole_CoGetClassObject(REFCLSID clsid, DWORD context,
 	*ppv = NULL;
 	if (!clsid || !riid)
 		return E_INVALIDARG;
-	if (!initialized())
+	if (!initialized()) {
+		TRACE("CoGetClassObject: COM is not initialised");
 		return CO_E_NOTINITIALIZED;
+	}
 
 	IUnknown *obj = registered(clsid, context);
 	if (obj) {
