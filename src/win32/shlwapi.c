@@ -12,6 +12,7 @@
 #include <strings.h>
 #include <sys/stat.h>
 
+#include "runtime/builtin.h"
 #include "win32/codepage.h"
 #include "win32/internal.h"
 #include "win32/path.h"
@@ -367,13 +368,126 @@ WINFN(DWORD) sl_SHDeleteKeyW(HKEY h, LPCWSTR sub)
 	return (DWORD)r;
 }
 
+/*
+ * SHGetValue, SHSetValue, SHDeleteValue: a value of a subkey, through
+ * advapi32's registry (vgmv2k2dx.ax keeps its settings this way). Getting
+ * expands REG_EXPAND_SZ data, as Windows' does.
+ */
+extern const struct builtin_dll builtin_advapi32;
+
+static void *adv(const char *name)
+{
+	return builtin_export(&builtin_advapi32, name);
+}
+
+WINFN(DWORD) sl_SHGetValueA(HKEY h, LPCSTR sub, LPCSTR name, DWORD *type,
+			    void *data, DWORD *cb)
+{
+	LONG (WINAPI *get)(HKEY, LPCSTR, LPCSTR, DWORD, LPDWORD, PVOID, LPDWORD) =
+		adv("RegGetValueA");
+	return (DWORD)get(h, sub, name, RRF_RT_ANY, type, data, cb);
+}
+
+WINFN(DWORD) sl_SHGetValueW(HKEY h, LPCWSTR sub, LPCWSTR name, DWORD *type,
+			    void *data, DWORD *cb)
+{
+	LONG (WINAPI *get)(HKEY, LPCWSTR, LPCWSTR, DWORD, LPDWORD, PVOID,
+			   LPDWORD) = adv("RegGetValueW");
+	return (DWORD)get(h, sub, name, RRF_RT_ANY, type, data, cb);
+}
+
+WINFN(DWORD) sl_SHSetValueA(HKEY h, LPCSTR sub, LPCSTR name, DWORD type,
+			    LPCVOID data, DWORD cb)
+{
+	LONG (WINAPI *create)(HKEY, LPCSTR, DWORD, LPSTR, DWORD, REGSAM,
+			      LPSECURITY_ATTRIBUTES, PHKEY, LPDWORD) =
+		adv("RegCreateKeyExA");
+	LONG (WINAPI *set)(HKEY, LPCSTR, DWORD, DWORD, const BYTE *, DWORD) =
+		adv("RegSetValueExA");
+	LONG (WINAPI *close)(HKEY) = adv("RegCloseKey");
+	HKEY k = h;
+	LONG r = ERROR_SUCCESS;
+
+	if (sub && *sub)
+		r = create(h, sub, 0, NULL, REG_OPTION_NON_VOLATILE,
+			   KEY_SET_VALUE, NULL, &k, NULL);
+	if (!r) {
+		r = set(k, name, 0, type, data, cb);
+		if (k != h)
+			close(k);
+	}
+	return (DWORD)r;
+}
+
+WINFN(DWORD) sl_SHSetValueW(HKEY h, LPCWSTR sub, LPCWSTR name, DWORD type,
+			    LPCVOID data, DWORD cb)
+{
+	LONG (WINAPI *create)(HKEY, LPCWSTR, DWORD, LPWSTR, DWORD, REGSAM,
+			      LPSECURITY_ATTRIBUTES, PHKEY, LPDWORD) =
+		adv("RegCreateKeyExW");
+	LONG (WINAPI *set)(HKEY, LPCWSTR, DWORD, DWORD, const BYTE *, DWORD) =
+		adv("RegSetValueExW");
+	LONG (WINAPI *close)(HKEY) = adv("RegCloseKey");
+	HKEY k = h;
+	LONG r = ERROR_SUCCESS;
+
+	if (sub && *sub)
+		r = create(h, sub, 0, NULL, REG_OPTION_NON_VOLATILE,
+			   KEY_SET_VALUE, NULL, &k, NULL);
+	if (!r) {
+		r = set(k, name, 0, type, data, cb);
+		if (k != h)
+			close(k);
+	}
+	return (DWORD)r;
+}
+
+WINFN(DWORD) sl_SHDeleteValueA(HKEY h, LPCSTR sub, LPCSTR name)
+{
+	LONG (WINAPI *open)(HKEY, LPCSTR, DWORD, REGSAM, PHKEY) =
+		adv("RegOpenKeyExA");
+	LONG (WINAPI *del)(HKEY, LPCSTR) = adv("RegDeleteValueA");
+	LONG (WINAPI *close)(HKEY) = adv("RegCloseKey");
+	HKEY k = h;
+	LONG r = ERROR_SUCCESS;
+
+	if (sub && *sub)
+		r = open(h, sub, 0, KEY_SET_VALUE, &k);
+	if (!r) {
+		r = del(k, name);
+		if (k != h)
+			close(k);
+	}
+	return (DWORD)r;
+}
+
+WINFN(DWORD) sl_SHDeleteValueW(HKEY h, LPCWSTR sub, LPCWSTR name)
+{
+	LONG (WINAPI *open)(HKEY, LPCWSTR, DWORD, REGSAM, PHKEY) =
+		adv("RegOpenKeyExW");
+	LONG (WINAPI *del)(HKEY, LPCWSTR) = adv("RegDeleteValueW");
+	LONG (WINAPI *close)(HKEY) = adv("RegCloseKey");
+	HKEY k = h;
+	LONG r = ERROR_SUCCESS;
+
+	if (sub && *sub)
+		r = open(h, sub, 0, KEY_SET_VALUE, &k);
+	if (!r) {
+		r = del(k, name);
+		if (k != h)
+			close(k);
+	}
+	return (DWORD)r;
+}
+
 WINFN(HRESULT) sl_DllGetVersion(DLLVERSIONINFO *v)
 { if(!v || v->cbSize<sizeof(*v)) return E_INVALIDARG; v->dwMajorVersion=6; v->dwMinorVersion=0; v->dwBuildNumber=2900; v->dwPlatformID=2; return S_OK; }
 
 #define E(n) { #n, 0, (void *)sl_##n }
 /* kernelbase.dll (kernel32.c) serves these too, as Windows 7's does. */
 const struct builtin_export shlwapi_exports[] = {
-	E(DllGetVersion), E(SHDeleteKeyA), E(SHDeleteKeyW), E(PathAddBackslashA), E(PathAddBackslashW), E(PathAppendA),
+	E(DllGetVersion), E(SHDeleteKeyA), E(SHDeleteKeyW), E(SHDeleteValueA),
+	E(SHDeleteValueW), E(SHGetValueA), E(SHGetValueW), E(SHSetValueA), E(SHSetValueW), E(PathAddBackslashA), E(PathAddBackslashW), E(PathAppendA),
 	E(PathCombineA), E(PathCombineW), E(PathFileExistsA), E(PathFileExistsW), E(PathFindExtensionA),
 	E(PathFindExtensionW), E(PathFindFileNameA), E(PathFindFileNameW),
 	E(PathIsDirectoryA), E(PathIsDirectoryW), E(PathIsFileSpecA), E(PathIsFileSpecW),

@@ -478,6 +478,272 @@ WINFN(DWORD) k32_SizeofResource(HMODULE h, HRSRC hrsrc)
 	return e ? e->Size : 0;
 }
 
+/*
+ * The Tool Help snapshot (DivXDecH264 walks it): the one process there is,
+ * its modules as they were when the snapshot was taken, and the calling
+ * thread. Nothing else in the host is a Win32 process or thread.
+ */
+#include "handle.h"
+
+struct snap_module {
+	BYTE *base;
+	DWORD size;
+	char *name;		/* ASCII */
+	char *path;		/* Windows path, UTF-8 */
+};
+
+struct snapshot {
+	struct kobject obj;
+	DWORD flags;
+	struct snap_module *mods;
+	size_t nmods;
+	DWORD tid;
+	size_t next_proc, next_mod, next_thread;
+};
+
+static void snapshot_destroy(struct kobject *obj)
+{
+	struct snapshot *s = (struct snapshot *)obj;
+
+	for (size_t i = 0; i < s->nmods; i++) {
+		free(s->mods[i].name);
+		free(s->mods[i].path);
+	}
+	free(s->mods);
+	free(s);
+}
+
+static int snapshot_modules(struct snapshot *s)
+{
+	size_t n = mod_list(NULL, 0);
+	HMODULE *hs = calloc(n ? n : 1, sizeof(*hs));
+
+	if (!hs)
+		return 0;
+	n = mod_list(hs, n);
+	s->mods = calloc(n ? n : 1, sizeof(*s->mods));
+	if (!s->mods) {
+		free(hs);
+		return 0;
+	}
+	for (size_t i = 0; i < n; i++) {
+		struct module *m = module_of(hs[i]);
+		if (!m)
+			continue;
+		struct snap_module *sm = &s->mods[s->nmods];
+		const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)m->base;
+		const IMAGE_NT_HEADERS32 *nt =
+			(const IMAGE_NT_HEADERS32 *)(m->base + dos->e_lfanew);
+		sm->base = m->base;
+		sm->size = nt->OptionalHeader.SizeOfImage;
+		sm->name = strdup(m->name);
+		sm->path = module_path(m);
+		if (!sm->name || !sm->path) {
+			free(sm->name);
+			free(sm->path);
+			continue;
+		}
+		s->nmods++;
+	}
+	free(hs);
+	return 1;
+}
+
+WINFN(HANDLE) k32_CreateToolhelp32Snapshot(DWORD flags, DWORD pid)
+{
+	struct snapshot *s;
+
+	if (pid && pid != (DWORD)getpid() &&
+	    (flags & (TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32))) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return INVALID_HANDLE_VALUE;
+	}
+	if (!(s = calloc(1, sizeof(*s)))) {
+		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
+		return INVALID_HANDLE_VALUE;
+	}
+	kobj_init(&s->obj, KOBJ_SNAPSHOT, snapshot_destroy);
+	s->flags = flags;
+	s->tid = thread_current_id();
+	if ((flags & (TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32)) &&
+	    !snapshot_modules(s)) {
+		kobj_unref(&s->obj);
+		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
+		return INVALID_HANDLE_VALUE;
+	}
+	HANDLE h = handle_new(&s->obj);
+	if (!h) {
+		kobj_unref(&s->obj);
+		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
+		return INVALID_HANDLE_VALUE;
+	}
+	return h;
+}
+
+/* The snapshot behind h, referenced, if the caller's dwSize is at least min. */
+static struct snapshot *snapshot_get(HANDLE h, const DWORD *size, DWORD min)
+{
+	if (!size || *size < min) {
+		win_set_error(ERROR_BAD_LENGTH);
+		return NULL;
+	}
+	return (struct snapshot *)handle_ref(h, KOBJ_SNAPSHOT);
+}
+
+static BOOL snap_done(struct snapshot *s)
+{
+	kobj_unref(&s->obj);
+	win_set_error(ERROR_NO_MORE_FILES);
+	return FALSE;
+}
+
+/* Copies an ASCII or UTF-8 name, truncated, into an A or W field. */
+static void put_name(const char *src, void *dst, size_t count, int wide)
+{
+	if (wide) {
+		WCHAR *w = utf8_to_utf16_dup(src);
+		size_t i = 0;
+		for (; w && w[i] && i < count - 1; i++)
+			((WCHAR *)dst)[i] = w[i];
+		((WCHAR *)dst)[i] = 0;
+		free(w);
+	} else {
+		char *a = utf8_to_acp_dup(src);
+		snprintf(dst, count, "%s", a ? a : src);
+		free(a);
+	}
+}
+
+static BOOL process_entry(HANDLE h, void *pe, int wide, int first)
+{
+	DWORD min = wide ? sizeof(PROCESSENTRY32W) : sizeof(PROCESSENTRY32);
+	struct snapshot *s = snapshot_get(h, pe, min);
+
+	if (!s)
+		return FALSE;
+	if (first)
+		s->next_proc = 0;
+	if (!(s->flags & TH32CS_SNAPPROCESS) || s->next_proc++ > 0)
+		return snap_done(s);
+	/* The two layouts agree up to szExeFile. */
+	PROCESSENTRY32W *p = pe;
+	p->cntUsage = 0;
+	p->th32ProcessID = (DWORD)getpid();
+	p->th32DefaultHeapID = 0;
+	p->th32ModuleID = 0;
+	p->cntThreads = 1;
+	p->th32ParentProcessID = (DWORD)getppid();
+	p->pcPriClassBase = 8;
+	p->dwFlags = 0;
+	put_name("seance.exe", p->szExeFile, MAX_PATH, wide);
+	kobj_unref(&s->obj);
+	return TRUE;
+}
+
+WINFN(BOOL) k32_Process32First(HANDLE h, LPPROCESSENTRY32 pe)
+{
+	return process_entry(h, pe, 0, 1);
+}
+
+WINFN(BOOL) k32_Process32Next(HANDLE h, LPPROCESSENTRY32 pe)
+{
+	return process_entry(h, pe, 0, 0);
+}
+
+WINFN(BOOL) k32_Process32FirstW(HANDLE h, LPPROCESSENTRY32W pe)
+{
+	return process_entry(h, pe, 1, 1);
+}
+
+WINFN(BOOL) k32_Process32NextW(HANDLE h, LPPROCESSENTRY32W pe)
+{
+	return process_entry(h, pe, 1, 0);
+}
+
+static BOOL module_entry(HANDLE h, void *me, int wide, int first)
+{
+	DWORD min = wide ? sizeof(MODULEENTRY32W) : sizeof(MODULEENTRY32);
+	struct snapshot *s = snapshot_get(h, me, min);
+
+	if (!s)
+		return FALSE;
+	if (first)
+		s->next_mod = 0;
+	if (s->next_mod >= s->nmods)
+		return snap_done(s);
+	const struct snap_module *sm = &s->mods[s->next_mod++];
+	/* The two layouts agree up to szModule. */
+	MODULEENTRY32 *m = me;
+	m->th32ModuleID = 1;
+	m->th32ProcessID = (DWORD)getpid();
+	m->GlblcntUsage = 0xffff;
+	m->ProccntUsage = 0xffff;
+	m->modBaseAddr = sm->base;
+	m->modBaseSize = sm->size;
+	m->hModule = (HMODULE)sm->base;
+	if (wide) {
+		MODULEENTRY32W *w = me;
+		put_name(sm->name, w->szModule, MAX_MODULE_NAME32 + 1, 1);
+		put_name(sm->path, w->szExePath, MAX_PATH, 1);
+	} else {
+		put_name(sm->name, m->szModule, MAX_MODULE_NAME32 + 1, 0);
+		put_name(sm->path, m->szExePath, MAX_PATH, 0);
+	}
+	kobj_unref(&s->obj);
+	return TRUE;
+}
+
+WINFN(BOOL) k32_Module32First(HANDLE h, LPMODULEENTRY32 me)
+{
+	return module_entry(h, me, 0, 1);
+}
+
+WINFN(BOOL) k32_Module32Next(HANDLE h, LPMODULEENTRY32 me)
+{
+	return module_entry(h, me, 0, 0);
+}
+
+WINFN(BOOL) k32_Module32FirstW(HANDLE h, LPMODULEENTRY32W me)
+{
+	return module_entry(h, me, 1, 1);
+}
+
+WINFN(BOOL) k32_Module32NextW(HANDLE h, LPMODULEENTRY32W me)
+{
+	return module_entry(h, me, 1, 0);
+}
+
+static BOOL thread_entry(HANDLE h, LPTHREADENTRY32 te, int first)
+{
+	struct snapshot *s = snapshot_get(h, te ? &te->dwSize : NULL,
+					  sizeof(*te));
+
+	if (!s)
+		return FALSE;
+	if (first)
+		s->next_thread = 0;
+	if (!(s->flags & TH32CS_SNAPTHREAD) || s->next_thread++ > 0)
+		return snap_done(s);
+	te->cntUsage = 0;
+	te->th32ThreadID = s->tid;
+	te->th32OwnerProcessID = (DWORD)getpid();
+	te->tpBasePri = 8;
+	te->tpDeltaPri = 0;
+	te->dwFlags = 0;
+	kobj_unref(&s->obj);
+	return TRUE;
+}
+
+WINFN(BOOL) k32_Thread32First(HANDLE h, LPTHREADENTRY32 te)
+{
+	return thread_entry(h, te, 1);
+}
+
+WINFN(BOOL) k32_Thread32Next(HANDLE h, LPTHREADENTRY32 te)
+{
+	return thread_entry(h, te, 0);
+}
+
 #define E(name) { #name, 0, (void *)k32_##name }
 
 /*
@@ -669,6 +935,7 @@ const struct builtin_export k32_module_exports[] = {
 	K32(GetProcessImageFileNameA),
 	K32(GetProcessImageFileNameW),
 	K32(GetProcessMemoryInfo),
+	E(CreateToolhelp32Snapshot),
 	E(DisableThreadLibraryCalls),
 	E(EnumResourceLanguagesA),
 	E(FindResourceA),
@@ -691,6 +958,16 @@ const struct builtin_export k32_module_exports[] = {
 	E(LoadLibraryW),
 	E(LoadResource),
 	E(LockResource),
+	E(Module32First),
+	E(Module32FirstW),
+	E(Module32Next),
+	E(Module32NextW),
+	E(Process32First),
+	E(Process32FirstW),
+	E(Process32Next),
+	E(Process32NextW),
 	E(SizeofResource),
+	E(Thread32First),
+	E(Thread32Next),
 	BUILTIN_END
 };

@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/sysinfo.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #include "loader/modules.h"
@@ -1102,6 +1103,94 @@ WINFN(void) k32_RtlFillMemory(void *dst, SIZE_T len, BYTE fill)
 	memset(dst, fill, len);
 }
 
+/*
+ * Read/WriteProcessMemory, for the one process there is (dsfs.dll reads its
+ * own memory this way to probe it): a copy that fails with
+ * ERROR_PARTIAL_COPY, not a fault, where the memory isn't there. The kernel
+ * checks the addresses for us; process_vm_* on ourselves needs no rights.
+ */
+static int self_process(HANDLE h)
+{
+	if (h == (HANDLE)(LONG_PTR)-1)
+		return 1;
+	win_set_error(ERROR_INVALID_HANDLE);
+	return 0;
+}
+
+static SIZE_T vm_copy(void *local, void *remote, SIZE_T size, int write)
+{
+	SIZE_T done = 0;
+
+	while (done < size) {
+		struct iovec l = { (BYTE *)local + done, size - done };
+		struct iovec r = { (BYTE *)remote + done, size - done };
+		ssize_t n = write ? process_vm_writev(getpid(), &l, 1, &r, 1, 0) :
+				    process_vm_readv(getpid(), &l, 1, &r, 1, 0);
+		if (n <= 0) {
+			if (n < 0 && errno == EINTR)
+				continue;
+			if (n < 0 && errno == ENOSYS) {
+				/* No process_vm_*: check first, then copy. */
+				if (bad_ptr(remote, size, write))
+					break;
+				if (write)
+					memcpy(remote, local, size);
+				else
+					memcpy(local, remote, size);
+				return size;
+			}
+			break;
+		}
+		done += (SIZE_T)n;
+	}
+	return done;
+}
+
+WINFN(BOOL) k32_ReadProcessMemory(HANDLE process, LPCVOID addr, LPVOID buf,
+				  SIZE_T size, SIZE_T *read)
+{
+	if (read)
+		*read = 0;
+	if (!self_process(process))
+		return FALSE;
+	SIZE_T n = vm_copy(buf, (void *)addr, size, 0);
+	if (read)
+		*read = n;
+	if (n < size) {
+		win_set_error(ERROR_PARTIAL_COPY);
+		return FALSE;
+	}
+	return TRUE;
+}
+
+/* Windows makes read-only and code pages writable for the copy, too. */
+WINFN(BOOL) k32_WriteProcessMemory(HANDLE process, LPVOID addr, LPCVOID buf,
+				   SIZE_T size, SIZE_T *written)
+{
+	if (written)
+		*written = 0;
+	if (!self_process(process))
+		return FALSE;
+	SIZE_T n = vm_copy((void *)buf, addr, size, 1);
+	if (n < size && !bad_ptr((const BYTE *)addr + n, size - n, 0)) {
+		DWORD old;
+		BYTE *p = (BYTE *)addr + n;
+		if (k32_VirtualProtect(p, size - n, PAGE_EXECUTE_READWRITE, &old)) {
+			memcpy(p, (const BYTE *)buf + n, size - n);
+			k32_VirtualProtect(p, size - n, old, &old);
+			__builtin___clear_cache((char *)p, (char *)p + (size - n));
+			n = size;
+		}
+	}
+	if (written)
+		*written = n;
+	if (n < size) {
+		win_set_error(ERROR_PARTIAL_COPY);
+		return FALSE;
+	}
+	return TRUE;
+}
+
 const struct builtin_export k32_memory_exports[] = {
 	E(RtlFillMemory),
 	E(RtlMoveMemory),
@@ -1144,6 +1233,7 @@ const struct builtin_export k32_memory_exports[] = {
 	E(LocalReAlloc),
 	E(LocalSize),
 	E(LocalUnlock),
+	E(ReadProcessMemory),
 	E(VirtualAlloc),
 	E(VirtualAllocEx),
 	E(VirtualFree),
@@ -1152,5 +1242,6 @@ const struct builtin_export k32_memory_exports[] = {
 	E(VirtualProtect),
 	E(VirtualQuery),
 	E(VirtualUnlock),
+	E(WriteProcessMemory),
 	BUILTIN_END
 };

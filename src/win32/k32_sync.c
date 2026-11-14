@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "win32/codepage.h"
 #include "win32/handle.h"
@@ -601,12 +602,165 @@ WINFN(HANDLE) k32_CreateSemaphoreExW(LPSECURITY_ATTRIBUTES sa, LONG initial,
 	return k32_CreateSemaphoreW(sa, initial, max, name);
 }
 
+/*
+ * I/O completion ports, as the work queues codecs (capavi32) make of them:
+ * PostQueuedCompletionStatus queues a packet, GetQueuedCompletionStatus
+ * takes the oldest. There is no overlapped I/O to complete (file I/O here is
+ * synchronous), so associating a file with a port only returns the port.
+ * The queue lives under the wait lock, so the port is waitable too.
+ */
+struct iocp_packet {
+	struct iocp_packet *next;
+	OVERLAPPED_ENTRY e;
+};
+
+struct iocp {
+	struct kobject obj;
+	struct iocp_packet *head, **tail;
+};
+
+static void iocp_destroy(struct kobject *obj)
+{
+	struct iocp *p = (struct iocp *)obj;
+
+	while (p->head) {
+		struct iocp_packet *n = p->head->next;
+		free(p->head);
+		p->head = n;
+	}
+	free(p);
+}
+
+static int iocp_signaled(struct kobject *obj, DWORD tid)
+{
+	return ((struct iocp *)obj)->head != NULL;
+}
+
+WINFN(HANDLE) k32_CreateIoCompletionPort(HANDLE file, HANDLE existing,
+					 ULONG_PTR key, DWORD threads)
+{
+	if (existing) {
+		struct kobject *o = handle_ref(existing, KOBJ_IOCP);
+		if (!o)
+			return NULL;
+		kobj_unref(o);
+		if (file == INVALID_HANDLE_VALUE) {
+			win_set_error(ERROR_INVALID_PARAMETER);
+			return NULL;
+		}
+		return existing;
+	}
+	struct iocp *p = calloc(1, sizeof(*p));
+	if (!p) {
+		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
+		return NULL;
+	}
+	kobj_init(&p->obj, KOBJ_IOCP, iocp_destroy);
+	p->obj.signaled = iocp_signaled;
+	p->tail = &p->head;
+	HANDLE h = handle_new(&p->obj);
+	if (!h) {
+		kobj_unref(&p->obj);
+		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
+	}
+	return h;
+}
+
+WINFN(BOOL) k32_PostQueuedCompletionStatus(HANDLE port, DWORD bytes,
+					   ULONG_PTR key, LPOVERLAPPED ov)
+{
+	struct iocp *p = (struct iocp *)handle_ref(port, KOBJ_IOCP);
+	struct iocp_packet *pk;
+
+	if (!p)
+		return FALSE;
+	if (!(pk = calloc(1, sizeof(*pk)))) {
+		kobj_unref(&p->obj);
+		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
+		return FALSE;
+	}
+	pk->e.lpCompletionKey = key;
+	pk->e.lpOverlapped = ov;
+	pk->e.dwNumberOfBytesTransferred = bytes;
+	wait_lock();
+	*p->tail = pk;
+	p->tail = &pk->next;
+	wait_broadcast();
+	wait_unlock();
+	kobj_unref(&p->obj);
+	return TRUE;
+}
+
+/* Takes up to max packets, waiting up to timeout for the first; 0 if none. */
+static ULONG iocp_take(HANDLE port, OVERLAPPED_ENTRY *out, ULONG max,
+		       DWORD timeout)
+{
+	struct iocp *p = (struct iocp *)handle_ref(port, KOBJ_IOCP);
+	struct timespec deadline;
+	ULONG n = 0;
+
+	if (!p)
+		return 0;
+	if (timeout != INFINITE)
+		wait_deadline(timeout, &deadline);
+	wait_lock();
+	while (!p->head && timeout &&
+	       !wait_block(timeout == INFINITE ? NULL : &deadline))
+		;
+	while (p->head && n < max) {
+		struct iocp_packet *pk = p->head;
+		if (!(p->head = pk->next))
+			p->tail = &p->head;
+		out[n++] = pk->e;
+		free(pk);
+	}
+	wait_unlock();
+	kobj_unref(&p->obj);
+	if (!n)
+		win_set_error(WAIT_TIMEOUT);
+	return n;
+}
+
+WINFN(BOOL) k32_GetQueuedCompletionStatus(HANDLE port, DWORD *bytes,
+					  ULONG_PTR *key, LPOVERLAPPED *ov,
+					  DWORD timeout)
+{
+	OVERLAPPED_ENTRY e;
+
+	if (!iocp_take(port, &e, 1, timeout)) {
+		if (ov)
+			*ov = NULL;
+		return FALSE;
+	}
+	if (bytes)
+		*bytes = e.dwNumberOfBytesTransferred;
+	if (key)
+		*key = e.lpCompletionKey;
+	if (ov)
+		*ov = e.lpOverlapped;
+	return TRUE;
+}
+
+WINFN(BOOL) k32_GetQueuedCompletionStatusEx(HANDLE port,
+					    LPOVERLAPPED_ENTRY entries,
+					    ULONG count, ULONG *removed,
+					    DWORD timeout, BOOL alertable)
+{
+	if (!entries || !count || !removed) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	*removed = iocp_take(port, entries, count, timeout);
+	return *removed != 0;
+}
+
 #define E(name) { #name, 0, (void *)k32_##name }
 
 const struct builtin_export k32_sync_exports[] = {
 	E(CreateEventA),
 	E(CreateEventExW),
 	E(CreateEventW),
+	E(CreateIoCompletionPort),
 	E(CreateMutexA),
 	E(CreateMutexW),
 	E(CreateSemaphoreA),
@@ -614,6 +768,8 @@ const struct builtin_export k32_sync_exports[] = {
 	E(CreateSemaphoreW),
 	E(DeleteCriticalSection),
 	E(EnterCriticalSection),
+	E(GetQueuedCompletionStatus),
+	E(GetQueuedCompletionStatusEx),
 	E(InitializeCriticalSection),
 	E(InitializeCriticalSectionAndSpinCount),
 	E(InitializeCriticalSectionEx),
@@ -628,6 +784,7 @@ const struct builtin_export k32_sync_exports[] = {
 	E(OpenEventW),
 	E(OpenMutexA),
 	E(OpenSemaphoreA),
+	E(PostQueuedCompletionStatus),
 	E(PulseEvent),
 	E(ReleaseMutex),
 	E(ReleaseSemaphore),
