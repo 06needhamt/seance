@@ -49,7 +49,7 @@ const struct vfw_codec *vfw_find_path(const char *path);
 /*
  * handlers.c: up to max FOURCCs the DLL at path may want to be opened
  * under, read from its code, data and version resource, the likelier
- * first. where, if not NULL, gets each one's VFW_FOURCC_FROM_*.
+ * first, then from the DLLs it imports that sit next to it. where, if not NULL, gets each one's VFW_FOURCC_FROM_*.
  */
 enum {
 	VFW_FOURCC_FROM_CMP,		/* compared with in code */
@@ -58,6 +58,7 @@ enum {
 	VFW_FOURCC_FROM_VERSION,	/* a word of the version resource */
 	VFW_FOURCC_FROM_STRING,		/* a string or its first word */
 	VFW_FOURCC_FROM_MOV,		/* stored or pushed in code */
+	VFW_FOURCC_FROM_COMPANION,	/* in a DLL it imports, next to it */
 };
 size_t vfw_dll_handlers(const char *path, FOURCC *out, unsigned char *where,
 			size_t max);

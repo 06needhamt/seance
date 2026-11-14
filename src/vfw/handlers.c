@@ -23,10 +23,15 @@
  * Each is four ASCII letters and digits, a letter first; the stream and
  * driver types ('vidc', 'vids', ...) aren't handlers and are left out.
  */
+#include <dirent.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
+#include "common/log.h"
 #include "loader/pe.h"
+#include "runtime/builtin.h"
 #include "vfw/registry.h"
 
 static int is_alnum(BYTE c)
@@ -42,8 +47,12 @@ static int is_printable(BYTE c)
 
 static int looks_like_fourcc(const BYTE *b)
 {
+	/* Stream and driver types, the month names of the C runtime's
+	 * locale table, which DLLs linked with it carry ("June", "July"),
+	 * and the signatures of debug information ("RSDS", "NB10"). */
 	static const char *const types[] = {
 		"vidc", "audc", "vids", "auds", "draw", "txts", "mids",
+		"June", "July", "RSDS", "NB10",
 	};
 
 	if (!((b[0] >= 'A' && b[0] <= 'Z') || (b[0] >= 'a' && b[0] <= 'z')) ||
@@ -66,6 +75,7 @@ static int case_pair(const BYTE *a, const BYTE *b)
 
 static unsigned char *add_where;	/* the caller's, or NULL */
 static unsigned add_from;
+static int add_companion;		/* scanning a DLL it imports */
 
 static size_t add(FOURCC *out, size_t n, size_t max, const BYTE *b)
 {
@@ -77,7 +87,8 @@ static size_t add(FOURCC *out, size_t n, size_t max, const BYTE *b)
 			return n;
 	if (n < max) {
 		if (add_where)
-			add_where[n] = (unsigned char)add_from;
+			add_where[n] = (unsigned char)(add_companion ?
+				VFW_FOURCC_FROM_COMPANION : add_from);
 		out[n++] = f;
 	}
 	return n;
@@ -197,15 +208,9 @@ static void demote_raw(FOURCC *out, unsigned char *where, size_t n)
 		memcpy(where, w, n);
 }
 
-size_t vfw_dll_handlers(const char *path, FOURCC *out, unsigned char *where,
-			size_t max)
+static size_t scan_image(const struct pe_image *img, FOURCC *out, size_t n,
+			 size_t max)
 {
-	struct pe_image *img = pe_open(path);
-	size_t n = 0;
-
-	if (!img)
-		return 0;
-	add_where = where;
 	for (int pass = 0; pass < 5; pass++) {
 		if (pass == 2) {
 			struct version_ctx v = { out, n, max };
@@ -262,9 +267,96 @@ size_t vfw_dll_handlers(const char *path, FOURCC *out, unsigned char *where,
 			}
 		}
 	}
+	return n;
+}
+
+/*
+ * The DLLs it imports that sit next to it, not built in, where a front end
+ * keeps its FOURCCs in the core it calls (utv_vcm.dll and utv_core.dll).
+ */
+struct companions {
+	char names[16][64];
+	size_t n;
+};
+
+static int add_companion_name(void *ctx, const struct pe_import *imp)
+{
+	struct companions *c = ctx;
+
+	if (!imp->dll || builtin_find(imp->dll) || strlen(imp->dll) >= 64)
+		return 0;
+	for (size_t i = 0; i < c->n; i++)
+		if (!strcasecmp(c->names[i], imp->dll))
+			return 0;
+	if (c->n < sizeof(c->names) / sizeof(c->names[0]))
+		snprintf(c->names[c->n++], 64, "%s", imp->dll);
+	return 0;
+}
+
+/* The file in dir named name, in any case; NULL if there is none. */
+static char *find_in_dir(const char *dir, const char *name)
+{
+	DIR *d = opendir(dir);
+	struct dirent *e;
+	char *found = NULL;
+
+	if (!d)
+		return NULL;
+	while (!found && (e = readdir(d)))
+		if (!strcasecmp(e->d_name, name) &&
+		    asprintf(&found, "%s/%s", dir, e->d_name) < 0)
+			found = NULL;
+	closedir(d);
+	return found;
+}
+
+static size_t scan_companions(const struct pe_image *img, const char *path,
+			      FOURCC *out, size_t n, size_t max)
+{
+	struct companions c = { .n = 0 };
+	char *dir = strdup(path), *slash = dir ? strrchr(dir, '/') : NULL;
+
+	if (!slash) {
+		free(dir);
+		return n;
+	}
+	*slash = 0;
+	pe_foreach_import(img, add_companion_name, &c);
+	add_companion = 1;
+	for (size_t i = 0; i < c.n; i++) {
+		char *file = find_in_dir(*dir ? dir : "/", c.names[i]);
+		struct pe_image *dep = file ? pe_open(file) : NULL;
+		if (dep) {
+			n = scan_image(dep, out, n, max);
+			pe_free(dep);
+		}
+		free(file);
+	}
+	add_companion = 0;
+	free(dir);
+	return n;
+}
+
+size_t vfw_dll_handlers(const char *path, FOURCC *out, unsigned char *where,
+			size_t max)
+{
+	struct pe_image *img = pe_open(path);
+	size_t n = 0;
+
+	if (!img)
+		return 0;
+	add_where = where;
+	n = scan_image(img, out, n, max);
+	n = scan_companions(img, path, out, n, max);
 	add_where = NULL;
 	pe_free(img);
 	demote_raw(out, where, n);
+	if (vfw_trace_enabled) {
+		char list[64 * 5 + 1] = "";
+		for (size_t i = 0; i < n && i < 64; i++)
+			snprintf(list + 5 * i, 6, "%.4s ", (const char *)&out[i]);
+		TRACE("FOURCCs found in %s: %s", path, list);
+	}
 	return n;
 }
 
@@ -277,6 +369,7 @@ const char *vfw_fourcc_from_name(unsigned from)
 		[VFW_FOURCC_FROM_VERSION] = "in its version resource",
 		[VFW_FOURCC_FROM_STRING] = "a string in its data",
 		[VFW_FOURCC_FROM_MOV] = "stored or pushed by its code",
+		[VFW_FOURCC_FROM_COMPANION] = "in a DLL it imports, next to it",
 	};
 
 	return from < sizeof(names) / sizeof(names[0]) ? names[from] : "?";

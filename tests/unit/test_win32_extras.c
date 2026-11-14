@@ -1514,6 +1514,8 @@ static void test_more_imports(const char *root)
 	CFN(m, int, iswupper, unsigned short);
 	CFN(m, void, _swab, const char *, char *, int);
 	CFN(m, char *, _strtime, char *);
+	CFN(m, double, difftime, time_t, time_t);
+	CFN(m, double, _difftime64, int64_t, int64_t);
 	CFN(m, int, __CppXcptFilter, unsigned, void *);
 	CFN(m, BYTE *, _mbsnbcpy, BYTE *, const BYTE *, size_t);
 	CFN(m, BYTE *, _mbsspnp, const BYTE *, const BYTE *);
@@ -1545,6 +1547,8 @@ static void test_more_imports(const char *root)
 	CHECK(!memcmp(sw, "badc", 4));
 	char tbuf[9];
 	CHECK(_strtime(tbuf) == tbuf && strlen(tbuf) == 8 && tbuf[2] == ':');
+	CHECK(difftime(100, 40) == 60.0 && difftime(40, 100) == -60.0);
+	CHECK(_difftime64(INT64_C(5000000000), 0) == 5e9);
 	CHECK_EQ(__CppXcptFilter(0xE06D7363, NULL), 1);
 	CHECK_EQ(__CppXcptFilter(0xC0000005, NULL), 0);
 	CHECK(*huge > 1e308);

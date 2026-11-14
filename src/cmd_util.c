@@ -439,7 +439,9 @@ int cli_open_codec(const char *arg, const char *fourcc, FOURCC guess,
 			HIC h = try_open(c, found[i], modes, nmodes);
 			ICINFO info;
 			if (h && ic_get_info(h, &info, sizeof(info)) &&
-			    (!nameless || info.fccHandler)) {
+			    (!nameless || (info.fccHandler &&
+					   (info.szName[0] ||
+					    info.szDescription[0])))) {
 				char fcc[FOURCC_STR_SIZE];
 				fprintf(stderr, "seance: %s answers only under a "
 					"FOURCC of its own; opened as '%s', found in "

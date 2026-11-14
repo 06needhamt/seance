@@ -2,7 +2,7 @@
 /*
  * More of msvcrt: wide-string conversions and classes (wcstol, wcstod,
  * _wtoi, _itow, wcstok, isw*), and odds and ends codecs import (_ftime,
- * _filelength, _strtime, _strdate, _swab, perror, _stricoll, _HUGE,
+ * _filelength, _strtime, _strdate, difftime, _swab, perror, _stricoll, _HUGE,
  * __CppXcptFilter). Windows' WCHAR is 16 bits and its long 32, so nothing
  * here goes through the host's wchar_t or long.
  */
@@ -233,6 +233,11 @@ CRTFN(char *) crt__strdate(char *buf)
 	return buf;
 }
 
+/* msvcrt's time_t is the host's here: 32 bits on i386, 64 on x64. */
+CRTFN(double) crt_difftime(time_t end, time_t start) { return (double)end - (double)start; }
+CRTFN(double) crt__difftime32(int32_t end, int32_t start) { return (double)end - (double)start; }
+CRTFN(double) crt__difftime64(int64_t end, int64_t start) { return (double)end - (double)start; }
+
 CRTFN(void) crt__swab(const char *src, char *dst, int n)
 {
 	for (int i = 0; i + 1 < n; i += 2) {
@@ -267,6 +272,8 @@ static const double huge_val = HUGE_VAL;
 const struct builtin_export crt_wide_exports[] = {
 	E(__CppXcptFilter),
 	{ "_HUGE", 0, (void *)&huge_val },
+	E(_difftime32),
+	E(_difftime64),
 	E(_filelength),
 	E(_ftime),
 	{ "_ftime32", 0, (void *)crt__ftime },
@@ -277,6 +284,7 @@ const struct builtin_export crt_wide_exports[] = {
 	E(_swab),
 	E(_wtoi),
 	E(_wtol),
+	E(difftime),
 	E(iswalnum),
 	E(iswalpha),
 	E(iswcntrl),

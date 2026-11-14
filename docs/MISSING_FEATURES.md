@@ -573,6 +573,28 @@ to a cause; what was seance's is fixed, and the rest is recorded here.
   - With that done they reach LEAD's licence check ("The evaluation
     period has expired"), and fail with 0x80050010. That isn't worked
     around.
+- **Ut Video** (`utv_vcm.dll`): round-trips now (ULRA, lossless).
+  - Its `DRV_OPEN` takes any FOURCC and makes its codec only for one of
+    its own, which are kept in `utv_core.dll`, the DLL it calls. seance
+    opened it as 'July', a month name of the C runtime's locale table, and
+    it then crashed on `ICM_DECOMPRESS_QUERY` with no codec behind it.
+  - The search of a DLL for its FOURCCs now leaves out the C runtime's
+    month names and debug signatures ('RSDS', 'NB10'), and goes on to the
+    DLLs it imports that sit next to it.
+  - A driver that says nothing of itself without a FOURCC is now taken
+    under one only if it then gives a name or description as well.
+- **3ivx** (`3ivxVfWCodec.dll` and its `DivXVfWCodec.dll` and
+  `SamsungVfWCodec.dll` brands, the `3ivxDS*` filters): `difftime`, which
+  they import, is now built in.
+  - The VfW codecs and the video encoder filter then fail in `3ivx.dll`,
+    their core: it is a trial build ("3ivx Trial", "Demo Expired") that
+    reads `trial.pbm` from the system directory. That file comes with its
+    installer, not the zip, and without it the core makes no encoder (the
+    VfW codecs crash on its NULL in `ICM_COMPRESS_GET_FORMAT`).
+  - The audio encoder filter, also a trial build ("This period has now
+    expired"), fails to be created with `E_NOINTERFACE`. Why wasn't
+    looked into past its trial code.
+  - None of this is worked around.
 
 ## In-repository baseline
 
