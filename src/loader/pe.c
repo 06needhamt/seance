@@ -15,6 +15,7 @@
 #include "common/error.h"
 #include "common/unicode.h"
 #include "loader/pe.h"
+#include "runtime/gate.h"
 #include "runtime/crash.h"
 #include "runtime/teb.h"
 
@@ -1227,7 +1228,9 @@ BOOL pe_call_entry(struct pe_image *img, DWORD reason)
 	entry_fn entry = (entry_fn)(img->base + ep);
 	struct crash_frame saved;
 	crash_enter("DllMain", (const void *)entry, reason, dll_reason_name, &saved);
-	BOOL r = entry((HINSTANCE)img->base, reason, NULL);
+	/* Through the gate, so it returns into kernel32 (runtime/gate.h). */
+	uintptr_t args[3] = { (uintptr_t)img->base, reason, 0 };
+	BOOL r = (BOOL)gate_call((const void *)entry, 3, args);
 	crash_leave(&saved);
 	return r;
 }

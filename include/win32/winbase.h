@@ -21,9 +21,11 @@
 #define ERROR_ACCESS_DENIED            5
 #define ERROR_INVALID_HANDLE           6
 #define ERROR_NOT_ENOUGH_MEMORY        8
+#define ERROR_CLIPBOARD_NOT_OPEN       1418
 #define ERROR_INVALID_DATA             13
 #define ERROR_OUTOFMEMORY              14
 #define ERROR_NO_MORE_FILES            18
+#define ERROR_BAD_LENGTH               24
 #define ERROR_GEN_FAILURE              31
 #define ERROR_SHARING_VIOLATION        32
 #define ERROR_HANDLE_EOF               38
@@ -54,6 +56,7 @@
 #define ERROR_NOT_OWNER                288
 #define ERROR_TOO_MANY_POSTS           298
 #define ERROR_INVALID_ADDRESS          487
+#define ERROR_PARTIAL_COPY             299
 #define ERROR_NOACCESS                 998
 #define ERROR_OLD_WIN_VERSION          1150
 #define ERROR_NOT_FOUND                1168
@@ -104,6 +107,7 @@
 #define WAIT_ABANDONED_0   0x80
 #define WAIT_IO_COMPLETION 0xc0
 #define WAIT_TIMEOUT       0x102
+#define ERROR_ABANDONED_WAIT_0 735
 #define WAIT_FAILED        0xffffffff
 #define MAXIMUM_WAIT_OBJECTS 64
 
@@ -361,6 +365,13 @@ typedef struct _OVERLAPPED {
 	};
 	HANDLE hEvent;
 } OVERLAPPED, *LPOVERLAPPED;
+
+typedef struct _OVERLAPPED_ENTRY {
+	ULONG_PTR lpCompletionKey;
+	LPOVERLAPPED lpOverlapped;
+	ULONG_PTR Internal;
+	DWORD dwNumberOfBytesTransferred;
+} OVERLAPPED_ENTRY, *LPOVERLAPPED_ENTRY;
 
 typedef struct _SYSTEMTIME {
 	WORD wYear;

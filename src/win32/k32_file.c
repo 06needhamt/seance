@@ -1012,6 +1012,177 @@ WINFN(DWORD) k32_GetFullPathNameW(LPCWSTR name, DWORD size, LPWSTR buf,
 	return full_path_name(name, 1, size, buf, (void **)filepart);
 }
 
+/*
+ * SearchPath: name, with ext added if it has none, in each directory of
+ * path (';'-separated), or else the current directory, the system
+ * directory and the Windows directory (the host's $PATH holds no Windows
+ * directories). The first that exists, as a full path.
+ */
+static DWORD search_path(const void *path, const void *name, const void *ext,
+			 int wide, DWORD size, void *buf, void **filepart)
+{
+	char *p = path ? (wide ? utf16_to_utf8_dup(path) : acp_to_utf8(path)) : NULL;
+	char *n = name ? (wide ? utf16_to_utf8_dup(name) : acp_to_utf8(name)) : NULL;
+	char *e = ext ? (wide ? utf16_to_utf8_dup(ext) : acp_to_utf8(ext)) : NULL;
+	char *dirs = NULL, *found = NULL;
+	DWORD r = 0;
+
+	if (!n || !*n) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		goto out;
+	}
+	const char *base = strrchr(n, '\\') ? strrchr(n, '\\') + 1 : n;
+	const char *add = e && *e && !strchr(base, '.') ? e : "";
+	if (p) {
+		dirs = strdup(p);
+	} else {
+		char *cwd = path_getcwd();
+		size_t len = (cwd ? strlen(cwd) : 1) + 64;
+		if ((dirs = malloc(len)))
+			snprintf(dirs, len, "%s;C:\\WINDOWS\\system32;C:\\WINDOWS",
+				 cwd ? cwd : ".");
+		free(cwd);
+	}
+	if (!dirs) {
+		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
+		goto out;
+	}
+	/* A name with a drive or a leading backslash names the file itself. */
+	int absolute = (n[0] && n[1] == ':') || n[0] == '\\' || n[0] == '/';
+	char *save = NULL;
+	for (char *d = absolute ? (char *)"" : strtok_r(dirs, ";", &save);
+	     d && !found; d = absolute ? NULL : strtok_r(NULL, ";", &save)) {
+		size_t len = strlen(d) + strlen(n) + strlen(add) + 2;
+		char *cand = malloc(len);
+		if (!cand)
+			break;
+		if (absolute)
+			snprintf(cand, len, "%s%s", n, add);
+		else
+			snprintf(cand, len, "%s%s%s%s", d,
+				 *d && d[strlen(d) - 1] != '\\' ? "\\" : "", n, add);
+		char *full = k32_full_path(cand);
+		char *unix_name = full ? path_to_unix(full) : NULL;
+		struct stat st;
+		if (unix_name && !stat(unix_name, &st) && !S_ISDIR(st.st_mode))
+			found = full;
+		else
+			free(full);
+		free(unix_name);
+		free(cand);
+	}
+	if (!found) {
+		win_set_error(ERROR_FILE_NOT_FOUND);
+		goto out;
+	}
+	r = wide ? copy_out_w(found, buf, size) : copy_out_a(found, buf, size);
+	if (filepart && r < size) {
+		if (wide) {
+			WCHAR *last = NULL;
+			for (WCHAR *q = buf; *q; q++)
+				if (*q == '\\')
+					last = q + 1;
+			*filepart = last;
+		} else {
+			char *last = strrchr(buf, '\\');
+			*filepart = last ? last + 1 : NULL;
+		}
+	}
+out:
+	free(p);
+	free(n);
+	free(e);
+	free(dirs);
+	free(found);
+	return r;
+}
+
+WINFN(DWORD) k32_SearchPathA(LPCSTR path, LPCSTR name, LPCSTR ext, DWORD size,
+			     LPSTR buf, LPSTR *filepart)
+{
+	return search_path(path, name, ext, 0, size, buf, (void **)filepart);
+}
+
+WINFN(DWORD) k32_SearchPathW(LPCWSTR path, LPCWSTR name, LPCWSTR ext, DWORD size,
+			     LPWSTR buf, LPWSTR *filepart)
+{
+	return search_path(path, name, ext, 1, size, buf, (void **)filepart);
+}
+
+/*
+ * Change notifications (ffdshow.ax watches its presets directory): a
+ * waitable object that never signals, as if nothing in the directory ever
+ * changed. Nothing here writes to a codec's directories behind its back.
+ */
+static void change_destroy(struct kobject *obj)
+{
+	free(obj);
+}
+
+static int change_signaled(struct kobject *obj, DWORD tid)
+{
+	return 0;
+}
+
+static HANDLE change_notification(const void *path, int wide)
+{
+	char *u = path ? (wide ? utf16_to_utf8_dup(path) : acp_to_utf8(path)) : NULL;
+	char *unix_name = u ? path_to_unix(u) : NULL;
+	struct stat st;
+	int ok = unix_name && !stat(unix_name, &st) && S_ISDIR(st.st_mode);
+
+	free(u);
+	free(unix_name);
+	if (!ok) {
+		win_set_error(ERROR_PATH_NOT_FOUND);
+		return INVALID_HANDLE_VALUE;
+	}
+	struct kobject *o = calloc(1, sizeof(*o));
+	if (!o) {
+		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
+		return INVALID_HANDLE_VALUE;
+	}
+	kobj_init(o, KOBJ_CHANGE, change_destroy);
+	o->signaled = change_signaled;
+	HANDLE h = handle_new(o);
+	if (!h) {
+		kobj_unref(o);
+		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
+		return INVALID_HANDLE_VALUE;
+	}
+	return h;
+}
+
+WINFN(HANDLE) k32_FindFirstChangeNotificationA(LPCSTR path, BOOL subtree, DWORD filter)
+{
+	return change_notification(path, 0);
+}
+
+WINFN(HANDLE) k32_FindFirstChangeNotificationW(LPCWSTR path, BOOL subtree, DWORD filter)
+{
+	return change_notification(path, 1);
+}
+
+WINFN(BOOL) k32_FindNextChangeNotification(HANDLE h)
+{
+	struct kobject *o = handle_ref(h, KOBJ_CHANGE);
+
+	if (!o)
+		return FALSE;
+	kobj_unref(o);
+	return TRUE;
+}
+
+WINFN(BOOL) k32_FindCloseChangeNotification(HANDLE h)
+{
+	struct kobject *o = handle_ref(h, KOBJ_CHANGE);
+
+	if (!o)
+		return FALSE;
+	kobj_unref(o);
+	return handle_close(h);
+}
+
 WINFN(DWORD) k32_GetCurrentDirectoryA(DWORD size, LPSTR buf)
 {
 	char *cwd = path_getcwd();
@@ -1583,6 +1754,10 @@ const struct builtin_export k32_file_exports[] = {
 	E(DeleteFileA),
 	E(DeleteFileW),
 	E(FindClose),
+	E(FindCloseChangeNotification),
+	E(FindFirstChangeNotificationA),
+	E(FindFirstChangeNotificationW),
+	E(FindNextChangeNotification),
 	E(FindFirstFileA),
 	E(FindFirstFileExW),
 	E(FindFirstFileW),
@@ -1636,6 +1811,8 @@ const struct builtin_export k32_file_exports[] = {
 	E(ReadFile),
 	E(RemoveDirectoryA),
 	E(RemoveDirectoryW),
+	E(SearchPathA),
+	E(SearchPathW),
 	E(SetConsoleCtrlHandler),
 	E(SetConsoleMode),
 	E(SetConsoleTextAttribute),

@@ -678,6 +678,107 @@ WINFN(HRESULT) ole_CoCreateInstance(REFCLSID clsid, LPUNKNOWN outer,
 WINFN(void) ole_CoFreeUnusedLibraries(void) { }
 WINFN(void) ole_CoFreeUnusedLibrariesEx(DWORD delay, DWORD reserved) { }
 
+/*
+ * PropVariantClear and PropVariantCopy. A PROPVARIANT is a VARIANT's
+ * layout (vt, three reserved words, the value at offset 8) with more
+ * types; the strings, CLSIDs and blobs it adds live in CoTaskMem, and the
+ * rest are a VARIANT's, so oleaut32 handles those. Vectors (VT_VECTOR) of
+ * anything aren't supported.
+ */
+#ifndef VT_LPWSTR
+#define VT_LPWSTR 31
+#endif
+#ifndef VT_CF
+#define VT_CF 71
+#endif
+
+struct clipdata {
+	ULONG cbSize;		/* of ulClipFmt and the data */
+	LONG ulClipFmt;
+	BYTE *pClipData;
+};
+
+static int task_mem_type(VARTYPE vt)
+{
+	return vt == VT_LPSTR || vt == VT_LPWSTR || vt == VT_CLSID ||
+	       vt == VT_BLOB || vt == VT_CF;
+}
+
+WINFN(HRESULT) ole_PropVariantClear(VARIANT *pv)
+{
+	if (!pv)
+		return S_OK;
+	BYTE *val = (BYTE *)pv + 8;
+	if (pv->vt & VT_VECTOR)
+		return DISP_E_BADVARTYPE;
+	if (task_mem_type(pv->vt)) {
+		void *p = pv->vt == VT_BLOB ? *(void **)(val + sizeof(void *)) :
+					      *(void **)val;
+		if (pv->vt == VT_CF && p)
+			ole_CoTaskMemFree(((struct clipdata *)p)->pClipData);
+		ole_CoTaskMemFree(p);
+	} else if (pv->vt != VT_EMPTY && pv->vt != VT_NULL) {
+		HRESULT hr = oa_VariantClear(pv);
+		if (FAILED(hr))
+			return hr;
+	}
+	memset(pv, 0, sizeof(*pv));
+	return S_OK;
+}
+
+static void *dup_task(const void *p, size_t n)
+{
+	void *d = n ? ole_CoTaskMemAlloc(n) : NULL;
+	if (d)
+		memcpy(d, p, n);
+	return d;
+}
+
+WINFN(HRESULT) ole_PropVariantCopy(VARIANT *dst, const VARIANT *src)
+{
+	if (!dst || !src)
+		return E_INVALIDARG;
+	if (src->vt & VT_VECTOR)
+		return DISP_E_BADVARTYPE;
+	if (!task_mem_type(src->vt)) {
+		memset(dst, 0, sizeof(*dst));
+		return src->vt == VT_EMPTY || src->vt == VT_NULL ?
+		       (*dst = *src, S_OK) : oa_VariantCopy(dst, src);
+	}
+	*dst = *src;
+	const BYTE *sv = (const BYTE *)src + 8;
+	BYTE *dv = (BYTE *)dst + 8;
+	const void *p = src->vt == VT_BLOB ? *(void *const *)(sv + sizeof(void *)) :
+					     *(void *const *)sv;
+	void *copy = NULL;
+	size_t n = 0;
+	switch (src->vt) {
+	case VT_LPSTR:  n = p ? strlen(p) + 1 : 0; break;
+	case VT_LPWSTR: if (p) while (((const WCHAR *)p)[n++]) ; n *= sizeof(WCHAR); break;
+	case VT_CLSID:  n = p ? sizeof(GUID) : 0; break;
+	case VT_BLOB:   n = *(const ULONG *)sv; break;
+	case VT_CF:     n = 0; break;
+	}
+	if (src->vt == VT_CF && p) {
+		const struct clipdata *cd = p;
+		struct clipdata *out = ole_CoTaskMemAlloc(sizeof(*out));
+		if (!out)
+			return E_OUTOFMEMORY;
+		*out = *cd;
+		out->pClipData = cd->cbSize > 4 && cd->pClipData ?
+				 dup_task(cd->pClipData, cd->cbSize - 4) : NULL;
+		copy = out;
+	} else if (p && n) {
+		if (!(copy = dup_task(p, n)))
+			return E_OUTOFMEMORY;
+	}
+	if (src->vt == VT_BLOB)
+		*(void **)(dv + sizeof(void *)) = copy;
+	else
+		*(void **)dv = copy;
+	return S_OK;
+}
+
 static const struct builtin_export exports[] = {
 	{ "CLSIDFromProgID", 0, ole_CLSIDFromProgID },
 	{ "CLSIDFromString", 0, ole_CLSIDFromString },
@@ -701,6 +802,8 @@ static const struct builtin_export exports[] = {
 	{ "OleInitialize", 0, ole_OleInitialize },
 	{ "OleUninitialize", 0, ole_OleUninitialize },
 	{ "ProgIDFromCLSID", 0, ole_ProgIDFromCLSID },
+	{ "PropVariantClear", 0, ole_PropVariantClear },
+	{ "PropVariantCopy", 0, ole_PropVariantCopy },
 	{ "StringFromCLSID", 0, ole_StringFromCLSID },
 	{ "StringFromGUID2", 0, ole_StringFromGUID2 },
 	{ "StringFromIID", 0, ole_StringFromIID },

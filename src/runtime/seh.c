@@ -342,6 +342,24 @@ int seh_take_fault(int sig, siginfo_t *si, void *ucontext)
 	case SIGFPE:
 		pending.rec.ExceptionCode = code_from_fpe(si->si_code);
 		break;
+	case SIGTRAP:
+		if (si->si_code == TRAP_TRACE) {
+			/* The trap flag: past the instruction, flag cleared. */
+			pending.rec.ExceptionCode = EXCEPTION_SINGLE_STEP;
+			pending.ctx.EFlags &= ~0x100u;
+		} else {
+			/*
+			 * int3, which Windows reports at the breakpoint
+			 * itself (a handler steps over it with Eip++); "int 3"
+			 * (CD 03) gets the same, one byte back, as there.
+			 */
+			pending.rec.ExceptionCode = EXCEPTION_BREAKPOINT;
+			pending.rec.NumberParameters = 1;
+			pending.ctx.Eip--;
+			pending.rec.ExceptionAddress =
+				(void *)(uintptr_t)pending.ctx.Eip;
+		}
+		break;
 	default:
 		pending.rec.ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
 		break;

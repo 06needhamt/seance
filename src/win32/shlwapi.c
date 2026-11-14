@@ -12,6 +12,7 @@
 #include <strings.h>
 #include <sys/stat.h>
 
+#include "runtime/builtin.h"
 #include "win32/codepage.h"
 #include "win32/internal.h"
 #include "win32/path.h"
@@ -367,13 +368,241 @@ WINFN(DWORD) sl_SHDeleteKeyW(HKEY h, LPCWSTR sub)
 	return (DWORD)r;
 }
 
+/*
+ * SHGetValue, SHSetValue, SHDeleteValue: a value of a subkey, through
+ * advapi32's registry (vgmv2k2dx.ax keeps its settings this way). Getting
+ * expands REG_EXPAND_SZ data, as Windows' does.
+ */
+extern const struct builtin_dll builtin_advapi32;
+
+static void *adv(const char *name)
+{
+	return builtin_export(&builtin_advapi32, name);
+}
+
+WINFN(DWORD) sl_SHGetValueA(HKEY h, LPCSTR sub, LPCSTR name, DWORD *type,
+			    void *data, DWORD *cb)
+{
+	LONG (WINAPI *get)(HKEY, LPCSTR, LPCSTR, DWORD, LPDWORD, PVOID, LPDWORD) =
+		adv("RegGetValueA");
+	return (DWORD)get(h, sub, name, RRF_RT_ANY, type, data, cb);
+}
+
+WINFN(DWORD) sl_SHGetValueW(HKEY h, LPCWSTR sub, LPCWSTR name, DWORD *type,
+			    void *data, DWORD *cb)
+{
+	LONG (WINAPI *get)(HKEY, LPCWSTR, LPCWSTR, DWORD, LPDWORD, PVOID,
+			   LPDWORD) = adv("RegGetValueW");
+	return (DWORD)get(h, sub, name, RRF_RT_ANY, type, data, cb);
+}
+
+WINFN(DWORD) sl_SHSetValueA(HKEY h, LPCSTR sub, LPCSTR name, DWORD type,
+			    LPCVOID data, DWORD cb)
+{
+	LONG (WINAPI *create)(HKEY, LPCSTR, DWORD, LPSTR, DWORD, REGSAM,
+			      LPSECURITY_ATTRIBUTES, PHKEY, LPDWORD) =
+		adv("RegCreateKeyExA");
+	LONG (WINAPI *set)(HKEY, LPCSTR, DWORD, DWORD, const BYTE *, DWORD) =
+		adv("RegSetValueExA");
+	LONG (WINAPI *close)(HKEY) = adv("RegCloseKey");
+	HKEY k = h;
+	LONG r = ERROR_SUCCESS;
+
+	if (sub && *sub)
+		r = create(h, sub, 0, NULL, REG_OPTION_NON_VOLATILE,
+			   KEY_SET_VALUE, NULL, &k, NULL);
+	if (!r) {
+		r = set(k, name, 0, type, data, cb);
+		if (k != h)
+			close(k);
+	}
+	return (DWORD)r;
+}
+
+WINFN(DWORD) sl_SHSetValueW(HKEY h, LPCWSTR sub, LPCWSTR name, DWORD type,
+			    LPCVOID data, DWORD cb)
+{
+	LONG (WINAPI *create)(HKEY, LPCWSTR, DWORD, LPWSTR, DWORD, REGSAM,
+			      LPSECURITY_ATTRIBUTES, PHKEY, LPDWORD) =
+		adv("RegCreateKeyExW");
+	LONG (WINAPI *set)(HKEY, LPCWSTR, DWORD, DWORD, const BYTE *, DWORD) =
+		adv("RegSetValueExW");
+	LONG (WINAPI *close)(HKEY) = adv("RegCloseKey");
+	HKEY k = h;
+	LONG r = ERROR_SUCCESS;
+
+	if (sub && *sub)
+		r = create(h, sub, 0, NULL, REG_OPTION_NON_VOLATILE,
+			   KEY_SET_VALUE, NULL, &k, NULL);
+	if (!r) {
+		r = set(k, name, 0, type, data, cb);
+		if (k != h)
+			close(k);
+	}
+	return (DWORD)r;
+}
+
+WINFN(DWORD) sl_SHDeleteValueA(HKEY h, LPCSTR sub, LPCSTR name)
+{
+	LONG (WINAPI *open)(HKEY, LPCSTR, DWORD, REGSAM, PHKEY) =
+		adv("RegOpenKeyExA");
+	LONG (WINAPI *del)(HKEY, LPCSTR) = adv("RegDeleteValueA");
+	LONG (WINAPI *close)(HKEY) = adv("RegCloseKey");
+	HKEY k = h;
+	LONG r = ERROR_SUCCESS;
+
+	if (sub && *sub)
+		r = open(h, sub, 0, KEY_SET_VALUE, &k);
+	if (!r) {
+		r = del(k, name);
+		if (k != h)
+			close(k);
+	}
+	return (DWORD)r;
+}
+
+WINFN(DWORD) sl_SHDeleteValueW(HKEY h, LPCWSTR sub, LPCWSTR name)
+{
+	LONG (WINAPI *open)(HKEY, LPCWSTR, DWORD, REGSAM, PHKEY) =
+		adv("RegOpenKeyExW");
+	LONG (WINAPI *del)(HKEY, LPCWSTR) = adv("RegDeleteValueW");
+	LONG (WINAPI *close)(HKEY) = adv("RegCloseKey");
+	HKEY k = h;
+	LONG r = ERROR_SUCCESS;
+
+	if (sub && *sub)
+		r = open(h, sub, 0, KEY_SET_VALUE, &k);
+	if (!r) {
+		r = del(k, name);
+		if (k != h)
+			close(k);
+	}
+	return (DWORD)r;
+}
+
+/*
+ * PathCanonicalize: "." and ".." segments folded out, never above the root
+ * ("C:\", "\\server\share\" or "\"); a trailing backslash stays.
+ */
+static void canonicalize_a(char *out, const char *in)
+{
+	size_t root = 0, n = strlen(in);
+
+	if (n >= 2 && in[1] == ':')
+		root = n > 2 && in[2] == '\\' ? 3 : 2;
+	else if (n >= 2 && in[0] == '\\' && in[1] == '\\') {
+		int seps = 0;
+		root = 2;
+		while (root < n && seps < 2)
+			if (in[root++] == '\\')
+				seps++;
+	} else if (n && in[0] == '\\')
+		root = 1;
+	memcpy(out, in, root);
+	size_t o = root;
+	const char *p = in + root;
+	while (*p) {
+		const char *e = strchr(p, '\\');
+		size_t len = e ? (size_t)(e - p) : strlen(p);
+		if (len == 1 && p[0] == '.') {
+			/* nothing */
+		} else if (len == 2 && p[0] == '.' && p[1] == '.') {
+			if (o > root) {
+				if (out[o - 1] == '\\')
+					o--;
+				while (o > root && out[o - 1] != '\\')
+					o--;
+			}
+		} else if (len) {
+			memcpy(out + o, p, len);
+			o += len;
+			if (e)
+				out[o++] = '\\';
+		}
+		p += len;
+		if (*p)
+			p++;
+	}
+	if (!o)
+		out[o++] = '\\';
+	out[o] = 0;
+}
+
+WINFN(BOOL) sl_PathCanonicalizeA(LPSTR out, LPCSTR in)
+{
+	if (!out || !in)
+		return FALSE;
+	char tmp[MAX_PATH * 2];
+	snprintf(tmp, sizeof(tmp), "%s", in);
+	char res[MAX_PATH * 2];
+	canonicalize_a(res, tmp);
+	size_t n = strlen(res);
+	if (n >= MAX_PATH)
+		n = MAX_PATH - 1;
+	memcpy(out, res, n);
+	out[n] = 0;
+	return TRUE;
+}
+
+WINFN(BOOL) sl_PathCanonicalizeW(LPWSTR out, LPCWSTR in)
+{
+	if (!out || !in)
+		return FALSE;
+	char *u = utf16_to_utf8_dup(in), res[MAX_PATH * 4];
+	if (!u)
+		return FALSE;
+	canonicalize_a(res, u);
+	free(u);
+	int n = cp_to_utf16(CP_UTF8, res, -1, out, MAX_PATH, 0);
+	if (n <= 0)
+		out[0] = 0;
+	return TRUE;
+}
+
+/* PathCompactPathEx: path cut to fit max characters (with the NUL), keeping
+ * its file name and putting "..." where the rest was. */
+WINFN(BOOL) sl_PathCompactPathExA(LPSTR out, LPCSTR src, UINT max, DWORD flags)
+{
+	if (!out || !src || !max)
+		return FALSE;
+	size_t n = strlen(src);
+	if (n < max) {
+		memcpy(out, src, n + 1);
+		return TRUE;
+	}
+	const char *file = strrchr(src, '\\');
+	file = file ? file : src;
+	size_t flen = strlen(file);
+	if (max - 1 >= 3 + flen) {
+		size_t keep = max - 1 - 3 - flen;
+		memcpy(out, src, keep);
+		memcpy(out + keep, "...", 3);
+		memcpy(out + keep + 3, file, flen + 1);
+	} else if (max > 4) {
+		memcpy(out, file, max - 4);
+		memcpy(out + max - 4, "...", 4);
+	} else {
+		memcpy(out, "...", max - 1);
+		out[max - 1] = 0;
+	}
+	return TRUE;
+}
+
+/* By pixels, on a device: with no display, everything fits. */
+WINFN(BOOL) sl_PathCompactPathA(HDC dc, LPSTR path, UINT dx)
+{
+	return path != NULL;
+}
+
 WINFN(HRESULT) sl_DllGetVersion(DLLVERSIONINFO *v)
 { if(!v || v->cbSize<sizeof(*v)) return E_INVALIDARG; v->dwMajorVersion=6; v->dwMinorVersion=0; v->dwBuildNumber=2900; v->dwPlatformID=2; return S_OK; }
 
 #define E(n) { #n, 0, (void *)sl_##n }
 /* kernelbase.dll (kernel32.c) serves these too, as Windows 7's does. */
 const struct builtin_export shlwapi_exports[] = {
-	E(DllGetVersion), E(SHDeleteKeyA), E(SHDeleteKeyW), E(PathAddBackslashA), E(PathAddBackslashW), E(PathAppendA),
+	E(DllGetVersion), E(PathCanonicalizeA), E(PathCanonicalizeW), E(PathCompactPathA),
+	E(PathCompactPathExA), E(SHDeleteKeyA), E(SHDeleteKeyW), E(SHDeleteValueA),
+	E(SHDeleteValueW), E(SHGetValueA), E(SHGetValueW), E(SHSetValueA), E(SHSetValueW), E(PathAddBackslashA), E(PathAddBackslashW), E(PathAppendA),
 	E(PathCombineA), E(PathCombineW), E(PathFileExistsA), E(PathFileExistsW), E(PathFindExtensionA),
 	E(PathFindExtensionW), E(PathFindFileNameA), E(PathFindFileNameW),
 	E(PathIsDirectoryA), E(PathIsDirectoryW), E(PathIsFileSpecA), E(PathIsFileSpecW),

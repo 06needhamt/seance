@@ -22,6 +22,7 @@
 #include "win32/codepage.h"
 #include "win32/gdi.h"
 #include "win32/internal.h"
+#include "win32/k32.h"
 #include "win32/path.h"
 #include "win32/user.h"
 
@@ -821,10 +822,132 @@ static UINT register_name(char *name)
 WINFN(UINT) user_RegisterWindowMessageA(LPCSTR name) { return register_name(acp_to_utf8(name)); }
 WINFN(UINT) user_RegisterWindowMessageW(LPCWSTR name) { return register_name(utf16_to_utf8_dup(name)); }
 
+/*
+ * The clipboard, kept in the process: with no desktop to share it with,
+ * what a DLL puts there is what it gets back. SetClipboardData hands the
+ * memory to the clipboard, as on Windows, which frees it when emptied.
+ */
+#define CLIP_FORMATS 16
+static struct { UINT format; HANDLE data; } clip[CLIP_FORMATS];
+static int clip_open;
+
+static void clip_empty(void)
+{
+	for (int i = 0; i < CLIP_FORMATS; i++) {
+		if (clip[i].format && clip[i].data)
+			global_free(clip[i].data);
+		clip[i].format = 0;
+		clip[i].data = NULL;
+	}
+}
+
+WINFN(BOOL) user_OpenClipboard(HWND owner)
+{
+	(void)owner;
+	clip_open = 1;
+	return TRUE;
+}
+
+WINFN(BOOL) user_CloseClipboard(void)
+{
+	if (!clip_open) {
+		win_set_error(ERROR_CLIPBOARD_NOT_OPEN);
+		return FALSE;
+	}
+	clip_open = 0;
+	return TRUE;
+}
+
+WINFN(BOOL) user_EmptyClipboard(void)
+{
+	if (!clip_open) {
+		win_set_error(ERROR_CLIPBOARD_NOT_OPEN);
+		return FALSE;
+	}
+	clip_empty();
+	return TRUE;
+}
+
+WINFN(HANDLE) user_SetClipboardData(UINT format, HANDLE data)
+{
+	int free_slot = -1;
+
+	if (!clip_open || !format) {
+		win_set_error(clip_open ? ERROR_INVALID_PARAMETER :
+			      ERROR_CLIPBOARD_NOT_OPEN);
+		return NULL;
+	}
+	for (int i = 0; i < CLIP_FORMATS; i++) {
+		if (clip[i].format == format) {
+			if (clip[i].data && clip[i].data != data)
+				global_free(clip[i].data);
+			clip[i].data = data;
+			return data ? data : (HANDLE)(ULONG_PTR)1;
+		}
+		if (!clip[i].format && free_slot < 0)
+			free_slot = i;
+	}
+	if (free_slot < 0) {
+		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
+		return NULL;
+	}
+	clip[free_slot].format = format;
+	clip[free_slot].data = data;
+	return data ? data : (HANDLE)(ULONG_PTR)1;
+}
+
+WINFN(HANDLE) user_GetClipboardData(UINT format)
+{
+	for (int i = 0; i < CLIP_FORMATS; i++)
+		if (clip[i].format == format)
+			return clip[i].data;
+	return NULL;
+}
+
+WINFN(BOOL) user_IsClipboardFormatAvailable(UINT format)
+{
+	return user_GetClipboardData(format) != NULL;
+}
+
+WINFN(int) user_CountClipboardFormats(void)
+{
+	int n = 0;
+	for (int i = 0; i < CLIP_FORMATS; i++)
+		n += clip[i].format != 0;
+	return n;
+}
+
+WINFN(UINT) user_EnumClipboardFormats(UINT format)
+{
+	int seen = !format;
+	for (int i = 0; i < CLIP_FORMATS; i++) {
+		if (!clip[i].format)
+			continue;
+		if (seen)
+			return clip[i].format;
+		seen = clip[i].format == format;
+	}
+	return 0;
+}
+
+WINFN(HWND) user_GetClipboardOwner(void)
+{
+	return NULL;
+}
+
 #define E(name) { #name, 0, (void *)user_##name }
 
 static const struct builtin_export exports[] = {
 	E(BeginPaint),
+	E(CloseClipboard),
+	E(CountClipboardFormats),
+	E(EmptyClipboard),
+	E(EnumClipboardFormats),
+	E(GetClipboardData),
+	E(GetClipboardOwner),
+	E(IsClipboardFormatAvailable),
+	E(OpenClipboard),
+	E(SetClipboardData),
 	E(ClipCursor),
 	E(CopyRect),
 	E(DestroyCursor),

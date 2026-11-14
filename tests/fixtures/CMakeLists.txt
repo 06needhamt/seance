@@ -125,6 +125,11 @@ fixture(pe_delay pe_delay.c)
 # Links against kernel32 (the mingw import library) and a made-up function.
 fixture(pe_runtime pe_runtime.c LIBS vfw_missing_imports kernel32)
 
+# Finds kernel32 from DllMain's return address and walks its exports, as
+# packers do, and starts a cdecl routine as a thread.
+fixture(pe_packer pe_packer.c LIBS kernel32
+	OPTIONS -mpreferred-stack-boundary=2)
+
 # Calls into kernel32 with a 4-byte-aligned stack, as MSVC code does.
 fixture(pe_k32 pe_k32.c pe_k32.rc LIBS kernel32
 	OPTIONS -mpreferred-stack-boundary=2)

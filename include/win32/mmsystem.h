@@ -142,4 +142,92 @@ typedef struct wavehdr_tag {
 	((DWORD)(BYTE)(c0) | ((DWORD)(BYTE)(c1) << 8) | \
 	 ((DWORD)(BYTE)(c2) << 16) | ((DWORD)(BYTE)(c3) << 24))
 
+/* Multimedia file I/O (mmio*). */
+typedef struct HMMIO__ *HMMIO;
+typedef char *HPSTR;
+typedef LRESULT (CALLBACK *LPMMIOPROC)(LPSTR info, UINT msg, LPARAM l1,
+				       LPARAM l2);
+
+#pragma pack(push, 1)
+typedef struct _MMIOINFO {
+	DWORD dwFlags;
+	FOURCC fccIOProc;
+	LPMMIOPROC pIOProc;
+	UINT wErrorRet;
+	HANDLE htask;
+	LONG cchBuffer;
+	HPSTR pchBuffer;
+	HPSTR pchNext;
+	HPSTR pchEndRead;
+	HPSTR pchEndWrite;
+	LONG lBufOffset;
+	LONG lDiskOffset;
+	DWORD adwInfo[3];
+	DWORD dwReserved1;
+	DWORD dwReserved2;
+	HMMIO hmmio;
+} MMIOINFO, *LPMMIOINFO;
+
+typedef struct _MMCKINFO {
+	FOURCC ckid;
+	DWORD cksize;
+	FOURCC fccType;
+	DWORD dwDataOffset;
+	DWORD dwFlags;
+} MMCKINFO, *LPMMCKINFO;
+#pragma pack(pop)
+
+#define MMIOERR_BASE           256
+#define MMIOERR_FILENOTFOUND   (MMIOERR_BASE + 1)
+#define MMIOERR_OUTOFMEMORY    (MMIOERR_BASE + 2)
+#define MMIOERR_CANNOTOPEN     (MMIOERR_BASE + 3)
+#define MMIOERR_CANNOTCLOSE    (MMIOERR_BASE + 4)
+#define MMIOERR_CANNOTREAD     (MMIOERR_BASE + 5)
+#define MMIOERR_CANNOTWRITE    (MMIOERR_BASE + 6)
+#define MMIOERR_CANNOTSEEK     (MMIOERR_BASE + 7)
+#define MMIOERR_CANNOTEXPAND   (MMIOERR_BASE + 8)
+#define MMIOERR_CHUNKNOTFOUND  (MMIOERR_BASE + 9)
+#define MMIOERR_UNBUFFERED     (MMIOERR_BASE + 10)
+
+#define MMIO_RWMODE     0x00000003
+#define MMIO_READ       0x00000000
+#define MMIO_WRITE      0x00000001
+#define MMIO_READWRITE  0x00000002
+#define MMIO_SHAREMODE  0x00000070
+#define MMIO_CREATE     0x00001000
+#define MMIO_PARSE      0x00000100
+#define MMIO_DELETE     0x00000200
+#define MMIO_EXIST      0x00004000
+#define MMIO_ALLOCBUF   0x00010000
+#define MMIO_GETTEMP    0x00020000
+#define MMIO_DIRTY      0x10000000
+
+#define MMIO_TOUPPER    0x0010
+#define MMIO_FINDCHUNK  0x0010
+#define MMIO_FINDRIFF   0x0020
+#define MMIO_FINDLIST   0x0040
+#define MMIO_CREATERIFF 0x0020
+#define MMIO_CREATELIST 0x0040
+#define MMIO_EMPTYBUF   0x0010
+
+#define MMIO_INSTALLPROC 0x00010000
+#define MMIO_GLOBALPROC  0x10000000
+#define MMIO_REMOVEPROC  0x00020000
+#define MMIO_UNICODEPROC 0x01000000
+#define MMIO_FINDPROC    0x00040000
+
+#define MMIOM_READ       0
+#define MMIOM_WRITE      1
+#define MMIOM_SEEK       2
+#define MMIOM_OPEN       3
+#define MMIOM_CLOSE      4
+#define MMIOM_WRITEFLUSH 5
+#define MMIOM_RENAME     6
+#define MMIOM_USER       0x8000
+
+#define FOURCC_RIFF mmioFOURCC('R', 'I', 'F', 'F')
+#define FOURCC_LIST mmioFOURCC('L', 'I', 'S', 'T')
+#define FOURCC_DOS  mmioFOURCC('D', 'O', 'S', ' ')
+#define FOURCC_MEM  mmioFOURCC('M', 'E', 'M', ' ')
+
 #endif /* VFW_WIN32_MMSYSTEM_H */

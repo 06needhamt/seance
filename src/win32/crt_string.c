@@ -228,6 +228,42 @@ CRTFN(void) crt_##name(const T *path, T *drive, T *dir, T *fname, T *ext) \
 }
 SPLITPATH(_splitpath, char)
 SPLITPATH(_wsplitpath, WCHAR)
+
+/*
+ * _makepath and _wmakepath, the inverse: the drive's letter and a colon, the
+ * directory with a backslash added if it has no trailing slash, the name,
+ * and the extension with a dot added if it has none. Unbounded, as
+ * Windows' are; NULL or empty parts are left out.
+ */
+#define MAKEPATH(name, T) \
+CRTFN(void) crt_##name(T *path, const T *drive, const T *dir, \
+		       const T *fname, const T *ext) \
+{ \
+	T *o = path; \
+	\
+	if (drive && drive[0]) { \
+		*o++ = drive[0]; \
+		*o++ = ':'; \
+	} \
+	if (dir && dir[0]) { \
+		while (*dir) \
+			*o++ = *dir++; \
+		if (o[-1] != '/' && o[-1] != '\\') \
+			*o++ = '\\'; \
+	} \
+	if (fname) \
+		while (*fname) \
+			*o++ = *fname++; \
+	if (ext && ext[0]) { \
+		if (ext[0] != '.') \
+			*o++ = '.'; \
+		while (*ext) \
+			*o++ = *ext++; \
+	} \
+	*o = 0; \
+}
+MAKEPATH(_makepath, char)
+MAKEPATH(_wmakepath, WCHAR)
 /* Case folds ASCII only, as the C locale does (and _stricmp here). */
 static WCHAR wlower(WCHAR c)
 {
@@ -458,7 +494,7 @@ const struct builtin_export crt_string_exports[] = {
 	E(_msize), E(wcslen), E(wcsrchr), E(wcscpy), E(wcscat), E(wcscmp), E(wcsncmp),
 	E(wcschr), E(wcsstr), E(wcsncpy), E(wcsncat), E(wcsspn), E(wcscspn),
 	E(wcspbrk), E(_wcsdup), E(_wcsicmp), E(_wcsnicmp), E(_wcslwr), E(_wcsupr),
-	E(_splitpath), E(_wsplitpath),
+	E(_splitpath), E(_wsplitpath), E(_makepath), E(_wmakepath),
 	E(strcoll), E(strxfrm),
 	E(atoi), E(atol), E(atof), E(strtol), E(strtoul), E(strtod),
 	E(_itoa), E(_ltoa), E(_ultoa),

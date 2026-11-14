@@ -54,6 +54,7 @@ struct wclass {
 	HCURSOR cursor;
 	HBRUSH background;
 	int nwindows;
+	BYTE extra[];		/* cls_extra bytes (Get/SetClassLong) */
 };
 
 struct prop {
@@ -270,7 +271,7 @@ static ATOM register_class(const WNDCLASSEXW *wc, int unicode)
 		win_set_error(ERROR_CLASS_ALREADY_EXISTS);
 		goto out;
 	}
-	if (!(c = calloc(1, sizeof(*c))))
+	if (!(c = calloc(1, sizeof(*c) + (wc->cbClsExtra > 0 ? wc->cbClsExtra : 0))))
 		goto nomem;
 	if (IS_INTRESOURCE(wc->lpszClassName)) {
 		c->atom = (ATOM)(ULONG_PTR)wc->lpszClassName;
@@ -292,7 +293,7 @@ static ATOM register_class(const WNDCLASSEXW *wc, int unicode)
 	c->style = wc->style;
 	c->proc = wc->lpfnWndProc;
 	c->unicode = unicode;
-	c->cls_extra = wc->cbClsExtra;
+	c->cls_extra = wc->cbClsExtra > 0 ? wc->cbClsExtra : 0;
 	c->wnd_extra = wc->cbWndExtra > 0 ? wc->cbWndExtra : 0;
 	c->icon = wc->hIcon;
 	c->icon_sm = wc->cbSize >= sizeof(WNDCLASSEXW) ? wc->hIconSm : NULL;
@@ -1369,6 +1370,134 @@ out:
 	return old;
 }
 
+/*
+ * Get/SetClassLong, and with wide the Ptr forms: the window's class's
+ * fields, or its extra bytes. The menu name isn't kept, so it reads 0.
+ */
+static LONG_PTR class_long(HWND hwnd, int index, int set, LONG_PTR value,
+			   int unicode, int wide)
+{
+	LONG_PTR old = 0;
+
+	enter();
+	struct window *w = get(hwnd);
+	struct wclass *c = w ? w->cls : NULL;
+	if (!c) {
+		if (w)
+			win_set_error(ERROR_INVALID_INDEX);
+		goto out;
+	}
+#if defined(__x86_64__)
+	if (!wide && (index == GCLP_WNDPROC || index == GCLP_HMODULE ||
+		      index == GCLP_HICON || index == GCLP_HICONSM ||
+		      index == GCLP_HCURSOR || index == GCLP_HBRBACKGROUND ||
+		      index == GCLP_MENUNAME)) {
+		win_set_error(ERROR_INVALID_INDEX);
+		goto out;
+	}
+#endif
+	switch (index) {
+	case GCLP_WNDPROC:
+		old = (LONG_PTR)c->proc;
+		if (set) {
+			c->proc = (WNDPROC)value;
+			c->unicode = unicode;
+		}
+		break;
+	case GCLP_HMODULE:
+		old = (LONG_PTR)c->inst;
+		if (set)
+			c->inst = (HINSTANCE)value;
+		break;
+	case GCLP_HICON:
+		old = (LONG_PTR)c->icon;
+		if (set)
+			c->icon = (HICON)value;
+		break;
+	case GCLP_HICONSM:
+		old = (LONG_PTR)c->icon_sm;
+		if (set)
+			c->icon_sm = (HICON)value;
+		break;
+	case GCLP_HCURSOR:
+		old = (LONG_PTR)c->cursor;
+		if (set)
+			c->cursor = (HCURSOR)value;
+		break;
+	case GCLP_HBRBACKGROUND:
+		old = (LONG_PTR)c->background;
+		if (set)
+			c->background = (HBRUSH)value;
+		break;
+	case GCLP_MENUNAME:
+		break;
+	case GCL_STYLE:
+		old = (LONG)c->style;
+		if (set)
+			c->style = (UINT)value;
+		break;
+	case GCL_CBWNDEXTRA:
+		old = c->wnd_extra;
+		if (set)
+			c->wnd_extra = value > 0 ? (int)value : 0;
+		break;
+	case GCL_CBCLSEXTRA:
+		/* Fixed at registration: the bytes are allocated then. */
+		old = c->cls_extra;
+		break;
+	case GCW_ATOM:
+		old = c->atom;
+		break;
+	default: {
+		size_t n = wide ? sizeof(LONG_PTR) : sizeof(LONG);
+		if (index < 0 || (size_t)index + n > (size_t)c->cls_extra) {
+			win_set_error(ERROR_INVALID_INDEX);
+			break;
+		}
+		if (wide) {
+			memcpy(&old, c->extra + index, n);
+			if (set)
+				memcpy(c->extra + index, &value, n);
+		} else {
+			LONG v, nv = (LONG)value;
+			memcpy(&v, c->extra + index, n);
+			old = v;
+			if (set)
+				memcpy(c->extra + index, &nv, n);
+		}
+		break;
+	}
+	}
+out:
+	leave();
+	return old;
+}
+
+WINFN(DWORD) user_GetClassLongA(HWND h, int i) { return (DWORD)class_long(h, i, 0, 0, 0, 0); }
+WINFN(DWORD) user_GetClassLongW(HWND h, int i) { return (DWORD)class_long(h, i, 0, 0, 1, 0); }
+WINFN(DWORD) user_SetClassLongA(HWND h, int i, LONG v) { return (DWORD)class_long(h, i, 1, v, 0, 0); }
+WINFN(DWORD) user_SetClassLongW(HWND h, int i, LONG v) { return (DWORD)class_long(h, i, 1, v, 1, 0); }
+#if defined(__x86_64__)
+WINFN(ULONG_PTR) user_GetClassLongPtrA(HWND h, int i) { return (ULONG_PTR)class_long(h, i, 0, 0, 0, 1); }
+WINFN(ULONG_PTR) user_GetClassLongPtrW(HWND h, int i) { return (ULONG_PTR)class_long(h, i, 0, 0, 1, 1); }
+WINFN(ULONG_PTR) user_SetClassLongPtrA(HWND h, int i, LONG_PTR v) { return (ULONG_PTR)class_long(h, i, 1, v, 0, 1); }
+WINFN(ULONG_PTR) user_SetClassLongPtrW(HWND h, int i, LONG_PTR v) { return (ULONG_PTR)class_long(h, i, 1, v, 1, 1); }
+#endif
+WINFN(WORD) user_GetClassWord(HWND h, int i)
+{
+	if (i == GCW_ATOM)
+		return (WORD)class_long(h, i, 0, 0, 0, 0);
+	WORD v = 0;
+	enter();
+	struct window *w = get(h);
+	if (w && w->cls && i >= 0 && (size_t)i + 2 <= (size_t)w->cls->cls_extra)
+		memcpy(&v, w->cls->extra + i, 2);
+	else if (w)
+		win_set_error(ERROR_INVALID_INDEX);
+	leave();
+	return v;
+}
+
 WINFN(LONG) user_GetWindowLongA(HWND h, int i) { return (LONG)window_long(h, i, 0, 0, 0, 0); }
 WINFN(LONG) user_GetWindowLongW(HWND h, int i) { return (LONG)window_long(h, i, 0, 0, 1, 0); }
 WINFN(LONG) user_SetWindowLongA(HWND h, int i, LONG v) { return (LONG)window_long(h, i, 1, v, 0, 0); }
@@ -2298,8 +2427,15 @@ const struct builtin_export u32_window_exports[] = {
 	E(GetClassInfoExA),
 	E(GetClassInfoExW),
 	E(GetClassInfoW),
+	E(GetClassLongA),
+#if defined(__x86_64__)
+	E(GetClassLongPtrA),
+	E(GetClassLongPtrW),
+#endif
+	E(GetClassLongW),
 	E(GetClassNameA),
 	E(GetClassNameW),
+	E(GetClassWord),
 	E(GetClientRect),
 	E(GetDesktopWindow),
 	E(GetDlgCtrlID),
@@ -2369,6 +2505,12 @@ const struct builtin_export u32_window_exports[] = {
 	E(SendNotifyMessageW),
 	E(SetActiveWindow),
 	E(SetCapture),
+	E(SetClassLongA),
+#if defined(__x86_64__)
+	E(SetClassLongPtrA),
+	E(SetClassLongPtrW),
+#endif
+	E(SetClassLongW),
 	E(SetDlgItemInt),
 	E(SetDlgItemTextA),
 	E(SetDlgItemTextW),

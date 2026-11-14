@@ -6,11 +6,15 @@
 #include <pthread.h>
 #include <signal.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
+#include <unistd.h>
 
 #include "common/error.h"
+#include "common/sanitizer.h"
 #include "loader/modules.h"
 #include "runtime/builtin.h"
+#include "runtime/crash.h"
 #include "runtime/runtime.h"
 #include "runtime/teb.h"
 #include "test.h"
@@ -245,6 +249,125 @@ static void test_fallback_builtins(void)
 	m = mod_load("kernel32.dll", NULL);
 	CHECK(m && m->builtin && !m->builtin->fallback);
 	mod_free(m);
+
+	/*
+	 * msvcrt.dll is a KnownDLL: an older copy beside a codec doesn't
+	 * shadow the built-in one, though a versioned CRT's copy does.
+	 */
+	const struct builtin_dll *crt = builtin_find("msvcrt.dll");
+	CHECK(crt && !builtin_shadowable(crt, "msvcrt.dll"));
+	CHECK(crt && builtin_shadowable(crt, "msvcr90.dll"));
+	CHECK(!builtin_shadowable(builtin_find("kernel32.dll"), "kernel32.dll"));
+}
+
+typedef DWORD (CDECL *dword_arg_fn)(DWORD);
+typedef DWORD (CDECL *dword_fn)(void);
+typedef WORD (CDECL *word_fn)(void);
+
+/* Copies a file; 0 on success. */
+static int copy_file(const char *from, const char *to)
+{
+	void *data;
+	size_t len;
+	if (vfw_read_file(from, &data, &len))
+		return -1;
+	FILE *f = fopen(to, "wb");
+	int ok = f && fwrite(data, 1, len, f) == len;
+	if (f)
+		fclose(f);
+	free(data);
+	return ok ? 0 : -1;
+}
+
+/*
+ * A DLL of the other architecture on the search path is passed over, as
+ * Windows' loader does, for one further along, or the built-in one.
+ */
+static void test_wrong_arch_skipped(void)
+{
+#if defined(__x86_64__)
+	const char *var = "VFW_FIXTURES32";
+#else
+	const char *var = "VFW_FIXTURES64";
+#endif
+	const char *other = getenv(var);
+	char src[4200], dir[2048], first[4200], second[4200];
+	const char *t = getenv("TMPDIR");
+
+	snprintf(src, sizeof(src), "%s/pe_basic.dll", other ? other : "");
+	if (!other || access(src, R_OK)) {
+		printf("  (no other-architecture fixtures: skipping)\n");
+		return;
+	}
+	snprintf(dir, sizeof(dir), "%s/vfw-arch-XXXXXX", t && *t ? t : "/tmp");
+	if (!mkdtemp(dir)) {
+		CHECK(0);
+		return;
+	}
+	char sub[2100];
+	snprintf(sub, sizeof(sub), "%s/b", dir);
+	mkdir(sub, 0700);
+	snprintf(first, sizeof(first), "%s/zz_arch.dll", dir);
+	snprintf(second, sizeof(second), "%s/zz_arch.dll", sub);
+	CHECK_EQ(copy_file(src, first), 0);
+	CHECK_EQ(copy_file(fixture("pe_basic.dll"), second), 0);
+
+	char path[8600];
+	snprintf(path, sizeof(path), "%s:%s", dir, sub);
+	setenv("VFW_PATH", path, 1);
+	struct module *m = mod_load("zz_arch.dll", NULL);
+	CHECK(m && m->path && !strcmp(m->path, second));
+	mod_free(m);
+
+	/* The 32-bit msvcr90.dll beside a 64-bit DLL, or the reverse. */
+	snprintf(first, sizeof(first), "%s/msvcr90.dll", dir);
+	CHECK_EQ(copy_file(src, first), 0);
+	setenv("VFW_PATH", dir, 1);
+	m = mod_load("msvcr90.dll", NULL);
+	CHECK(m && m->builtin);
+	mod_free(m);
+	unsetenv("VFW_PATH");
+
+	unlink(first);
+	snprintf(first, sizeof(first), "%s/zz_arch.dll", dir);
+	unlink(first);
+	unlink(second);
+	rmdir(sub);
+	rmdir(dir);
+}
+
+/*
+ * A packer's DllMain finds kernel32 from its return address and resolves
+ * functions by walking kernel32's exports; a cdecl routine runs as a thread.
+ */
+static void test_packer_fixture(void)
+{
+	struct module *m = mod_load(fixture("pe_packer.dll"), NULL);
+	CHECK(m != NULL);
+	if (!m) {
+		fprintf(stderr, "  %s\n", vfw_error());
+		return;
+	}
+	dword_fn found = mod_get_proc(m, "pk_found");
+	DWORD (CDECL *len)(const char *) = mod_get_proc(m, "pk_strlen");
+	void *(CDECL *k32)(void) = mod_get_proc(m, "pk_kernel32");
+	dword_arg_fn thread = mod_get_proc(m, "pk_cdecl_thread");
+	CHECK(found && len && k32 && thread);
+	if (!found || !len || !k32 || !thread)
+		return;
+	CHECK_EQ(found(), 1);
+	CHECK_EQ(len("seance"), 6);
+	struct module *kernel32 = mod_find("kernel32.dll");
+	CHECK(kernel32 && k32() == (void *)kernel32->base);
+	CHECK_EQ(thread(21), 42);
+	CHECK_EQ(thread(1000), 2000);
+	/* int3 and DebugBreak reach the DLL's own handler, at the int3. */
+	dword_fn breakpoints = mod_get_proc(m, "pk_breakpoints");
+	CHECK_EQ(crash_install(), 0);
+	/* Sanitizer builds leave the fault signals to the sanitizer. */
+	if (!VFW_SANITIZER_BUILD)
+		CHECK(breakpoints && breakpoints() == 2);
+	mod_free(m);
 }
 
 static void test_builtin_modules(void)
@@ -272,7 +395,8 @@ static void test_builtin_modules(void)
 		pe_free(hdr);
 	}
 	mod_free(k32);
-	CHECK(mod_find("kernel32.dll") == NULL);
+	/* Never unloaded, as on Windows: its image holds the call gate. */
+	CHECK(mod_find("kernel32.dll") == k32);
 
 	struct module *exe = mod_main();
 	CHECK(exe != NULL && mod_main() == exe);
@@ -281,9 +405,6 @@ static void test_builtin_modules(void)
 	CHECK(mod_from_base(exe->base) == exe);
 }
 
-typedef DWORD (CDECL *dword_arg_fn)(DWORD);
-typedef DWORD (CDECL *dword_fn)(void);
-typedef WORD (CDECL *word_fn)(void);
 
 static void test_fixture(void)
 {
@@ -338,7 +459,7 @@ static void test_fixture(void)
 		fprintf(stderr, "  child said: %s", msg);
 
 	mod_free(m);
-	CHECK(mod_find("kernel32.dll") == NULL);
+	CHECK(mod_find("kernel32.dll") != NULL);	/* pinned */
 }
 
 int main(void)
@@ -351,5 +472,7 @@ int main(void)
 	test_builtin_modules();
 	test_fixture();
 	test_fallback_builtins();
+	test_wrong_arch_skipped();
+	test_packer_fixture();
 	return test_summary("test_runtime");
 }

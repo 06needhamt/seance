@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -1040,6 +1041,579 @@ static void test_splitpath(void)
 	CHECK(wdir[0] == 'x' && wdir[1] == '\\' && !wdir[2]);
 	CHECK(wn[0] == 'y' && !wn[1]);
 	CHECK(we[0] == '.' && we[1] == 'z' && !we[2]);
+
+	/* _makepath (ffdshow.ax, from msvcr71). */
+	struct module *m71 = mod_load("msvcr71.dll", NULL);
+	CHECK(m71 != NULL);
+	if (!m71)
+		return;
+	CFN(m71, void, _makepath, char *, const char *, const char *, const char *,
+	    const char *);
+	char path[128];
+	_makepath(path, "C", "\\dir", "file", "avi");
+	CHECK_STR(path, "C:\\dir\\file.avi");
+	_makepath(path, NULL, "d/", "f", ".x");
+	CHECK_STR(path, "d/f.x");
+	_makepath(path, "", "", "f", NULL);
+	CHECK_STR(path, "f");
+	mod_free(m71);
+}
+
+/*
+ * The functions codecs in the catalogue zip trapped on: Tool Help
+ * (DivXDecH264), Read/WriteProcessMemory (dsfs), completion ports
+ * (capavi32), mmio (ravi32), SHGetValue (vgmv2k2dx), class longs (the LEAD
+ * encoders) and UnrealizeObject (dsvc).
+ */
+static void test_toolhelp(void)
+{
+	struct module *k = mod_load("kernel32.dll", NULL);
+	CHECK(k != NULL);
+	if (!k)
+		return;
+	FN(k, HANDLE, CreateToolhelp32Snapshot, DWORD, DWORD);
+	FN(k, BOOL, Process32First, HANDLE, LPPROCESSENTRY32);
+	FN(k, BOOL, Process32Next, HANDLE, LPPROCESSENTRY32);
+	FN(k, BOOL, Process32FirstW, HANDLE, LPPROCESSENTRY32W);
+	FN(k, BOOL, Module32First, HANDLE, LPMODULEENTRY32);
+	FN(k, BOOL, Module32Next, HANDLE, LPMODULEENTRY32);
+	FN(k, BOOL, Module32FirstW, HANDLE, LPMODULEENTRY32W);
+	FN(k, BOOL, Thread32First, HANDLE, LPTHREADENTRY32);
+	FN(k, BOOL, Thread32Next, HANDLE, LPTHREADENTRY32);
+	FN(k, BOOL, CloseHandle, HANDLE);
+	FN(k, DWORD, GetLastError, void);
+	FN(k, DWORD, GetCurrentThreadId, void);
+
+	HANDLE s = CreateToolhelp32Snapshot(TH32CS_SNAPALL, 0);
+	CHECK(s != INVALID_HANDLE_VALUE);
+	PROCESSENTRY32 pe = { .dwSize = sizeof(pe) };
+	CHECK(Process32First(s, &pe));
+	CHECK_EQ(pe.th32ProcessID, (DWORD)getpid());
+	CHECK_STR(pe.szExeFile, "seance.exe");
+	CHECK(!Process32Next(s, &pe));
+	CHECK_EQ(GetLastError(), ERROR_NO_MORE_FILES);
+	PROCESSENTRY32W pw = { .dwSize = sizeof(pw) };
+	CHECK(Process32FirstW(s, &pw) && pw.szExeFile[0] == 's');
+	/* Too small a dwSize is refused. */
+	pe.dwSize = 8;
+	CHECK(!Process32First(s, &pe));
+	CHECK_EQ(GetLastError(), ERROR_BAD_LENGTH);
+
+	MODULEENTRY32 me = { .dwSize = sizeof(me) };
+	int n = 0, k32 = 0;
+	for (BOOL ok = Module32First(s, &me); ok; ok = Module32Next(s, &me)) {
+		n++;
+		if (me.hModule == (HMODULE)k->base) {
+			k32++;
+			CHECK_STR(me.szModule, "kernel32.dll");
+			CHECK(strstr(me.szExePath, "kernel32.dll") != NULL);
+			CHECK(me.modBaseAddr == k->base && me.modBaseSize >= 0x1000);
+		}
+	}
+	CHECK(n >= 2);
+	CHECK_EQ(k32, 1);
+	MODULEENTRY32W mw = { .dwSize = sizeof(mw) };
+	CHECK(Module32FirstW(s, &mw) && mw.szModule[0]);
+
+	THREADENTRY32 te = { .dwSize = sizeof(te) };
+	CHECK(Thread32First(s, &te));
+	CHECK_EQ(te.th32ThreadID, GetCurrentThreadId());
+	CHECK_EQ(te.th32OwnerProcessID, (DWORD)getpid());
+	CHECK(!Thread32Next(s, &te));
+	CHECK(CloseHandle(s));
+
+	/* A process-only snapshot has no modules. */
+	s = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	CHECK(!Module32First(s, &me));
+	CHECK(!Thread32First(s, &te));
+	CloseHandle(s);
+	mod_free(k);
+}
+
+static void test_process_memory(void)
+{
+	struct module *k = mod_load("kernel32.dll", NULL);
+	if (!k)
+		return;
+	FN(k, BOOL, ReadProcessMemory, HANDLE, LPCVOID, LPVOID, SIZE_T, SIZE_T *);
+	FN(k, BOOL, WriteProcessMemory, HANDLE, LPVOID, LPCVOID, SIZE_T, SIZE_T *);
+	FN(k, LPVOID, VirtualAlloc, LPVOID, SIZE_T, DWORD, DWORD);
+	FN(k, BOOL, VirtualFree, LPVOID, SIZE_T, DWORD);
+	FN(k, DWORD, GetLastError, void);
+	HANDLE self = (HANDLE)(LONG_PTR)-1;
+	char src[] = "seance", dst[8] = "";
+	SIZE_T n = 0;
+
+	CHECK(ReadProcessMemory(self, src, dst, sizeof(src), &n));
+	CHECK_EQ(n, sizeof(src));
+	CHECK_STR(dst, "seance");
+	/* A read that runs off the end of a mapping copies what it can. */
+	BYTE *p = VirtualAlloc(NULL, 0x2000, MEM_RESERVE, PAGE_NOACCESS);
+	CHECK(p != NULL);
+	VirtualAlloc(p, 0x1000, MEM_COMMIT, PAGE_READWRITE);
+	memset(p + 0xff0, 'x', 16);
+	char buf[32];
+	CHECK(!ReadProcessMemory(self, p + 0xff0, buf, 32, &n));
+	CHECK_EQ(GetLastError(), ERROR_PARTIAL_COPY);
+	CHECK_EQ(n, 16);
+	CHECK(!ReadProcessMemory(self, NULL, buf, 4, &n) && n == 0);
+	/* Writes reach read-only pages, as on Windows. */
+	VirtualAlloc(p + 0x1000, 0x1000, MEM_COMMIT, PAGE_READONLY);
+	CHECK(WriteProcessMemory(self, p + 0x1000, "abc", 4, &n) && n == 4);
+	CHECK_STR((const char *)p + 0x1000, "abc");
+	CHECK(!WriteProcessMemory((HANDLE)0x1234, p, "a", 1, &n));
+	VirtualFree(p, 0, MEM_RELEASE);
+	mod_free(k);
+}
+
+static void test_iocp(void)
+{
+	struct module *k = mod_load("kernel32.dll", NULL);
+	if (!k)
+		return;
+	FN(k, HANDLE, CreateIoCompletionPort, HANDLE, HANDLE, ULONG_PTR, DWORD);
+	FN(k, BOOL, PostQueuedCompletionStatus, HANDLE, DWORD, ULONG_PTR, LPOVERLAPPED);
+	FN(k, BOOL, GetQueuedCompletionStatus, HANDLE, DWORD *, ULONG_PTR *,
+	   LPOVERLAPPED *, DWORD);
+	FN(k, BOOL, GetQueuedCompletionStatusEx, HANDLE, LPOVERLAPPED_ENTRY,
+	   ULONG, ULONG *, DWORD, BOOL);
+	FN(k, DWORD, WaitForSingleObject, HANDLE, DWORD);
+	FN(k, BOOL, CloseHandle, HANDLE);
+	FN(k, DWORD, GetLastError, void);
+
+	HANDLE port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1);
+	CHECK(port != NULL);
+	DWORD bytes = 0;
+	ULONG_PTR key = 0;
+	OVERLAPPED ov, *got = &ov;
+	CHECK(!GetQueuedCompletionStatus(port, &bytes, &key, &got, 0));
+	CHECK_EQ(GetLastError(), WAIT_TIMEOUT);
+	CHECK(got == NULL);
+	CHECK_EQ(WaitForSingleObject(port, 0), WAIT_TIMEOUT);
+	CHECK(PostQueuedCompletionStatus(port, 10, 1, &ov));
+	CHECK(PostQueuedCompletionStatus(port, 20, 2, NULL));
+	CHECK(PostQueuedCompletionStatus(port, 30, 3, NULL));
+	CHECK_EQ(WaitForSingleObject(port, 0), WAIT_OBJECT_0);
+	CHECK(GetQueuedCompletionStatus(port, &bytes, &key, &got, INFINITE));
+	CHECK(bytes == 10 && key == 1 && got == &ov);
+	OVERLAPPED_ENTRY e[4];
+	ULONG removed = 0;
+	CHECK(GetQueuedCompletionStatusEx(port, e, 4, &removed, 0, FALSE));
+	CHECK_EQ(removed, 2);
+	CHECK(e[0].lpCompletionKey == 2 && e[1].dwNumberOfBytesTransferred == 30);
+	/* Associating with an existing port gives the port back. */
+	CHECK(CreateIoCompletionPort((HANDLE)0x10, port, 5, 0) == port);
+	CHECK(!PostQueuedCompletionStatus((HANDLE)0x1234, 0, 0, NULL));
+	CHECK(CloseHandle(port));
+	mod_free(k);
+}
+
+static void test_mmio(const char *root)
+{
+	struct module *m = mod_load("winmm.dll", NULL);
+	CHECK(m != NULL);
+	if (!m)
+		return;
+	FN(m, HMMIO, mmioOpenA, LPSTR, LPMMIOINFO, DWORD);
+	FN(m, MMRESULT, mmioClose, HMMIO, UINT);
+	FN(m, LONG, mmioRead, HMMIO, HPSTR, LONG);
+	FN(m, LONG, mmioWrite, HMMIO, const char *, LONG);
+	FN(m, LONG, mmioSeek, HMMIO, LONG, int);
+	FN(m, MMRESULT, mmioFlush, HMMIO, UINT);
+	FN(m, MMRESULT, mmioDescend, HMMIO, LPMMCKINFO, const MMCKINFO *, UINT);
+	FN(m, MMRESULT, mmioAscend, HMMIO, LPMMCKINFO, UINT);
+	FN(m, MMRESULT, mmioCreateChunk, HMMIO, LPMMCKINFO, UINT);
+	FN(m, FOURCC, mmioStringToFOURCCA, LPCSTR, UINT);
+	FN(m, HMMIO, mmioOpenW, LPWSTR, LPMMIOINFO, DWORD);
+
+	CHECK_EQ(mmioStringToFOURCCA("wav", MMIO_TOUPPER), mmioFOURCC('W', 'A', 'V', ' '));
+	CHECK_EQ(mmioStringToFOURCCA("RIFFX", 0), FOURCC_RIFF);
+
+	/* Writes a RIFF 'TEST' file with a 3-byte 'abcd' chunk in a LIST. */
+	char name[] = "C:\\mmio.riff";
+	MMIOINFO info;
+	memset(&info, 0, sizeof(info));
+	HMMIO h = mmioOpenA(name, &info, MMIO_CREATE | MMIO_WRITE);
+	CHECK(h != NULL);
+	if (!h)
+		goto out;
+	MMCKINFO riff = { .fccType = mmioFOURCC('T', 'E', 'S', 'T') };
+	MMCKINFO list = { .fccType = mmioFOURCC('l', 'i', 's', 't') };
+	MMCKINFO ck = { .ckid = mmioFOURCC('a', 'b', 'c', 'd') };
+	CHECK_EQ(mmioCreateChunk(h, &riff, MMIO_CREATERIFF), 0);
+	CHECK_EQ(mmioCreateChunk(h, &list, MMIO_CREATELIST), 0);
+	CHECK_EQ(mmioCreateChunk(h, &ck, 0), 0);
+	CHECK_EQ(mmioWrite(h, "xyz", 3), 3);
+	CHECK_EQ(mmioAscend(h, &ck, 0), 0);
+	CHECK_EQ(ck.cksize, 3);
+	CHECK_EQ(mmioAscend(h, &list, 0), 0);
+	CHECK_EQ(mmioAscend(h, &riff, 0), 0);
+	CHECK_EQ(riff.cksize, 4 + 12 + 8 + 4);
+	CHECK_EQ(mmioFlush(h, 0), 0);
+	CHECK_EQ(mmioClose(h, 0), 0);
+
+	/* The bytes on disk. */
+	char path[512];
+	snprintf(path, sizeof(path), "%s/drive_c/mmio.riff", root);
+	FILE *f = fopen(path, "rb");
+	BYTE disk[64];
+	size_t len = f ? fread(disk, 1, sizeof(disk), f) : 0;
+	if (f)
+		fclose(f);
+	CHECK_EQ(len, 36);
+	CHECK(!memcmp(disk, "RIFF\x1c\0\0\0TESTLIST\x10\0\0\0listabcd\x03\0\0\0xyz\0", 36));
+
+	/* Reads it back, finding the chunks. */
+	h = mmioOpenA(name, NULL, MMIO_READ);
+	CHECK(h != NULL);
+	MMCKINFO r2 = { .fccType = mmioFOURCC('T', 'E', 'S', 'T') }, l2, c2;
+	CHECK_EQ(mmioDescend(h, &r2, NULL, MMIO_FINDRIFF), 0);
+	CHECK_EQ(r2.dwDataOffset, 8);
+	l2.fccType = mmioFOURCC('l', 'i', 's', 't');
+	CHECK_EQ(mmioDescend(h, &l2, &r2, MMIO_FINDLIST), 0);
+	c2.ckid = mmioFOURCC('n', 'o', 'n', 'e');
+	CHECK_EQ(mmioDescend(h, &c2, &l2, MMIO_FINDCHUNK), MMIOERR_CHUNKNOTFOUND);
+	CHECK_EQ(mmioSeek(h, l2.dwDataOffset + 4, SEEK_SET), (LONG)l2.dwDataOffset + 4);
+	c2.ckid = mmioFOURCC('a', 'b', 'c', 'd');
+	CHECK_EQ(mmioDescend(h, &c2, &l2, MMIO_FINDCHUNK), 0);
+	char got[4] = "";
+	CHECK_EQ(mmioRead(h, got, 3), 3);
+	CHECK(!memcmp(got, "xyz", 3));
+	CHECK_EQ(mmioAscend(h, &c2, 0), 0);
+	CHECK_EQ(mmioSeek(h, 0, SEEK_CUR), 36);
+	CHECK_EQ(mmioRead(h, got, 3), 0);
+	mmioClose(h, 0);
+
+	/* A memory file. */
+	char mem[16] = "0123456789";
+	memset(&info, 0, sizeof(info));
+	info.fccIOProc = FOURCC_MEM;
+	info.pchBuffer = mem;
+	info.cchBuffer = 10;
+	h = mmioOpenA(NULL, &info, MMIO_READWRITE);
+	CHECK(h != NULL);
+	CHECK_EQ(mmioSeek(h, 4, SEEK_SET), 4);
+	CHECK_EQ(mmioRead(h, got, 3), 3);
+	CHECK(!memcmp(got, "456", 3));
+	CHECK_EQ(mmioWrite(h, "AB", 2), 2);
+	CHECK(!memcmp(mem, "0123456AB9", 10));
+	CHECK_EQ(mmioSeek(h, 0, SEEK_END), 10);
+	CHECK_EQ(mmioRead(h, got, 3), 0);
+	mmioClose(h, 0);
+
+	/* A missing file. */
+	memset(&info, 0, sizeof(info));
+	char missing[] = "C:\\no-such.riff";
+	CHECK(mmioOpenA(missing, &info, MMIO_READ) == NULL);
+	CHECK_EQ(info.wErrorRet, MMIOERR_FILENOTFOUND);
+	CHECK(mmioOpenA(name, NULL, MMIO_EXIST) != NULL);
+	WCHAR wname[] = { 'C', ':', '\\', 'm', 'm', 'i', 'o', '.', 'r', 'i', 'f', 'f', 0 };
+	h = mmioOpenW(wname, NULL, MMIO_READ);
+	CHECK(h != NULL);
+	if (h)
+		mmioClose(h, 0);
+out:
+	mod_free(m);
+}
+
+static void test_sh_value(void)
+{
+	struct module *m = mod_load("shlwapi.dll", NULL);
+	CHECK(m != NULL);
+	if (!m)
+		return;
+	FN(m, DWORD, SHSetValueA, HKEY, LPCSTR, LPCSTR, DWORD, LPCVOID, DWORD);
+	FN(m, DWORD, SHGetValueA, HKEY, LPCSTR, LPCSTR, DWORD *, void *, DWORD *);
+	FN(m, DWORD, SHGetValueW, HKEY, LPCWSTR, LPCWSTR, DWORD *, void *, DWORD *);
+	FN(m, DWORD, SHDeleteValueA, HKEY, LPCSTR, LPCSTR);
+	FN(m, DWORD, SHDeleteKeyA, HKEY, LPCSTR);
+	const char *sub = "Software\\seance-test\\sh";
+	DWORD v = 1234, type = 0, out = 0, cb = sizeof(out);
+
+	CHECK_EQ(SHSetValueA(HKEY_CURRENT_USER, sub, "n", REG_DWORD, &v, 4), 0);
+	CHECK_EQ(SHGetValueA(HKEY_CURRENT_USER, sub, "n", &type, &out, &cb), 0);
+	CHECK(type == REG_DWORD && out == 1234 && cb == 4);
+	CHECK_EQ(SHSetValueA(HKEY_CURRENT_USER, sub, "s", REG_SZ, "hello", 6), 0);
+	char s[16];
+	cb = sizeof(s);
+	CHECK_EQ(SHGetValueA(HKEY_CURRENT_USER, sub, "s", &type, s, &cb), 0);
+	CHECK_STR(s, "hello");
+	WCHAR wsub[64], ws[16];
+	size_t i = 0;
+	for (; sub[i]; i++)
+		wsub[i] = sub[i];
+	wsub[i] = 0;
+	WCHAR wn[] = { 's', 0 };
+	cb = sizeof(ws);
+	CHECK_EQ(SHGetValueW(HKEY_CURRENT_USER, wsub, wn, &type, ws, &cb), 0);
+	CHECK(ws[0] == 'h' && ws[5] == 0);
+	CHECK_EQ(SHDeleteValueA(HKEY_CURRENT_USER, sub, "n"), 0);
+	cb = sizeof(out);
+	CHECK_EQ(SHGetValueA(HKEY_CURRENT_USER, sub, "n", &type, &out, &cb),
+		 ERROR_FILE_NOT_FOUND);
+	CHECK_EQ(SHDeleteValueA(HKEY_CURRENT_USER, "Software\\no-such", "n"),
+		 ERROR_FILE_NOT_FOUND);
+	SHDeleteKeyA(HKEY_CURRENT_USER, "Software\\seance-test");
+	mod_free(m);
+}
+
+static LRESULT WINAPI test_wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+	return msg == 0x0081;	/* WM_NCCREATE goes on */
+}
+
+static void test_class_long(void)
+{
+	struct module *u = mod_load("user32.dll", NULL);
+	struct module *g = mod_load("gdi32.dll", NULL);
+	CHECK(u && g);
+	if (!u || !g)
+		return;
+	FN(u, ATOM, RegisterClassA, const WNDCLASSA *);
+	FN(u, BOOL, UnregisterClassA, LPCSTR, HINSTANCE);
+	FN(u, HWND, CreateWindowExA, DWORD, LPCSTR, LPCSTR, DWORD, int, int, int,
+	   int, HWND, HMENU, HINSTANCE, LPVOID);
+	FN(u, BOOL, DestroyWindow, HWND);
+	FN(u, DWORD, GetClassLongA, HWND, int);
+	FN(u, DWORD, SetClassLongA, HWND, int, LONG);
+	FN(u, WORD, GetClassWord, HWND, int);
+	FN(g, BOOL, UnrealizeObject, HGDIOBJ);
+	FN(g, HGDIOBJ, GetStockObject, int);
+
+	WNDCLASSA wc;
+	memset(&wc, 0, sizeof(wc));
+	wc.style = 0x0002;
+	wc.lpfnWndProc = test_wndproc;
+	wc.cbClsExtra = 8;
+	wc.cbWndExtra = 4;
+	wc.lpszClassName = "SeanceClassLong";
+	ATOM atom = RegisterClassA(&wc);
+	CHECK(atom != 0);
+	HWND w = CreateWindowExA(0, "SeanceClassLong", "", 0, 0, 0, 10, 10, NULL,
+				 NULL, NULL, NULL);
+	CHECK(w != NULL);
+	CHECK_EQ(GetClassLongA(w, GCL_STYLE), 0x0002);
+	CHECK_EQ(GetClassLongA(w, GCL_CBCLSEXTRA), 8);
+	CHECK_EQ(GetClassLongA(w, GCL_CBWNDEXTRA), 4);
+	CHECK_EQ(GetClassWord(w, GCW_ATOM), atom);
+	CHECK_EQ(GetClassLongA(w, 4), 0);
+	CHECK_EQ(SetClassLongA(w, 4, 0x1234), 0);
+	CHECK_EQ(GetClassLongA(w, 4), 0x1234);
+	CHECK_EQ(SetClassLongA(w, GCL_STYLE, 0x0001), 0x0002);
+	CHECK_EQ(GetClassLongA(w, GCL_STYLE), 0x0001);
+	/* Out of the extra bytes. */
+	CHECK_EQ(GetClassLongA(w, 6), 0);
+	DestroyWindow(w);
+	UnregisterClassA("SeanceClassLong", NULL);
+
+	CHECK(UnrealizeObject(GetStockObject(BLACK_BRUSH)));
+	CHECK(!UnrealizeObject(NULL));
+	mod_free(g);
+	mod_free(u);
+}
+
+/* The _mbs* family and the rest of what mfc42.dll imports from msvcrt
+ * (WaveT2.dll), and SearchPath (ffdshow.ax). */
+static void test_mbcs_searchpath(const char *root)
+{
+	struct module *m = mod_load("msvcrt.dll", NULL);
+	struct module *k = mod_load("kernel32.dll", NULL);
+	CHECK(m && k);
+	if (!m || !k)
+		return;
+	CFN(m, BYTE *, _mbsrchr, const BYTE *, unsigned);
+	CFN(m, BYTE *, _mbsstr, const BYTE *, const BYTE *);
+	CFN(m, int, _mbsnbicmp, const BYTE *, const BYTE *, size_t);
+	CFN(m, BYTE *, _mbsupr, BYTE *);
+	CFN(m, BYTE *, _mbsrev, BYTE *);
+	CFN(m, BYTE *, _mbsinc, const BYTE *);
+	CFN(m, BYTE *, _mbsdec, const BYTE *, const BYTE *);
+	CFN(m, size_t, _mbclen, const BYTE *);
+	CFN(m, int, _ismbcspace, unsigned);
+	CFN(m, int *, __p___argc, void);
+	CFN(m, char ***, __p___argv, void);
+	CFN(m, char *, _fullpath, char *, const char *, size_t);
+	CFN(m, LONG, mktime, int *);
+	CFN(m, void *, _expand, void *, size_t);
+	CFN(m, void *, malloc, size_t);
+	CFN(m, void, free, void *);
+	const BYTE *mbctype = get(m, "_mbctype");
+	const BYTE *s = (const BYTE *)"a\\b\\c.avi";
+
+	CHECK(_mbsrchr(s, '\\') == s + 3);
+	CHECK(_mbsstr(s, (const BYTE *)"c.") == s + 4);
+	CHECK_EQ(_mbsnbicmp((const BYTE *)"ABCx", (const BYTE *)"abcy", 3), 0);
+	CHECK(_mbsnbicmp((const BYTE *)"ABCx", (const BYTE *)"abcy", 4) < 0);
+	BYTE buf[16] = "abC";
+	CHECK_STR((char *)_mbsupr(buf), "ABC");
+	CHECK_STR((char *)_mbsrev(buf), "CBA");
+	CHECK(_mbsinc(s) == s + 1 && _mbsdec(s, s + 2) == s + 1 && !_mbsdec(s, s));
+	CHECK_EQ(_mbclen(s), 1);
+	CHECK(_ismbcspace(' ') && !_ismbcspace('x'));
+	CHECK(mbctype['A' + 1] == 0x10 && mbctype['a' + 1] == 0x20 && !mbctype[0x81 + 1]);
+	CHECK(*__p___argc() == 1 && !strcmp((*__p___argv())[0], "seance.exe"));
+	char full[300];
+	CHECK(_fullpath(full, "C:\\x\\..\\y.txt", sizeof(full)) == full);
+	CHECK_STR(full, "C:\\y.txt");
+	CHECK(_fullpath(full, "C:\\x", 3) == NULL);
+	int tm[9] = { 0, 0, 0, 32, 0, 100, 0, 0, 0 };	/* 2000-01-32 */
+	CHECK_EQ(mktime(tm), 949363200);
+	CHECK(tm[3] == 1 && tm[4] == 1 && tm[6] == 2);	/* 1 Feb, a Tuesday */
+	void *p = malloc(16);
+	CHECK(_expand(p, 8) == p && _expand(p, 1 << 20) == NULL);
+	free(p);
+
+	FN(k, DWORD, SearchPathA, LPCSTR, LPCSTR, LPCSTR, DWORD, LPSTR, LPSTR *);
+	char path[512], found[300], *part = NULL;
+	snprintf(path, sizeof(path), "%s/drive_c/sp", root);
+	mkdir(path, 0755);
+	snprintf(path, sizeof(path), "%s/drive_c/sp/codec.ini", root);
+	FILE *f = fopen(path, "w");
+	if (f)
+		fclose(f);
+	DWORD n = SearchPathA("C:\\nowhere;C:\\sp", "codec", ".ini", sizeof(found),
+			      found, &part);
+	CHECK_EQ(n, strlen("C:\\sp\\codec.ini"));
+	CHECK_STR(found, "C:\\sp\\codec.ini");
+	CHECK(part && !strcmp(part, "codec.ini"));
+	CHECK_EQ(SearchPathA("C:\\sp", "missing.ini", NULL, sizeof(found), found, NULL), 0);
+	CHECK_EQ(SearchPathA(NULL, "C:\\sp\\codec.ini", NULL, sizeof(found), found, NULL),
+		 strlen("C:\\sp\\codec.ini"));
+	CHECK_EQ(SearchPathA("C:\\sp", "codec.ini", NULL, 4, found, NULL),
+		 strlen("C:\\sp\\codec.ini") + 1);
+	mod_free(k);
+	mod_free(m);
+}
+
+static volatile int beginthread_ran;
+
+static void CDECL beginthread_routine(void *arg)
+{
+	beginthread_ran = (int)(intptr_t)arg;
+}
+
+/* The second round of imports from the zip's codecs: msvcrt's wide-string
+ * and misc functions (ffdshow, WaveT2), ETW and PropVariant (wmdrmsdk),
+ * change notifications and DelayLoadFailureHook. */
+static void test_more_imports(const char *root)
+{
+	struct module *m = mod_load("msvcrt.dll", NULL);
+	struct module *k = mod_load("kernel32.dll", NULL);
+	struct module *a = mod_load("advapi32.dll", NULL);
+	struct module *o = mod_load("ole32.dll", NULL);
+	CHECK(m && k && a && o);
+	if (!m || !k || !a || !o)
+		return;
+	CFN(m, LONG, wcstol, const WCHAR *, WCHAR **, int);
+	CFN(m, ULONG, wcstoul, const WCHAR *, WCHAR **, int);
+	CFN(m, double, wcstod, const WCHAR *, WCHAR **);
+	CFN(m, int, _wtoi, const WCHAR *);
+	CFN(m, WCHAR *, _itow, int, WCHAR *, int);
+	CFN(m, WCHAR *, wcstok, WCHAR *, const WCHAR *);
+	CFN(m, int, iswspace, unsigned short);
+	CFN(m, int, iswupper, unsigned short);
+	CFN(m, void, _swab, const char *, char *, int);
+	CFN(m, char *, _strtime, char *);
+	CFN(m, int, __CppXcptFilter, unsigned, void *);
+	CFN(m, BYTE *, _mbsnbcpy, BYTE *, const BYTE *, size_t);
+	CFN(m, BYTE *, _mbsspnp, const BYTE *, const BYTE *);
+	CFN(m, uintptr_t, _beginthread, void (CDECL *)(void *), unsigned, void *);
+	const double *huge = get(m, "_HUGE");
+	WCHAR num[] = { ' ', '-', '4', '2', 'x', 0 }, *end = NULL;
+
+	CHECK_EQ(wcstol(num, &end, 10), -42);
+	CHECK(end == num + 4);
+	WCHAR big[] = { '9', '9', '9', '9', '9', '9', '9', '9', '9', '9', '9', 0 };
+	CHECK_EQ(wcstol(big, NULL, 10), 0x7fffffff);
+	WCHAR hex[] = { '0', 'x', 'f', 'f', 0 };
+	CHECK_EQ(wcstoul(hex, NULL, 0), 255);
+	WCHAR flt[] = { '2', '.', '5', 'e', '1', 0 };
+	CHECK(wcstod(flt, NULL) == 25.0);
+	CHECK_EQ(_wtoi(num), -42);
+	WCHAR out[16];
+	_itow(-255, out, 10);
+	CHECK(out[0] == '-' && out[1] == '2' && out[3] == '5' && !out[4]);
+	_itow(255, out, 16);
+	CHECK(out[0] == 'f' && out[1] == 'f' && !out[2]);
+	WCHAR toks[] = { 'a', ',', ',', 'b', 'c', 0 }, delim[] = { ',', 0 };
+	WCHAR *t1 = wcstok(toks, delim), *t2 = wcstok(NULL, delim);
+	CHECK(t1 == toks && !toks[1] && t2 == toks + 3 && !wcstok(NULL, delim));
+	CHECK(iswspace(' ') && iswspace(0x09) && !iswspace('x'));
+	CHECK(iswupper('A') && !iswupper('a'));
+	char sw[4];
+	_swab("abcd", sw, 4);
+	CHECK(!memcmp(sw, "badc", 4));
+	char tbuf[9];
+	CHECK(_strtime(tbuf) == tbuf && strlen(tbuf) == 8 && tbuf[2] == ':');
+	CHECK_EQ(__CppXcptFilter(0xE06D7363, NULL), 1);
+	CHECK_EQ(__CppXcptFilter(0xC0000005, NULL), 0);
+	CHECK(*huge > 1e308);
+	BYTE nb[8];
+	memset(nb, 'z', sizeof(nb));
+	_mbsnbcpy(nb, (const BYTE *)"ab", 4);
+	CHECK(!memcmp(nb, "ab\0\0zz", 6));
+	const BYTE *sp = (const BYTE *)"  x";
+	CHECK(_mbsspnp(sp, (const BYTE *)" ") == sp + 2);
+	CHECK(_mbsspnp(sp, (const BYTE *)" x") == NULL);
+
+	FN(k, DWORD, WaitForSingleObject, HANDLE, DWORD);
+	FN(k, BOOL, CloseHandle, HANDLE);
+	beginthread_ran = 0;
+	uintptr_t th = _beginthread(beginthread_routine, 0, (void *)7);
+	CHECK(th && th != (uintptr_t)-1);
+	if (th && th != (uintptr_t)-1) {
+		CHECK_EQ(WaitForSingleObject((HANDLE)th, 5000), WAIT_OBJECT_0);
+		CloseHandle((HANDLE)th);
+	}
+	CHECK_EQ(beginthread_ran, 7);
+
+	FN(k, HANDLE, FindFirstChangeNotificationA, LPCSTR, BOOL, DWORD);
+	FN(k, BOOL, FindNextChangeNotification, HANDLE);
+	FN(k, BOOL, FindCloseChangeNotification, HANDLE);
+	FN(k, FARPROC, DelayLoadFailureHook, LPCSTR, LPCSTR);
+	HANDLE ch = FindFirstChangeNotificationA("C:\\", FALSE, 1);
+	CHECK(ch != INVALID_HANDLE_VALUE);
+	CHECK_EQ(WaitForSingleObject(ch, 0), WAIT_TIMEOUT);
+	CHECK(FindNextChangeNotification(ch));
+	CHECK(FindCloseChangeNotification(ch));
+	CHECK(FindFirstChangeNotificationA("C:\\no\\such", FALSE, 1) == INVALID_HANDLE_VALUE);
+	CHECK(DelayLoadFailureHook("x.dll", "f") == NULL);
+	(void)root;
+
+	FN(a, ULONG, RegisterTraceGuidsW, void *, void *, const GUID *, ULONG, void *,
+	   LPCWSTR, LPCWSTR, uint64_t *);
+	FN(a, ULONG, UnregisterTraceGuids, uint64_t);
+	FN(a, ULONG, GetTraceEnableFlags, uint64_t);
+	uint64_t th64 = 0;
+	CHECK_EQ(RegisterTraceGuidsW((void *)1, NULL, &IID_IUnknown, 0, NULL, NULL,
+				     NULL, &th64), 0);
+	CHECK(th64 != 0);
+	CHECK_EQ(GetTraceEnableFlags(th64), 0);
+	CHECK_EQ(UnregisterTraceGuids(th64), 0);
+
+	FN(o, HRESULT, PropVariantCopy, VARIANT *, const VARIANT *);
+	FN(o, HRESULT, PropVariantClear, VARIANT *);
+	FN(o, void *, CoTaskMemAlloc, SIZE_T);
+	VARIANT src, dst;
+	memset(&src, 0, sizeof(src));
+	src.vt = VT_LPSTR;
+	char *str = CoTaskMemAlloc(6);
+	memcpy(str, "hello", 6);
+	*(char **)((BYTE *)&src + 8) = str;
+	CHECK_EQ(PropVariantCopy(&dst, &src), S_OK);
+	char *copy = *(char **)((BYTE *)&dst + 8);
+	CHECK(copy && copy != str && !strcmp(copy, "hello"));
+	CHECK_EQ(PropVariantClear(&dst), S_OK);
+	CHECK_EQ(dst.vt, VT_EMPTY);
+	CHECK_EQ(PropVariantClear(&src), S_OK);
+	memset(&src, 0, sizeof(src));
+	src.vt = VT_I4;
+	src.lVal = 5;
+	CHECK(PropVariantCopy(&dst, &src) == S_OK && dst.vt == VT_I4 && dst.lVal == 5);
+	mod_free(o);
+	mod_free(a);
+	mod_free(k);
+	mod_free(m);
 }
 
 int main(void)
@@ -1071,6 +1645,14 @@ int main(void)
 	test_oledlg_dbghelp();
 	test_netapi32();
 	test_splitpath();
+	test_mbcs_searchpath(root);
+	test_more_imports(root);
+	test_toolhelp();
+	test_process_memory();
+	test_iocp();
+	test_mmio(root);
+	test_sh_value();
+	test_class_long();
 
 	char cmd[512];
 	snprintf(cmd, sizeof(cmd), "rm -rf '%s'", root);

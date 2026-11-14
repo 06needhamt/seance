@@ -126,6 +126,7 @@ static const char *signame(int sig)
 	case SIGBUS:  return "SIGBUS";
 	case SIGILL:  return "SIGILL";
 	case SIGFPE:  return "SIGFPE";
+	case SIGTRAP: return "SIGTRAP";
 	default:      return "signal";
 	}
 }
@@ -332,7 +333,7 @@ int crash_install(void)
 	sa.sa_sigaction = on_fault;
 	sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
 	sigemptyset(&sa.sa_mask);
-	static const int sigs[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE };
+	static const int sigs[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP };
 	for (size_t i = 0; !VFW_SANITIZER_BUILD && i < sizeof(sigs) / sizeof(sigs[0]);
 	     i++)
 		sigaction(sigs[i], &sa, NULL);
