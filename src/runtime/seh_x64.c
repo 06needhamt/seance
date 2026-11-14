@@ -823,6 +823,18 @@ int seh_take_fault(int sig, siginfo_t *si, void *ucontext)
 	case SIGFPE:
 		pending.rec.ExceptionCode = code_from_fpe(si->si_code);
 		break;
+	case SIGTRAP:
+		if (si->si_code == TRAP_TRACE) {
+			pending.rec.ExceptionCode = EXCEPTION_SINGLE_STEP;
+			c->EFlags &= ~0x100u;
+		} else {
+			/* int3: reported at the breakpoint, as on Windows. */
+			pending.rec.ExceptionCode = EXCEPTION_BREAKPOINT;
+			pending.rec.NumberParameters = 1;
+			c->Rip--;
+			pending.rec.ExceptionAddress = (void *)(uintptr_t)c->Rip;
+		}
+		break;
 	default:
 		pending.rec.ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
 		break;

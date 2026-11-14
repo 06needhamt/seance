@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include "loader/modules.h"
+#include "runtime/gate.h"
 #include "runtime/runtime.h"
 #include "win32/handle.h"
 #include "win32/internal.h"
@@ -157,7 +158,14 @@ static void *thread_main(void *arg)
 	if (!sigsetjmp(t->exit_jump, 0)) {
 		t->can_jump = 1;
 		mod_thread_notify(DLL_THREAD_ATTACH);
-		code = t->start(t->param);
+		/*
+		 * Through the gate: a cdecl routine passed as the start
+		 * routine leaves its argument on the stack, which Windows'
+		 * BaseThreadInitThunk never notices but would shift this
+		 * frame.
+		 */
+		uintptr_t arg = (uintptr_t)t->param;
+		code = (DWORD)gate_call((const void *)t->start, 1, &arg);
 	} else {
 		code = t->exit_code;	/* set by ExitThread */
 	}

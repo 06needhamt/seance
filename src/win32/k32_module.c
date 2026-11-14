@@ -153,7 +153,19 @@ static struct module *find_by_name(const char *name)
 			base = p + 1;
 	if (!strcasecmp(base, "seance.exe") || !strcasecmp(base, "seance"))
 		return mod_main();
-	return mod_find(base);
+	char want[256];
+	snprintf(want, sizeof(want), "%s%s", base, strchr(base, '.') ? "" : ".dll");
+	struct module *m = mod_find(want);
+	/*
+	 * ntdll and kernel32 are in every Windows process from its start, so
+	 * their handles are there to get even if nothing imported them yet.
+	 */
+	if (!m && (!strcasecmp(want, "ntdll.dll") ||
+		   !strcasecmp(want, "kernel32.dll"))) {
+		m = mod_load(want, NULL);
+		mod_pin(m);
+	}
+	return m;
 }
 
 static HMODULE module_handle(const char *name)

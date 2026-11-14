@@ -238,7 +238,7 @@ static BYTE *version_block(const char *name, const void *ret, DWORD *size)
 	const struct builtin_dll *b = builtin_find(base);
 
 	if (base != name) {
-		if (b && !b->fallback)
+		if (b && !builtin_shadowable(b, base))
 			return builtin_block(b->name, size);
 		char *u = path_to_unix(name);
 		if (u && !access(u, F_OK)) {
@@ -263,7 +263,7 @@ static BYTE *version_block(const char *name, const void *ret, DWORD *size)
 		mod_free(m);
 		return block;
 	}
-	if (b && !b->fallback)
+	if (b && !builtin_shadowable(b, base))
 		return builtin_block(b->name, size);
 	if (!mod_search(base, win_caller_module(ret), path, sizeof(path)))
 		return file_block(path, size);

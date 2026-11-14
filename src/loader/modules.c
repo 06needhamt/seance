@@ -18,6 +18,7 @@
 #include "common/noted.h"
 #include "loader/modules.h"
 #include "runtime/crash.h"
+#include "runtime/gate.h"
 #include "runtime/runtime.h"
 #include "runtime/seh.h"
 #include "runtime/teb.h"
@@ -152,8 +153,36 @@ static int find_in_dir(const char *dir, const char *name, char *out,
 	return found;
 }
 
-static int search(const char *name, const struct module *importer,
-		  char *out, size_t outsz)
+#if defined(__x86_64__)
+#define NATIVE_MACHINE IMAGE_FILE_MACHINE_AMD64
+#else
+#define NATIVE_MACHINE IMAGE_FILE_MACHINE_I386
+#endif
+
+/*
+ * find_in_dir, passing over a DLL built for the other architecture when
+ * same_arch is set: Windows' loader skips a 32-bit msvcr90.dll on a 64-bit
+ * process's path (or the reverse) and keeps looking, falling back to the
+ * system's own. A file that isn't a PE at all is still found, so its
+ * error is the one reported.
+ */
+static int find_arch(const char *dir, const char *name, char *out,
+		     size_t outsz, int same_arch)
+{
+	if (find_in_dir(dir, name, out, outsz))
+		return -1;
+	if (!same_arch)
+		return 0;
+	WORD m = pe_peek_machine(out);
+	if (m && m != NATIVE_MACHINE) {
+		TRACE("%s: skipping it, built for another architecture", out);
+		return -1;
+	}
+	return 0;
+}
+
+static int search_arch(const char *name, const struct module *importer,
+		       char *out, size_t outsz, int same_arch)
 {
 	if (importer && importer->path) {
 		char dir[PATH_MAX];
@@ -163,7 +192,7 @@ static int search(const char *name, const struct module *importer,
 				 (int)(slash - importer->path), importer->path);
 		else
 			snprintf(dir, sizeof(dir), ".");
-		if (!find_in_dir(dir, name, out, outsz))
+		if (!find_arch(dir, name, out, outsz, same_arch))
 			return 0;
 	}
 
@@ -172,7 +201,7 @@ static int search(const char *name, const struct module *importer,
 		char *copy = strdup(env), *save = NULL;
 		for (char *dir = strtok_r(copy, ":", &save); dir;
 		     dir = strtok_r(NULL, ":", &save)) {
-			if (!find_in_dir(dir, name, out, outsz)) {
+			if (!find_arch(dir, name, out, outsz, same_arch)) {
 				free(copy);
 				return 0;
 			}
@@ -180,13 +209,20 @@ static int search(const char *name, const struct module *importer,
 		free(copy);
 	}
 
-	return find_in_dir(".", name, out, outsz);
+	return find_arch(".", name, out, outsz, same_arch);
+}
+
+/* Where a DLL this process can load is: of its own architecture. */
+static int search(const char *name, const struct module *importer,
+		  char *out, size_t outsz)
+{
+	return search_arch(name, importer, out, outsz, 1);
 }
 
 int mod_search(const char *name, const struct module *importer,
 	       char *out, size_t outsz)
 {
-	return search(name, importer, out, outsz);
+	return search_arch(name, importer, out, outsz, 0);
 }
 
 static int force_reloc(void)
@@ -516,7 +552,7 @@ static struct module *load_builtin(const char *name,
 	if (!m)
 		return NULL;
 	m->builtin = b;
-	m->base = builtin_fake_image();
+	m->base = builtin_fake_image(b);
 	if (!m->base) {
 		vfw_set_error("%s: cannot map a module header", name);
 		free(m->name);
@@ -524,6 +560,12 @@ static struct module *load_builtin(const char *name,
 		return NULL;
 	}
 	m->attached = 1;
+	/*
+	 * Never unloaded, as on Windows: kernel32's image holds the call
+	 * gate, and code that found it by its header keeps using it.
+	 */
+	if (!strcasecmp(b->name, "kernel32.dll") || !strcasecmp(b->name, "ntdll.dll"))
+		m->pinned = 1;
 	m->next = modules;
 	modules = m;
 	TRACE("loaded built-in %s", name);
@@ -580,6 +622,15 @@ static struct module *load_pe(const char *path)
 	}
 	TRACE("loaded %s at %p%s", path, (void *)m->base,
 	      img->relocated ? " (relocated)" : "");
+	/*
+	 * kernel32's image holds the call gate DllMain returns into, which a
+	 * packed DLL's DllMain scans down from to find kernel32.
+	 */
+	if (!gate_copy()) {
+		const struct builtin_dll *k32 = builtin_find("kernel32.dll");
+		if (k32 && !mod_find("kernel32.dll"))
+			load_builtin("kernel32.dll", k32);
+	}
 	/* From before its TLS callbacks, which may load DLLs too. */
 	unsigned mark = mod_missing_mark();
 	pe_tls_notify(img, DLL_PROCESS_ATTACH);
@@ -644,7 +695,7 @@ struct module *mod_load(const char *name, struct module *importer)
 		snprintf(path, sizeof(path), "%s", name);
 	} else {
 		const struct builtin_dll *b = builtin_find(want);
-		if (b && !b->fallback) {
+		if (b && !builtin_shadowable(b, want)) {
 			m = load_builtin(want, b);
 			goto out;
 		}
@@ -674,7 +725,7 @@ struct module *mod_main(void)
 	LOCK();
 	if (!main_module) {
 		struct module *m = new_module("seance.exe", NULL);
-		if (m && (m->base = builtin_fake_image())) {
+		if (m && (m->base = builtin_fake_image(NULL))) {
 			m->attached = 1;
 			main_module = m;
 			peb_get()->ImageBaseAddress = m->base;

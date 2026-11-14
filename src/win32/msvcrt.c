@@ -8,8 +8,10 @@
  *
  * A codec with a statically linked CRT (/MT) never imports any of this at
  * all - it carries its own copy - so this exists only for one built with a
- * dynamic CRT (/MD). fallback = 1: a real msvcrt.dll a codec ships
- * alongside itself, found on the search path, still wins over this.
+ * dynamic CRT (/MD). A real msvcr71/80/90.dll (or any other versioned name)
+ * a codec ships alongside itself, found on the search path, still wins over
+ * this; msvcrt.dll itself never does, as it is one of Windows' KnownDLLs: the
+ * XP-era msvcrt.dll some packages bundle lacks what later DLLs import.
  */
 #include <math.h>
 
@@ -50,7 +52,8 @@ static const char *const msvcrt_aliases[] = {
 	"vcruntime[0-9]*.dll", "ucrtbase.dll", "api-ms-win-crt-*.dll", NULL
 };
 
-const struct builtin_dll builtin_msvcrt = { "msvcrt.dll", msvcrt_aliases, tables, 1 };
+const struct builtin_dll builtin_msvcrt = { "msvcrt.dll", msvcrt_aliases, tables,
+					       BUILTIN_FALLBACK_ALIASES };
 
 /*
  * crtdll.dll, the C runtime of Windows NT 3.x and 4.0 (msvidc32.dll, the
@@ -103,4 +106,5 @@ static const struct builtin_export *const crtdll_tables[] = {
 };
 
 /* A real crtdll.dll found on the search path wins, as for msvcrt. */
-const struct builtin_dll builtin_crtdll = { "crtdll.dll", NULL, crtdll_tables, 1 };
+const struct builtin_dll builtin_crtdll = { "crtdll.dll", NULL, crtdll_tables,
+					       BUILTIN_FALLBACK };

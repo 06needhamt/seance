@@ -1434,6 +1434,71 @@ WINFN(BOOL) adv_GetUserNameW(LPWSTR buf, LPDWORD size)
 	return user_name(buf, size, 1);
 }
 
+/*
+ * The service control manager: there are no services to run here, and a
+ * DLL that installs or starts one (a protection driver) is told it may not.
+ */
+typedef void *SC_HANDLE;
+
+WINFN(SC_HANDLE) adv_OpenSCManagerA(LPCSTR machine, LPCSTR db, DWORD access)
+{
+	win_set_error(ERROR_ACCESS_DENIED);
+	return NULL;
+}
+
+WINFN(SC_HANDLE) adv_OpenSCManagerW(LPCWSTR machine, LPCWSTR db, DWORD access)
+{
+	win_set_error(ERROR_ACCESS_DENIED);
+	return NULL;
+}
+
+static SC_HANDLE no_scm(void)
+{
+	win_set_error(ERROR_INVALID_HANDLE);
+	return NULL;
+}
+
+static BOOL no_service(void)
+{
+	win_set_error(ERROR_INVALID_HANDLE);
+	return FALSE;
+}
+
+WINFN(SC_HANDLE) adv_OpenServiceA(SC_HANDLE scm, LPCSTR name, DWORD access) { return no_scm(); }
+WINFN(SC_HANDLE) adv_OpenServiceW(SC_HANDLE scm, LPCWSTR name, DWORD access) { return no_scm(); }
+WINFN(SC_HANDLE) adv_CreateServiceA(SC_HANDLE scm, LPCSTR name, LPCSTR display,
+				    DWORD access, DWORD type, DWORD start,
+				    DWORD error, LPCSTR path, LPCSTR group,
+				    LPDWORD tag, LPCSTR deps, LPCSTR user,
+				    LPCSTR password) { return no_scm(); }
+WINFN(SC_HANDLE) adv_CreateServiceW(SC_HANDLE scm, LPCWSTR name, LPCWSTR display,
+				    DWORD access, DWORD type, DWORD start,
+				    DWORD error, LPCWSTR path, LPCWSTR group,
+				    LPDWORD tag, LPCWSTR deps, LPCWSTR user,
+				    LPCWSTR password) { return no_scm(); }
+WINFN(BOOL) adv_StartServiceA(SC_HANDLE svc, DWORD argc, LPCSTR *argv) { return no_service(); }
+WINFN(BOOL) adv_StartServiceW(SC_HANDLE svc, DWORD argc, LPCWSTR *argv) { return no_service(); }
+WINFN(BOOL) adv_ControlService(SC_HANDLE svc, DWORD control, void *status) { return no_service(); }
+WINFN(BOOL) adv_DeleteService(SC_HANDLE svc) { return no_service(); }
+WINFN(BOOL) adv_QueryServiceStatus(SC_HANDLE svc, void *status) { return no_service(); }
+WINFN(BOOL) adv_CloseServiceHandle(SC_HANDLE h) { return no_service(); }
+
+/*
+ * The event log: events a DLL reports go nowhere, as on a system whose log
+ * is full; the source handle is a token to give back.
+ */
+#define EVENT_SOURCE ((HANDLE)(ULONG_PTR)0xe7e7)
+
+WINFN(HANDLE) adv_RegisterEventSourceA(LPCSTR server, LPCSTR source) { return EVENT_SOURCE; }
+WINFN(HANDLE) adv_RegisterEventSourceW(LPCWSTR server, LPCWSTR source) { return EVENT_SOURCE; }
+WINFN(BOOL) adv_DeregisterEventSource(HANDLE h) { return h == EVENT_SOURCE; }
+WINFN(BOOL) adv_ReportEventA(HANDLE h, WORD type, WORD cat, DWORD id, void *sid,
+			     WORD nstrings, DWORD size, LPCSTR *strings,
+			     void *data) { return h == EVENT_SOURCE; }
+WINFN(BOOL) adv_ReportEventW(HANDLE h, WORD type, WORD cat, DWORD id, void *sid,
+			     WORD nstrings, DWORD size, LPCWSTR *strings,
+			     void *data) { return h == EVENT_SOURCE; }
+
 #define E(name) { #name, 0, (void *)adv_##name }
 
 WINFN(LONG) adv_RegConnectRegistryA(LPCSTR machine, HKEY key, HKEY *out)
@@ -1446,6 +1511,23 @@ WINFN(LONG) adv_RegConnectRegistryA(LPCSTR machine, HKEY key, HKEY *out)
 }
 
 static const struct builtin_export exports[] = {
+	E(CloseServiceHandle),
+	E(ControlService),
+	E(CreateServiceA),
+	E(CreateServiceW),
+	E(DeleteService),
+	E(DeregisterEventSource),
+	E(OpenSCManagerA),
+	E(OpenSCManagerW),
+	E(OpenServiceA),
+	E(OpenServiceW),
+	E(QueryServiceStatus),
+	E(RegisterEventSourceA),
+	E(RegisterEventSourceW),
+	E(ReportEventA),
+	E(ReportEventW),
+	E(StartServiceA),
+	E(StartServiceW),
 	E(GetUserNameA),
 	E(GetUserNameW),
 	E(RegCloseKey),

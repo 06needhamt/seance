@@ -21,6 +21,7 @@
 #define ERROR_ACCESS_DENIED            5
 #define ERROR_INVALID_HANDLE           6
 #define ERROR_NOT_ENOUGH_MEMORY        8
+#define ERROR_CLIPBOARD_NOT_OPEN       1418
 #define ERROR_INVALID_DATA             13
 #define ERROR_OUTOFMEMORY              14
 #define ERROR_NO_MORE_FILES            18

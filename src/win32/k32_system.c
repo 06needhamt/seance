@@ -1023,6 +1023,12 @@ WINFN(void) k32_OutputDebugStringW(LPCWSTR s)
 
 WINFN(BOOL) k32_IsDebuggerPresent(void) { return FALSE; }
 
+/* A breakpoint exception, which the caller's own handler may take. */
+WINFN(void) k32_DebugBreak(void)
+{
+	__asm__ volatile("int3");
+}
+
 static UINT error_mode;
 
 WINFN(UINT) k32_SetErrorMode(UINT mode)
@@ -1279,6 +1285,7 @@ const struct builtin_export k32_system_exports[] = {
 	E(GetWindowsDirectoryA),
 	E(GetWindowsDirectoryW),
 	E(IsDebuggerPresent),
+	E(DebugBreak),
 	E(IsProcessorFeaturePresent),
 	E(OutputDebugStringA),
 	E(OutputDebugStringW),
