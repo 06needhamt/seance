@@ -113,6 +113,10 @@ typedef int FILTER_STATE;
 #define EC_LENGTH_CHANGED            0x1E
 #define EC_DEVICE_LOST               0x1F
 
+/* AM_SAMPLE2_PROPERTIES.dwTypeSpecificFlags of video (amvideo.h). */
+#define AM_VIDEO_FLAG_FIELD1FIRST           0x00000004
+#define AM_VIDEO_FLAG_WEAVE                 0x00000008
+
 /* VIDEOINFOHEADER2.dwInterlaceFlags and dwControlFlags (dvdmedia.h). */
 #define AMINTERLACE_IsInterlaced            0x00000001
 #define AMINTERLACE_1FieldPerSample         0x00000002

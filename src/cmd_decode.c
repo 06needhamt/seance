@@ -68,7 +68,13 @@ static int usage(void)
 		"  --clsid <{GUID}>     the filter or DMO when a DLL has several\n"
 		"  --output-format <f>  what the codec should decompress to: I420,\n"
 		"                       YV12, YUY2, UYVY, BGR32, BGR24, RGB565,\n"
-		"                       RGB555 or PAL8 (default: negotiated)\n"
+		"                       RGB555, PAL8, NV12, YV16, YV24, P010, P016,\n"
+		"                       P210, P216, AYUV, Y410, Y416, v210 or v410\n"
+		"                       (default: negotiated)\n"
+		"  --native             .y4m and .yuv keep the decoder's own format's\n"
+		"                       chroma subsampling and bit depth (C422,\n"
+		"                       C444p10, ...) instead of 8-bit 4:2:0, and\n"
+		"                       the format the decoder prefers is taken\n"
 		"  --stream <n>         the stream (default: the first video)\n"
 		"  --start <pos>        first frame to write, or a time (2.5s);\n"
 		"                       decoding starts at the keyframe before it\n"
@@ -126,12 +132,18 @@ static void *read_file(const char *path, size_t *len)
 	return data;
 }
 
+/*
+ * --native: Y4M and YUV frames in the layout the decoder gives them in,
+ * and the decoder's own choice of format first.
+ */
+static int native;
+
 /* A standard format by name, or -1. */
 static int std_format(const char *name, LONG w, LONG h, struct vfw_format *f)
 {
 	const char *n;
 
-	for (unsigned i = 0; (n = vfw_std_format(i, w, h, f)); i++)
+	for (unsigned i = 0; (n = vfw_out_format(i, w, h, f)); i++)
 		if (!strcasecmp(n, name))
 			return (int)i;
 	return -1;
@@ -170,6 +182,14 @@ static BITMAPINFOHEADER *choose_output(HIC hic, const BITMAPINFOHEADER *in,
 		}
 		goto copy;
 	}
+	/* The codec's own suggestion, if the output can take it as it is. */
+	if (native && (out = ic_negotiate_output(hic, in, &r))) {
+		struct image_conv *c = image_conv_new(out, vfw_format_size(out));
+		image_conv_free(c);
+		if (c)
+			return out;
+		free(out);
+	}
 	for (size_t i = 0; prefer && prefer[i]; i++) {
 		std_format(prefer[i], w, h, &f);
 		if (ic_send(hic, ICM_DECOMPRESS_QUERY, (DWORD_PTR)in,
@@ -192,6 +212,21 @@ copy:
 	return out;
 }
 
+/* --native: the output takes the converter's layout. Returns 0 or -1. */
+static int set_native(struct output *o, const struct image_conv *conv)
+{
+	struct image_layout l;
+
+	image_native_layout(conv, &l);
+	if (output_set_layout(o, &l)) {
+		fprintf(stderr, "seance: %s\n", vfw_error());
+		return -1;
+	}
+	TRACE("decode: frames as %s, %d-bit, chroma 1/%d across, 1/%d down",
+	      image_format_name(conv), l.bits, 1 << l.sx, 1 << l.sy);
+	return 0;
+}
+
 static double now(void)
 {
 	struct timespec t;
@@ -204,7 +239,141 @@ struct com_decode_output {
 	struct image_conv **conv;	/* replaced when the format changes */
 	REFERENCE_TIME first_time;	/* earlier samples are before --start */
 	unsigned long limit;		/* frames to write */
+	int interlaced;			/* the type says samples say (VIH2) */
+	DWORD rate, scale;		/* the stream's frame rate */
+	char failed[200];		/* why frames were refused, if they were */
+	int any_format;			/* reconnections may change the format */
+	DWORD compression;		/* else they keep this one */
 };
+
+/*
+ * The width of the picture a type shows: rcTarget's, when that is
+ * narrower than the rows (LAV Video pads v210's), else the rows'.
+ */
+static LONG picture_width(const AM_MEDIA_TYPE *mt, const BITMAPINFOHEADER *b)
+{
+	if (!mt->pbFormat || mt->cbFormat < 2 * sizeof(RECT) ||
+	    (memcmp(&mt->formattype, &FORMAT_VideoInfo, sizeof(GUID)) &&
+	     memcmp(&mt->formattype, &FORMAT_VideoInfo2, sizeof(GUID))))
+		return b->biWidth;
+	/* Both start with rcSource, then rcTarget. */
+	const RECT *target = (const RECT *)mt->pbFormat + 1;
+	LONG w = target->right - target->left;
+	return w > 0 && w < b->biWidth ? w : b->biWidth;
+}
+
+/*
+ * A converter for out, a decoder's own type, of a picture width pixels
+ * wide (the type's rows may be wider). NULL if it can't be had.
+ */
+static struct image_conv *picture_conv(const BITMAPINFOHEADER *out,
+				       LONG width)
+{
+	struct image_conv *c = image_conv_new(out, vfw_format_size(out));
+
+	if (c && image_width(c) > width && image_conv_crop(c, width)) {
+		image_conv_free(c);
+		c = NULL;
+	}
+	return c;
+}
+
+/*
+ * A converter for frames of type mt, of the picture it shows (rows
+ * cropped to it), and the type's header if bih isn't NULL. NULL if the
+ * output can't convert them.
+ */
+static struct image_conv *type_conv(const AM_MEDIA_TYPE *mt,
+				    BITMAPINFOHEADER **bih, size_t *size)
+{
+	BITMAPINFOHEADER *b = NULL;
+	size_t n = 0;
+
+	if (FAILED(dshow_mt_to_bih(mt, &b, &n)))
+		return NULL;
+	struct image_conv *c = image_conv_new(b, n);
+	LONG w = picture_width(mt, b);
+	if (c && w != b->biWidth) {
+		TRACE("decode: a %ld-pixel picture in %ld-pixel rows",
+		      (long)w, (long)b->biWidth);
+		if (image_conv_crop(c, w)) {
+			image_conv_free(c);
+			c = NULL;
+		}
+	}
+	if (bih) {
+		*bih = b;
+		*size = n;
+	} else {
+		free(b);
+	}
+	return c;
+}
+
+/*
+ * A type the decoder would reconnect with, taken if it's the same picture
+ * in a format the output converts: of the same format, as LAV Video
+ * reconnects to pad v210's rows, or with --native and no format asked
+ * for, any (LAV Video's own for the stream, once it has seen it).
+ */
+static int com_accept(void *opaque, const AM_MEDIA_TYPE *mt)
+{
+	struct com_decode_output *d = opaque;
+	BITMAPINFOHEADER *bih = NULL;
+	size_t size = 0;
+	char desc[160];
+
+	if (!d->conv || !*d->conv)
+		return 0;
+	struct image_conv *c = type_conv(mt, &bih, &size);
+	if (!bih)
+		return 0;
+	int take = c && image_width(c) == image_width(*d->conv) &&
+		   image_height(c) == image_height(*d->conv) &&
+		   (d->any_format || bih->biCompression == d->compression);
+	TRACE("decode: the decoder offers %s: %s",
+	      cli_format_desc(bih, desc, sizeof(desc)), take ? "taken" : "refused");
+	image_conv_free(c);
+	free(bih);
+	return take;
+}
+
+/*
+ * A decoder that makes several frames of each (a deinterlacer giving a
+ * frame per field) says so in its first frame's length, a whole fraction
+ * of the stream's frame: k frames each, at k times the rate.
+ */
+static void frames_per_frame(struct com_decode_output *d,
+			     const struct xform_output *o)
+{
+	if (!d->rate || d->limit == 1)	/* one picture asked for: the first */
+		return;
+	REFERENCE_TIME frame = (REFERENCE_TIME)d->scale * 10000000 / d->rate;
+	REFERENCE_TIME len = o->stop - o->start;
+
+	if (!o->timed || len <= 0 || !frame)
+		return;
+	REFERENCE_TIME k = (frame + len / 2) / len;
+	if (k < 2 || k > 8 || llabs(k * len - frame) > frame / 100)
+		return;
+	TRACE("decode: %lld frames for each of the stream's", (long long)k);
+	output_set_rate(d->output, d->rate * (DWORD)k, d->scale);
+	d->limit *= (unsigned long)k;
+}
+
+/*
+ * Whether a type is a VIDEOINFOHEADER2 of interlaced frames, whose samples
+ * then say how each is (AM_VIDEO_FLAG_*): one with both fields in a sample.
+ */
+static int interlaced_type(const AM_MEDIA_TYPE *mt)
+{
+	if (!mt || memcmp(&mt->formattype, &FORMAT_VideoInfo2, sizeof(GUID)) ||
+	    mt->cbFormat < sizeof(VIDEOINFOHEADER2) || !mt->pbFormat)
+		return 0;
+	DWORD f = ((const VIDEOINFOHEADER2 *)mt->pbFormat)->dwInterlaceFlags;
+	return (f & AMINTERLACE_IsInterlaced) &&
+	       !(f & AMINTERLACE_1FieldPerSample);
+}
 
 /*
  * A sample carrying a new media type changes the format of it and of every
@@ -215,23 +384,27 @@ struct com_decode_output {
 static HRESULT com_format_change(struct com_decode_output *d,
 				   const AM_MEDIA_TYPE *mt)
 {
-	BITMAPINFOHEADER *bih = NULL;
-	size_t size = 0;
-	HRESULT hr = dshow_mt_to_bih(mt, &bih, &size);
+	struct image_conv *next = type_conv(mt, NULL, NULL);
 
-	if (FAILED(hr))
-		return hr;
-	LONG height = bih->biHeight < 0 ? -bih->biHeight : bih->biHeight;
-	struct image_conv *next = NULL;
-	if (bih->biWidth == image_width(*d->conv) &&
-	    height == image_height(*d->conv))
-		next = image_conv_new(bih, size);
-	free(bih);
+	if (next && (image_width(next) != image_width(*d->conv) ||
+		     image_height(next) != image_height(*d->conv))) {
+		image_conv_free(next);
+		next = NULL;
+	}
 	if (!next)
 		return VFW_E_INVALIDMEDIATYPE;
 	image_conv_free(*d->conv);
 	*d->conv = next;
 	return S_OK;
+}
+
+/* The first reason frames are refused, kept to report. */
+static HRESULT com_refuse(struct com_decode_output *d, HRESULT hr,
+			  const char *why)
+{
+	if (!d->failed[0])
+		snprintf(d->failed, sizeof(d->failed), "%s", why);
+	return hr;
 }
 
 static HRESULT com_write_output(void *opaque, const struct xform_output *o,
@@ -240,11 +413,22 @@ static HRESULT com_write_output(void *opaque, const struct xform_output *o,
 	struct com_decode_output *d = opaque;
 	if (dynamic && *d->conv) {
 		HRESULT hr = com_format_change(d, dynamic);
-		if (FAILED(hr))
-			return hr;
+		if (FAILED(hr)) {
+			BITMAPINFOHEADER *bih = NULL;
+			char desc[160], why[200];
+			snprintf(why, sizeof(why), "the decoder changed to a format "
+				 "the output can't take (%s)",
+				 SUCCEEDED(dshow_mt_to_bih(dynamic, &bih, NULL)) ?
+				 cli_format_desc(bih, desc, sizeof(desc)) : "?");
+			free(bih);
+			return com_refuse(d, hr, why);
+		}
 	}
 	if (dynamic && !*d->conv)
-		return VFW_E_INVALIDMEDIATYPE;
+		return com_refuse(d, VFW_E_INVALIDMEDIATYPE,
+				  "the decoder changed format");
+	if (dynamic)
+		d->interlaced = interlaced_type(dynamic);
 	/*
 	 * Decoders needn't pass the preroll flag on, and may hold back frames
 	 * (to reorder them) that come out after the ones asked for, so the
@@ -254,8 +438,21 @@ static HRESULT com_write_output(void *opaque, const struct xform_output *o,
 			   o->start < d->first_time) ||
 	    output_frames(d->output) >= d->limit)
 		return S_OK;
+	if (!output_frames(d->output)) {
+		frames_per_frame(d, o);
+		/* --native: as the first frame is, whatever was first connected. */
+		if (native && set_native(d->output, *d->conv))
+			return com_refuse(d, E_FAIL, vfw_error());
+	}
+	if (output_frames(d->output) >= d->limit)
+		return S_OK;
+	/* A Y4M file's field order: the first frame's, as the decoder says. */
+	if (!output_frames(d->output) && d->interlaced && o->has_type_flags)
+		output_set_field_order(d->output,
+			o->type_flags & AM_VIDEO_FLAG_WEAVE ? 'p' :
+			o->type_flags & AM_VIDEO_FLAG_FIELD1FIRST ? 't' : 'b');
 	if (output_write(d->output, *d->conv, o->data, o->size))
-		return E_FAIL;
+		return com_refuse(d, E_FAIL, vfw_error());
 	return S_OK;
 }
 
@@ -276,7 +473,7 @@ static BITMAPINFOHEADER *connected_format(struct xform *x,
 
 	if (!mt || FAILED(dshow_mt_to_bih(mt, &bih, &size)))
 		return NULL;
-	int same = bih->biWidth == offered->bih.biWidth &&
+	int same = picture_width(mt, bih) == offered->bih.biWidth &&
 		   labs(bih->biHeight) == labs(offered->bih.biHeight);
 	TRACE("decode: the decoder's own type: %s%s",
 	      cli_format_desc(bih, desc, sizeof(desc)),
@@ -393,6 +590,9 @@ static int decode_com(const char *target, const CLSID *selected,
 			target, dshow_hr_name(hr, name));
 		goto done;
 	}
+	xform_set_accept(x, com_accept, &sink);
+	/* --native, unless a format is asked for: whatever the decoder prefers. */
+	sink.any_format = native && !forced;
 	if (state_path) {
 		size_t n;
 		if (!(state = read_file(state_path, &n))) {
@@ -423,8 +623,31 @@ static int decode_com(const char *target, const CLSID *selected,
 				goto media_error;
 			continue;
 		}
+		/*
+		 * --native: the decoder's own first type, as a renderer that
+		 * takes anything would get it, if the output converts it.
+		 */
+		if (native && !forced && vfw_std_format(0, in->biWidth, height, &fmt)) {
+			AM_MEDIA_TYPE any = { .majortype = MEDIATYPE_Video };
+			connect_hr = xform_connect(x, &in_mt, &any,
+						   com_write_output, &sink);
+			if (SUCCEEDED(connect_hr) &&
+			    (out = connected_format(x, &fmt))) {
+				struct image_conv *c =
+					picture_conv(out, in->biWidth);
+				image_conv_free(c);
+				if (c) {
+					connected = 1;
+					break;
+				}
+				free(out);
+				out = NULL;
+			}
+			if (SUCCEEDED(connect_hr))
+				xform_disconnect(x);
+		}
 		for (int pass = 0; pass < passes && !connected; pass++) {
-			for (unsigned i = 0; (format_name = vfw_std_format(i, in->biWidth,
+			for (unsigned i = 0; (format_name = vfw_out_format(i, in->biWidth,
 								     height, &fmt)); i++) {
 				if (forced && strcasecmp(forced, format_name))
 					continue;
@@ -481,7 +704,7 @@ static int decode_com(const char *target, const CLSID *selected,
 				xform_kind_name(x), dshow_hr_name(hr, name));
 		goto done;
 	}
-	conv = image_conv_new(out, vfw_format_size(out));
+	conv = picture_conv(out, in->biWidth);
 	if (!conv && kind != OUT_RAW) {
 		fprintf(stderr, "seance: the %s's output (%s) cannot be "
 			"converted\n", xform_kind_name(x),
@@ -518,15 +741,22 @@ static int decode_com(const char *target, const CLSID *selected,
 	size_t want = s->frames > start ? s->frames - start : 0;
 	if (count < want)
 		want = count;
-	if (!(output = output_open(out_path, kind, out->biWidth,
+	if (!(output = output_open(out_path, kind,
+			conv ? image_width(conv) : out->biWidth,
 			out->biHeight < 0 ? -out->biHeight : out->biHeight,
 			rate, scale, want == 1))) {
 		fprintf(stderr, "seance: %s\n", vfw_error());
 		goto done;
 	}
+	if (native && set_native(output, conv))
+		goto done;
 	sink.output = output;
 	sink.conv = &conv;
+	sink.compression = out->biCompression;
 	sink.limit = want;
+	sink.interlaced = interlaced_type(xform_output_type(x));
+	sink.rate = rate;
+	sink.scale = scale;
 	sink.first_time = start ?
 		(REFERENCE_TIME)start * scale * 10000000 / rate : 0;
 
@@ -534,8 +764,9 @@ static int decode_com(const char *target, const CLSID *selected,
 	unsigned long decoded = 0, errors = 0;
 	double busy = 0;
 	frame = first_frame;
-	for (size_t c = first_chunk; c < s->nchunks && output_frames(output) < want;
-	     c++) {
+	/* Until the frames asked for: more, from a decoder that makes more. */
+	for (size_t c = first_chunk;
+	     c < s->nchunks && output_frames(output) < sink.limit; c++) {
 		const struct avi_chunk *chunk = &s->chunks[c];
 		if (!avi_chunk_is_frame(chunk))
 			continue;
@@ -574,6 +805,15 @@ static int decode_com(const char *target, const CLSID *selected,
 	hr = xform_end(x);
 	if (FAILED(hr)) {
 		fprintf(stderr, "seance: end of stream: %s\n", dshow_hr_name(hr, name));
+		goto done;
+	}
+	if (sink.failed[0]) {
+		fprintf(stderr, "seance: %s\n", sink.failed);
+		goto done;
+	}
+	if (!output_frames(output) && decoded > errors && sink.limit) {
+		fprintf(stderr, "seance: the %s gave no frames for the %lu it "
+			"was given\n", xform_kind_name(x), decoded - errors);
 		goto done;
 	}
 	unsigned long written = output_frames(output);
@@ -734,6 +974,7 @@ int cmd_decode(int argc, char **argv)
 	enum output_kind kind;
 	struct audio_codec_job job = { .source.stream = -1, .quality = -1 };
 
+	native = 0;
 	for (int i = 1; i < argc; i++) {
 		const char *a = argv[i];
 		int v = i + 1 < argc;
@@ -752,6 +993,8 @@ int cmd_decode(int argc, char **argv)
 			state_path = argv[++i];
 		else if (!strcmp(a, "--keep-going"))
 			keep_going = 1;
+		else if (!strcmp(a, "--native"))
+			native = 1;
 		else if (!strcmp(a, "--start") && v) {
 			if (cli_parse_position(a, argv[++i], &job.start))
 				return 2;
@@ -799,9 +1042,9 @@ int cmd_decode(int argc, char **argv)
 			    out_path, audio_only_kinds,
 			    !format && output_is_null(out_path) ? target : NULL,
 			    clsid_arg, 0)) {
-		if (fourcc || forced || count != (unsigned long)-1) {
-			fprintf(stderr, "seance: --fourcc, --output-format and "
-				"--frames are for video\n");
+		if (fourcc || forced || native || count != (unsigned long)-1) {
+			fprintf(stderr, "seance: --fourcc, --output-format, "
+				"--native and --frames are for video\n");
 			return 2;
 		}
 		if (clsid_arg && parse_clsid(clsid_arg, &job.clsid_value)) {
@@ -823,6 +1066,10 @@ int cmd_decode(int argc, char **argv)
 	if (format ? output_kind_from_name(format, &kind) :
 		     output_kind_from_path(out_path, &kind)) {
 		fprintf(stderr, "seance: %s\n", vfw_error());
+		return 2;
+	}
+	if (native && kind != OUT_Y4M && kind != OUT_YUV) {
+		fprintf(stderr, "seance: --native is for .y4m and .yuv output\n");
 		return 2;
 	}
 
@@ -1056,6 +1303,8 @@ int cmd_decode(int argc, char **argv)
 		fprintf(stderr, "seance: %s\n", vfw_error());
 		goto done;
 	}
+	if (native && set_native(o, conv))
+		goto done;
 
 	size_t cap = 0;
 	unsigned long errors = 0, decoded = 0;

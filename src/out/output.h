@@ -66,6 +66,24 @@ struct output *output_open(const char *path, enum output_kind kind,
 int output_write(struct output *o, struct image_conv *conv, const void *raw,
 		 size_t raw_len);
 
+/*
+ * A Y4M file's field order, given before its first frame: 'p'
+ * (progressive, the default), 't' (top field first) or 'b'.
+ */
+void output_set_field_order(struct output *o, char order);
+
+/*
+ * For Y4M and raw YUV: frames are written in layout l (the converter's
+ * native one, image_native_layout()) rather than as 8-bit I420, given
+ * before the first frame. A Y4M header then says C422, C444p10, ... as
+ * the layout is. Frames that come in another layout later are refused.
+ * Returns 0 or -1.
+ */
+int output_set_layout(struct output *o, const struct image_layout *l);
+
+/* A Y4M file's frame rate, given before its first frame. */
+void output_set_rate(struct output *o, DWORD rate, DWORD scale);
+
 /* Writes the last frame again (for dropped, zero-length frames). */
 int output_repeat(struct output *o);
 

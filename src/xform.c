@@ -34,6 +34,8 @@ struct xform {
 	/* the caller's */
 	xform_output_fn callback;
 	void *opaque;
+	xform_accept_fn accept;	/* a filter's reconnections to take */
+	void *accept_opaque;
 };
 
 /*
@@ -282,11 +284,22 @@ static HRESULT from_sample(void *opaque, IMediaSample *sample,
 	o.sync = sample->lpVtbl->IsSyncPoint(sample) == S_OK;
 	o.preroll = sample->lpVtbl->IsPreroll(sample) == S_OK;
 	o.timed = SUCCEEDED(sample->lpVtbl->GetTime(sample, &o.start, &o.stop));
-	TRACE("xform: output %zu bytes at %lld..%lld%s%s%s%s", o.size,
-	      o.timed ? (long long)o.start : -1LL,
+	IMediaSample2 *s2 = NULL;
+	if (SUCCEEDED(sample->lpVtbl->QueryInterface(sample, &IID_IMediaSample2,
+						     (void **)&s2))) {
+		AM_SAMPLE2_PROPERTIES p = { 0 };
+		if (SUCCEEDED(s2->lpVtbl->GetProperties(s2, sizeof(p),
+							(BYTE *)&p))) {
+			o.has_type_flags = 1;
+			o.type_flags = p.dwTypeSpecificFlags;
+		}
+		s2->lpVtbl->Release(s2);
+	}
+	TRACE("xform: output %zu bytes at %lld..%lld%s%s%s%s, type flags 0x%lx",
+	      o.size, o.timed ? (long long)o.start : -1LL,
 	      o.timed ? (long long)o.stop : -1LL, o.timed ? "" : " (untimed)",
 	      o.sync ? ", sync" : "", o.preroll ? ", preroll" : "",
-	      new_type ? ", new type" : "");
+	      new_type ? ", new type" : "", (unsigned long)o.type_flags);
 	return x->callback ? x->callback(x->opaque, &o, new_type) : S_OK;
 }
 
@@ -382,6 +395,8 @@ HRESULT xform_connect(struct xform *x, const AM_MEDIA_TYPE *in,
 		return dmo_host_create(x->mo, in, out, from_dmo, x, &x->dmo_host);
 	hr = dshow_host_create(x->filter, in, out, callback ? from_sample : NULL,
 			       x, &x->host);
+	if (SUCCEEDED(hr) && x->accept)
+		dshow_host_set_accept(x->host, x->accept, x->accept_opaque);
 	/* The type connected: a partial one, completed by the filter. */
 	if (SUCCEEDED(hr))
 		hr = dshow_copy_media_type(&x->out,
@@ -392,6 +407,12 @@ HRESULT xform_connect(struct xform *x, const AM_MEDIA_TYPE *in,
 		dshow_free_media_type(&x->out);
 	}
 	return hr;
+}
+
+void xform_set_accept(struct xform *x, xform_accept_fn accept, void *opaque)
+{
+	x->accept = accept;
+	x->accept_opaque = opaque;
 }
 
 const AM_MEDIA_TYPE *xform_output_type(const struct xform *x)

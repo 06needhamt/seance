@@ -205,9 +205,9 @@ is chosen by extension or `--format`:
 
 | Output | Contents |
 |---|---|
-| `.y4m` | YUV4MPEG2, 4:2:0 |
+| `.y4m` | YUV4MPEG2, 8-bit 4:2:0; with `--native`, the frames' own chroma subsampling and depth |
 | `.bmp` | one 24-bit BMP per frame; the name needs a frame number: `%d`, `%u` or `%0Nd` (`%%` for a `%`) |
-| `.yuv` | raw I420 frames |
+| `.yuv` | raw I420 frames; with `--native`, planes as the `.y4m` has them |
 | `.bgr` | raw top-down BGR24 frames |
 | `.raw` | the frames exactly as stored |
 
@@ -216,8 +216,16 @@ It accepts these inputs:
 - BI_BITFIELDS at 16 and 32 bits.
 - BI_RLE8 and BI_RLE4.
 - YUY2, UYVY, YVYU, I420/IYUV, YV12, NV12, NV21 and Y800.
+- Deeper or less subsampled YUV: P010 and P016 (4:2:0), P210 and P216
+  (4:2:2), YV16 (4:2:2), YV24, AYUV, Y410, Y416 and v410 (4:4:4), and v210
+  (4:2:2, 10 bits).
 
 YUV is BT.601 limited range, and empty (dropped) frames repeat the previous one.
+By default every frame becomes 8-bit 4:2:0, deeper samples rounded. With
+`--native`, `.y4m` and `.yuv` keep the frames' own chroma subsampling and
+bit depth instead: YUY2 becomes `C422`, P010 `C420p10`, Y410 `C444p10`,
+P016 or Y416 `C420p16` or `C444p16`, Y800 `Cmono`, and RGB 8-bit 4:4:4
+(`C444`). 4:2:0 at 8 bits stays `C420jpeg`, as without it.
 Compressed streams need a codec: see `decode`.
 
 `-o /dev/null` (or another name for the null device) discards the output,
@@ -603,6 +611,7 @@ build/seance decode filter.ax clip.avi -o clip.y4m --clsid '{GUID}'
 build/seance decode dmo.dll clip.avi -o clip.y4m
 build/seance decode auto clip.avi -o 'frame%05d.bmp' --start 250 --frames 10
 build/seance decode XVID clip.avi -o clip.yuv --output-format YV12
+build/seance decode LAVVideo.ax hevc10.avi -o hevc10.y4m --native
 
 build/seance encode codec.dll in.y4m -o out.avi --keyint 30 --quality 8000
 build/seance encode filter.ax in.y4m -o out.avi --clsid '{GUID}'
@@ -638,7 +647,29 @@ is used. A sample that carries a new media type is followed when only the pixel
 format changes. For `--start`, the DirectShow graph is flushed and given a new
 segment before frames are preroll-fed from the preceding keyframe; frames
 before the start (by time stamp) or past `--frames` are dropped even if the
-filter doesn't flag them as preroll. Output and EOS may arrive
+filter doesn't flag them as preroll. A filter whose output type is
+interlaced (`VIDEOINFOHEADER2`) says how each frame is: a Y4M file takes
+the first frame's field order (`It`, `Ib`, or `Ip` for progressive). A
+filter that makes several frames of each, such as LAV Video's deinterlacer
+giving a frame per field, is followed by its first frame's length: the Y4M
+rate is multiplied, and `--frames` counts the stream's frames.
+
+`--native` keeps the decoder's own format, as `convert --native` does: a
+10-bit, 4:2:2 or 4:4:4 stream comes out as `C420p10`, `C422p10`,
+`C444p10` and so on, rather than 8-bit 4:2:0. The format is the one the
+decoder prefers: a VfW codec's suggestion, or a filter's first type. A
+filter that reconnects once it has seen the stream, as LAV Video does
+(it connects as NV12, then calls the sink's `ReceiveConnection` with
+P010 for a 10-bit stream), is let change to any format the output
+converts, as a video renderer would; without `--native`, only to the
+same format (LAV Video does this to pad v210's rows), so the format
+asked for stays. `--output-format` takes the deeper formats too (NV12,
+YV16, YV24, P010, P016, P210, P216, AYUV, Y410, Y416, v210, v410); with
+`--native` the file then has that format's sampling. A filter type wider
+than its picture, the picture in `rcTarget`, is cropped to it, for
+formats stored in whole rows. Frames a filter sends that the output can't
+take, or a filter that sends none at all, now fail the decode rather than
+ending it quietly. Output and EOS may arrive
 from a filter worker thread; EOS waits are bounded by `VFW_TIMEOUT` (five
 seconds by default).
 

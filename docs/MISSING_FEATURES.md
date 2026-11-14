@@ -74,7 +74,7 @@ ffmpeg can't encode).** Results where the decoder runs:
 |---|---|
 | Bit-identical to ffmpeg | H.264 (also with B-frames; `H264 h264 X264 x264 avc1 AVC1 CCV1`), HEVC (`HEVC HVC1 HM10 H265`), MPEG-1, MPEG-2 (`MPG2 mpg2 MP2V`), MPEG-4 ASP (24 FOURCCs: `FMP4 XVID DIVX DX50 MP4V M4S2 3IVX BLZ0 SEDG ...`), MS MPEG-4 v2 and v3 (19 FOURCCs, `DIV2`..`DIV6`, `MPG3`, `DVX3`), WMV1, WMV2, FLV1, H.263 and H.263+, H.261, JPEG 2000 (5 FOURCCs), DV PAL (12 FOURCCs), Theora, VP8, VP9, AV1 (libaom and SVT), FFVHuff, FFV1, Snow, Ut Video 4:2:0, ASV1, ASV2, WebP (as YV12), MJPEG (raw YUV planes) |
 | Bit-identical as BGR24 | PNG, TIFF, Targa, BMP, GIF, zlib, ZMBV, QuickTime RLE, Cinepak, MS Video 1 (`CRAM MSVC WHAM`), Apple RPZA, FFV1 RGB, Ut Video RGB and RGBA, Hap1, Hap5, HapY, lossless JPEG (`LJPG`) |
-| 42 to 62 dB (10-bit, 4:2:2 or 4:4:4 sources compared after conversion to 8-bit 4:2:0) | H.264, HEVC and VP9 at 10 bits, ProRes (all five profiles, `apch apcn apcs apco ap4h ap4x`), DNxHD at 1080p, CineForm (`CFHD`), MagicYUV, HuffYUV, Ut Video 4:2:2 and 4:4:4, JPEG-LS, DV 4:1:1 and DVCPRO50, SVQ1 |
+| 42 to 62 dB (10-bit, 4:2:2 or 4:4:4 sources compared after conversion to 8-bit 4:2:0; with `--native`, bit-identical, see below) | H.264, HEVC and VP9 at 10 bits, ProRes (all five profiles, `apch apcn apcs apco ap4h ap4x`), DNxHD at 1080p, CineForm (`CFHD`), MagicYUV, HuffYUV, Ut Video 4:2:2 and 4:4:4, JPEG-LS, DV 4:1:1 and DVCPRO50, SVQ1 |
 | Decodes; differs from ffmpeg | `smc` (Apple Graphics): all black, on the 32-bit LAV too (see below). VC-2 (`drac`/`vcrd`) from a 10-bit source: 30 dB from ffmpeg's decode, the same on the 32-bit LAV (see below). `GEOV`: GeoVision's MPEG-4 variant, not the bitstream made |
 | Refused by LAV's input pin (on the 32-bit LAV too) | `v210`, uncompressed YUY2, UYVY, YV12, NV12, BGR24, `CLJR` |
 | Not testable | RealVideo 1.0 and 2.0 (`RV10`, `RV20`): ffmpeg can't decode the AVI it writes, and LAV rejects it. MS MPEG-4 v1 (`MPG4 MP41 DIV1`): ffmpeg has no encoder. `MJPB`, `VP70`, `VP8X`: these FOURCCs name other codecs, and the clips are not their bitstreams |
@@ -94,8 +94,9 @@ declares (`8BPS LOCO VCR1 AASC VMnc G2M4 DUCK TM20 ...`).
 | Decodes; differs from ffmpeg | IMA ADPCM (`0x0011`): max difference 42, mean 8 at a peak of 3000; identical on the 32-bit LAV |
 | Sample-identical once enabled | WMA 1 and 2: LAV Audio has them off by default (its changelog: "Disabled the WMA codecs by default"), hence `VFW_E_UNSUPPORTED_AUDIO`; `HKCU\Software\LAV\Audio\Formats` `wma`=1 (what `tests/lav_matrix/run_audio.py` sets) turns them on, and every sample then matches ffmpeg's (LAV gives 2048 frames fewer at the end) |
 | Refused by LAV (32-bit too) | G.726, G.722, Yamaha ADPCM (none is in its input list) |
-| Not run | PCM (`seance decode` won't take PCM), and formats ffmpeg can't put in an AVI or encode: Nellymoser, Real audio, AMR, ... |
+| Not run | PCM (`seance decode` won't take PCM), and formats ffmpeg can't encode: AMR, Cook and the other Real audio codecs but 14.4, ... |
 | Sample-identical, by `--subtype` | ALAC, TrueHD and MLP: LAV knows them by subtypes no 16-bit wave format tag stands for, and ffmpeg won't write them into an AVI under any tag. `tests/lav_matrix/mkavi_audio.py` puts ffmpeg's Matroska packets in an AVI by hand (`run_audio.py` does this for them), and `decode --subtype alac`, `'MLP '` or `{EB27CEC4-163E-4CA3-8B74-8E25F91B517E}` (TrueHD) says what they are; the PCM is the source's, bit for bit, on the 64- and 32-bit LAV |
+| Identical to ffmpeg's decode, by `--subtype` | RealAudio 1.0 (14.4, `--subtype 14_4`) and Nellymoser (`NELL`): lossy, so compared with ffmpeg's own decode; `mkavi_audio.py` makes their AVIs, Nellymoser's from FLV (Matroska won't take it). Nellymoser on the 32-bit LAV is within 2 LSB, a float codec's rounding |
 | Sample-identical, hand-tagged | WavPack: `ffmpeg -c:a wavpack -tag:a 0x5756 -strict unofficial` makes an AVI its own demuxer doesn't know but LAV takes; the PCM is the source's, bit for bit |
 | Sample-identical once enabled, with its header | TTA: LAV has it off by default (`HKCU\Software\LAV\Audio\Formats` `tta`=1 turns it on), and FFmpeg's TTA decoder won't open without the 22-byte TTA1 header as its extra data, which `ffmpeg -c:a tta -tag:a 0x77a1` leaves out of an AVI (hence `VFW_E_UNSUPPORTED_AUDIO` from LAV's `avcodec_open2`). `mkavi_audio.py <in.mka> <out.avi> 0x77a1` carries the header Matroska's demuxer rebuilds; the PCM is then the source's, bit for bit, on the 64- and 32-bit LAV |
 
@@ -247,10 +248,42 @@ wrong layout in `_fstat` and is now MSVCRT's.
 | CryptoAPI hashes, keys; NCrypt | There is no hashing algorithm to create and no key storage provider to open. |
 | Hardware decoding | Every route (DXVA2, D3D11, Quick Sync, CUDA) reports no hardware and LAV decodes in software. |
 
+Interlaced streams (`run_video.py`'s `h264-mbaff`, `mpeg2-interlaced`, at
+352x288) are bit-identical to ffmpeg on the 64-bit LAV, and the Y4M takes
+the field order LAV gives each frame (`It` for the MPEG-2, `Ib` for x264's
+MBAFF, as ffmpeg's own frames say). On the 32-bit LAV they are 98 dB: its
+older FFmpeg decodes interlaced MPEG-2 a few pixels differently, though
+progressive MPEG-2 is identical. LAV's YADIF (`SWDeintMode`=1 in
+`HKCU\Software\LAV\Video`) is bit-identical to ffmpeg's `yadif` in both
+output modes: a frame for two fields, and a frame for each field, at twice
+the rate, which `decode` follows (before that, it wrote half the frames at
+the stream's rate). After `--start`, the first frame's fields differ, as
+YADIF has no earlier frame there. An AVI of two video streams decodes
+either, identically, with `--stream`.
+
+With `decode --native` (seance64, LAV Video 64-bit), the decoder's own
+format is written as it is: 10-bit and 12-bit, 4:2:2 and 4:4:4 come out
+as `C420p10`, `C422p10`, `C444p10`, `C444p16`, `C422` and `C444`, and are
+bit-identical to ffmpeg's decode at the same pixel format for H.264
+(10-bit; 4:2:2 and 4:4:4, 8 and 10 bits), HEVC (10-bit 4:2:0 and 4:2:2,
+12-bit 4:4:4, which LAV gives as Y416), VP9 10-bit, ProRes (all five
+profiles; 4444 as Y416), CineForm, DNxHD, DVCPRO50, HuffYUV, MagicYUV and
+Ut Video 4:2:2 and 4:4:4. DV NTSC (4:1:1) and SVQ1 (4:1:0) aren't layouts
+LAV gives, so it converts them, to 4:2:2 and 4:2:0 (45 and 49 dB). The
+32-bit LAV gives the same for the H.264 streams. LAV connects as NV12
+before it has seen the stream, then calls the sink's `ReceiveConnection`
+with its own format (P010, P210, YV24, Y410, Y416, YUY2) and sends the
+frames in it without marking them: `--native` takes that reconnection, as
+a renderer does. Forced with `--output-format`, LAV's P010, P016, P210,
+P216, YV24, Y410, Y416 and v410 are read exactly (identical where the
+format keeps the stream's sampling and depth); it refuses YV16 and AYUV.
+Its v210 is delivered only at widths that are a multiple of 48 (192x144
+identical): at 176 its own type is 208 pixels wide in 512-byte rows, and
+it sends nothing, which decode now reports as a failure.
+
 Not yet exercised: VC-1 / WMV3 (no encoder to make a stream with here),
-interlaced and field-coded streams, 10-bit and 4:4:4 sources (the standard
-output list is 8-bit), more than one video stream, and LAV Video's other
-settings (format selection, deinterlacing, dithering).
+field-coded streams (ffmpeg makes no PAFF or MPEG-2 field pictures), and
+LAV Video's other settings (dithering, the other deinterlacers).
 
 ### LAV Audio (DMO/audio plan, Phase 6)
 
@@ -436,6 +469,12 @@ what keeps the others from working.
 - `m3jp2k32.dll` encodes but fails to decode frame 1.
 - `m3jpeg32.dll`'s own decoder gets chroma and RGB wrong. FFmpeg decodes
   its files correctly.
+- Both Morgan codecs are trial builds whose trial has run out ("The trial
+  period has expired !"): at today's date they put up that dialog and
+  refuse `ICM_COMPRESS_BEGIN` and `ICM_DECOMPRESS_BEGIN` with
+  `ICERR_BADFORMAT`, even for FFmpeg's MJPEG. The two faults above were
+  seen before then and can't be looked into again without getting around
+  the trial, which seance doesn't do.
 
 **Can't work in seance:**
 

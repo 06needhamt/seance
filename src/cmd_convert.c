@@ -35,6 +35,9 @@ static int usage(void)
 		"                     time (2.5s, 1500ms, 1:02.5)\n"
 		"  --frames <n>       number of frames to write (default: all)\n"
 		"  --duration <len>   how much to write, as frames or a time\n"
+		"  --native           .y4m and .yuv keep the frames' own chroma\n"
+		"                     subsampling and bit depth (C422, C444p10,\n"
+		"                     ...; RGB as 4:4:4) instead of 8-bit 4:2:0\n"
 		"\n"
 		"Audio, from an AVI, a WAV, or raw PCM (taken when the input has\n"
 		"no video, the output is .wav, .pcm or .avi, or --audio is given):\n"
@@ -210,7 +213,7 @@ int cmd_convert(int argc, char **argv)
 	unsigned long count = (unsigned long)-1, stream = (unsigned long)-1;
 	unsigned long channels = 0, hz = 0;
 	struct audio_job job = { .src.stream = -1 };
-	int want_audio = 0;
+	int want_audio = 0, native = 0;
 	enum output_kind kind;
 
 	for (int i = 1; i < argc; i++) {
@@ -237,6 +240,8 @@ int cmd_convert(int argc, char **argv)
 				return 2;
 		} else if (!strcmp(a, "--audio")) {
 			want_audio = 1;
+		} else if (!strcmp(a, "--native")) {
+			native = 1;
 		} else if (!strcmp(a, "--sample-format") && has_value) {
 			if (audio_sample_from_name(argv[++i], &job.sample)) {
 				fprintf(stderr, "seance: %s\n", vfw_error());
@@ -286,9 +291,9 @@ int cmd_convert(int argc, char **argv)
 				"raw PCM, with --raw\n");
 			return 2;
 		}
-		if (count != (unsigned long)-1) {
-			fprintf(stderr, "seance: --frames is for video; use "
-				"--duration\n");
+		if (count != (unsigned long)-1 || native) {
+			fprintf(stderr, "seance: --frames and --native are for "
+				"video; use --duration\n");
 			return 2;
 		}
 		return convert_audio(&job);
@@ -297,6 +302,10 @@ int cmd_convert(int argc, char **argv)
 	if (format ? output_kind_from_name(format, &kind) :
 		     output_kind_from_path(out, &kind)) {
 		fprintf(stderr, "seance: %s\n", vfw_error());
+		return 2;
+	}
+	if (native && kind != OUT_Y4M && kind != OUT_YUV) {
+		fprintf(stderr, "seance: --native is for .y4m and .yuv output\n");
 		return 2;
 	}
 
@@ -352,6 +361,12 @@ int cmd_convert(int argc, char **argv)
 	o = output_open(out, kind, image_width(conv), image_height(conv),
 			rate, scale, want == 1);
 	if (!o) {
+		fprintf(stderr, "seance: %s\n", vfw_error());
+		goto done;
+	}
+	struct image_layout layout;
+	image_native_layout(conv, &layout);
+	if (native && output_set_layout(o, &layout)) {
 		fprintf(stderr, "seance: %s\n", vfw_error());
 		goto done;
 	}

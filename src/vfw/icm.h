@@ -88,6 +88,13 @@ struct vfw_format {
 const char *vfw_std_format(unsigned i, LONG w, LONG h, struct vfw_format *f);
 
 /*
+ * The same, then the formats a decoder may also give and the output
+ * converts (NV12, YV16, YV24, P010, P016, P210, P216, AYUV, Y410, Y416,
+ * v210, v410): what decode tries and --output-format names.
+ */
+const char *vfw_out_format(unsigned i, LONG w, LONG h, struct vfw_format *f);
+
+/*
  * Picks a decompressed format for input `in`: the codec's own suggestion
  * if it accepts it, else the first standard format it accepts. Returns a
  * malloc()ed format, or NULL with *err set to an ICERR_* value.
