@@ -27,6 +27,9 @@ extern const struct builtin_dll builtin_shlwapi;
 extern const struct builtin_dll builtin_bcrypt, builtin_crypt32, builtin_d3d9,
 	builtin_dxva2, builtin_d3d11, builtin_dxgi, builtin_ncrypt, builtin_ws2_32,
 	builtin_wsock32, builtin_rpcrt4;
+extern const struct builtin_dll builtin_ddraw, builtin_dsound, builtin_dinput,
+	builtin_dinput8, builtin_wininet, builtin_urlmon, builtin_gdiplus,
+	builtin_iphlpapi, builtin_msimg32;
 
 const struct builtin_dll *const builtin_dlls[] = {
 	&builtin_kernel32,
@@ -67,6 +70,15 @@ const struct builtin_dll *const builtin_dlls[] = {
 	&builtin_dbghelp,
 	&builtin_netapi32,
 	&builtin_rpcrt4,
+	&builtin_ddraw,
+	&builtin_dsound,
+	&builtin_dinput,
+	&builtin_dinput8,
+	&builtin_wininet,
+	&builtin_urlmon,
+	&builtin_gdiplus,
+	&builtin_iphlpapi,
+	&builtin_msimg32,
 	NULL
 };
 

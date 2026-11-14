@@ -17,6 +17,7 @@
 #include <shlwapi.h>
 #include <psapi.h>
 #include <tlhelp32.h>
+#include <wininet.h>
 #include <dshow.h>
 /* MinGW 12: aviriff.h sets TIMECODE_DEFINED without PTIMECODE_SAMPLE.
  * Include DirectShow first so strmif.h supplies the complete definitions. */

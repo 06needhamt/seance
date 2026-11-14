@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -1040,6 +1041,22 @@ static void test_splitpath(void)
 	CHECK(wdir[0] == 'x' && wdir[1] == '\\' && !wdir[2]);
 	CHECK(wn[0] == 'y' && !wn[1]);
 	CHECK(we[0] == '.' && we[1] == 'z' && !we[2]);
+
+	/* _makepath (ffdshow.ax, from msvcr71). */
+	struct module *m71 = mod_load("msvcr71.dll", NULL);
+	CHECK(m71 != NULL);
+	if (!m71)
+		return;
+	CFN(m71, void, _makepath, char *, const char *, const char *, const char *,
+	    const char *);
+	char path[128];
+	_makepath(path, "C", "\\dir", "file", "avi");
+	CHECK_STR(path, "C:\\dir\\file.avi");
+	_makepath(path, NULL, "d/", "f", ".x");
+	CHECK_STR(path, "d/f.x");
+	_makepath(path, "", "", "f", NULL);
+	CHECK_STR(path, "f");
+	mod_free(m71);
 }
 
 /*
@@ -1395,6 +1412,210 @@ static void test_class_long(void)
 	mod_free(u);
 }
 
+/* The _mbs* family and the rest of what mfc42.dll imports from msvcrt
+ * (WaveT2.dll), and SearchPath (ffdshow.ax). */
+static void test_mbcs_searchpath(const char *root)
+{
+	struct module *m = mod_load("msvcrt.dll", NULL);
+	struct module *k = mod_load("kernel32.dll", NULL);
+	CHECK(m && k);
+	if (!m || !k)
+		return;
+	CFN(m, BYTE *, _mbsrchr, const BYTE *, unsigned);
+	CFN(m, BYTE *, _mbsstr, const BYTE *, const BYTE *);
+	CFN(m, int, _mbsnbicmp, const BYTE *, const BYTE *, size_t);
+	CFN(m, BYTE *, _mbsupr, BYTE *);
+	CFN(m, BYTE *, _mbsrev, BYTE *);
+	CFN(m, BYTE *, _mbsinc, const BYTE *);
+	CFN(m, BYTE *, _mbsdec, const BYTE *, const BYTE *);
+	CFN(m, size_t, _mbclen, const BYTE *);
+	CFN(m, int, _ismbcspace, unsigned);
+	CFN(m, int *, __p___argc, void);
+	CFN(m, char ***, __p___argv, void);
+	CFN(m, char *, _fullpath, char *, const char *, size_t);
+	CFN(m, LONG, mktime, int *);
+	CFN(m, void *, _expand, void *, size_t);
+	CFN(m, void *, malloc, size_t);
+	CFN(m, void, free, void *);
+	const BYTE *mbctype = get(m, "_mbctype");
+	const BYTE *s = (const BYTE *)"a\\b\\c.avi";
+
+	CHECK(_mbsrchr(s, '\\') == s + 3);
+	CHECK(_mbsstr(s, (const BYTE *)"c.") == s + 4);
+	CHECK_EQ(_mbsnbicmp((const BYTE *)"ABCx", (const BYTE *)"abcy", 3), 0);
+	CHECK(_mbsnbicmp((const BYTE *)"ABCx", (const BYTE *)"abcy", 4) < 0);
+	BYTE buf[16] = "abC";
+	CHECK_STR((char *)_mbsupr(buf), "ABC");
+	CHECK_STR((char *)_mbsrev(buf), "CBA");
+	CHECK(_mbsinc(s) == s + 1 && _mbsdec(s, s + 2) == s + 1 && !_mbsdec(s, s));
+	CHECK_EQ(_mbclen(s), 1);
+	CHECK(_ismbcspace(' ') && !_ismbcspace('x'));
+	CHECK(mbctype['A' + 1] == 0x10 && mbctype['a' + 1] == 0x20 && !mbctype[0x81 + 1]);
+	CHECK(*__p___argc() == 1 && !strcmp((*__p___argv())[0], "seance.exe"));
+	char full[300];
+	CHECK(_fullpath(full, "C:\\x\\..\\y.txt", sizeof(full)) == full);
+	CHECK_STR(full, "C:\\y.txt");
+	CHECK(_fullpath(full, "C:\\x", 3) == NULL);
+	int tm[9] = { 0, 0, 0, 32, 0, 100, 0, 0, 0 };	/* 2000-01-32 */
+	CHECK_EQ(mktime(tm), 949363200);
+	CHECK(tm[3] == 1 && tm[4] == 1 && tm[6] == 2);	/* 1 Feb, a Tuesday */
+	void *p = malloc(16);
+	CHECK(_expand(p, 8) == p && _expand(p, 1 << 20) == NULL);
+	free(p);
+
+	FN(k, DWORD, SearchPathA, LPCSTR, LPCSTR, LPCSTR, DWORD, LPSTR, LPSTR *);
+	char path[512], found[300], *part = NULL;
+	snprintf(path, sizeof(path), "%s/drive_c/sp", root);
+	mkdir(path, 0755);
+	snprintf(path, sizeof(path), "%s/drive_c/sp/codec.ini", root);
+	FILE *f = fopen(path, "w");
+	if (f)
+		fclose(f);
+	DWORD n = SearchPathA("C:\\nowhere;C:\\sp", "codec", ".ini", sizeof(found),
+			      found, &part);
+	CHECK_EQ(n, strlen("C:\\sp\\codec.ini"));
+	CHECK_STR(found, "C:\\sp\\codec.ini");
+	CHECK(part && !strcmp(part, "codec.ini"));
+	CHECK_EQ(SearchPathA("C:\\sp", "missing.ini", NULL, sizeof(found), found, NULL), 0);
+	CHECK_EQ(SearchPathA(NULL, "C:\\sp\\codec.ini", NULL, sizeof(found), found, NULL),
+		 strlen("C:\\sp\\codec.ini"));
+	CHECK_EQ(SearchPathA("C:\\sp", "codec.ini", NULL, 4, found, NULL),
+		 strlen("C:\\sp\\codec.ini") + 1);
+	mod_free(k);
+	mod_free(m);
+}
+
+static volatile int beginthread_ran;
+
+static void CDECL beginthread_routine(void *arg)
+{
+	beginthread_ran = (int)(intptr_t)arg;
+}
+
+/* The second round of imports from the zip's codecs: msvcrt's wide-string
+ * and misc functions (ffdshow, WaveT2), ETW and PropVariant (wmdrmsdk),
+ * change notifications and DelayLoadFailureHook. */
+static void test_more_imports(const char *root)
+{
+	struct module *m = mod_load("msvcrt.dll", NULL);
+	struct module *k = mod_load("kernel32.dll", NULL);
+	struct module *a = mod_load("advapi32.dll", NULL);
+	struct module *o = mod_load("ole32.dll", NULL);
+	CHECK(m && k && a && o);
+	if (!m || !k || !a || !o)
+		return;
+	CFN(m, LONG, wcstol, const WCHAR *, WCHAR **, int);
+	CFN(m, ULONG, wcstoul, const WCHAR *, WCHAR **, int);
+	CFN(m, double, wcstod, const WCHAR *, WCHAR **);
+	CFN(m, int, _wtoi, const WCHAR *);
+	CFN(m, WCHAR *, _itow, int, WCHAR *, int);
+	CFN(m, WCHAR *, wcstok, WCHAR *, const WCHAR *);
+	CFN(m, int, iswspace, unsigned short);
+	CFN(m, int, iswupper, unsigned short);
+	CFN(m, void, _swab, const char *, char *, int);
+	CFN(m, char *, _strtime, char *);
+	CFN(m, int, __CppXcptFilter, unsigned, void *);
+	CFN(m, BYTE *, _mbsnbcpy, BYTE *, const BYTE *, size_t);
+	CFN(m, BYTE *, _mbsspnp, const BYTE *, const BYTE *);
+	CFN(m, uintptr_t, _beginthread, void (CDECL *)(void *), unsigned, void *);
+	const double *huge = get(m, "_HUGE");
+	WCHAR num[] = { ' ', '-', '4', '2', 'x', 0 }, *end = NULL;
+
+	CHECK_EQ(wcstol(num, &end, 10), -42);
+	CHECK(end == num + 4);
+	WCHAR big[] = { '9', '9', '9', '9', '9', '9', '9', '9', '9', '9', '9', 0 };
+	CHECK_EQ(wcstol(big, NULL, 10), 0x7fffffff);
+	WCHAR hex[] = { '0', 'x', 'f', 'f', 0 };
+	CHECK_EQ(wcstoul(hex, NULL, 0), 255);
+	WCHAR flt[] = { '2', '.', '5', 'e', '1', 0 };
+	CHECK(wcstod(flt, NULL) == 25.0);
+	CHECK_EQ(_wtoi(num), -42);
+	WCHAR out[16];
+	_itow(-255, out, 10);
+	CHECK(out[0] == '-' && out[1] == '2' && out[3] == '5' && !out[4]);
+	_itow(255, out, 16);
+	CHECK(out[0] == 'f' && out[1] == 'f' && !out[2]);
+	WCHAR toks[] = { 'a', ',', ',', 'b', 'c', 0 }, delim[] = { ',', 0 };
+	WCHAR *t1 = wcstok(toks, delim), *t2 = wcstok(NULL, delim);
+	CHECK(t1 == toks && !toks[1] && t2 == toks + 3 && !wcstok(NULL, delim));
+	CHECK(iswspace(' ') && iswspace(0x09) && !iswspace('x'));
+	CHECK(iswupper('A') && !iswupper('a'));
+	char sw[4];
+	_swab("abcd", sw, 4);
+	CHECK(!memcmp(sw, "badc", 4));
+	char tbuf[9];
+	CHECK(_strtime(tbuf) == tbuf && strlen(tbuf) == 8 && tbuf[2] == ':');
+	CHECK_EQ(__CppXcptFilter(0xE06D7363, NULL), 1);
+	CHECK_EQ(__CppXcptFilter(0xC0000005, NULL), 0);
+	CHECK(*huge > 1e308);
+	BYTE nb[8];
+	memset(nb, 'z', sizeof(nb));
+	_mbsnbcpy(nb, (const BYTE *)"ab", 4);
+	CHECK(!memcmp(nb, "ab\0\0zz", 6));
+	const BYTE *sp = (const BYTE *)"  x";
+	CHECK(_mbsspnp(sp, (const BYTE *)" ") == sp + 2);
+	CHECK(_mbsspnp(sp, (const BYTE *)" x") == NULL);
+
+	FN(k, DWORD, WaitForSingleObject, HANDLE, DWORD);
+	FN(k, BOOL, CloseHandle, HANDLE);
+	beginthread_ran = 0;
+	uintptr_t th = _beginthread(beginthread_routine, 0, (void *)7);
+	CHECK(th && th != (uintptr_t)-1);
+	if (th && th != (uintptr_t)-1) {
+		CHECK_EQ(WaitForSingleObject((HANDLE)th, 5000), WAIT_OBJECT_0);
+		CloseHandle((HANDLE)th);
+	}
+	CHECK_EQ(beginthread_ran, 7);
+
+	FN(k, HANDLE, FindFirstChangeNotificationA, LPCSTR, BOOL, DWORD);
+	FN(k, BOOL, FindNextChangeNotification, HANDLE);
+	FN(k, BOOL, FindCloseChangeNotification, HANDLE);
+	FN(k, FARPROC, DelayLoadFailureHook, LPCSTR, LPCSTR);
+	HANDLE ch = FindFirstChangeNotificationA("C:\\", FALSE, 1);
+	CHECK(ch != INVALID_HANDLE_VALUE);
+	CHECK_EQ(WaitForSingleObject(ch, 0), WAIT_TIMEOUT);
+	CHECK(FindNextChangeNotification(ch));
+	CHECK(FindCloseChangeNotification(ch));
+	CHECK(FindFirstChangeNotificationA("C:\\no\\such", FALSE, 1) == INVALID_HANDLE_VALUE);
+	CHECK(DelayLoadFailureHook("x.dll", "f") == NULL);
+	(void)root;
+
+	FN(a, ULONG, RegisterTraceGuidsW, void *, void *, const GUID *, ULONG, void *,
+	   LPCWSTR, LPCWSTR, uint64_t *);
+	FN(a, ULONG, UnregisterTraceGuids, uint64_t);
+	FN(a, ULONG, GetTraceEnableFlags, uint64_t);
+	uint64_t th64 = 0;
+	CHECK_EQ(RegisterTraceGuidsW((void *)1, NULL, &IID_IUnknown, 0, NULL, NULL,
+				     NULL, &th64), 0);
+	CHECK(th64 != 0);
+	CHECK_EQ(GetTraceEnableFlags(th64), 0);
+	CHECK_EQ(UnregisterTraceGuids(th64), 0);
+
+	FN(o, HRESULT, PropVariantCopy, VARIANT *, const VARIANT *);
+	FN(o, HRESULT, PropVariantClear, VARIANT *);
+	FN(o, void *, CoTaskMemAlloc, SIZE_T);
+	VARIANT src, dst;
+	memset(&src, 0, sizeof(src));
+	src.vt = VT_LPSTR;
+	char *str = CoTaskMemAlloc(6);
+	memcpy(str, "hello", 6);
+	*(char **)((BYTE *)&src + 8) = str;
+	CHECK_EQ(PropVariantCopy(&dst, &src), S_OK);
+	char *copy = *(char **)((BYTE *)&dst + 8);
+	CHECK(copy && copy != str && !strcmp(copy, "hello"));
+	CHECK_EQ(PropVariantClear(&dst), S_OK);
+	CHECK_EQ(dst.vt, VT_EMPTY);
+	CHECK_EQ(PropVariantClear(&src), S_OK);
+	memset(&src, 0, sizeof(src));
+	src.vt = VT_I4;
+	src.lVal = 5;
+	CHECK(PropVariantCopy(&dst, &src) == S_OK && dst.vt == VT_I4 && dst.lVal == 5);
+	mod_free(o);
+	mod_free(a);
+	mod_free(k);
+	mod_free(m);
+}
+
 int main(void)
 {
 	char root[256];
@@ -1424,6 +1645,8 @@ int main(void)
 	test_oledlg_dbghelp();
 	test_netapi32();
 	test_splitpath();
+	test_mbcs_searchpath(root);
+	test_more_imports(root);
 	test_toolhelp();
 	test_process_memory();
 	test_iocp();

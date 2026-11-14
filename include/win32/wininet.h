@@ -1,0 +1,84 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+/* wininet.h: the parts of WinINet that codecs use. */
+#ifndef VFW_WIN32_WININET_H
+#define VFW_WIN32_WININET_H
+
+#include "win32/types.h"
+
+typedef void *HINTERNET;
+typedef WORD INTERNET_PORT;
+
+typedef enum {
+	INTERNET_SCHEME_PARTIAL = -2,
+	INTERNET_SCHEME_UNKNOWN = -1,
+	INTERNET_SCHEME_DEFAULT = 0,
+	INTERNET_SCHEME_FTP,
+	INTERNET_SCHEME_GOPHER,
+	INTERNET_SCHEME_HTTP,
+	INTERNET_SCHEME_HTTPS,
+	INTERNET_SCHEME_FILE,
+	INTERNET_SCHEME_NEWS,
+	INTERNET_SCHEME_MAILTO,
+	INTERNET_SCHEME_SOCKS,
+	INTERNET_SCHEME_JAVASCRIPT,
+	INTERNET_SCHEME_VBSCRIPT,
+	INTERNET_SCHEME_RES,
+} INTERNET_SCHEME;
+
+typedef struct {
+	DWORD dwStructSize;
+	LPSTR lpszScheme;
+	DWORD dwSchemeLength;
+	INTERNET_SCHEME nScheme;
+	LPSTR lpszHostName;
+	DWORD dwHostNameLength;
+	INTERNET_PORT nPort;
+	LPSTR lpszUserName;
+	DWORD dwUserNameLength;
+	LPSTR lpszPassword;
+	DWORD dwPasswordLength;
+	LPSTR lpszUrlPath;
+	DWORD dwUrlPathLength;
+	LPSTR lpszExtraInfo;
+	DWORD dwExtraInfoLength;
+} URL_COMPONENTSA, *LPURL_COMPONENTSA;
+
+typedef struct {
+	DWORD dwStructSize;
+	LPWSTR lpszScheme;
+	DWORD dwSchemeLength;
+	INTERNET_SCHEME nScheme;
+	LPWSTR lpszHostName;
+	DWORD dwHostNameLength;
+	INTERNET_PORT nPort;
+	LPWSTR lpszUserName;
+	DWORD dwUserNameLength;
+	LPWSTR lpszPassword;
+	DWORD dwPasswordLength;
+	LPWSTR lpszUrlPath;
+	DWORD dwUrlPathLength;
+	LPWSTR lpszExtraInfo;
+	DWORD dwExtraInfoLength;
+} URL_COMPONENTSW, *LPURL_COMPONENTSW;
+
+#define INTERNET_DEFAULT_FTP_PORT    21
+#define INTERNET_DEFAULT_GOPHER_PORT 70
+#define INTERNET_DEFAULT_HTTP_PORT   80
+#define INTERNET_DEFAULT_HTTPS_PORT  443
+
+#define INTERNET_CONNECTION_OFFLINE 0x20
+
+#define ICU_ESCAPE        0x80000000
+#define ICU_DECODE        0x10000000
+#define ICU_NO_ENCODE     0x20000000
+#define ICU_BROWSER_MODE  0x02000000
+#define ICU_ENCODE_SPACES_ONLY 0x04000000
+
+#define ERROR_INTERNET_INVALID_OPTION        12009
+#define ERROR_INTERNET_INCORRECT_HANDLE_TYPE 12018
+#define ERROR_INTERNET_CANNOT_CONNECT        12029
+#define ERROR_INTERNET_UNRECOGNIZED_SCHEME   12006
+#define ERROR_INTERNET_INVALID_URL           12005
+#define ERROR_INTERNET_DISCONNECTED          12163
+
+#endif

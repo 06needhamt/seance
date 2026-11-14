@@ -744,6 +744,13 @@ WINFN(BOOL) k32_Thread32Next(HANDLE h, LPTHREADENTRY32 te)
 	return thread_entry(h, te, 0);
 }
 
+/* The delay-load helper's last resort: no replacement for what failed. */
+WINFN(FARPROC) k32_DelayLoadFailureHook(LPCSTR dll, LPCSTR proc)
+{
+	win_set_error(ERROR_MOD_NOT_FOUND);
+	return NULL;
+}
+
 #define E(name) { #name, 0, (void *)k32_##name }
 
 /*
@@ -936,6 +943,7 @@ const struct builtin_export k32_module_exports[] = {
 	K32(GetProcessImageFileNameW),
 	K32(GetProcessMemoryInfo),
 	E(CreateToolhelp32Snapshot),
+	E(DelayLoadFailureHook),
 	E(DisableThreadLibraryCalls),
 	E(EnumResourceLanguagesA),
 	E(FindResourceA),

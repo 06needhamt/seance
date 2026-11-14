@@ -30,6 +30,8 @@ extern const struct builtin_export crt_cxx_exports[];
 extern const struct builtin_export crt_lowio_exports[];
 extern const struct builtin_export crt_legacy_exports[];
 extern const struct builtin_export crt_modern_exports[];
+extern const struct builtin_export crt_mbcs_exports[];
+extern const struct builtin_export crt_wide_exports[];
 
 static const struct builtin_export *const tables[] = {
 	crt_math_exports,
@@ -44,6 +46,8 @@ static const struct builtin_export *const tables[] = {
 	crt_lowio_exports,
 	crt_legacy_exports,
 	crt_modern_exports,
+	crt_mbcs_exports,
+	crt_wide_exports,
 	NULL
 };
 
@@ -102,6 +106,8 @@ static const struct builtin_export *const crtdll_tables[] = {
 	crt_lowio_exports,
 	crt_legacy_exports,
 	crt_modern_exports,
+	crt_mbcs_exports,
+	crt_wide_exports,
 	NULL
 };
 

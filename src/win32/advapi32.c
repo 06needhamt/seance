@@ -1510,6 +1510,49 @@ WINFN(LONG) adv_RegConnectRegistryA(LPCSTR machine, HKEY key, HKEY *out)
 	return ERROR_SUCCESS;
 }
 
+/*
+ * Event tracing (wmdrmsdk.dll registers a provider): registration
+ * succeeds, but no trace session ever enables the provider, so its logger
+ * handle, flags and level are none and events go nowhere.
+ */
+typedef uint64_t TRACEHANDLE;
+
+WINFN(ULONG) adv_RegisterTraceGuidsW(void *cb, void *ctx, const GUID *guid,
+				     ULONG n, void *regs, LPCWSTR mof,
+				     LPCWSTR res, TRACEHANDLE *h)
+{
+	if (!cb || !guid || !h)
+		return ERROR_INVALID_PARAMETER;
+	*h = 1;
+	return ERROR_SUCCESS;
+}
+
+WINFN(ULONG) adv_RegisterTraceGuidsA(void *cb, void *ctx, const GUID *guid,
+				     ULONG n, void *regs, LPCSTR mof,
+				     LPCSTR res, TRACEHANDLE *h)
+{
+	return adv_RegisterTraceGuidsW(cb, ctx, guid, n, regs, NULL, NULL, h);
+}
+
+WINFN(ULONG) adv_UnregisterTraceGuids(TRACEHANDLE h) { return ERROR_SUCCESS; }
+
+WINFN(TRACEHANDLE) adv_GetTraceLoggerHandle(void *buffer)
+{
+	win_set_error(ERROR_INVALID_HANDLE);
+	return (TRACEHANDLE)-1;
+}
+
+WINFN(ULONG) adv_GetTraceEnableFlags(TRACEHANDLE h) { return 0; }
+WINFN(UCHAR) adv_GetTraceEnableLevel(TRACEHANDLE h) { return 0; }
+WINFN(ULONG) adv_TraceEvent(TRACEHANDLE h, void *header) { return ERROR_INVALID_HANDLE; }
+
+/* cdecl, with the message's arguments after. */
+static ULONG STUB_CDECL adv_TraceMessage(TRACEHANDLE h, ULONG flags,
+					 const GUID *guid, USHORT number, ...)
+{
+	return ERROR_INVALID_HANDLE;
+}
+
 static const struct builtin_export exports[] = {
 	E(CloseServiceHandle),
 	E(ControlService),
@@ -1573,6 +1616,14 @@ static const struct builtin_export exports[] = {
 	E(RegSetValueExA),
 	E(RegSetValueExW),
 	E(RegSetValueW),
+	E(GetTraceEnableFlags),
+	E(GetTraceEnableLevel),
+	E(GetTraceLoggerHandle),
+	E(RegisterTraceGuidsA),
+	E(RegisterTraceGuidsW),
+	E(TraceEvent),
+	E(TraceMessage),
+	E(UnregisterTraceGuids),
 	BUILTIN_END
 };
 

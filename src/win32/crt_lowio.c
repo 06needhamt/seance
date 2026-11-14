@@ -507,13 +507,37 @@ CRTFN(void) crt__endthreadex(unsigned code)
 	thread_exit(code);
 }
 
+/*
+ * _beginthread: a cdecl routine returning nothing (the call gate keeps the
+ * stack straight). Windows closes the handle when the thread ends; here it
+ * stays open, which only costs a slot in the handle table. -1 on failure.
+ */
+CRTFN(uintptr_t) crt__beginthread(void (STUB_CDECL *start)(void *),
+				  unsigned stack, void *arg)
+{
+	HANDLE h = thread_create_ex(stack, (LPTHREAD_START_ROUTINE)(void *)start,
+				    arg, 0, NULL);
+
+	if (!h) {
+		errno = EAGAIN;
+		return (uintptr_t)-1;
+	}
+	return (uintptr_t)h;
+}
+
+CRTFN(void) crt__endthread(void)
+{
+	thread_exit(0);
+}
+
 #define E(name) { #name, 0, (void *)crt_##name }
 
 const struct builtin_export crt_lowio_exports[] = {
 	E(_open), E(_wopen), E(_sopen), E(_wsopen), E(_close), E(_dup), E(_dup2),
 	E(_isatty), E(_lseeki64), E(_setmode), E(_get_osfhandle),
 	E(_unlink), E(_wunlink), E(_mkdir), E(_wmkdir), E(_rmdir), E(_wrmdir),
-	E(_waccess), E(_beginthreadex), E(_endthreadex),
+	E(_waccess), E(_beginthread), E(_beginthreadex), E(_endthread),
+	E(_endthreadex),
 	E(_findfirst), E(_findnext), E(_findclose), E(_wfindfirst), E(_wfindnext),
 	E(_getcwd), E(_open_osfhandle), E(_getmaxstdio), E(_setmaxstdio),
 	BUILTIN_END

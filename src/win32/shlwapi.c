@@ -480,13 +480,128 @@ WINFN(DWORD) sl_SHDeleteValueW(HKEY h, LPCWSTR sub, LPCWSTR name)
 	return (DWORD)r;
 }
 
+/*
+ * PathCanonicalize: "." and ".." segments folded out, never above the root
+ * ("C:\", "\\server\share\" or "\"); a trailing backslash stays.
+ */
+static void canonicalize_a(char *out, const char *in)
+{
+	size_t root = 0, n = strlen(in);
+
+	if (n >= 2 && in[1] == ':')
+		root = n > 2 && in[2] == '\\' ? 3 : 2;
+	else if (n >= 2 && in[0] == '\\' && in[1] == '\\') {
+		int seps = 0;
+		root = 2;
+		while (root < n && seps < 2)
+			if (in[root++] == '\\')
+				seps++;
+	} else if (n && in[0] == '\\')
+		root = 1;
+	memcpy(out, in, root);
+	size_t o = root;
+	const char *p = in + root;
+	while (*p) {
+		const char *e = strchr(p, '\\');
+		size_t len = e ? (size_t)(e - p) : strlen(p);
+		if (len == 1 && p[0] == '.') {
+			/* nothing */
+		} else if (len == 2 && p[0] == '.' && p[1] == '.') {
+			if (o > root) {
+				if (out[o - 1] == '\\')
+					o--;
+				while (o > root && out[o - 1] != '\\')
+					o--;
+			}
+		} else if (len) {
+			memcpy(out + o, p, len);
+			o += len;
+			if (e)
+				out[o++] = '\\';
+		}
+		p += len;
+		if (*p)
+			p++;
+	}
+	if (!o)
+		out[o++] = '\\';
+	out[o] = 0;
+}
+
+WINFN(BOOL) sl_PathCanonicalizeA(LPSTR out, LPCSTR in)
+{
+	if (!out || !in)
+		return FALSE;
+	char tmp[MAX_PATH * 2];
+	snprintf(tmp, sizeof(tmp), "%s", in);
+	char res[MAX_PATH * 2];
+	canonicalize_a(res, tmp);
+	size_t n = strlen(res);
+	if (n >= MAX_PATH)
+		n = MAX_PATH - 1;
+	memcpy(out, res, n);
+	out[n] = 0;
+	return TRUE;
+}
+
+WINFN(BOOL) sl_PathCanonicalizeW(LPWSTR out, LPCWSTR in)
+{
+	if (!out || !in)
+		return FALSE;
+	char *u = utf16_to_utf8_dup(in), res[MAX_PATH * 4];
+	if (!u)
+		return FALSE;
+	canonicalize_a(res, u);
+	free(u);
+	int n = cp_to_utf16(CP_UTF8, res, -1, out, MAX_PATH, 0);
+	if (n <= 0)
+		out[0] = 0;
+	return TRUE;
+}
+
+/* PathCompactPathEx: path cut to fit max characters (with the NUL), keeping
+ * its file name and putting "..." where the rest was. */
+WINFN(BOOL) sl_PathCompactPathExA(LPSTR out, LPCSTR src, UINT max, DWORD flags)
+{
+	if (!out || !src || !max)
+		return FALSE;
+	size_t n = strlen(src);
+	if (n < max) {
+		memcpy(out, src, n + 1);
+		return TRUE;
+	}
+	const char *file = strrchr(src, '\\');
+	file = file ? file : src;
+	size_t flen = strlen(file);
+	if (max - 1 >= 3 + flen) {
+		size_t keep = max - 1 - 3 - flen;
+		memcpy(out, src, keep);
+		memcpy(out + keep, "...", 3);
+		memcpy(out + keep + 3, file, flen + 1);
+	} else if (max > 4) {
+		memcpy(out, file, max - 4);
+		memcpy(out + max - 4, "...", 4);
+	} else {
+		memcpy(out, "...", max - 1);
+		out[max - 1] = 0;
+	}
+	return TRUE;
+}
+
+/* By pixels, on a device: with no display, everything fits. */
+WINFN(BOOL) sl_PathCompactPathA(HDC dc, LPSTR path, UINT dx)
+{
+	return path != NULL;
+}
+
 WINFN(HRESULT) sl_DllGetVersion(DLLVERSIONINFO *v)
 { if(!v || v->cbSize<sizeof(*v)) return E_INVALIDARG; v->dwMajorVersion=6; v->dwMinorVersion=0; v->dwBuildNumber=2900; v->dwPlatformID=2; return S_OK; }
 
 #define E(n) { #n, 0, (void *)sl_##n }
 /* kernelbase.dll (kernel32.c) serves these too, as Windows 7's does. */
 const struct builtin_export shlwapi_exports[] = {
-	E(DllGetVersion), E(SHDeleteKeyA), E(SHDeleteKeyW), E(SHDeleteValueA),
+	E(DllGetVersion), E(PathCanonicalizeA), E(PathCanonicalizeW), E(PathCompactPathA),
+	E(PathCompactPathExA), E(SHDeleteKeyA), E(SHDeleteKeyW), E(SHDeleteValueA),
 	E(SHDeleteValueW), E(SHGetValueA), E(SHGetValueW), E(SHSetValueA), E(SHSetValueW), E(PathAddBackslashA), E(PathAddBackslashW), E(PathAppendA),
 	E(PathCombineA), E(PathCombineW), E(PathFileExistsA), E(PathFileExistsW), E(PathFindExtensionA),
 	E(PathFindExtensionW), E(PathFindFileNameA), E(PathFindFileNameW),
