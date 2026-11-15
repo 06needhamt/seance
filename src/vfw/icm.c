@@ -61,6 +61,15 @@ const char *ic_driver_name(HIC hic)
 	return n;
 }
 
+const char *ic_open_note(HIC hic)
+{
+	pthread_mutex_lock(&lock);
+	int s = slot_of(hic);
+	HDRVR drv = s >= 0 ? ics[s].drv : NULL;
+	pthread_mutex_unlock(&lock);
+	return drv ? drv_open_note(drv) : "";
+}
+
 /* Records an open driver as a HIC; closes it if the table is full. */
 static HIC add_ic(HDRVR drv, FOURCC type, FOURCC handler, UINT mode,
 		  const char *driver)
@@ -584,6 +593,11 @@ BITMAPINFOHEADER *ic_get_format(HIC hic, UINT msg, const BITMAPINFOHEADER *in,
 		*err = ICERR_MEMORY;
 		return NULL;
 	}
+	/*
+	 * The header's size set, as a caller that copies its input format in
+	 * leaves it: TxsH263.dll refuses a buffer whose biSize is under 40.
+	 */
+	out->biSize = sizeof(*out);
 	LRESULT r = ic_send(hic, msg, (DWORD_PTR)in, (DWORD_PTR)out);
 	if (r < 0) {
 		*err = r;

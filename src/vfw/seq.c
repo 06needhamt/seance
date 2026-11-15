@@ -251,10 +251,12 @@ BOOL ic_seq_start_ex(COMPVARS *pc, const BITMAPINFO *in, DWORD rate,
 		char err2[24];
 		if (query != ICERR_OK)
 			vfw_set_error("ICM_COMPRESS_BEGIN: %s (and "
-				      "ICM_COMPRESS_QUERY: %s)", icerr_name(r, err),
-				      icerr_name(query, err2));
+				      "ICM_COMPRESS_QUERY: %s)%s",
+				      icerr_name(r, err), icerr_name(query, err2),
+				      ic_open_note(pc->hic));
 		else
-			vfw_set_error("ICM_COMPRESS_BEGIN: %s", icerr_name(r, err));
+			vfw_set_error("ICM_COMPRESS_BEGIN: %s%s",
+				      icerr_name(r, err), ic_open_note(pc->hic));
 		goto fail;
 	}
 	/*
@@ -311,8 +313,9 @@ LPVOID STUB_WINAPI ic_seq_frame(COMPVARS *pc, UINT flags, LPVOID bits,
 			      &pc->lpbiIn->bmiHeader : NULL,
 			      s->temporal && pc->lFrame ? pc->lpBitsPrev : NULL);
 	if (r != ICERR_OK) {
-		vfw_set_error("ICM_COMPRESS, frame %ld: %s", (long)pc->lFrame,
-			      icerr_name((LRESULT)(LONG)r, err));
+		vfw_set_error("ICM_COMPRESS, frame %ld: %s%s", (long)pc->lFrame,
+			      icerr_name((LRESULT)(LONG)r, err),
+			      ic_open_note(pc->hic));
 		return NULL;
 	}
 	DWORD written = s->headroom + HEADROOM_WATCH;

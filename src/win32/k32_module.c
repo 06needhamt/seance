@@ -12,6 +12,7 @@
 #include "common/error.h"
 #include "loader/modules.h"
 #include "runtime/builtin.h"
+#include "runtime/trap.h"
 #include "win32/codepage.h"
 #include "win32/internal.h"
 #include "win32/k32.h"
@@ -121,6 +122,33 @@ WINFN(void) k32_FreeLibraryAndExitThread(HMODULE h, DWORD code)
 	thread_exit(code);
 }
 
+/*
+ * Whether ret is in a packer's unpacking stub (UPX's, in scmpack.dll and
+ * DivX520.dll), before its DLL's DllMain has returned: in a section both
+ * writable and executable that holds the entry point. Such a stub binds the
+ * DLL's real import table through GetProcAddress, and gives up on a NULL.
+ */
+static int in_unpacker(const void *ret)
+{
+	struct module *c = win_caller_module(ret);
+
+	if (!c || !c->img || c->attached)
+		return 0;
+	uintptr_t rva = (uintptr_t)((const BYTE *)ret - c->base);
+	DWORD ep = c->img->nt.OptionalHeader.AddressOfEntryPoint;
+	for (unsigned i = 0; i < c->img->nsections; i++) {
+		const IMAGE_SECTION_HEADER *s = &c->img->sections[i];
+		DWORD size = s->Misc.VirtualSize > s->SizeOfRawData ?
+			     s->Misc.VirtualSize : s->SizeOfRawData;
+		const DWORD rwx = IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_EXECUTE;
+		if (rva >= s->VirtualAddress && rva - s->VirtualAddress < size)
+			return (s->Characteristics & rwx) == rwx &&
+			       ep >= s->VirtualAddress &&
+			       ep - s->VirtualAddress < size;
+	}
+	return 0;
+}
+
 WINFN(FARPROC) k32_GetProcAddress(HMODULE h, LPCSTR name)
 {
 	struct module *m = module_of(h);
@@ -132,6 +160,24 @@ WINFN(FARPROC) k32_GetProcAddress(HMODULE h, LPCSTR name)
 		p = mod_get_ordinal(m, (WORD)(uintptr_t)name);
 	else
 		p = mod_get_proc(m, name);
+	/*
+	 * A packed DLL's imports are static imports bound late: an
+	 * unimplemented built-in one is bound to a trap, as the loader binds
+	 * it, rather than stopping the DLL loading.
+	 */
+	if (!p && m->builtin && in_unpacker(__builtin_return_address(0))) {
+		WORD ord = (uintptr_t)name <= 0xffff ? (WORD)(uintptr_t)name : 0;
+		const char *n = ord ? NULL : name;
+		if (n)
+			TRACE("GetProcAddress(%s, %s) from an unpacker: not "
+			      "implemented; bound to a trap", m->name, n);
+		else
+			TRACE("GetProcAddress(%s, #%u) from an unpacker: not "
+			      "implemented; bound to a trap", m->name, ord);
+		p = trap_thunk(m->name, n, ord);
+		if (p)
+			return (FARPROC)p;
+	}
 	if (!p) {
 		if ((uintptr_t)name <= 0xffff)
 			TRACE("GetProcAddress(%s, #%u) = NULL", m->name,
@@ -371,7 +417,7 @@ typedef BOOL (CALLBACK *ENUMRESLANGPROCA)(HMODULE, LPCSTR, LPCSTR, WORD,
 
 struct enum_resource_languages {
 	HMODULE module;
-	LPCSTR type_arg, name_arg;
+	const void *type_arg, *name_arg;
 	pe_resid type, name;
 	ENUMRESLANGPROCA callback;
 	LONG_PTR param;
@@ -405,8 +451,9 @@ static int enum_resource_language(void *arg, const struct pe_resource *res)
 	return 0;
 }
 
-WINFN(BOOL) k32_EnumResourceLanguagesA(HMODULE h, LPCSTR type, LPCSTR name,
-					ENUMRESLANGPROCA callback, LONG_PTR param)
+/* The callback gets type and name as given: strings in the call's form. */
+static BOOL enum_languages(HMODULE h, const void *type, const void *name,
+			   ENUMRESLANGPROCA callback, LONG_PTR param, int wide)
 {
 	struct module *m = module_of(h);
 	char tbuf[256], nbuf[256];
@@ -420,8 +467,8 @@ WINFN(BOOL) k32_EnumResourceLanguagesA(HMODULE h, LPCSTR type, LPCSTR name,
 		.module = h ? h : (HMODULE)m->base,
 		.type_arg = type,
 		.name_arg = name,
-		.type = res_arg(type, 0, tbuf, sizeof(tbuf)),
-		.name = res_arg(name, 0, nbuf, sizeof(nbuf)),
+		.type = res_arg(type, wide, tbuf, sizeof(tbuf)),
+		.name = res_arg(name, wide, nbuf, sizeof(nbuf)),
 		.callback = callback,
 		.param = param,
 	};
@@ -437,6 +484,18 @@ WINFN(BOOL) k32_EnumResourceLanguagesA(HMODULE h, LPCSTR type, LPCSTR name,
 		return FALSE;
 	}
 	return TRUE;
+}
+
+WINFN(BOOL) k32_EnumResourceLanguagesA(HMODULE h, LPCSTR type, LPCSTR name,
+					ENUMRESLANGPROCA callback, LONG_PTR param)
+{
+	return enum_languages(h, type, name, callback, param, 0);
+}
+
+WINFN(BOOL) k32_EnumResourceLanguagesW(HMODULE h, LPCWSTR type, LPCWSTR name,
+					ENUMRESLANGPROCA callback, LONG_PTR param)
+{
+	return enum_languages(h, type, name, callback, param, 1);
 }
 
 /* The data entry behind hrsrc, if it lies inside module h's image. */
@@ -950,6 +1009,7 @@ const struct builtin_export k32_module_exports[] = {
 	E(DelayLoadFailureHook),
 	E(DisableThreadLibraryCalls),
 	E(EnumResourceLanguagesA),
+	E(EnumResourceLanguagesW),
 	E(FindResourceA),
 	E(FindResourceExA),
 	E(FindResourceExW),

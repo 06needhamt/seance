@@ -9,6 +9,12 @@ static int attach_count;
 static int detach_count;
 static int *detach_flag;
 
+/* A FOURCC alone in its data, which the search of a DLL that imports this
+ * one for its handlers finds here ('BSCC'). */
+__attribute__((used)) static const DWORD basic_handlers[3] = {
+	0, 'C' << 24 | 'C' << 16 | 'S' << 8 | 'B', 0
+};
+
 int basic_add(int a, int b)
 {
 	return a + b;

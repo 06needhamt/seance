@@ -24,6 +24,7 @@ struct module {
 	int attached;		/* DllMain(PROCESS_ATTACH) succeeded */
 	int no_thread_calls;	/* DisableThreadLibraryCalls */
 	int pinned;		/* never unloaded */
+	struct ldr_entry *ldr;	/* its entry in the PEB's loader lists */
 
 	/* Modules this one holds a reference on (imports and forwarders). */
 	struct module **deps;

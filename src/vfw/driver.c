@@ -25,6 +25,8 @@ struct drv_module {
 	struct module *mod;	/* NULL for a bare procedure */
 	DRIVERPROC proc;
 	unsigned opens;
+	/* What its first open looked for and didn't find ("" for nothing). */
+	char note[600];
 };
 
 struct drv_instance {
@@ -169,6 +171,18 @@ struct module *drv_module(HDRVR h)
 	return m;
 }
 
+const char *drv_open_note(HDRVR h)
+{
+	const char *note = "";
+
+	pthread_mutex_lock(&lock);
+	int s = slot_of(h, 1);
+	if (s >= 0)
+		note = instances[s].dm->note;
+	pthread_mutex_unlock(&lock);
+	return note;
+}
+
 unsigned drv_open_count(void)
 {
 	unsigned n = 0;
@@ -202,21 +216,12 @@ static void unload(struct drv_module *dm, HDRVR h)
 	free(dm);
 }
 
-/* Where the records of what was looked for stand (see looked_for()). */
-struct looked_mark {
-	unsigned dlls, keys;
-};
-
-static struct looked_mark looked_mark(void)
+struct looked_mark drv_looked_mark(void)
 {
 	return (struct looked_mark){ mod_missing_mark(), reg_missing_mark() };
 }
 
-/*
- * "; it looked for ..., which aren't here", naming the DLLs and software
- * registry keys looked for and not found since mark, or "", for a refusal.
- */
-static const char *looked_for(struct looked_mark mark, char *buf, size_t size)
+const char *drv_looked_for(struct looked_mark mark, char *buf, size_t size)
 {
 	char names[400], keys[400];
 	size_t len = 0;
@@ -297,7 +302,7 @@ static HDRVR open_instance(struct module *mod, DRIVERPROC proc,
 		if (!drv_call(proc, 0, h, DRV_LOAD, 0, 0)) {
 			vfw_set_error("%s: the driver refused DRV_LOAD%s",
 				      mod ? mod->name : "driver procedure",
-				      looked_for(mark, looked, sizeof(looked)));
+				      drv_looked_for(mark, looked, sizeof(looked)));
 			goto fail;
 		}
 		loaded = 1;
@@ -307,10 +312,17 @@ static HDRVR open_instance(struct module *mod, DRIVERPROC proc,
 	if (!id) {
 		vfw_set_error("%s: the driver refused DRV_OPEN%s",
 			      mod ? mod->name : "driver procedure",
-			      looked_for(mark, looked, sizeof(looked)));
+			      drv_looked_for(mark, looked, sizeof(looked)));
 		goto fail;
 	}
 
+	/*
+	 * A driver can open without what it looked for and fail only later
+	 * (tm2x.dll in ICM_COMPRESS, without its installer's registry key):
+	 * keep the note for that failure's message.
+	 */
+	if (first)
+		drv_looked_for(mark, dm->note, sizeof(dm->note));
 	pthread_mutex_lock(&lock);
 	instances[slot].id = id;
 	instances[slot].opening = 0;
@@ -378,7 +390,7 @@ HDRVR drv_open(const char *dll, const WCHAR *alias, LPARAM lp2)
 	if (runtime_enter())
 		return NULL;
 
-	struct looked_mark mark = looked_mark();
+	struct looked_mark mark = drv_looked_mark();
 	struct module *mod = mod_load(dll, NULL);
 	if (!mod)
 		return NULL;	/* vfw_error() names the DLL */
@@ -411,7 +423,7 @@ HDRVR drv_open_proc(DRIVERPROC proc, const WCHAR *alias, LPARAM lp2)
 	}
 	if (runtime_enter())
 		return NULL;
-	return open_instance(NULL, proc, alias, lp2, looked_mark());
+	return open_instance(NULL, proc, alias, lp2, drv_looked_mark());
 }
 
 LRESULT drv_send(HDRVR h, UINT msg, LPARAM l1, LPARAM l2)

@@ -606,6 +606,8 @@ struct encode_sink {
 	unsigned long packets;
 	uint64_t bytes;
 	char error[256];
+	GUID odd_format;	/* an output's format type not WAVEFORMATEX */
+	int odd;
 };
 
 static int same_format(const struct encode_sink *e, const AM_MEDIA_TYPE *mt)
@@ -685,17 +687,28 @@ static int encode_connect(struct xform *x, const WAVEFORMATEX *wf,
 	AM_MEDIA_TYPE in = { 0 }, out = { 0 };
 	HRESULT hr = audio_wfx_to_mt(wf, size, &in);
 
+	/*
+	 * An encoder whose registration names no format tag (its subtype
+	 * isn't one, as the Vorbis encoder's isn't) takes the first audio
+	 * output it offers.
+	 */
 	out.majortype = MEDIATYPE_Audio;
-	out.subtype = (GUID)WAVE_FORMAT_SUBTYPE_INIT(tag);
+	if (tag)
+		out.subtype = (GUID)WAVE_FORMAT_SUBTYPE_INIT(tag);
 	if (SUCCEEDED(hr))
 		hr = xform_connect(x, &in, &out, encode_output, e);
 	if (SUCCEEDED(hr)) {
 		free(e->format);
 		e->format = NULL;
-		hr = audio_mt_to_wfx(xform_output_type(x), &e->format,
-				     &e->format_size);
-		if (FAILED(hr))
+		const AM_MEDIA_TYPE *mt = xform_output_type(x);
+		hr = audio_mt_to_wfx(mt, &e->format, &e->format_size);
+		if (FAILED(hr)) {
+			if (mt && !e->odd) {
+				e->odd_format = mt->formattype;
+				e->odd = 1;
+			}
 			xform_disconnect(x);
+		}
 	}
 	dshow_free_media_type(&in);
 	return SUCCEEDED(hr) ? 0 : -1;
@@ -749,8 +762,8 @@ int encode_audio(const struct audio_codec_job *j)
 		goto done;
 	}
 	if (FAILED(hr = xform_create(j->codec, &found, &x))) {
-		fprintf(stderr, "seance: cannot open the encoder in %s (%s)\n",
-			j->codec, dshow_hr_name(hr, name));
+		fprintf(stderr, "seance: cannot open the encoder in %s (%s)%s\n",
+			j->codec, dshow_hr_name(hr, name), xform_open_note());
 		goto done;
 	}
 	if (j->state && load_state(x, j->state))
@@ -795,7 +808,8 @@ int encode_audio(const struct audio_codec_job *j)
 			size_t n = audio_pcm_format(others[i], wf->nChannels,
 						    wf->nSamplesPerSec, mask, form,
 						    &pcm);
-			if (others[i] == native && !memcmp(&pcm, wf, n))
+			if (others[i] == native && n == size &&
+			    !memcmp(&pcm, wf, n))
 				continue;
 			connected = !encode_connect(x, &pcm.Format, n,
 						    (WORD)found.compression,
@@ -803,6 +817,16 @@ int encode_audio(const struct audio_codec_job *j)
 			if (connected)
 				feed = others[i];
 		}
+	}
+	if (!connected && sink.odd) {
+		char g[OLE_GUID_CHARS];
+		ole_guid_format(&sink.odd_format, g);
+		fprintf(stderr, "seance: the %s takes %s, but its output's "
+			"format (type %s) isn't a WAVEFORMATEX, which an AVI or "
+			"WAV file needs: it is meant for a container of its own "
+			"(a multiplexer filter)\n", xform_kind_name(x), in_desc,
+			g);
+		goto done;
 	}
 	if (!connected) {
 		fprintf(stderr, "seance: the %s takes neither %s nor any other "

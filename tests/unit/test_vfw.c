@@ -1735,6 +1735,21 @@ static void test_dll_handlers(void)
 			CHECK(at[k - 1] < at[k]);	/* the likelier first */
 	}
 	CHECK(strstr(vfw_fourcc_from_name(VFW_FOURCC_FROM_MOV), "stored"));
+	for (size_t i = 0; i < n; i++)
+		CHECK(found[i] != FCC('J', 'u', 'l', 'y') &&
+		      found[i] != FCC('R', 'S', 'D', 'S'));
+
+	/* Then those of a DLL it imports that sits next to it (pe_dep.dll
+	 * imports PE_BASIC.DLL, found whatever its case). */
+	n = vfw_dll_handlers(fixture("pe_dep.dll"), found, where, 64);
+	size_t bscc = n;
+	for (size_t i = 0; i < n; i++)
+		if (found[i] == FCC('B', 'S', 'C', 'C'))
+			bscc = i;
+	CHECK(bscc < n);
+	if (bscc < n)
+		CHECK_EQ(where[bscc], VFW_FOURCC_FROM_COMPANION);
+	CHECK(strstr(vfw_fourcc_from_name(VFW_FOURCC_FROM_COMPANION), "imports"));
 
 	/* Raw formats a codec checks its input against come last. */
 	n = vfw_dll_handlers(fixture("testcodec.dll"), found, NULL, 64);

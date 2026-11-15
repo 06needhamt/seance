@@ -89,9 +89,30 @@ struct msg_node {
 	MSG msg;
 };
 
+/*
+ * A message sent to a window of another thread. Its procedure runs on that
+ * thread, when it next looks at its queue, while the sender waits. It is
+ * shared by the two (refs), as either may give up on it first.
+ */
+struct sent {
+	struct sent *next;
+	HWND hwnd;
+	UINT msg;
+	WPARAM wp;
+	LPARAM lp;
+	int unicode;
+	int refs;
+	int done;		/* replied, or given up */
+	LRESULT result;
+	struct sent *outer;	/* the one its handler was handling */
+	struct sent *wait_outer;	/* the one its sender was waiting on */
+};
+
 struct queue {
 	struct queue *next;
 	DWORD tid;
+	int alive;		/* its thread has used it and not ended */
+	struct sent *sent, **sent_tail;
 	struct msg_node *head, *tail;
 	int quit, quit_code;
 	DWORD last_time;
@@ -119,10 +140,22 @@ static ULONG_PTR next_handle = 0x00010020;
 static struct queue *queues;
 static struct timer *timers;
 static UINT_PTR next_timer_id = 1;
+static pthread_key_t queue_key;
+static __thread struct sent *in_send;	/* being handled on this thread */
+static __thread struct sent *waiting;	/* sent by this thread, awaited */
+
+static void queue_thread_end(void *arg);
+static struct queue *queue_self(void);
+static void queue_self_end(void);
+static void wake_all(void);
 
 static void init(void)
 {
 	pthread_condattr_t attr;
+
+	pthread_key_create(&queue_key, queue_thread_end);
+	__atomic_store_n(&thread_end_hook, queue_self_end, __ATOMIC_RELEASE);
+	__atomic_store_n(&thread_wake_hook, wake_all, __ATOMIC_RELEASE);
 
 	pthread_condattr_init(&attr);
 	pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
@@ -815,6 +848,7 @@ static HWND create_window(DWORD exstyle, const WCHAR *cls_name,
 			w->exstyle = exstyle;
 			w->inst = inst;
 			w->tid = thread_current_id();
+			queue_self();
 			w->flags = message_only ? MESSAGE_ONLY : 0;
 			if (style & WS_CHILD) {
 				w->parent = parent;
@@ -1841,10 +1875,119 @@ static struct queue *queue_for(DWORD tid)
 			return q;
 	if ((q = calloc(1, sizeof(*q)))) {
 		q->tid = tid;
+		q->sent_tail = &q->sent;
 		q->next = queues;
 		queues = q;
 	}
 	return q;
+}
+
+/* The calling thread's queue, which is then live until the thread ends. */
+static struct queue *queue_self(void)
+{
+	struct queue *q = queue_for(thread_current_id());
+
+	if (q && !q->alive) {
+		q->alive = 1;
+		pthread_setspecific(queue_key, q);
+	}
+	return q;
+}
+
+static void sent_drop(struct sent *s)
+{
+	if (!--s->refs)
+		free(s);
+}
+
+/* Takes the oldest message sent to q, or NULL. Called with the lock. */
+static struct sent *sent_take(struct queue *q)
+{
+	struct sent *s = q->sent;
+
+	if (s && !(q->sent = s->next))
+		q->sent_tail = &q->sent;
+	return s;
+}
+
+static void sent_finish(struct sent *s, LRESULT r)
+{
+	if (!s->done) {
+		s->result = r;
+		s->done = 1;
+		pthread_cond_broadcast(&cond);
+	}
+	sent_drop(s);
+}
+
+/*
+ * The calling thread is ending, maybe from inside a procedure handling a
+ * sent message or a wait for one it sent: what it was handling, nested
+ * ones too, is answered with 0, and what it waited on is let go of.
+ * Called with the lock.
+ */
+static void sends_self_end(void)
+{
+	struct sent *s;
+
+	while ((s = in_send)) {
+		in_send = s->outer;
+		sent_finish(s, 0);
+	}
+	while ((s = waiting)) {
+		waiting = s->wait_outer;
+		sent_drop(s);
+	}
+}
+
+/* A thread that ends answers what was sent to it with 0. Called on the
+ * ending thread. */
+static void queue_thread_end(void *arg)
+{
+	struct queue *q = arg;
+	struct sent *s;
+
+	enter();
+	q->alive = 0;
+	sends_self_end();
+	while ((s = sent_take(q)))
+		sent_finish(s, 0);
+	leave();
+}
+
+/* The exiting thread's queue ends now, not when its pthread goes. */
+static void queue_self_end(void)
+{
+	struct queue *q = pthread_getspecific(queue_key);
+
+	if (q) {
+		pthread_setspecific(queue_key, NULL);
+		queue_thread_end(q);
+	} else if (in_send || waiting) {
+		enter();
+		sends_self_end();
+		leave();
+	}
+}
+
+/*
+ * Runs one message sent to q's thread, if there is one: 1 if it ran.
+ * Called with the lock, which is dropped while the procedure runs.
+ */
+static int run_sent(struct queue *q)
+{
+	struct sent *s = sent_take(q);
+
+	if (!s)
+		return 0;
+	s->outer = in_send;
+	in_send = s;
+	leave();
+	LRESULT r = send(s->hwnd, s->msg, s->wp, s->lp, s->unicode);
+	enter();
+	in_send = s->outer;
+	sent_finish(s, r);
+	return 1;
 }
 
 static BOOL post(DWORD tid, HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -2003,22 +2146,45 @@ static long next_timer(DWORD tid)
 	return best;
 }
 
-/* Sleeps on the queue condition for at most ms (-1: until woken). */
+/* Wakes every thread asleep on the queue condition (TerminateThread). */
+static void wake_all(void)
+{
+	enter();
+	pthread_cond_broadcast(&cond);
+	leave();
+}
+
+/*
+ * Sleeps on the queue condition for at most ms (-1: until woken). A thread
+ * TerminateThread asked to end lets go of the lock and ends here; what it
+ * was sending or handling is let go of by queue_self_end.
+ */
 static void wait_ms(long ms)
 {
-	if (ms < 0) {
-		pthread_cond_wait(&cond, &lock);
+	/* Checked under the lock first: a request made after this is
+	 * followed by a broadcast under the lock, which the wait sees. */
+	if (thread_terminate_pending()) {
+		leave();
+		thread_terminated_check();
+		enter();
 		return;
 	}
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	ts.tv_sec += ms / 1000;
-	ts.tv_nsec += (ms % 1000) * 1000000L;
-	if (ts.tv_nsec >= 1000000000L) {
-		ts.tv_sec++;
-		ts.tv_nsec -= 1000000000L;
+	if (ms < 0) {
+		pthread_cond_wait(&cond, &lock);
+	} else {
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		ts.tv_sec += ms / 1000;
+		ts.tv_nsec += (ms % 1000) * 1000000L;
+		if (ts.tv_nsec >= 1000000000L) {
+			ts.tv_sec++;
+			ts.tv_nsec -= 1000000000L;
+		}
+		pthread_cond_timedwait(&cond, &lock, &ts);
 	}
-	pthread_cond_timedwait(&cond, &lock, &ts);
+	leave();
+	thread_terminated_check();
+	enter();
 }
 
 static BOOL get_message(MSG *msg, HWND hwnd, UINT min, UINT max)
@@ -2026,9 +2192,15 @@ static BOOL get_message(MSG *msg, HWND hwnd, UINT min, UINT max)
 	MSG m;
 
 	enter();
-	struct queue *q = queue_for(thread_current_id());
-	while (q && !take(q, hwnd, min, max, 1, &m))
+	struct queue *q = queue_self();
+	/* Messages sent to the thread run first, as they come. */
+	while (q) {
+		if (run_sent(q))
+			continue;
+		if (take(q, hwnd, min, max, 1, &m))
+			break;
 		wait_ms(next_timer(q->tid));
+	}
 	if (q) {
 		q->last_time = m.time;
 		q->last_pos = MAKELONG(m.pt.x, m.pt.y);
@@ -2056,7 +2228,9 @@ static BOOL peek_message(MSG *msg, HWND hwnd, UINT min, UINT max, UINT flags)
 	MSG m;
 
 	enter();
-	struct queue *q = queue_for(thread_current_id());
+	struct queue *q = queue_self();
+	while (q && run_sent(q))
+		;
 	int got = q && take(q, hwnd, min, max, flags & PM_REMOVE, &m);
 	if (got) {
 		q->last_time = m.time;
@@ -2083,9 +2257,14 @@ WINFN(BOOL) user_WaitMessage(void)
 	MSG m;
 
 	enter();
-	struct queue *q = queue_for(thread_current_id());
-	while (q && !take(q, NULL, 0, 0, 0, &m))
+	struct queue *q = queue_self();
+	while (q) {
+		if (run_sent(q))
+			continue;
+		if (take(q, NULL, 0, 0, 0, &m))
+			break;
 		wait_ms(next_timer(q->tid));
+	}
 	leave();
 	return q != NULL;
 }
@@ -2106,8 +2285,22 @@ static LRESULT dispatch(const MSG *msg, int unicode)
 WINFN(LRESULT) user_DispatchMessageA(const MSG *msg) { return dispatch(msg, 0); }
 WINFN(LRESULT) user_DispatchMessageW(const MSG *msg) { return dispatch(msg, 1); }
 WINFN(BOOL) user_TranslateMessage(const MSG *msg) { return FALSE; }
-WINFN(BOOL) user_InSendMessage(void) { return FALSE; }
-WINFN(BOOL) user_ReplyMessage(LRESULT r) { return FALSE; }
+WINFN(BOOL) user_InSendMessage(void) { return in_send != NULL; }
+
+WINFN(BOOL) user_ReplyMessage(LRESULT r)
+{
+	BOOL ok = FALSE;
+
+	enter();
+	if (in_send && !in_send->done) {
+		in_send->result = r;
+		in_send->done = 1;
+		pthread_cond_broadcast(&cond);
+		ok = TRUE;
+	}
+	leave();
+	return ok;
+}
 
 WINFN(LONG) user_GetMessageTime(void)
 {
@@ -2127,20 +2320,187 @@ WINFN(DWORD) user_GetMessagePos(void)
 	return p;
 }
 
+/* How send_to waits for a message it sends to another thread. */
+#define SEND_WAIT    (-1L)	/* until the reply */
+#define SEND_NOTIFY  (-2L)	/* not at all */
+
+/*
+ * Whether msg's parameters carry pointers, which can't be sent without
+ * waiting (SendNotifyMessage), as Windows says with ERROR_MESSAGE_SYNC_ONLY.
+ */
+static int pointer_message(UINT msg)
+{
+	switch (msg) {
+	case WM_CREATE: case WM_SETTEXT: case WM_GETTEXT:
+	case 0x001a:	/* WM_WININICHANGE */
+	case 0x001b:	/* WM_DEVMODECHANGE */
+	case WM_GETMINMAXINFO:
+	case 0x002b:	/* WM_DRAWITEM */
+	case 0x002c:	/* WM_MEASUREITEM */
+	case 0x002d:	/* WM_DELETEITEM */
+	case 0x0039:	/* WM_COMPAREITEM */
+	case WM_WINDOWPOSCHANGING: case WM_WINDOWPOSCHANGED:
+	case 0x004a:	/* WM_COPYDATA */
+	case WM_NOTIFY:
+	case 0x0053:	/* WM_HELP */
+	case 0x007c:	/* WM_STYLECHANGING */
+	case 0x007d:	/* WM_STYLECHANGED */
+	case WM_NCCREATE: case WM_NCCALCSIZE:
+	case 0x0087:	/* WM_GETDLGCODE */
+	case 0x0213:	/* WM_NEXTMENU */
+	case 0x0214:	/* WM_SIZING */
+	case 0x0216:	/* WM_MOVING */
+	case 0x0220:	/* WM_MDICREATE */
+	case 0x0309:	/* WM_PAINTCLIPBOARD */
+	case 0x030b:	/* WM_SIZECLIPBOARD */
+	case 0x030c:	/* WM_ASKCBFORMATNAME */
+		return 1;
+	}
+	return 0;
+}
+
+/*
+ * Sends a message as SendMessage does: a window of the calling thread, or
+ * of a thread that has ended, gets it at once; one of another live thread
+ * gets it on that thread, and the caller waits up to wait ms (SEND_WAIT:
+ * until the reply; SEND_NOTIFY: not at all), handling what is sent to it
+ * meanwhile unless flags has SMTO_BLOCK. 0 if it timed out or failed, with
+ * the last error set.
+ */
+static int send_to(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, int unicode,
+		   long wait, UINT flags, LRESULT *result)
+{
+	LRESULT dummy;
+	if (!result)
+		result = &dummy;
+	*result = 0;
+	if (hwnd == DESKTOP_HANDLE)
+		user_desktop();
+	enter();
+	struct window *w = get(hwnd);
+	struct queue *to = NULL;
+	if (w && w->tid != thread_current_id()) {
+		for (to = queues; to && to->tid != w->tid; to = to->next)
+			;
+		if (to && !to->alive)
+			to = NULL;
+	}
+	if (!to) {
+		leave();
+		if (w)
+			*result = send(hwnd, msg, wp, lp, unicode);
+		return 1;
+	}
+	struct sent *s = calloc(1, sizeof(*s));
+	if (!s) {
+		/* Not run here instead: the procedure belongs to its thread. */
+		leave();
+		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
+		return 0;
+	}
+	s->hwnd = hwnd;
+	s->msg = msg;
+	s->wp = wp;
+	s->lp = lp;
+	s->unicode = unicode;
+	s->refs = wait == SEND_NOTIFY ? 1 : 2;
+	*to->sent_tail = s;
+	to->sent_tail = &s->next;
+	pthread_cond_broadcast(&cond);
+	if (wait == SEND_NOTIFY) {
+		leave();
+		return 1;
+	}
+	s->wait_outer = waiting;
+	waiting = s;
+	struct queue *me = (flags & SMTO_BLOCK) ? NULL : queue_self();
+	uint64_t end = now_ms() + (wait > 0 ? (uint64_t)wait : 0);
+	while (!s->done) {
+		if (me && run_sent(me))
+			continue;
+		if (wait >= 0) {
+			uint64_t now = now_ms();
+			if (now >= end)
+				break;
+			wait_ms((long)(end - now));
+		} else {
+			wait_ms(-1);
+		}
+	}
+	waiting = s->wait_outer;
+	int done = s->done;
+	*result = s->result;
+	sent_drop(s);
+	leave();
+	if (!done)
+		win_set_error(ERROR_TIMEOUT);
+	return done;
+}
+
+/* Each top-level window, sent the message in turn with wait and flags. */
+static void send_broadcast(UINT msg, WPARAM wp, LPARAM lp, int unicode,
+			   long wait, UINT flags)
+{
+	size_t n;
+
+	enter();
+	HWND *list = snapshot(is_top_level, NULL, &n);
+	leave();
+	for (size_t i = 0; list && i < n; i++)
+		send_to(list[i], msg, wp, lp, unicode, wait, flags, NULL);
+	free(list);
+}
+
 static LRESULT send_message(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
 			    int unicode)
 {
+	LRESULT r = 0;
+
 	if (hwnd == HWND_BROADCAST) {
-		size_t n;
-		enter();
-		HWND *list = snapshot(is_top_level, NULL, &n);
-		leave();
-		for (size_t i = 0; list && i < n; i++)
-			send(list[i], msg, wp, lp, unicode);
-		free(list);
+		send_broadcast(msg, wp, lp, unicode, SEND_WAIT, 0);
 		return 0;
 	}
-	return send(hwnd, msg, wp, lp, unicode);
+	send_to(hwnd, msg, wp, lp, unicode, SEND_WAIT, 0, &r);
+	return r;
+}
+
+static LRESULT send_timeout(HWND h, UINT m, WPARAM wp, LPARAM lp, int unicode,
+			    UINT flags, UINT timeout, PDWORD_PTR result)
+{
+	LRESULT r = 0;
+	/* Without hang detection every thread counts as answering, so
+	 * SMTO_ABORTIFHUNG never aborts and NOTIMEOUTIFNOTHUNG never times
+	 * out. */
+	long wait = (flags & SMTO_NOTIMEOUTIFNOTHUNG) ? SEND_WAIT :
+		    (long)(timeout > 0x7fffffffu ? 0x7fffffffu : timeout);
+
+	if (h == HWND_BROADCAST) {
+		/* The timeout is for each window, as Windows has it. */
+		send_broadcast(m, wp, lp, unicode, wait, flags);
+	} else if (!user_is_window(h)) {
+		win_set_error(ERROR_INVALID_WINDOW_HANDLE);
+		return 0;
+	} else if (!send_to(h, m, wp, lp, unicode, wait, flags, &r)) {
+		return 0;
+	}
+	if (result)
+		*result = (DWORD_PTR)r;
+	return 1;
+}
+
+static BOOL send_notify(HWND h, UINT m, WPARAM wp, LPARAM lp, int unicode)
+{
+	if (pointer_message(m)) {
+		win_set_error(ERROR_MESSAGE_SYNC_ONLY);
+		return FALSE;
+	}
+	if (h == HWND_BROADCAST) {
+		send_broadcast(m, wp, lp, unicode, SEND_NOTIFY, 0);
+		return TRUE;
+	}
+	if (!user_is_window(h))
+		return FALSE;
+	return send_to(h, m, wp, lp, unicode, SEND_NOTIFY, 0, NULL);
 }
 
 WINFN(LRESULT) user_SendMessageA(HWND h, UINT m, WPARAM wp, LPARAM lp)
@@ -2156,35 +2516,23 @@ WINFN(LRESULT) user_SendMessageW(HWND h, UINT m, WPARAM wp, LPARAM lp)
 WINFN(LRESULT) user_SendMessageTimeoutA(HWND h, UINT m, WPARAM wp, LPARAM lp,
 					UINT flags, UINT timeout, PDWORD_PTR result)
 {
-	if (h != HWND_BROADCAST && !user_is_window(h))
-		return 0;
-	LRESULT r = send_message(h, m, wp, lp, 0);
-	if (result)
-		*result = r;
-	return 1;
+	return send_timeout(h, m, wp, lp, 0, flags, timeout, result);
 }
 
 WINFN(LRESULT) user_SendMessageTimeoutW(HWND h, UINT m, WPARAM wp, LPARAM lp,
 					UINT flags, UINT timeout, PDWORD_PTR result)
 {
-	if (h != HWND_BROADCAST && !user_is_window(h))
-		return 0;
-	LRESULT r = send_message(h, m, wp, lp, 1);
-	if (result)
-		*result = r;
-	return 1;
+	return send_timeout(h, m, wp, lp, 1, flags, timeout, result);
 }
 
 WINFN(BOOL) user_SendNotifyMessageA(HWND h, UINT m, WPARAM wp, LPARAM lp)
 {
-	send_message(h, m, wp, lp, 0);
-	return h == HWND_BROADCAST || user_is_window(h);
+	return send_notify(h, m, wp, lp, 0);
 }
 
 WINFN(BOOL) user_SendNotifyMessageW(HWND h, UINT m, WPARAM wp, LPARAM lp)
 {
-	send_message(h, m, wp, lp, 1);
-	return h == HWND_BROADCAST || user_is_window(h);
+	return send_notify(h, m, wp, lp, 1);
 }
 
 /*
@@ -2202,7 +2550,9 @@ WINFN(DWORD) user_MsgWaitForMultipleObjectsEx(DWORD n, const HANDLE *handles,
 
 	for (;;) {
 		enter();
-		struct queue *q = queue_for(thread_current_id());
+		struct queue *q = queue_self();
+		while (q && run_sent(q))
+			;
 		int ready = mask && q && take(q, NULL, 0, 0, 0, &m);
 		long slice = 10;
 		if (!ready && !n && q) {

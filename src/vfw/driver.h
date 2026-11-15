@@ -38,6 +38,13 @@ int drv_valid(HDRVR h);
 /* The DLL behind a driver (NULL for a procedure or a bad handle). */
 struct module *drv_module(HDRVR h);
 
+/*
+ * "; it looked for ..., which aren't here" for what the driver's module
+ * looked for and didn't find when it was first opened, or "". It stays
+ * valid while h is open.
+ */
+const char *drv_open_note(HDRVR h);
+
 /* The number of open drivers (for tests). */
 unsigned drv_open_count(void);
 
@@ -47,6 +54,17 @@ unsigned drv_open_count(void);
  */
 LRESULT drv_call(DRIVERPROC proc, DWORD_PTR id, HDRVR h, UINT msg,
 		 LPARAM l1, LPARAM l2);
+
+/*
+ * Where the records of the DLLs and software registry keys looked for and
+ * not found stand, and "; it looked for ..., which aren't here" naming
+ * those since mark (or "" for none), for a refusal's message.
+ */
+struct looked_mark {
+	unsigned dlls, keys;
+};
+struct looked_mark drv_looked_mark(void);
+const char *drv_looked_for(struct looked_mark mark, char *buf, size_t size);
 
 /* A message's name ("DRV_OPEN", "ICM_DECOMPRESS", ...) or its number. */
 const char *drv_msg_name(UINT msg, char buf[24]);

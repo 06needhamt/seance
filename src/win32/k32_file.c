@@ -38,7 +38,15 @@ struct file {
 	int fd;
 	int std;		/* 0-2 for the standard streams: never closed */
 	int delete_on_close;
+	int overlapped;		/* opened with FILE_FLAG_OVERLAPPED */
 	char *path;
+	/* Its completion port and key, set once by CreateIoCompletionPort. */
+	struct port_link *link;
+};
+
+struct port_link {
+	struct kobject *port;
+	ULONG_PTR key;
 };
 
 static void file_destroy(struct kobject *o)
@@ -49,8 +57,80 @@ static void file_destroy(struct kobject *o)
 		close(f->fd);
 	if (f->delete_on_close && f->path)
 		unlink(f->path);
+	if (f->link) {
+		kobj_unref(f->link->port);
+		free(f->link);
+	}
 	free(f->path);
 	free(f);
+}
+
+int file_set_port(HANDLE h, struct kobject *port, ULONG_PTR key)
+{
+	struct file *f = (struct file *)handle_ref(h, KOBJ_FILE);
+	struct port_link *none = NULL, *link;
+
+	if (!f)
+		return 0;
+	if (!(link = malloc(sizeof(*link)))) {
+		kobj_unref(&f->obj);
+		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
+		return 0;
+	}
+	/* Port and key are published together; a handle gets one, once. */
+	link->port = port;
+	link->key = key;
+	kobj_ref(port);
+	if (!__atomic_compare_exchange_n(&f->link, &none, link, 0,
+					 __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+		kobj_unref(port);
+		free(link);
+		kobj_unref(&f->obj);
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return 0;
+	}
+	kobj_unref(&f->obj);
+	return 1;
+}
+
+/*
+ * Overlapped I/O never stays pending here. A handle opened for overlapped
+ * I/O and associated with a port queues a packet when it finishes, unless
+ * the event handle's low bit asks for none: io_start reserves that packet
+ * before the I/O, which doesn't start (FALSE, the error set) without one.
+ */
+struct io_done {
+	const struct port_link *link;
+	struct iocp_packet *packet;
+};
+
+static BOOL io_start(struct file *f, LPOVERLAPPED ov, struct io_done *d)
+{
+	d->link = NULL;
+	d->packet = NULL;
+	if (!ov || !f->overlapped || ((UINT_PTR)ov->hEvent & 1))
+		return TRUE;
+	d->link = __atomic_load_n(&f->link, __ATOMIC_ACQUIRE);
+	if (d->link && !(d->packet = iocp_packet_new()))
+		return FALSE;
+	return TRUE;
+}
+
+/* The result goes in the OVERLAPPED, its event is set, the packet queued. */
+static void io_complete(struct io_done *d, LPOVERLAPPED ov, BOOL ok,
+			DWORD total)
+{
+	if (!ov)
+		return;
+	ov->Internal = ok ? 0 : 0xC0000001;	/* STATUS_UNSUCCESSFUL */
+	ov->InternalHigh = total;
+	UINT_PTR ev = (UINT_PTR)ov->hEvent;
+	if (ev & ~(UINT_PTR)1)
+		event_signal((HANDLE)(ev & ~(UINT_PTR)1), 0);
+	if (ok && d->packet)
+		iocp_queue(d->link->port, d->packet, total, d->link->key, ov);
+	else
+		iocp_packet_free(d->packet);
 }
 
 static HANDLE file_handle_new(int fd, int std, const char *path)
@@ -236,6 +316,7 @@ static HANDLE create_file(const void *name, int wide, DWORD access,
 	if (h != INVALID_HANDLE_VALUE) {
 		struct file *f = (struct file *)handle_ref(h, KOBJ_FILE);
 		f->delete_on_close = (flags & FILE_FLAG_DELETE_ON_CLOSE) != 0;
+		f->overlapped = (flags & FILE_FLAG_OVERLAPPED) != 0;
 		kobj_unref(&f->obj);
 		win_set_error(exists && (disposition == CREATE_ALWAYS ||
 					 disposition == OPEN_ALWAYS) ?
@@ -276,6 +357,11 @@ WINFN(BOOL) k32_ReadFile(HANDLE h, LPVOID buf, DWORD n, LPDWORD done,
 		*done = 0;
 	if (!f)
 		return FALSE;
+	struct io_done d;
+	if (!io_start(f, ov, &d)) {
+		kobj_unref(&f->obj);
+		return FALSE;
+	}
 	off_t pos = ov ? (off_t)(((ULONGLONG)ov->OffsetHigh << 32) | ov->Offset) : 0;
 	/* Disk files are read in full; pipes and consoles return what they have. */
 	struct stat st;
@@ -296,8 +382,7 @@ WINFN(BOOL) k32_ReadFile(HANDLE h, LPVOID buf, DWORD n, LPDWORD done,
 	}
 	if (done)
 		*done = total;
-	if (ov)
-		ov->InternalHigh = total;
+	io_complete(&d, ov, ok, total);
 	kobj_unref(&f->obj);
 	return ok;
 }
@@ -313,6 +398,11 @@ WINFN(BOOL) k32_WriteFile(HANDLE h, LPCVOID buf, DWORD n, LPDWORD done,
 		*done = 0;
 	if (!f)
 		return FALSE;
+	struct io_done d;
+	if (!io_start(f, ov, &d)) {
+		kobj_unref(&f->obj);
+		return FALSE;
+	}
 	off_t pos = ov ? (off_t)(((ULONGLONG)ov->OffsetHigh << 32) | ov->Offset) : 0;
 	while (total < n) {
 		ssize_t r = ov ? pwrite(f->fd, (const BYTE *)buf + total,
@@ -328,8 +418,7 @@ WINFN(BOOL) k32_WriteFile(HANDLE h, LPCVOID buf, DWORD n, LPDWORD done,
 	}
 	if (done)
 		*done = total;
-	if (ov)
-		ov->InternalHigh = total;
+	io_complete(&d, ov, ok, total);
 	kobj_unref(&f->obj);
 	return ok;
 }
@@ -1342,6 +1431,30 @@ WINFN(BOOL) k32_GetVolumeInformationA(LPCSTR root, LPSTR name, DWORD name_size,
 	return TRUE;
 }
 
+/* The same answers, as UTF-16 (scmpack.dll asks this form). */
+WINFN(BOOL) k32_GetVolumeInformationW(LPCWSTR root, LPWSTR name,
+				      DWORD name_size, LPDWORD serial,
+				      LPDWORD max_comp, LPDWORD flags,
+				      LPWSTR fs, DWORD fs_size)
+{
+	static const WCHAR vname[] = { 'V', 'F', 'W', 0 };
+	static const WCHAR ntfs[] = { 'N', 'T', 'F', 'S', 0 };
+
+	(void)root;
+	if (name && name_size) {
+		DWORD n = name_size < 4 ? name_size - 1 : 3;
+		memcpy(name, vname, n * sizeof(WCHAR));
+		name[n] = 0;
+	}
+	if (fs && fs_size) {
+		DWORD n = fs_size < 5 ? fs_size - 1 : 4;
+		memcpy(fs, ntfs, n * sizeof(WCHAR));
+		fs[n] = 0;
+	}
+	return k32_GetVolumeInformationA(NULL, NULL, 0, serial, max_comp,
+					 flags, NULL, 0);
+}
+
 WINFN(BOOL) k32_GetFileInformationByHandle(HANDLE h,
 					   LPBY_HANDLE_FILE_INFORMATION info)
 {
@@ -1801,6 +1914,7 @@ const struct builtin_export k32_file_exports[] = {
 	E(GetTempPathA),
 	E(GetTempPathW),
 	E(GetVolumeInformationA),
+	E(GetVolumeInformationW),
 	E(LockFile),
 	E(MapViewOfFile),
 	E(MapViewOfFileEx),

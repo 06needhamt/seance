@@ -1217,6 +1217,10 @@ static void test_iocp(void)
 	FN(k, DWORD, GetLastError, void);
 	FN(k, HANDLE, CreateFileA, LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES,
 	   DWORD, DWORD, HANDLE);
+	FN(k, BOOL, ReadFile, HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
+	FN(k, BOOL, WriteFile, HANDLE, LPCVOID, DWORD, LPDWORD, LPOVERLAPPED);
+	FN(k, HANDLE, CreateEventA, LPSECURITY_ATTRIBUTES, BOOL, BOOL, LPCSTR);
+	FN(k, BOOL, ResetEvent, HANDLE);
 
 	HANDLE port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1);
 	CHECK(port != NULL);
@@ -1245,6 +1249,56 @@ static void test_iocp(void)
 			       NULL);
 	CHECK(f != INVALID_HANDLE_VALUE);
 	CHECK(CreateIoCompletionPort(f, port, 5, 0) == port);
+	/* Once, only (capavi32 waits on the port for its reads). */
+	CHECK(CreateIoCompletionPort(f, port, 6, 0) == NULL);
+	CHECK_EQ(GetLastError(), ERROR_INVALID_PARAMETER);
+	/* Its I/O queues a packet with the file's key, and sets the event. */
+	HANDLE ev = CreateEventA(NULL, TRUE, FALSE, NULL);
+	OVERLAPPED wo = { .hEvent = ev };
+	DWORD n = 0;
+	CHECK(WriteFile(f, "abcdef", 6, &n, &wo));
+	CHECK_EQ(WaitForSingleObject(ev, 0), WAIT_OBJECT_0);
+	CHECK(wo.Internal == 0 && wo.InternalHigh == 6);
+	got = NULL;
+	CHECK(GetQueuedCompletionStatus(port, &bytes, &key, &got, 0));
+	CHECK(bytes == 6 && key == 5 && got == &wo);
+	char rb[4] = { 0 };
+	OVERLAPPED ro = { .Offset = 2 };
+	CHECK(ReadFile(f, rb, 3, &n, &ro));
+	CHECK(GetQueuedCompletionStatus(port, &bytes, &key, &got, 0));
+	CHECK(bytes == 3 && key == 5 && got == &ro && !memcmp(rb, "cde", 3));
+	/* The event handle's low bit asks for no packet. */
+	ResetEvent(ev);
+	OVERLAPPED quiet = { .hEvent = (HANDLE)((UINT_PTR)ev | 1) };
+	CHECK(ReadFile(f, rb, 1, &n, &quiet));
+	CHECK_EQ(WaitForSingleObject(ev, 0), WAIT_OBJECT_0);
+	CHECK(!GetQueuedCompletionStatus(port, &bytes, &key, &got, 0));
+	/* A file that isn't overlapped queues nothing. */
+	HANDLE sf = CreateFileA("C:\\iocp2.bin", GENERIC_READ | GENERIC_WRITE, 0,
+				NULL, CREATE_ALWAYS, FILE_FLAG_DELETE_ON_CLOSE,
+				NULL);
+	CHECK(CreateIoCompletionPort(sf, port, 7, 0) == port);
+	OVERLAPPED so = { 0 };
+	CHECK(WriteFile(sf, "x", 1, &n, &so));
+	CHECK(!GetQueuedCompletionStatus(port, &bytes, &key, &got, 0));
+	CHECK(CloseHandle(sf));
+	/* A port made from the file directly; the file keeps it alive. */
+	HANDLE port2 = CreateIoCompletionPort(f, NULL, 8, 0);
+	CHECK(port2 == NULL);	/* f already has a port */
+	HANDLE g = CreateFileA("C:\\iocp3.bin", GENERIC_READ | GENERIC_WRITE, 0,
+			       NULL, CREATE_ALWAYS,
+			       FILE_FLAG_OVERLAPPED | FILE_FLAG_DELETE_ON_CLOSE,
+			       NULL);
+	port2 = CreateIoCompletionPort(g, NULL, 9, 0);
+	CHECK(port2 != NULL);
+	OVERLAPPED go = { 0 };
+	CHECK(WriteFile(g, "y", 1, &n, &go));
+	CHECK(GetQueuedCompletionStatus(port2, &bytes, &key, &got, 0));
+	CHECK(key == 9 && got == &go);
+	CHECK(CloseHandle(port2));
+	CHECK(WriteFile(g, "z", 1, &n, &go));	/* no packet reader; no crash */
+	CHECK(CloseHandle(g));
+	CHECK(CloseHandle(ev));
 	CHECK(CloseHandle(f));
 	/* A handle that isn't a file is refused. */
 	CHECK(CreateIoCompletionPort((HANDLE)0x1230, port, 5, 0) == NULL);
@@ -1890,6 +1944,8 @@ static void test_more_imports(const char *root)
 	CFN(m, int, iswupper, unsigned short);
 	CFN(m, void, _swab, const char *, char *, int);
 	CFN(m, char *, _strtime, char *);
+	CFN(m, double, difftime, time_t, time_t);
+	CFN(m, double, _difftime64, int64_t, int64_t);
 	CFN(m, int, __CppXcptFilter, unsigned, void *);
 	CFN(m, BYTE *, _mbsnbcpy, BYTE *, const BYTE *, size_t);
 	CFN(m, BYTE *, _mbsspnp, const BYTE *, const BYTE *);
@@ -1943,6 +1999,8 @@ static void test_more_imports(const char *root)
 	CHECK(!memcmp(sw, "badc", 4));
 	char tbuf[9];
 	CHECK(_strtime(tbuf) == tbuf && strlen(tbuf) == 8 && tbuf[2] == ':');
+	CHECK(difftime(100, 40) == 60.0 && difftime(40, 100) == -60.0);
+	CHECK(_difftime64(INT64_C(5000000000), 0) == 5e9);
 	CHECK_EQ(__CppXcptFilter(0xE06D7363, NULL), 1);
 	CHECK_EQ(__CppXcptFilter(0xC0000005, NULL), 0);
 	CHECK(*huge > 1e308);
@@ -2055,6 +2113,55 @@ static void test_more_imports(const char *root)
 	mod_free(m);
 }
 
+static int dllexit_calls;
+static void CDECL dllexit_fn(void) { dllexit_calls++; }
+
+/* __dllonexit appends to the DLL's own table, as MinGW's DLL startup
+ * expects, and free ignores a pointer that can't start a block (vfwbw.dll
+ * frees one a byte into its block), as a Windows heap does. */
+static void test_dllonexit_and_bad_free(void)
+{
+	struct module *m = mod_load("msvcrt.dll", NULL);
+	CHECK(m != NULL);
+	if (!m)
+		return;
+	typedef void (CDECL *pfv)(void);
+	CFN(m, void *, __dllonexit, void *, pfv **, pfv **);
+	CFN(m, void *, malloc, size_t);
+	CFN(m, void, free, void *);
+	CFN(m, size_t, _msize, void *);
+
+	pfv *begin = malloc(32 * sizeof(pfv)), *end = begin;
+	CHECK(begin != NULL);
+	if (!begin)
+		return;
+	for (int i = 0; i < 100; i++)
+		CHECK(__dllonexit((void *)dllexit_fn, &begin, &end) == (void *)dllexit_fn);
+	CHECK(end - begin == 100);
+	CHECK(_msize(begin) >= 100 * sizeof(pfv));
+	dllexit_calls = 0;
+	for (pfv *f = end - 1; f >= begin; f--)
+		(*f)();
+	CHECK_EQ(dllexit_calls, 100);
+	free(begin);
+
+	/* With no table yet, one is made. */
+	begin = end = NULL;
+	CHECK(__dllonexit((void *)dllexit_fn, &begin, &end) == (void *)dllexit_fn);
+	CHECK(begin && end == begin + 1 && begin[0] == dllexit_fn);
+	free(begin);
+	CHECK(__dllonexit(NULL, &begin, &end) == NULL);
+
+	char *block = malloc(64);
+	CHECK(block != NULL);
+	free(block + 1);	/* ignored, with a warning */
+	free(block + 13);
+	if (block)
+		block[63] = 1;	/* still the caller's */
+	free(block);
+	mod_free(m);
+}
+
 int main(void)
 {
 	char root[256];
@@ -2086,6 +2193,7 @@ int main(void)
 	test_splitpath();
 	test_mbcs_searchpath(root);
 	test_more_imports(root);
+	test_dllonexit_and_bad_free();
 	test_toolhelp();
 	test_process_memory();
 	test_iocp();

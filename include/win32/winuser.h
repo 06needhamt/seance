@@ -227,6 +227,13 @@ typedef struct tagMONITORINFO {
 #define SM_SAMEDISPLAYFORMAT 81
 #define SM_REMOTESESSION     0x1000
 
+/* SendMessageTimeout flags. */
+#define SMTO_NORMAL             0x0000
+#define SMTO_BLOCK              0x0001
+#define SMTO_ABORTIFHUNG        0x0002
+#define SMTO_NOTIMEOUTIFNOTHUNG 0x0008
+#define SMTO_ERRORONEXIT        0x0020
+
 /* Window messages. */
 #define WM_NULL              0x0000
 #define WM_CREATE            0x0001

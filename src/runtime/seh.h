@@ -34,6 +34,114 @@
  */
 int seh_take_fault(int sig, siginfo_t *si, void *ucontext);
 
+/* Whether the instruction at pc is one only the kernel may run. */
+static inline int seh_privileged_instr(const BYTE *pc)
+{
+	for (int i = 0; i < 15; i++, pc++) {
+		switch (*pc) {
+		case 0x26: case 0x2e: case 0x36: case 0x3e: case 0x64:
+		case 0x65: case 0x66: case 0x67: case 0xf2: case 0xf3:
+			continue;	/* prefixes */
+#ifdef __x86_64__
+		case 0x40: case 0x41: case 0x42: case 0x43:
+		case 0x44: case 0x45: case 0x46: case 0x47:
+		case 0x48: case 0x49: case 0x4a: case 0x4b:
+		case 0x4c: case 0x4d: case 0x4e: case 0x4f:
+			continue;	/* REX, which mov r, cr8 takes */
+#endif
+		case 0xf4:		/* hlt */
+		case 0xfa:		/* cli */
+		case 0xfb:		/* sti */
+			return 1;
+		case 0x0f:
+			switch (pc[1]) {
+			case 0x06:	/* clts */
+			case 0x08:	/* invd */
+			case 0x09:	/* wbinvd */
+			case 0x20: case 0x21: case 0x22: case 0x23: /* mov cr, dr */
+			case 0x30:	/* wrmsr */
+			case 0x32:	/* rdmsr */
+				return 1;
+			case 0x00:	/* lldt, ltr */
+				return ((pc[2] >> 3) & 7) == 2 || ((pc[2] >> 3) & 7) == 3;
+			case 0x01: {	/* lgdt, lidt, lmsw, invlpg */
+				int reg = (pc[2] >> 3) & 7;
+				if (reg == 6)
+					return 1;
+				return (pc[2] & 0xc0) != 0xc0 &&
+				       (reg == 2 || reg == 3 || reg == 7);
+			}
+			}
+			return 0;
+		default:
+			return 0;
+		}
+	}
+	return 0;
+}
+
+/*
+ * The exception Windows reports for a hardware fault, from the signal and
+ * the CPU's trap number and error code (as Wine has them). *pc and *eflags
+ * are the context's: a breakpoint is reported at itself, and a single step
+ * with the trap flag clear.
+ */
+static inline void seh_fault_record(EXCEPTION_RECORD *rec, int sig,
+				    const siginfo_t *si, unsigned long trapno,
+				    unsigned long err, ULONG_PTR *pc,
+				    DWORD *eflags)
+{
+	rec->ExceptionAddress = (void *)*pc;
+	switch (sig) {
+	case SIGSEGV:
+	case SIGBUS:
+		rec->ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
+		rec->NumberParameters = 2;
+		if (trapno == 13) {
+			/*
+			 * A general-protection fault: an instruction only the
+			 * kernel may run, or one it refuses ("int 1", a
+			 * non-canonical address), which Windows reports as
+			 * reading -1.
+			 */
+			if (!err && seh_privileged_instr((const BYTE *)*pc)) {
+				rec->ExceptionCode = EXCEPTION_PRIV_INSTRUCTION;
+				rec->NumberParameters = 0;
+			} else {
+				rec->ExceptionInformation[1] = (ULONG_PTR)-1;
+			}
+			break;
+		}
+		/* bit 1 of the page-fault error code: 1 for a write. */
+		rec->ExceptionInformation[0] = (err & 2) ? 1 : 0;
+		rec->ExceptionInformation[1] = (ULONG_PTR)si->si_addr;
+		break;
+	case SIGILL:
+		rec->ExceptionCode = EXCEPTION_ILLEGAL_INSTRUCTION;
+		break;
+	case SIGTRAP:
+		if (trapno == 1 || (trapno != 3 && si->si_code == TRAP_TRACE)) {
+			/* The trap flag, or icebp (F1): past the instruction. */
+			rec->ExceptionCode = EXCEPTION_SINGLE_STEP;
+			*eflags &= ~0x100u;
+		} else {
+			/*
+			 * int3, which Windows reports at the breakpoint itself
+			 * (a handler steps over it with Eip++); "int 3" (CD 03)
+			 * gets the same, one byte back, as there.
+			 */
+			rec->ExceptionCode = EXCEPTION_BREAKPOINT;
+			rec->NumberParameters = 1;
+			(*pc)--;
+			rec->ExceptionAddress = (void *)*pc;
+		}
+		break;
+	default:
+		rec->ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
+		break;
+	}
+}
+
 /* RaiseException, RtlUnwind, and Set/UnhandledExceptionFilter, exported by
  * kernel32.dll (RtlUnwind is also exported, as a forward, by ntdll.dll). */
 void WINAPI seh_RaiseException(DWORD code, DWORD flags, DWORD nargs,

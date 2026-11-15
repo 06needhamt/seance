@@ -586,8 +586,9 @@ static int decode_com(const char *target, const CLSID *selected,
 	in->biSizeImage = largest;
 	HRESULT hr = xform_open(target, selected, 0, 0, &x, NULL);
 	if (FAILED(hr)) {
-		fprintf(stderr, "seance: cannot open a unique decoder in %s (%s)\n",
-			target, dshow_hr_name(hr, name));
+		fprintf(stderr, "seance: cannot open a unique decoder in %s "
+			"(%s)%s\n", target, dshow_hr_name(hr, name),
+			xform_open_note());
 		goto done;
 	}
 	xform_set_accept(x, com_accept, &sink);

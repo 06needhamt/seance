@@ -6,6 +6,7 @@
 #include "loader/modules.h"
 #include "runtime/runtime.h"
 #include "win32/codepage.h"
+#include "win32/internal.h"
 #include "test.h"
 
 static struct module *dll;
@@ -196,6 +197,50 @@ static void test_wide(void)
 	WCHAR *unc = utf8_to_utf16_dup("\\\\s\\x");
 	CHECK(PathIsUNCW(unc) && !PathIsUNCW(dir));
 	free(unc); free(dir); free(rel); free(rooted); free(abs);
+
+	/* As scmpack.dll calls it from its DllMain. */
+	FN(BOOL, PathAppendW, LPWSTR, LPCWSTR);
+	WCHAR *base = utf8_to_utf16_dup("C:\\Program Files");
+	WCHAR *sub = utf8_to_utf16_dup("\\SMV\\pack.dat");
+	memcpy(out, base, (wstrlen(base) + 1) * sizeof(WCHAR));
+	CHECK(PathAppendW(out, sub));
+	a = utf16_to_utf8_dup(out);
+	CHECK_STR(a, "C:\\Program Files\\SMV\\pack.dat");
+	free(a);
+	for (int i = 0; i < MAX_PATH - 2; i++)
+		out[i] = 'x';
+	out[MAX_PATH - 2] = 0;
+	CHECK(!PathAppendW(out, sub) && wstrlen(out) == MAX_PATH - 2);
+	/* The result is canonicalised, as Windows does. */
+	WCHAR *up = utf8_to_utf16_dup("C:\\a\\b");
+	WCHAR *upr = utf8_to_utf16_dup("..\\c\\.\\d");
+	memcpy(out, up, (wstrlen(up) + 1) * sizeof(WCHAR));
+	CHECK(PathAppendW(out, upr));
+	a = utf16_to_utf8_dup(out);
+	CHECK_STR(a, "C:\\a\\c\\d");
+	free(a); free(up); free(upr);
+	free(base); free(sub);
+
+	FN(BOOL, PathStripToRootA, LPSTR);
+	FN(BOOL, PathStripToRootW, LPWSTR);
+	char ra[64];
+	strcpy(ra, "C:\\a\\b.txt");
+	CHECK(PathStripToRootA(ra));
+	CHECK_STR(ra, "C:\\");
+	strcpy(ra, "\\\\server\\share\\x\\y");
+	CHECK(PathStripToRootA(ra));
+	CHECK_STR(ra, "\\\\server\\share");
+	strcpy(ra, "\\dir\\f");
+	CHECK(PathStripToRootA(ra));
+	CHECK_STR(ra, "\\");
+	strcpy(ra, "rel\\f");
+	CHECK(!PathStripToRootA(ra));
+	CHECK_STR(ra, "rel\\f");
+	WCHAR *wp = utf8_to_utf16_dup("D:\\\u00e9t\u00e9\\f");
+	CHECK(PathStripToRootW(wp));
+	a = utf16_to_utf8_dup(wp);
+	CHECK_STR(a, "D:\\");
+	free(a); free(wp);
 }
 
 /* kernelbase.dll: kernel32's functions and shlwapi's path ones. */

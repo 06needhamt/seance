@@ -6,6 +6,7 @@
 #include <time.h>
 
 #include "win32/handle.h"
+#include "win32/k32.h"
 #include "win32/internal.h"
 
 #define MAX_HANDLES 65536
@@ -213,11 +214,53 @@ void wait_deadline(DWORD timeout_ms, struct timespec *deadline)
 	}
 }
 
+/* The objects this thread's current wait holds references to, so that a
+ * thread TerminateThread ends inside the wait still releases them. */
+static __thread struct kobject *const *held;
+static __thread DWORD nheld;
+
+void wait_hold(struct kobject *const *objs, DWORD n)
+{
+	held = objs;
+	nheld = n;
+}
+
+static __thread void (*term_undo)(void *);
+static __thread void *term_undo_ctx;
+
+void wait_on_terminate(void (*undo)(void *ctx), void *ctx)
+{
+	term_undo = undo;
+	term_undo_ctx = ctx;
+}
+
+void wait_terminate_undo(void)
+{
+	void (*undo)(void *) = term_undo;
+
+	term_undo = NULL;
+	if (undo)
+		undo(term_undo_ctx);
+}
+
+void wait_release_held(void)
+{
+	DWORD n = nheld;
+
+	nheld = 0;
+	for (DWORD i = 0; i < n; i++)
+		kobj_unref(held[i]);
+}
+
 int wait_block(const struct timespec *deadline)
 {
+	/* Before sleeping too: a request made while this thread was busy
+	 * elsewhere may have no wake left to follow it. */
+	thread_wake_check();
 	int r = deadline ?
 		pthread_cond_timedwait(&wait_cond, &wait_mutex, deadline) :
 		pthread_cond_wait(&wait_cond, &wait_mutex);
+	thread_wake_check();
 	return r == ETIMEDOUT ? -1 : 0;
 }
 

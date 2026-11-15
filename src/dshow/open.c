@@ -6,9 +6,11 @@
 #include "dshow/discover.h"
 #include "dshow/dshow.h"
 #include "loader/modules.h"
+#include "win32/ole.h"
 
 struct dshow_filter {
 	struct module *module;
+	int com;		/* ole_host_enter() initialised COM */
 };
 
 HRESULT dshow_filter_open(const char *path, const CLSID *selected, int encoder,
@@ -65,6 +67,9 @@ HRESULT dshow_filter_create(const char *path, const CLSID *clsid,
 		free(s);
 		return E_FAIL;
 	}
+	/* A filter may make COM objects of its own as it is created
+	 * (the LEAD encoders do); a real host has COM up by then. */
+	s->com = ole_host_enter();
 	LPFNGETCLASSOBJECT get = (LPFNGETCLASSOBJECT)mod_get_proc(
 		s->module, "DllGetClassObject");
 	IClassFactory *factory = NULL;
@@ -77,6 +82,8 @@ HRESULT dshow_filter_create(const char *path, const CLSID *clsid,
 		factory->lpVtbl->Release(factory);
 	if (FAILED(hr)) {
 		*filter = NULL;
+		if (s->com)
+			ole_host_leave();
 		mod_free(s->module);
 		free(s);
 		return hr;
@@ -90,6 +97,8 @@ void dshow_filter_close(struct dshow_filter *server, IBaseFilter *filter)
 	if (filter)
 		filter->lpVtbl->Release(filter);
 	if (server) {
+		if (server->com)
+			ole_host_leave();
 		mod_free(server->module);
 		free(server);
 	}

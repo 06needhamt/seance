@@ -223,6 +223,15 @@ static void walk_chain(struct win_teb *teb, EXCEPTION_RECORD *rec, CONTEXT *ctx,
 			seh_call_handler(frame->Handler, rec, frame, ctx, NULL);
 
 		if (d == ExceptionContinueExecution) {
+			if (vfw_trace_enabled) {
+				char h[160];
+				if (!mod_describe_address_try((void *)frame->Handler,
+							      h, sizeof(h)))
+					snprintf(h, sizeof(h), "%p",
+						 (void *)frame->Handler);
+				TRACE("handler %s: continue at %#lx",
+				      h, (unsigned long)ctx->Eip);
+			}
 			/*
 			 * Leaving SEH dispatch for good: resume_context()
 			 * never returns here, so this cannot be left to a
@@ -298,7 +307,8 @@ static void __attribute__((noreturn)) seh_run_chain(void)
 		resume_context(&ctx);
 
 	crash_report_and_die(sig, (const void *)(uintptr_t)ctx.Eip,
-			     (const void *)(uintptr_t)rec.ExceptionInformation[1]);
+			     (const void *)(uintptr_t)rec.ExceptionInformation[1],
+			     (const void *)(uintptr_t)ctx.Esp);
 }
 
 int seh_take_fault(int sig, siginfo_t *si, void *ucontext)
@@ -333,43 +343,15 @@ int seh_take_fault(int sig, siginfo_t *si, void *ucontext)
 	pending.ctx.SegSs = (DWORD)g[REG_SS];
 
 	memset(&pending.rec, 0, sizeof(pending.rec));
-	pending.rec.ExceptionAddress = (void *)(uintptr_t)pending.ctx.Eip;
-	switch (sig) {
-	case SIGSEGV:
-	case SIGBUS:
-		pending.rec.ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
-		pending.rec.NumberParameters = 2;
-		/* bit 1 of the page-fault error code: 1 for a write. */
-		pending.rec.ExceptionInformation[0] = (g[REG_ERR] & 2) ? 1 : 0;
-		pending.rec.ExceptionInformation[1] = (DWORD_PTR)(uintptr_t)si->si_addr;
-		break;
-	case SIGILL:
-		pending.rec.ExceptionCode = EXCEPTION_ILLEGAL_INSTRUCTION;
-		break;
-	case SIGFPE:
+	ULONG_PTR pc = pending.ctx.Eip;
+	if (sig == SIGFPE) {
+		pending.rec.ExceptionAddress = (void *)pc;
 		pending.rec.ExceptionCode = code_from_fpe(si->si_code);
-		break;
-	case SIGTRAP:
-		if (si->si_code == TRAP_TRACE) {
-			/* The trap flag: past the instruction, flag cleared. */
-			pending.rec.ExceptionCode = EXCEPTION_SINGLE_STEP;
-			pending.ctx.EFlags &= ~0x100u;
-		} else {
-			/*
-			 * int3, which Windows reports at the breakpoint
-			 * itself (a handler steps over it with Eip++); "int 3"
-			 * (CD 03) gets the same, one byte back, as there.
-			 */
-			pending.rec.ExceptionCode = EXCEPTION_BREAKPOINT;
-			pending.rec.NumberParameters = 1;
-			pending.ctx.Eip--;
-			pending.rec.ExceptionAddress =
-				(void *)(uintptr_t)pending.ctx.Eip;
-		}
-		break;
-	default:
-		pending.rec.ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
-		break;
+	} else {
+		seh_fault_record(&pending.rec, sig, si, (unsigned long)g[REG_TRAPNO],
+				 (unsigned long)g[REG_ERR], &pc,
+				 (DWORD *)&pending.ctx.EFlags);
+		pending.ctx.Eip = (DWORD)pc;
 	}
 
 	/* Reserve some room below the faulting stack, as the CPU itself

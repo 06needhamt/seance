@@ -680,6 +680,9 @@ static HRESULT connect_output(struct dshow_host *h, const AM_MEDIA_TYPE *out) {
     AM_MEDIA_TYPE *mt = NULL;
     HRESULT hr = E_FAIL;
     while (FAILED(hr) && dshow_call_enum_media_types_next(e, &mt) == S_OK) {
+      TRACE("dshow: the output offers subtype %08lx, format type %08lx, "
+            "%lu format bytes", (unsigned long)mt->subtype.Data1,
+            (unsigned long)mt->formattype.Data1, (unsigned long)mt->cbFormat);
       if (matches_partial(mt, out)) {
         hr = dshow_call_pin_connect(h->output, &h->sink.pin, mt);
         /* A filter that failed after we took the connection may not undo it. */

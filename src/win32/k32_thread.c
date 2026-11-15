@@ -3,6 +3,9 @@
  * kernel32: threads, TLS and FLS slots, sleeping, process exit.
  */
 #include <errno.h>
+#include <link.h>
+#include <signal.h>
+#include <ucontext.h>
 #include <pthread.h>
 #include <sched.h>
 #include <setjmp.h>
@@ -42,7 +45,16 @@ struct thread {
 	sigjmp_buf exit_jump;		/* ExitThread returns here */
 	int can_jump;
 	HANDLE close_on_exit;		/* _beginthread's handle */
+
+	/* TerminateThread: asked to end, with this code. */
+	pthread_t pt;
+	int terminate;
+	DWORD term_code;
+	int in_routine;			/* past the point where it checks */
 };
+
+/* What thread_main's exit_jump is given by TerminateThread (ExitThread: 1). */
+#define JUMP_TERMINATED 2
 
 /* The calling thread's object: one we created, or made on demand. */
 static _Thread_local struct thread *self;
@@ -104,8 +116,14 @@ HANDLE thread_handle_current(void)
 static PFLS_CALLBACK_FUNCTION fls_callbacks[TEB_TLS_MAX];
 static pthread_mutex_t fls_lock = PTHREAD_MUTEX_INITIALIZER;
 
+void (*thread_end_hook)(void);
+
 void thread_exit_cleanup(void)
 {
+	void (*hook)(void) = __atomic_load_n(&thread_end_hook, __ATOMIC_ACQUIRE);
+
+	if (hook)
+		hook();
 	for (DWORD i = 0; i < TEB_TLS_MAX; i++) {
 		pthread_mutex_lock(&fls_lock);
 		PFLS_CALLBACK_FUNCTION cb = fls_callbacks[i];
@@ -152,13 +170,21 @@ static void *thread_main(void *arg)
 	}
 	__atomic_store_n(&t->tid, teb_current()->UniqueThread, __ATOMIC_RELEASE);
 
+	t->pt = pthread_self();
 	pthread_mutex_lock(&t->gate_lock);
 	while (t->suspend_count > 0)
 		pthread_cond_wait(&t->gate, &t->gate_lock);
 	pthread_mutex_unlock(&t->gate_lock);
 
-	TRACE("thread %u starting at %p(%p)", t->tid, (void *)t->start, t->param);
-	if (!sigsetjmp(t->exit_jump, 0)) {
+	int jumped = 0, terminated = 0;
+	if (__atomic_load_n(&t->terminate, __ATOMIC_ACQUIRE)) {
+		/* Terminated before it ran: its routine never does. */
+		TRACE("thread %u terminated before starting", t->tid);
+		code = t->term_code;
+		terminated = 1;
+	} else if (!(jumped = sigsetjmp(t->exit_jump, 0))) {
+		TRACE("thread %u starting at %p(%p)", t->tid, (void *)t->start,
+		      t->param);
 		t->can_jump = 1;
 		mod_thread_notify(DLL_THREAD_ATTACH);
 		/*
@@ -168,13 +194,39 @@ static void *thread_main(void *arg)
 		 * frame.
 		 */
 		uintptr_t arg = (uintptr_t)t->param;
-		code = (DWORD)gate_call((const void *)t->start, 1, &arg);
+		/* Ordered against TerminateThread's store and load. */
+		__atomic_store_n(&t->in_routine, 1, __ATOMIC_SEQ_CST);
+		if (__atomic_load_n(&t->terminate, __ATOMIC_SEQ_CST)) {
+			TRACE("thread %u terminated before starting", t->tid);
+			code = t->term_code;
+			terminated = 1;
+		} else {
+			code = (DWORD)gate_call((const void *)t->start, 1, &arg);
+		}
 	} else {
-		code = t->exit_code;	/* set by ExitThread */
+		code = t->exit_code;	/* set by ExitThread or TerminateThread */
+		terminated = jumped == JUMP_TERMINATED;
 	}
 	t->can_jump = 0;
 
-	thread_finish(t, code, 1);
+	if (terminated) {
+		/* As Windows: no FLS callbacks, and no DLL_THREAD_DETACH (the
+		 * DLL ending it may well be in its DllMain, holding the loader
+		 * lock that sending one would wait for). Its message queue
+		 * ends first, so a sender who sees it done gets the answer
+		 * for an ended owner. */
+		void (*hook)(void) = __atomic_load_n(&thread_end_hook,
+						     __ATOMIC_ACQUIRE);
+		if (hook)
+			hook();
+		wait_lock();
+		t->exit_code = code;
+		t->done = 1;
+		wait_broadcast();
+		wait_unlock();
+	} else {
+		thread_finish(t, code, 1);
+	}
 	if (t->close_on_exit)
 		handle_close(t->close_on_exit);
 	self = NULL;
@@ -354,11 +406,176 @@ HANDLE thread_create_ex(SIZE_T stack, LPTHREAD_START_ROUTINE start, LPVOID param
 		     (flags & THREAD_CLOSE_ON_EXIT) != 0);
 }
 
+/*
+ * TerminateThread. A DLL ends its worker threads so as it unloads (in
+ * DllMain), and its code is unmapped straight after, so the thread is
+ * stopped before this returns where that can be done safely:
+ *  - one that hasn't started its routine never does;
+ *  - one running the DLL's code is interrupted by SIGTERM_THREAD, whose
+ *    handler goes to the thread's exit, as ExitThread would;
+ *  - one in the harness's own code (waiting, sleeping) ends when it next
+ *    wakes there, which it is made to; it isn't interrupted where it may
+ *    hold a lock.
+ * Like Windows, this runs none of the thread's cleanup.
+ */
+#define SIGTERM_THREAD (SIGRTMIN + 3)
+
+static void on_terminate(int sig, siginfo_t *info, void *ctx);
+static int add_host_text(struct dl_phdr_info *info, size_t size, void *ctx);
+
+static void terminate_init(void)
+{
+	struct sigaction sa;
+
+	/*
+	 * The table of host code ranges is made once, before the handler
+	 * that reads it is installed, and never changes after.
+	 */
+	dl_iterate_phdr(add_host_text, NULL);
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_sigaction = on_terminate;
+	sa.sa_flags = SA_SIGINFO;
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGTERM_THREAD, &sa, NULL);
+}
+
+/* The executable ranges of the harness and its libraries. */
+static struct { uintptr_t lo, hi; } host_text[64];
+static int nhost_text;
+
+static int add_host_text(struct dl_phdr_info *info, size_t size, void *ctx)
+{
+	for (int i = 0; i < info->dlpi_phnum; i++) {
+		const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
+		if (ph->p_type != PT_LOAD || !(ph->p_flags & PF_X) ||
+		    nhost_text == (int)(sizeof(host_text) / sizeof(*host_text)))
+			continue;
+		host_text[nhost_text].lo = info->dlpi_addr + ph->p_vaddr;
+		host_text[nhost_text].hi = info->dlpi_addr + ph->p_vaddr +
+					   ph->p_memsz;
+		nhost_text++;
+	}
+	return 0;
+}
+
+static int in_host_text(uintptr_t pc)
+{
+	for (int i = 0; i < nhost_text; i++)
+		if (pc >= host_text[i].lo && pc < host_text[i].hi)
+			return 1;
+	return 0;
+}
+
+static void end_terminated(struct thread *t)
+{
+	t->exit_code = t->term_code;
+	siglongjmp(t->exit_jump, JUMP_TERMINATED);
+}
+
+static void on_terminate(int sig, siginfo_t *info, void *ctx)
+{
+	struct thread *t = self;
+	const ucontext_t *uc = ctx;
+
+	if (!t || !__atomic_load_n(&t->terminate, __ATOMIC_ACQUIRE) ||
+	    !t->can_jump || !__atomic_load_n(&t->in_routine, __ATOMIC_ACQUIRE))
+		return;
+#if defined(__x86_64__)
+	uintptr_t pc = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+#else
+	uintptr_t pc = (uintptr_t)uc->uc_mcontext.gregs[REG_EIP];
+#endif
+	if (in_host_text(pc))
+		return;		/* it ends when it wakes in thread_wake_check */
+	end_terminated(t);
+}
+
+void (*thread_wake_hook)(void);
+
+int thread_terminate_pending(void)
+{
+	struct thread *t = self;
+
+	return t && t->can_jump &&
+	       __atomic_load_n(&t->in_routine, __ATOMIC_ACQUIRE) &&
+	       __atomic_load_n(&t->terminate, __ATOMIC_SEQ_CST);
+}
+
+/* In a sleep, woken: ends the thread if TerminateThread asked. */
+void thread_terminated_check(void)
+{
+	if (thread_terminate_pending())
+		end_terminated(self);
+}
+
+void thread_wake_check(void)
+{
+	struct thread *t = self;
+
+	if (t && t->can_jump && __atomic_load_n(&t->in_routine, __ATOMIC_ACQUIRE) &&
+	    __atomic_load_n(&t->terminate, __ATOMIC_ACQUIRE)) {
+		wait_terminate_undo();
+		wait_unlock();
+		wait_release_held();
+		end_terminated(t);
+	}
+}
+
 WINFN(BOOL) k32_TerminateThread(HANDLE h, DWORD code)
 {
-	TRACE("TerminateThread(%p, %u) is not supported", h, code);
-	win_set_error(ERROR_NOT_SUPPORTED);
-	return FALSE;
+	static pthread_once_t once = PTHREAD_ONCE_INIT;
+	struct thread *t = thread_from(h);
+
+	if (!t)
+		return FALSE;
+	if (t == self) {
+		kobj_unref(&t->obj);
+		/* Ending itself, it still runs none of its cleanup. */
+		if (t->can_jump) {
+			t->term_code = code;
+			end_terminated(t);
+		}
+		thread_exit(code);
+	}
+	TRACE("TerminateThread(%p, %u): thread %u", h, code, t->tid);
+	pthread_once(&once, terminate_init);
+
+	t->term_code = code;
+	__atomic_store_n(&t->terminate, 1, __ATOMIC_SEQ_CST);
+	if (!__atomic_load_n(&t->in_routine, __ATOMIC_SEQ_CST)) {
+		/* It will see the request before it runs its routine; it may
+		 * be waiting for the loader lock this thread holds. */
+		pthread_mutex_lock(&t->gate_lock);
+		t->suspend_count = 0;
+		pthread_cond_broadcast(&t->gate);
+		pthread_mutex_unlock(&t->gate_lock);
+		kobj_unref(&t->obj);
+		return TRUE;
+	}
+	pthread_mutex_lock(&t->gate_lock);
+	t->suspend_count = 0;
+	pthread_cond_broadcast(&t->gate);
+	pthread_mutex_unlock(&t->gate_lock);
+
+	/* Up to 2 s for it to end, asking again as it may have been between
+	 * places where it looks. */
+	for (int i = 0; i < 200 && !__atomic_load_n(&t->done, __ATOMIC_ACQUIRE);
+	     i++) {
+		pthread_kill(t->pt, SIGTERM_THREAD);
+		wait_lock();
+		wait_broadcast();
+		wait_unlock();
+		void (*wake)(void) = __atomic_load_n(&thread_wake_hook,
+						     __ATOMIC_ACQUIRE);
+		if (wake)
+			wake();
+		struct timespec ts = { 0, 10 * 1000000L };
+		nanosleep(&ts, NULL);
+	}
+	if (!__atomic_load_n(&t->done, __ATOMIC_ACQUIRE))
+		TRACE("TerminateThread: thread %u is still running", t->tid);
+	kobj_unref(&t->obj);
+	return TRUE;
 }
 
 WINFN(HANDLE) k32_GetCurrentThread(void) { return PSEUDO_THREAD; }
@@ -429,12 +646,14 @@ WINFN(void) k32_Sleep(DWORD ms)
 		return;
 	}
 	if (ms == INFINITE) {
-		for (;;)
+		for (;;) {
 			pause();
+			thread_terminated_check();
+		}
 	}
 	struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L };
 	while (nanosleep(&ts, &ts) && errno == EINTR)
-		;
+		thread_terminated_check();
 }
 
 WINFN(DWORD) k32_SleepEx(DWORD ms, BOOL alertable)

@@ -245,7 +245,7 @@ WINFN(SAFEARRAY *) oa_SafeArrayCreateEx(VARTYPE vt, UINT dims,
 	return psa;
 }
 
-WINFN(SAFEARRAY *) oa_SafeArrayCreateVector(VARTYPE vt, LONG lbound,
+SAFEARRAY *STUB_WINAPI oa_SafeArrayCreateVector(VARTYPE vt, LONG lbound,
 					    ULONG count)
 {
 	SAFEARRAYBOUND b = { count, lbound };

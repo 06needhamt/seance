@@ -166,6 +166,86 @@ static void check_parsed(const struct qz_filter *f)
 	CHECK_EQ(out->nmediums, 0);
 }
 
+/* IMoniker's methods by vtable slot: 2 Release, 9 BindToStorage. */
+typedef ULONG (WINAPI *release_fn)(void *);
+typedef HRESULT (WINAPI *bind_fn)(IMoniker *, void *, IMoniker *, REFIID,
+				  void **);
+
+static void check_moniker(IMoniker *mon, const char *path)
+{
+	void **vtbl = *(void ***)mon;
+	IPropertyBag *bag = NULL;
+	static const IID iid_stream = { 0x0000000c, 0, 0,
+		{ 0xc0, 0, 0, 0, 0, 0, 0, 0x46 } };
+
+	CHECK_EQ(((bind_fn)vtbl[9])(mon, NULL, NULL, &iid_stream,
+				    (void **)&bag), E_NOINTERFACE);
+	CHECK_EQ(((bind_fn)vtbl[9])(mon, NULL, NULL, &IID_IPropertyBag,
+				    (void **)&bag), S_OK);
+	if (bag) {
+		/* A plain string, as racodec passes, is taken as a BSTR. */
+		static const WCHAR rasc[] = { 'R', 'A', 'S', 'C', 0 };
+		VARIANT v;
+		WCHAR *fcc = wide("FccHandler"), *num = wide("Number");
+		memset(&v, 0, sizeof(v));
+		v.vt = VT_BSTR;
+		v.bstrVal = (BSTR)rasc;
+		CHECK_EQ(bag->lpVtbl->Write(bag, fcc, &v), S_OK);
+		v.vt = VT_I4;
+		v.lVal = 42;
+		CHECK_EQ(bag->lpVtbl->Write(bag, num, &v), S_OK);
+		v.vt = VT_DATE;
+		CHECK_EQ(bag->lpVtbl->Write(bag, num, &v), E_INVALIDARG);
+		char *s = sz_value(path, "FccHandler");
+		CHECK_STR(s, "RASC");
+		free(s);
+		DWORD d = 0;
+		CHECK(dword_value(path, "Number", &d) && d == 42);
+		/* Read back as the registry types say. */
+		memset(&v, 0, sizeof(v));
+		CHECK_EQ(bag->lpVtbl->Read(bag, num, &v, NULL), S_OK);
+		CHECK(v.vt == VT_I4 && v.lVal == 42);
+		memset(&v, 0, sizeof(v));
+		CHECK_EQ(bag->lpVtbl->Read(bag, fcc, &v, NULL), S_OK);
+		CHECK(v.vt == VT_BSTR && v.bstrVal && !memcmp(v.bstrVal, rasc,
+							       sizeof(rasc)));
+		struct module *oa = mod_load("oleaut32.dll", NULL);
+		if (oa) {
+			FN(oa, void, SysFreeString, BSTR);
+			if (v.vt == VT_BSTR)
+				SysFreeString(v.bstrVal);
+			/*
+			 * A type asked for, with the rest of the VARIANT unset:
+			 * what is there isn't freed. A locked array there makes
+			 * clearing it fail, as a stale pointer would crash.
+			 */
+			FN(oa, HRESULT, SafeArrayDestroy, SAFEARRAY *);
+			SAFEARRAY stale;
+			memset(&stale, 0, sizeof(stale));
+			stale.cDims = 1;
+			stale.cLocks = 1;
+			memset(&v, 0, sizeof(v));
+			v.vt = VT_ARRAY | VT_UI1;
+			v.parray = &stale;
+			CHECK_EQ(bag->lpVtbl->Read(bag, fcc, &v, NULL), S_OK);
+			CHECK(v.vt == (VT_ARRAY | VT_UI1) && v.parray &&
+			      v.parray != &stale);
+			if (v.parray && v.parray != &stale)
+				SafeArrayDestroy(v.parray);
+			CHECK_EQ(stale.cLocks, 1);
+			mod_free(oa);
+		}
+		WCHAR *none = wide("Missing");
+		memset(&v, 0, sizeof(v));
+		CHECK(FAILED(bag->lpVtbl->Read(bag, none, &v, NULL)));
+		free(none);
+		free(fcc);
+		free(num);
+		bag->lpVtbl->Release(bag);
+	}
+	CHECK_EQ(((release_fn)vtbl[2])(mon), 0);
+}
+
 static void test_register2(void)
 {
 	IFilterMapper2 *fm = new_mapper(&CLSID_FilterMapper2);
@@ -179,9 +259,13 @@ static void test_register2(void)
 
 	CHECK_EQ(fm->lpVtbl->RegisterFilter(fm, &clsid_filter, name, &mon,
 					    NULL, NULL, &rf2), S_OK);
-	CHECK(mon == NULL);
 
 	const char *path = CLASSES "CLSID\\" LEGACY "\\Instance\\" FILTER;
+	/* The registration's device moniker: its property bag adds values to
+	 * the key, as a video compressor adds FccHandler. */
+	CHECK(mon != NULL && mon != (IMoniker *)&rf2);
+	if (mon && mon != (IMoniker *)&rf2)
+		check_moniker(mon, path);
 	char *s = sz_value(path, "FriendlyName");
 	CHECK_STR(s, "Test Decoder");
 	free(s);

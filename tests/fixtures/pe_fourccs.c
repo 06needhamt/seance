@@ -3,11 +3,18 @@
  * FOURCCs kept where codecs keep them, for the search of a DLL for its
  * handlers: one compared with ('CMPA'), one stored by its code ('MOVB'),
  * a string that begins with one ('STRC codec'), and, in its version
- * resource, a word that is one ("seance VERD fixture").
+ * resource, a word that is one ("seance VERD fixture"). And words that
+ * aren't handlers though they look like one: a month name of the C
+ * runtime's locale table ('July') and a debug directory's signature ('RSDS').
  */
 #include "fixture.h"
 
 static const char description[] = "STRC codec";
+
+__attribute__((used)) static const DWORD not_handlers[5] = {
+	0, 'y' << 24 | 'l' << 16 | 'u' << 8 | 'J',
+	0, 'S' << 24 | 'D' << 16 | 'S' << 8 | 'R', 0
+};
 
 EXPORT const char *fourccs_description(void)
 {

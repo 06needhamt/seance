@@ -5,6 +5,9 @@
  * class through CoCreateInstance (which finds this DLL by the
  * InprocServer32 key the test registers) and reads its own version
  * resource. It returns 0, or the number of the first check that failed.
+ * com_get() asks for a class's factory from inside this DLL, through
+ * CoGetClassObject (how 0) or CoCreateInstance (how 1), and returns the
+ * HRESULT: a server registered by bare name is looked for next to it.
  */
 #include "fixture.h"
 
@@ -218,4 +221,17 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
 	if (reason == DLL_PROCESS_ATTACH)
 		self = inst;
 	return TRUE;
+}
+
+HRESULT com_get(const GUID *clsid, int how)
+{
+	void *p = NULL;
+	HRESULT hr = how ?
+		CoCreateInstance(clsid, NULL, CLSCTX_INPROC_SERVER,
+				 &iid_unknown, &p) :
+		CoGetClassObject(clsid, CLSCTX_INPROC_SERVER, NULL,
+				 &iid_factory, &p);
+	if (SUCCEEDED(hr) && p)
+		((IUnknown *)p)->lpVtbl->Release((IUnknown *)p);
+	return hr;
 }

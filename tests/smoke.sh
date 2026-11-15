@@ -167,6 +167,24 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		"$work/in.pcm" -o "$work/in.wav" 2>/dev/null
 	$emu "$harness" encode "$f" "$work/in.wav" -o "$work/t.avi" 2>/dev/null
 	$emu "$harness" avi "$work/t.avi" | grep -q "wave format 0x7354"
+	# An encoder registered with no format tag (as Ogg Vorbis encoders
+	# are) is connected; output a file can't hold is named as such.
+	odd=$(VFW_REGISTRY= VFW_ENV_TESTFILTER_AUDIO_ODD=1 $emu "$harness" \
+		encode "$f" "$work/in.wav" -o "$work/odd.avi" 2>&1) && {
+		echo "smoke: an encoder's non-WAVEFORMATEX output was taken" >&2
+		exit 1
+	}
+	case $odd in
+	*"isn't a WAVEFORMATEX"*) ;;
+	*) echo "smoke: odd audio encoder: $odd" >&2; exit 1 ;;
+	esac
+	# A filter that can't be created names the DLL it looked for.
+	missing=$(VFW_ENV_TESTFILTER_MISSING_DLL=1 $emu "$harness" encode "$f" \
+		"$work/in.wav" -o "$work/x.avi" 2>&1) && exit 1
+	case $missing in
+	*"looked for seance_absent_engine.dll, which isn't here"*) ;;
+	*) echo "smoke: missing DLL: $missing" >&2; exit 1 ;;
+	esac
 	for mode in "" SPLIT HOLD FLOAT; do
 		env ${mode:+VFW_ENV_TESTFILTER_AUDIO_$mode=1} $emu "$harness" \
 			decode "$f" "$work/t.avi" -o "$work/out.pcm" 2>/dev/null
@@ -347,6 +365,14 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	VFW_ENV_TESTCODEC_NEEDS_DLL=4 $emu "$harness" encode \
 		"$fixtures/testcodec.dll" "$work/v.y4m" -o "$work/x.avi" 2>&1 |
 		grep -q "refused DRV_LOAD; it looked for the registry key HKLM.Software.Seance Test.Codec, which isn't set"
+	# And one that opens without it, to fail later, names it then.
+	VFW_ENV_TESTCODEC_NEEDS_DLL=5 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/v.y4m" -o "$work/x.avi" 2>&1 |
+		grep -q "ICM_COMPRESS, frame 0: ICERR_INTERNAL; it looked for the registry key HKLM.Software.Seance Test.Codec, which isn't set"
+	# One that wants the output buffer's biSize set before it fills it in.
+	VFW_ENV_TESTCODEC_SIZED_OUT=1 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/v.y4m" -o "$work/x.avi" \
+		>/dev/null 2>&1
 	# YUV a codec writes upside down: RGB instead, or turned over.
 	{
 		printf 'YUV4MPEG2 W16 H16 F25:1 Ip A1:1 C420jpeg\nFRAME\n'

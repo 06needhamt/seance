@@ -24,6 +24,8 @@
 #include "runtime/seh.h"
 #include "runtime/teb.h"
 #include "runtime/trap.h"
+#include "win32/codepage.h"
+#include "win32/path.h"
 
 #define MAX_FORWARD_DEPTH 16
 
@@ -33,6 +35,175 @@ static pthread_mutex_t loader_lock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
 
 #define LOCK()   pthread_mutex_lock(&loader_lock)
 #define UNLOCK() pthread_mutex_unlock(&loader_lock)
+
+/*
+ * The PEB's loader data (PEB->Ldr), which code that finds modules without
+ * calling the loader walks: shellcode-style API lookup in packers and
+ * protectors (diavc.ax), for one. Laid out as Windows' PEB_LDR_DATA and
+ * LDR_DATA_TABLE_ENTRY, whose natural alignment gives both the 32-bit and
+ * the 64-bit offsets. Changed only under the loader lock, as on Windows.
+ */
+struct win_list {
+	struct win_list *Flink, *Blink;
+};
+
+struct win_ustring {
+	USHORT Length, MaximumLength;
+	WCHAR *Buffer;
+};
+
+struct ldr_entry {
+	struct win_list InLoadOrderLinks;		/* 0x00  0x00 */
+	struct win_list InMemoryOrderLinks;		/* 0x08  0x10 */
+	struct win_list InInitializationOrderLinks;	/* 0x10  0x20 */
+	void *DllBase;					/* 0x18  0x30 */
+	void *EntryPoint;				/* 0x1c  0x38 */
+	ULONG SizeOfImage;				/* 0x20  0x40 */
+	struct win_ustring FullDllName;			/* 0x24  0x48 */
+	struct win_ustring BaseDllName;			/* 0x2c  0x58 */
+	ULONG Flags;					/* 0x34  0x68 */
+	USHORT LoadCount;				/* 0x38  0x6c */
+	USHORT TlsIndex;				/* 0x3a  0x6e */
+	struct win_list HashLinks;			/* 0x3c  0x70 */
+	ULONG TimeDateStamp;				/* 0x44  0x80 */
+	int in_init;		/* on InInitializationOrder */
+};
+
+struct ldr_data {
+	ULONG Length;					/* 0x00  0x00 */
+	BYTE Initialized;				/* 0x04  0x04 */
+	void *SsHandle;					/* 0x08  0x08 */
+	struct win_list InLoadOrderModuleList;		/* 0x0c  0x10 */
+	struct win_list InMemoryOrderModuleList;	/* 0x14  0x20 */
+	struct win_list InInitializationOrderModuleList; /* 0x1c  0x30 */
+	void *EntryInProgress;				/* 0x24  0x40 */
+};
+
+_Static_assert(offsetof(struct ldr_entry, DllBase) == TEB_OFF(0x18, 0x30),
+	       "LDR_DATA_TABLE_ENTRY layout");
+_Static_assert(offsetof(struct ldr_entry, BaseDllName) == TEB_OFF(0x2c, 0x58),
+	       "LDR_DATA_TABLE_ENTRY layout");
+_Static_assert(offsetof(struct ldr_entry, TimeDateStamp) == TEB_OFF(0x44, 0x80),
+	       "LDR_DATA_TABLE_ENTRY layout");
+_Static_assert(offsetof(struct ldr_data, InInitializationOrderModuleList) ==
+	       TEB_OFF(0x1c, 0x30), "PEB_LDR_DATA layout");
+
+#define LDRP_IMAGE_DLL       0x00000004
+#define LDRP_ENTRY_PROCESSED 0x00004000
+
+static struct ldr_data ldr;
+
+static void list_init(struct win_list *head)
+{
+	head->Flink = head->Blink = head;
+}
+
+static void list_append(struct win_list *head, struct win_list *e)
+{
+	e->Flink = head;
+	e->Blink = head->Blink;
+	head->Blink->Flink = e;
+	head->Blink = e;
+}
+
+static void list_remove(struct win_list *e)
+{
+	e->Blink->Flink = e->Flink;
+	e->Flink->Blink = e->Blink;
+	e->Flink = e->Blink = e;
+}
+
+static int set_ustring(struct win_ustring *u, const char *s)
+{
+	WCHAR *w = utf8_to_utf16_dup(s);
+	size_t n = 0;
+
+	if (!w)
+		return -1;
+	while (w[n])
+		n++;
+	u->Buffer = w;
+	u->Length = (USHORT)(n * sizeof(WCHAR));
+	u->MaximumLength = (USHORT)((n + 1) * sizeof(WCHAR));
+	return 0;
+}
+
+static size_t module_size(const struct module *m);
+static void ldr_seed(void);
+
+/* Puts m on the load- and memory-order lists, and init with init. */
+static void ldr_add(struct module *m, int init)
+{
+	struct ldr_entry *e;
+
+	ldr_seed();	/* which may list m itself, if it is the main image */
+	if (m->ldr || !(e = calloc(1, sizeof(*e))))
+		return;
+	char *full = m->path ? path_to_windows(m->path) : NULL;
+	if (!full && m != main_module) {
+		size_t n = strlen(m->name) + 32;
+		if ((full = malloc(n)))
+			snprintf(full, n, "C:\\WINDOWS\\system32\\%s", m->name);
+	} else if (!full && (full = malloc(32))) {
+		snprintf(full, 32, "C:\\seance.exe");
+	}
+	if (!full || set_ustring(&e->FullDllName, full) ||
+	    set_ustring(&e->BaseDllName, m->name)) {
+		free(full);
+		free(e->FullDllName.Buffer);
+		free(e);
+		return;
+	}
+	free(full);
+	e->DllBase = m->base;
+	e->SizeOfImage = (ULONG)module_size(m);
+	if (m->img) {
+		const struct pe_optional *o = &m->img->nt.OptionalHeader;
+		if (o->AddressOfEntryPoint)
+			e->EntryPoint = m->base + o->AddressOfEntryPoint;
+		e->TimeDateStamp = m->img->nt.FileHeader.TimeDateStamp;
+	}
+	e->Flags = m != main_module ? LDRP_IMAGE_DLL : 0;
+	e->LoadCount = m->pinned || m == main_module ? 0xffff : 1;
+	list_init(&e->HashLinks);
+	list_init(&e->InInitializationOrderLinks);
+	list_append(&ldr.InLoadOrderModuleList, &e->InLoadOrderLinks);
+	list_append(&ldr.InMemoryOrderModuleList, &e->InMemoryOrderLinks);
+	m->ldr = e;
+	if (init && m != main_module) {
+		/* Windows leaves the main image off this one. */
+		list_append(&ldr.InInitializationOrderModuleList,
+			    &e->InInitializationOrderLinks);
+		e->Flags |= LDRP_ENTRY_PROCESSED;
+	}
+}
+
+/* After m's DllMain: it goes on the initialisation-order list. */
+static void ldr_initialized(struct module *m)
+{
+	struct ldr_entry *e = m->ldr;
+
+	if (e && !(e->Flags & LDRP_ENTRY_PROCESSED)) {
+		list_append(&ldr.InInitializationOrderModuleList,
+			    &e->InInitializationOrderLinks);
+		e->Flags |= LDRP_ENTRY_PROCESSED;
+	}
+}
+
+static void ldr_remove(struct module *m)
+{
+	struct ldr_entry *e = m->ldr;
+
+	if (!e)
+		return;
+	list_remove(&e->InLoadOrderLinks);
+	list_remove(&e->InMemoryOrderLinks);
+	list_remove(&e->InInitializationOrderLinks);
+	free(e->FullDllName.Buffer);
+	free(e->BaseDllName.Buffer);
+	free(e);
+	m->ldr = NULL;
+}
 
 static const char *base_name(const char *path)
 {
@@ -477,6 +648,7 @@ static void unload(struct module *m)
 
 	unlink_module(m);
 	forget(m);
+	ldr_remove(m);
 #if defined(__x86_64__)
 	if (m->img && m->base)
 		cxx_forget_image(m->base, m->img->map_len);
@@ -581,6 +753,7 @@ static struct module *load_builtin(const char *name,
 		m->pinned = 1;
 	m->next = modules;
 	modules = m;
+	ldr_add(m, 1);
 	TRACE("loaded built-in %s", name);
 	return m;
 }
@@ -625,6 +798,7 @@ static struct module *load_pe(const char *path)
 		goto fail;
 	}
 	m->base = img->base;
+	ldr_add(m, 0);
 	struct delay_ctx delay = { .m = m };
 	if (pe_bind_imports(img, resolve_import, m) ||
 	    pe_bind_delay_imports(img, resolve_delayed, delay_handle, &delay) ||
@@ -661,6 +835,7 @@ static struct module *load_pe(const char *path)
 		goto fail;
 	}
 	m->attached = 1;
+	ldr_initialized(m);
 	return m;
 
 fail:
@@ -689,6 +864,38 @@ void mod_missing_since(unsigned mark, char *buf, size_t size)
 	noted_since(&missing, mark, buf, size);
 }
 
+/*
+ * Sets up PEB->Ldr the first time a module is listed, as Windows XP has
+ * it: the main image, then ntdll and kernel32 (both pinned).
+ */
+static void ldr_seed(void)
+{
+	static int seeded;
+
+	if (seeded)
+		return;
+	seeded = 1;
+	ldr.Length = sizeof(ldr);
+	ldr.Initialized = 1;
+	list_init(&ldr.InLoadOrderModuleList);
+	list_init(&ldr.InMemoryOrderModuleList);
+	list_init(&ldr.InInitializationOrderModuleList);
+	peb_get()->Ldr = &ldr;
+	/*
+	 * The main image heads the load order, even when mod_main() made it
+	 * first: its ldr_add() is what brought us here, with seeded set.
+	 */
+	struct module *m = mod_main();
+	if (m && !m->ldr)
+		ldr_add(m, 0);
+	static const char *const first[] = { "ntdll.dll", "kernel32.dll" };
+	for (size_t i = 0; i < sizeof(first) / sizeof(first[0]); i++) {
+		const struct builtin_dll *b = builtin_find(first[i]);
+		if (b && !mod_find(first[i]))
+			load_builtin(first[i], b);
+	}
+}
+
 struct module *mod_load(const char *name, struct module *importer)
 {
 	char want[256], path[PATH_MAX];
@@ -699,6 +906,7 @@ struct module *mod_load(const char *name, struct module *importer)
 	module_name(name, want, sizeof(want));
 
 	LOCK();
+	ldr_seed();
 	if ((m = mod_find(want))) {
 		m->refcount++;
 		goto out;
@@ -742,6 +950,7 @@ struct module *mod_main(void)
 			m->attached = 1;
 			main_module = m;
 			peb_get()->ImageBaseAddress = m->base;
+			ldr_add(m, 0);
 		} else if (m) {
 			free(m->name);
 			free(m);

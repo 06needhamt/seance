@@ -30,6 +30,15 @@ HRESULT ole_hglobal_from_stream(IStream *stream, HGLOBAL *out);
 void *ole_taskmem_alloc(SIZE_T size);
 void ole_taskmem_free(void *p);
 
+/*
+ * The harness as a COM client: joins the calling thread to an STA, as a
+ * player or GraphEdit does before it creates a filter or DMO, whose
+ * construction may itself call CoCreateInstance. Returns 1 if this call
+ * initialised COM, to be undone with ole_host_leave() on the same thread.
+ */
+int ole_host_enter(void);
+void ole_host_leave(void);
+
 /* The streams and in-process marshalling (ole_stream.c). */
 extern const struct builtin_export ole_stream_exports[];
 

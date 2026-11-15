@@ -17,6 +17,7 @@
 #include "runtime/crash.h"
 #include "runtime/gate.h"
 #include "runtime/runtime.h"
+#include "runtime/seh.h"
 #include "runtime/teb.h"
 #include "test.h"
 
@@ -337,6 +338,48 @@ static void test_wrong_arch_skipped(void)
 	rmdir(dir);
 }
 
+/* Which instructions count as privileged (#GP in user mode). */
+static void test_privileged_instr(void)
+{
+	static const BYTE hlt[] = { 0xf4 }, mov_cr0[] = { 0x0f, 0x20, 0xc0 },
+		seg_cli[] = { 0x2e, 0xfa }, nop[] = { 0x90 },
+		rex_cr8[] = { 0x44, 0x0f, 0x20, 0xc0 };
+
+	CHECK(seh_privileged_instr(hlt));
+	CHECK(seh_privileged_instr(mov_cr0));
+	CHECK(seh_privileged_instr(seg_cli));
+	CHECK(!seh_privileged_instr(nop));
+#ifdef __x86_64__
+	/* mov rax, cr8: a REX prefix before the opcode. */
+	CHECK(seh_privileged_instr(rex_cr8));
+#else
+	/* On i386 0x44 is inc esp, an instruction of its own. */
+	CHECK(!seh_privileged_instr(rex_cr8));
+#endif
+}
+
+/*
+ * An unpacking stub that binds a missing import through GetProcAddress gets
+ * a trap, as the loader binds it; ordinary code probing for it gets NULL.
+ */
+static void test_unpacker_fixture(void)
+{
+	struct module *m = mod_load(fixture("pe_unpacker.dll"), NULL);
+	CHECK(m != NULL);
+	if (!m) {
+		fprintf(stderr, "  %s\n", vfw_error());
+		return;
+	}
+	int (CDECL *bound)(void) = mod_get_proc(m, "up_bound");
+	int (CDECL *probe)(void) = mod_get_proc(m, "up_probe");
+	CHECK(bound && probe);
+	if (bound && probe) {
+		CHECK_EQ(bound(), 1);
+		CHECK_EQ(probe(), 1);
+	}
+	mod_free(m);
+}
+
 /*
  * A packer's DllMain finds kernel32 from its return address and resolves
  * functions by walking kernel32's exports; a cdecl routine runs as a thread.
@@ -376,6 +419,13 @@ static void test_packer_fixture(void)
 	dword_fn break_step = mod_get_proc(m, "pk_break_step");
 	if (!VFW_SANITIZER_BUILD)
 		CHECK(break_step && break_step() == 1);
+	/* "int 1", icebp and hlt raise what Windows raises for them. */
+	dword_fn hw = mod_get_proc(m, "pk_hw_faults");
+	if (!VFW_SANITIZER_BUILD)
+		CHECK(hw && hw() == 7);
+	/* PEB->Ldr lists the modules, as code that walks it expects. */
+	dword_fn ldr = mod_get_proc(m, "pk_peb_ldr");
+	CHECK(ldr && ldr() == 15);
 	mod_free(m);
 }
 
@@ -392,8 +442,10 @@ static void test_builtin_modules(void)
 	CHECK(gate_break() && mod_from_address(gate_break()) == k32);
 	CHECK(((const BYTE *)gate_break())[0] == 0xcc &&
 	      ((const BYTE *)gate_break())[1] == 0xc3);
+	/* Listed in PEB->Ldr from the start, so it may be loaded already. */
+	int refs = k32->refcount;
 	CHECK(mod_load("kernel32.dll", NULL) == k32);
-	CHECK_EQ(k32->refcount, 2);
+	CHECK_EQ(k32->refcount, refs + 1);
 	mod_free(k32);
 
 	CHECK(mod_get_proc(k32, "GetTickCount") != NULL);
@@ -477,10 +529,31 @@ static void test_fixture(void)
 	CHECK(mod_find("kernel32.dll") != NULL);	/* pinned */
 }
 
+/*
+ * In a fresh process, the main image asked for before any DLL is loaded
+ * still heads PEB->Ldr's load order, ahead of ntdll and kernel32.
+ */
+static void test_main_first_in_ldr(void)
+{
+	pid_t child = fork();
+	CHECK(child >= 0);
+	if (!child) {
+		struct module *main = mod_main();
+		struct module *m = main ? mod_load(fixture("pe_packer.dll"), NULL) :
+				   NULL;
+		dword_fn ldr = m ? mod_get_proc(m, "pk_peb_ldr") : NULL;
+		_exit(ldr && (ldr() & 1) ? 0 : 1);
+	}
+	int status = -1;
+	CHECK_EQ(waitpid(child, &status, 0), child);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
 int main(void)
 {
 	/* Crashes and traps exit 128 + the signal, whatever we inherit. */
 	unsetenv("VFW_CORE");
+	test_main_first_in_ldr();
 	test_teb();
 	test_threads_and_tls();
 	test_builtin_tables();
@@ -489,5 +562,7 @@ int main(void)
 	test_fallback_builtins();
 	test_wrong_arch_skipped();
 	test_packer_fixture();
+	test_unpacker_fixture();
+	test_privileged_instr();
 	return test_summary("test_runtime");
 }

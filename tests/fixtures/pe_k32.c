@@ -34,6 +34,78 @@ static int ends_with(const char *s, const char *suffix)
 	return n >= m && !lstrcmpiA(s + n - m, suffix);
 }
 
+/* TerminateThread's targets: one spinning in this DLL's code, one waiting,
+ * one asleep, and one that never starts. */
+static volatile LONG spins, never_ran = 1;
+static HANDLE never_set;
+
+static DWORD WINAPI spinner(LPVOID arg)
+{
+	for (;;)
+		spins++;
+	return 0;
+}
+
+static DWORD WINAPI waiter(LPVOID arg)
+{
+	WaitForSingleObject(never_set, INFINITE);
+	return 1;
+}
+
+static DWORD WINAPI sleeper(LPVOID arg)
+{
+	Sleep(INFINITE);
+	return 1;
+}
+
+static DWORD WINAPI unstarted(LPVOID arg)
+{
+	never_ran = 0;
+	return 1;
+}
+
+static int terminated(HANDLE t, DWORD want)
+{
+	DWORD code = 0;
+	int ok = TerminateThread(t, want) &&
+		 WaitForSingleObject(t, 5000) == WAIT_OBJECT_0 &&
+		 GetExitCodeThread(t, &code) && code == want;
+	CloseHandle(t);
+	return ok;
+}
+
+/* Returns 0, or the number of the first check that failed. */
+EXPORT int k32_terminate_test(void)
+{
+	never_set = CreateEventA(NULL, TRUE, FALSE, NULL);
+
+	HANDLE t = CreateThread(NULL, 0, spinner, NULL, 0, NULL);
+	while (t && spins < 1000)
+		Sleep(1);
+	if (!t || !terminated(t, 5))
+		return 1;
+	LONG at = spins;
+	Sleep(20);
+	if (spins != at)
+		return 2;
+
+	t = CreateThread(NULL, 0, waiter, NULL, 0, NULL);
+	Sleep(20);
+	if (!t || !terminated(t, 6))
+		return 3;
+
+	t = CreateThread(NULL, 0, sleeper, NULL, 0, NULL);
+	Sleep(20);
+	if (!t || !terminated(t, 7))
+		return 4;
+
+	t = CreateThread(NULL, 0, unstarted, NULL, CREATE_SUSPENDED, NULL);
+	if (!t || !terminated(t, 8) || !never_ran)
+		return 5;
+	CloseHandle(never_set);
+	return 0;
+}
+
 EXPORT int k32_selftest(void)
 {
 	char path[MAX_PATH];

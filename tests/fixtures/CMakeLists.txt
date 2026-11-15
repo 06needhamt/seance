@@ -125,6 +125,9 @@ fixture(pe_delay pe_delay.c)
 # Links against kernel32 (the mingw import library) and a made-up function.
 fixture(pe_runtime pe_runtime.c LIBS vfw_missing_imports kernel32)
 
+# Binds a missing import through GetProcAddress from an unpacking stub.
+fixture(pe_unpacker pe_unpacker.c LIBS kernel32)
+
 # Finds kernel32 from DllMain's return address and walks its exports, as
 # packers do, and starts a cdecl routine as a thread.
 fixture(pe_packer pe_packer.c LIBS kernel32

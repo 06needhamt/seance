@@ -550,6 +550,283 @@ the above:
   (`aslcodec_vfw.dll` decodes it).
 - `nsrt2432.acm` (Voxware RT24) takes none of the PCM layouts offered.
 
+### The codec zip, November 2026: per-codec investigations
+
+The sweep over the zip (504 codecs, catalogued separately) left codecs
+whose failures needed a closer look. Each was traced (`VFW_TRACE=1`, gdb)
+to a cause; what was seance's is fixed, and the rest is recorded here.
+
+- **LEAD DirectShow filters** (`LEncAAC`, `LEncAC3`, `LEncAMR`, `LEncVP8`,
+  `LEncmpga2`, `LENCSCR2`, `LMVMtnDet2` and their `x` variants):
+  - They look up a class of `DSKernel2.dll` while being created, with
+    `CoGetClassObject`. seance ran registration under `CoInitialize` but
+    created and ran filters and DMOs with COM down, so this failed with
+    `CO_E_NOTINITIALIZED` (0x800401f0). A host application has COM
+    initialised, so now seance does too, for as long as a filter or DMO
+    is open.
+  - The class is `DSKernel2.dll`'s (`{E2B7DDA9-38C5-11D5-91F6-00104BDB8FF9}`),
+    which LEAD's installer registers. Without it the open fails with
+    `REGDB_E_CLASSNOTREG`; a class that isn't registered is now named in
+    the trace. `seance register DSKernel2.dll` registers it; its
+    `DllRegisterServer` then fails at the type library
+    (`TYPE_E_CANTLOADLIBRARY`), after writing the classes.
+  - With that done they reach LEAD's licence check ("The evaluation
+    period has expired"), and fail with 0x80050010. That isn't worked
+    around.
+- **Ut Video** (`utv_vcm.dll`): round-trips now (ULRA, lossless).
+  - Its `DRV_OPEN` takes any FOURCC and makes its codec only for one of
+    its own, which are kept in `utv_core.dll`, the DLL it calls. seance
+    opened it as 'July', a month name of the C runtime's locale table, and
+    it then crashed on `ICM_DECOMPRESS_QUERY` with no codec behind it.
+  - The search of a DLL for its FOURCCs now leaves out the C runtime's
+    month names and debug signatures ('RSDS', 'NB10'), and goes on to the
+    DLLs it imports that sit next to it.
+  - A driver that says nothing of itself without a FOURCC is now taken
+    under one only if it then gives a name or description as well.
+- **3ivx** (`3ivxVfWCodec.dll` and its `DivXVfWCodec.dll` and
+  `SamsungVfWCodec.dll` brands, the `3ivxDS*` filters): `difftime`, which
+  they import, is now built in.
+  - The VfW codecs and the video encoder filter then fail in `3ivx.dll`,
+    their core: it is a trial build ("3ivx Trial", "Demo Expired") that
+    reads `trial.pbm` from the system directory. That file comes with its
+    installer, not the zip, and without it the core makes no encoder (the
+    VfW codecs crash on its NULL in `ICM_COMPRESS_GET_FORMAT`).
+  - The audio encoder filter, also a trial build ("This period has now
+    expired"), fails to be created with `E_NOINTERFACE`. Why wasn't
+    looked into past its trial code.
+  - None of this is worked around.
+- **BergWave** (`vfwbw.dll`, BW00): faults of its own, so it doesn't work.
+  - It reads its quantisers from `HKCU\Software\GNU\BergWave` (`i_quant`,
+    `p_quant`, ...), which its configure dialog writes. With none, they
+    are 0 and `ICM_COMPRESS` divides by zero. Seed them in the registry
+    file (16 works) to get further.
+  - Its allocator rounds a pointer up with `& ~0x11` where `& ~0xf` was
+    meant, so for half of the blocks it is given its buffer starts 2
+    bytes before the block. It then frees one byte before its pointer,
+    not the block. On Windows those frees fail, which msvcrt's `free`
+    ignores, and the headers it overwrote are never looked at again.
+    libc's heap checks its neighbours' headers, and the run aborts
+    ("corrupted size vs. prev_size"). Given its own mapping per block, it
+    encodes 320x240 at 830 kbit/s.
+  - seance now ignores a `free` of a pointer that can't start a block (not
+    8-aligned), with a warning, as Windows does, instead of aborting.
+- `__dllonexit` now adds to the DLL's own exit table, as MinGW's DLL
+  startup expects (it runs the table when it detaches). It used to add
+  to the process's, which ran the functions at exit, after the DLL was gone.
+- **MPEG4V** (`MPEG4V.DLL`, 3RVC): locked to a DVR product, so it doesn't
+  work here. Its first `ICM_COMPRESS_QUERY` reads `Codec` under `[PRODUCT]`
+  from `C:\Dvr\Ini\Config.ini` and only works when the value is 333.
+  Without the file it goes on to use a NULL `FILE` and faults. This is
+  the vendor's lock, and it isn't worked around.
+- **dgcolorxvfw** (`dgcolorxvfw.dll`): not a codec. It is a colour-conversion
+  library that declares no FOURCC, and its driver entry opens and refuses
+  every format. Under the sweep it used to crash, until seance's
+  `TerminateThread`, which used to do nothing, was implemented.
+  `TerminateThread` now ends the thread:
+  - at once in guest code;
+  - when it wakes, if it is waiting or sleeping in seance;
+  - before it starts, if it hasn't run.
+- **CapAvi32** (`capavi32.dll`, CAPA): round-trips now (lossless).
+  - It is a capture codec. Its frames go to `C:\capavi.000`, and the AVI
+    holds only short references into that file, so the AVI is no use
+    without it.
+  - It reads that file with overlapped `ReadFile` on a handle it has
+    associated with a completion port, and then waits on the port. seance's
+    file I/O never stays pending, and associating a file with a port did
+    nothing, so no packet came and the decode hung.
+  - Now a handle associated with a port records it, and overlapped
+    `ReadFile` and `WriteFile` on a handle opened with
+    `FILE_FLAG_OVERLAPPED` queue a packet as they return. As on Windows,
+    no packet is queued when the event handle's low bit is set. The
+    OVERLAPPED's event is set, and `Internal` holds the status.
+- **VTZ32** (`VTZ32.DLL`, VDTZ): round-trips now (49 dB).
+  - On `DRV_LOAD` it starts a thread that makes a window and runs its
+    message loop. On `DRV_FREE` it sends that window `WM_CLOSE` with
+    `SendMessage` and waits for the thread to end.
+  - seance ran a message sent to another thread's window on the sender's
+    thread. So `WM_DESTROY`'s `PostQuitMessage` quit the wrong queue, the
+    window's thread never ended, and `DRV_FREE` hung.
+  - Now a message sent to a window of another, live thread runs on that
+    thread when it next looks at its queue: in `GetMessage`,
+    `PeekMessage`, `WaitMessage`, `MsgWaitForMultipleObjects`, or while
+    it sends a message itself. The sender waits and runs what is sent to
+    it meanwhile.
+  - `SendMessageTimeout` gives up after its timeout (`ERROR_TIMEOUT`), and
+    `SendNotifyMessage` doesn't wait. `InSendMessage` and `ReplyMessage`
+    work.
+  - A window whose thread has ended still gets the message on the caller's
+    thread, as before.
+- **DiAVC** (`diavc.ax`): protected by a code virtualizer, and doesn't work
+  here. As it is created, it runs code that raises faults on purpose for an
+  `__except` filter, itself virtualized, to act on. Three of the things it
+  relies on were missing in seance, and are now there:
+  - `PEB->Ldr` was NULL. It now holds Windows' loader lists (load,
+    memory and initialisation order), seeded as Windows XP has them (the
+    main image, ntdll, kernel32) and kept with the modules loaded.
+  - A general-protection fault, such as `int 1` (CD 01) from user mode, is
+    reported as Windows reports it: an access violation reading -1. A
+    privileged instruction (`hlt`, `cli`, ...) is reported as
+    `STATUS_PRIVILEGED_INSTRUCTION`.
+  - `icebp` (F1) is reported as a single step, past the instruction, not
+    as a breakpoint.
+  - With these, its filter still sends it into a loop of faults (writing
+    to its own code at +0x801a8). Why wasn't worked out: that would mean
+    reversing the virtualized filter. `VFW_TRACE` now names each handler
+    that continues execution, and where.
+- **racodec / racode64** (`racodec.ax`, `racode64.ax`, RASC; the
+  RemotelyAnywhere screen codec): registers and opens now, but nothing
+  round-trips.
+  - Its `DllRegisterServer` registers the encoder under
+    VideoCompressorCategory, then calls `BindToStorage(IID_IPropertyBag)` on
+    the moniker that `IFilterMapper2::RegisterFilter` returns, to write
+    `FccHandler`. seance returned no moniker, so the call went through
+    NULL.
+  - `RegisterFilter` now returns a device moniker for the registration. Its
+    property bag reads and writes the instance key's values (REG_SZ as
+    `VT_BSTR`, REG_DWORD as `VT_I4`, REG_BINARY as `VT_ARRAY | VT_UI1`), as
+    Windows' `CDeviceMoniker` does.
+  - The encoder's samples are its input frames, uncompressed, whatever the
+    input format (I420 or RGB32).
+  - The decoder offers only RGB32 output, and makes the picture square on
+    purpose: max(width, height) both ways, for sizes up to 640. So the
+    sweep sees "a different picture". Let through, it decodes those
+    streams as black frames. The pair probably expects a RemotelyAnywhere
+    session to drive it; this wasn't pursued.
+  - Cropping a decoder's larger picture to the input's size is Phase 5's
+    padded-output item.
+- **Canopus DV** (`csccdvc.dll` 2.03 and `cscdvsd.dll` 2.07, DV
+  encoder and decoder): these don't match the zip's `csedv.dll` (3.11), so
+  they don't work here. `csccdvcx.dll` (3.02) is not an encoder; it doesn't
+  take dvsd either.
+  - Both get their DV engine's entry points from `csedv`'s only export,
+    `_SoftEngine@4`. It returns each address minus a constant, and the
+    caller adds the constants it was built with.
+  - csccdvc's constants still match. But it passes the engine a function
+    pointer (an entry of its own per-format table) where csedv 3.11 takes
+    a pointer to the table. The engine calls through the function's first
+    four bytes and faults (`SIGSEGV at 0x53ec8b55`, in `ICM_COMPRESS`).
+  - cscdvsd's constants don't match, so the address it calls is wild
+    (`0xd9d00d04`, in `ICM_DECOMPRESS`).
+  - They need the `csedv.dll` they were released with, which isn't in the
+    zip.
+  - A crash at an address in no module now also names up to three stack
+    words that point into modules (`[sp+0x1c] csccdvc.dll+0x15bf4`). These
+    usually include the caller.
+- **BHA XVD video encoder** (`BHA_XVDVEnc.dll`, a DMO with VGMV output):
+  locked by its vendor, so it doesn't work here.
+  - Its normal path opens its encoder engine through a stub that always
+    fails, so `GetOutputType` offers nothing (`DMO_E_NO_MORE_ITEMS`).
+  - Given an output type anyway, it takes it. Its first `ProcessInput`
+    then reads through its unsized frame queue's NULL front (`accessing
+    0x14`).
+  - A working encoder path sits behind a registry switch whose name the
+    DLL keeps encrypted. That is the vendor's gate, and seance doesn't set
+    it.
+- **Matrox software codecs** (`swcdvvfw.dll`, `swcjpegvfw.dll`,
+  `swcmpegvfw.dll`) and **DigiVCap** (`digivcap.dll`): DigiVCap round-trips
+  now, as dvsd, dv25, dv50 and mjpg (DV at 720x480: 33.8 dB, and 36.0 dB
+  decoding ffmpeg's DV).
+  - The swc* DLLs aren't DirectShow filters, hence "no filters". Each
+    registers a plain COM class, its engine for DigiVCap (the VfW driver),
+    with `InprocServer32` a bare `swcdvvfw.dll`.
+  - seance looked for a bare server name only on `VFW_PATH` and in the
+    current directory, so DigiVCap's `DRV_OPEN` failed. `CoGetClassObject`
+    and `CoCreateInstance` now look next to the calling DLL first, as
+    `LoadLibrary` does. (On Windows these DLLs are in system32.)
+  - `seance register` the three swc* DLLs first.
+  - DigiVCap's other FOURCCs (MPEG-2, HD, dvsl) want
+    `HKLM\Software\Movie2`, which Matrox's software installs.
+- **OggDS** (`oggds.dll`: Ogg splitter and muxer, Vorbis encoder and
+  decoder): its Vorbis encoder now connects, but seance can't store what it
+  makes.
+  - It registers its output as a subtype that is no format tag's. seance
+    asked such an encoder for the subtype of format tag 0, which it never
+    offers. An encoder registered with no tag now gets its first audio
+    output.
+  - That output's format is OggDS's own (`{6BDDFA7E-9F22-46A9-AB5E-884EFF294D9F}`),
+    meant for its Ogg muxer, not a WAVEFORMATEX, so it can't go into an AVI
+    or WAV. seance now says so, where it used to say the encoder took no PCM.
+  - Its decoder takes the same type, which only its Ogg splitter gives.
+    seance reads no Ogg.
+  - Fixed on the way: the PCM retry compared formats past the end of a
+    16-byte `fmt ` chunk.
+- **Canopus DirectShow codecs** (`csDShowcodc.dll`: DV, DVCPRO50/HD, HQ,
+  Lossless and MPEG2-Intra decoders, HQ encoder): they need Canopus's
+  engine, `PAVEDIUS.DLL`, which isn't in the zip. Each filter loads it when
+  created and fails (`E_FAIL`) without it.
+  - Opening a DirectShow filter or DMO now names the DLLs and registry keys
+    it looked for and didn't find, as opening a VfW driver does: "it looked
+    for PAVEDIUS.DLL, which isn't here (add its directory to VFW_PATH)".
+- **Intel H.261 and H.263** (`h261_32.ax`, `h263_32.ax`, NetMeeting-era
+  VfW codecs): they encode in real time only.
+  - Their rate control times frames with `timeGetTime` and refuses a delta
+    frame that arrives sooner than the frame interval (`ICERR_INTERNAL`).
+    seance compresses as fast as it can, so the first delta frame fails.
+  - Fed one frame per 110 ms with `--rate 10`, H.261 encodes at CIF (4
+    frames, 1 key). H.263 then fails inside the codec, through a NULL local.
+  - `--keyint 1` (every frame a keyframe) encodes with H.263.
+  - seance doesn't pace an encode to real time.
+- **Broadway** (`bw10.dll`, BW10): the encoder drives Data Translation's
+  Broadway capture card through `VTACCESS.dll` (`_VT_GetHardwareBuffer`).
+  It needs that hardware.
+- **TechSmith screen codecs** (`tsccvid.dll`, TSCC; `tsc2_codec32.dll`,
+  TSC2): their compressors are locked to TechSmith's products ("TSCC allows
+  compression only if you have registered ... Camtasia Studio", "TSC2 only
+  allows compression from TechSmith products"). seance doesn't get round
+  that.
+- **Duck TrueMotion 2X** (`tm2x.dll`, TM2X): it needs its installer.
+  - `ICM_COMPRESS_BEGIN` loads a compression profile, a `.cfg` file in the
+    directory that `HKLM\Software\Duck\VFW Encoder/Decoder\TM2X`
+    `DuckDir` names. There is no key and no `.cfg` in the zip, so the
+    encoder engine is never made.
+  - `ICM_COMPRESS` then faults on it, catches the fault and returns
+    `0x8000ffff`. Its installer also has serial-number and trial modes.
+  - A codec can open without the registry keys or DLLs it looks for and fail
+    only later. An `ICM_COMPRESS_BEGIN` or `ICM_COMPRESS` failure now names
+    them too: "it looked for the registry key
+    HKLM\Software\Duck\VFW Encoder/Decoder\TM2X, which isn't set".
+- **March Networks H.263** (`TxsH263.dll`, T263): it round-trips now, 27.9
+  dB at CIF.
+  - Its `ICM_COMPRESS_GET_FORMAT` refuses an output buffer whose `biSize`
+    is under 40. seance passed a zeroed one and now sets `biSize` first, as
+    a caller that copies its input format in does.
+  - It decompresses only to 8-bit paletted output while
+    `HKCU\Software\MarchNetworks\H263` `"8bit Decoding"` is 1, which it
+    writes by default. Set it to 0 in the registry file for 16 or 32 bits
+    (`--output-format BGR32`); with MMX it doesn't give 24.
+  - It also takes its vendor's own MYUV and TXSY formats.
+- **UPX-packed DLLs** (`DivX520.dll`, `scmpack.dll`): they load now, and
+  DivX 5.2 round-trips (39.3 dB).
+  - UPX's stub binds the packed DLL's import table itself, through
+    `GetProcAddress`, and fails `DllMain` at the first NULL (gdi32's
+    `StartDocA`, kernel32's `GlobalAddAtomW`). The loader binds an
+    unimplemented import to a trap that reports it if it is called; these
+    are the same imports bound late.
+  - `GetProcAddress` called from such a stub, before its DLL's `DllMain`
+    has returned, now gives a trap for an unimplemented built-in function,
+    as the loader does. The stub is code in a writable and executable
+    section that holds the entry point. A probe from anywhere else still
+    gets NULL.
+  - Added for what scmpack calls from its `DllMain`: `GlobalAddAtomW` and
+    the other W atom functions, `EnumResourceLanguagesW`,
+    `GetVolumeInformationW`, `PathAppendW` and `PathStripToRootA/W`.
+  - scmpack (SMV Media Pack) is a set of DirectShow decoders for SMV, its
+    vendor's own container. The zip has no SMV files to try them on.
+- **CoreAVC** (`CoreAVCDecoder.ax`): wrapped in Licenturion's licence
+  protector, which checks for a kernel debugger (`SICE`, `NTICE`) and its
+  licence key under `Software\Licenturion GmbH`. Without the key `DllMain`
+  fails. seance doesn't get round that.
+- **Insignis MultiCodec** (`MultiCodec.dll`, INMC): it opens, but
+  `ICM_COMPRESS` gives `ICERR_UNSUPPORTED`. It needs LEADTOOLS 9
+  (`LTKRN90N.dll`, `LTDIS90N.dll`, `LTFIL90N.DLL`), `d3dx9_30.dll` and its
+  own software's `HKLM\Software\Insignis Technologies\REMOTEDG` keys,
+  none of which are in the zip. The error now names them.
+- **DivX Pro 5.1.1** (`DivX511.dll`, the adware-supported edition): its
+  first `ICM_COMPRESS` looks for the Gator (GAIN) adware's COM class and
+  `HKLM\SOFTWARE\Gator.com\CMEII`. Without them it opens a dialog and
+  refuses (`ICERR_ERROR`). That is the vendor's licence condition; seance
+  doesn't get round it. It decodes.
+
 ## In-repository baseline
 
 For comparison, the same command over `build/fixtures` examined 23 fixture

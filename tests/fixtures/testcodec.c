@@ -76,7 +76,13 @@
  *                         a full path to no file (C:\nowhere\zz_path.dll);
  *                         set to 4, unless its vendor's registry key
  *                         HKLM\Software\Seance Test\Codec is there
- *                         (rricm.dll: Matrox's)
+ *                         (rricm.dll: Matrox's); set to 5, it loads
+ *                         and opens without that key but fails every
+ *                         ICM_COMPRESS with ICERR_INTERNAL (tm2x.dll,
+ *                         without Duck's)
+ *   TESTCODEC_SIZED_OUT   ICM_COMPRESS_GET_FORMAT refuses an output buffer
+ *                         whose biSize isn't set to at least a
+ *                         BITMAPINFOHEADER's (TxsH263.dll)
  * TESTCODEC_ALIGN16=2 takes any height when asked, but begins only with
  * a multiple of 16 (vp31vfw.dll, vp4vfw.dll); TESTCODEC_ALIGN16=3 takes
  * only 320x240, as ones that take a few fixed sizes (ADV601.dll at 640x480,
@@ -87,7 +93,8 @@
  * ICM_COMPRESS_GET_SIZE and the output format), as wtvc.dll does.
  *
  * Two private messages misbehave on purpose, for the harness's crash and
- * hang reports: TESTCODEC_CRASH writes through a null pointer and
+ * hang reports: TESTCODEC_CRASH writes through a null pointer,
+ * TESTCODEC_JUMP calls the address in lParam1 (which maps nothing), and
  * TESTCODEC_HANG never returns.
  * Built like old MSVC code, with a 4-byte stack boundary.
  */
@@ -101,6 +108,7 @@
 #define MAX_LOG 64
 #define TESTCODEC_CRASH (ICM_USER + 100)
 #define TESTCODEC_HANG  (ICM_USER + 101)
+#define TESTCODEC_JUMP  (ICM_USER + 102)
 
 struct state {
 	DWORD quality;
@@ -153,7 +161,7 @@ static int pair_named(DWORD h)
 static int end_crash;
 static int overrun;
 static int empty_format, no_keys, align16;
-static int begin_rgb, yuv_upside, needs_dll;
+static int begin_rgb, yuv_upside, needs_dll, key_missing, sized_out;
 static volatile int zero;
 #define EARLY_SIZE 16	/* what it says before ICM_COMPRESS_BEGIN */
 static DWORD last_quality = 0xffffffff;	/* of the last ICM_COMPRESS */
@@ -718,7 +726,9 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 			     (v[0] == '1' || v[0] == '2') ? v[0] - '0' : 0;
 		needs_dll = GetEnvironmentVariableA("TESTCODEC_NEEDS_DLL", v,
 						    sizeof(v)) == 1 &&
-			    v[0] >= '1' && v[0] <= '4' ? v[0] - '0' : 0;
+			    v[0] >= '1' && v[0] <= '5' ? v[0] - '0' : 0;
+		sized_out = GetEnvironmentVariableA("TESTCODEC_SIZED_OUT", v,
+						    sizeof(v)) == 1 && v[0] == '1';
 		if (GetEnvironmentVariableA("TESTCODEC_CHATTY", v, sizeof(v)) == 1 &&
 		    v[0] == '1') {
 			static const char hello[] = "testcodec: hello\n";
@@ -729,12 +739,14 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		log_msg(msg);
 		check_module(hdrvr);
 		HKEY key;
-		if (needs_dll == 4) {
-			if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
-					  "Software\\Seance Test\\Codec", 0,
-					  KEY_READ, &key))
+		if (needs_dll >= 4) {
+			key_missing = RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+						    "Software\\Seance Test\\Codec",
+						    0, KEY_READ, &key) != 0;
+			if (key_missing && needs_dll == 4)
 				return 0;
-			RegCloseKey(key);
+			if (!key_missing)
+				RegCloseKey(key);
 		} else if (needs_dll && !LoadLibraryA(needs_dll == 3 ?
 					       "C:\\nowhere\\zz_path.dll" :
 					       needs_dll == 2 ? "pe_missing.dll" :
@@ -801,6 +813,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 	case TESTCODEC_CRASH:
 		*(volatile DWORD *)l1 = 1;	/* l1 is 0 */
 		return ICERR_OK;
+	case TESTCODEC_JUMP:
+		return ((LRESULT (WINAPI *)(void))l1)();
 	case TESTCODEC_HANG:
 		for (;;)
 			*(volatile DWORD *)&inst->magic;
@@ -866,6 +880,9 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 			return ICERR_BADFORMAT;
 		return compress_query((BITMAPINFOHEADER *)l1, (BITMAPINFOHEADER *)l2);
 	case ICM_COMPRESS_GET_FORMAT:
+		if (sized_out && l2 &&
+		    ((BITMAPINFOHEADER *)l2)->biSize < sizeof(BITMAPINFOHEADER))
+			return ICERR_BADFORMAT;
 		return compress_get_format((BITMAPINFOHEADER *)l1,
 					   (BITMAPINFOHEADER *)l2);
 	case ICM_COMPRESS_GET_SIZE:
@@ -906,6 +923,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		return ICERR_OK;
 	}
 	case ICM_COMPRESS:
+		if (key_missing)
+			return ICERR_INTERNAL;
 		/* Unchecked, as ADV601.dll calls it. */
 		if (needs_status && inst->status(inst->status_param,
 						 ICSTATUS_STATUS, 0))

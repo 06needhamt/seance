@@ -65,6 +65,13 @@ HIC ic_open_dll(const char *path, DWORD type, DWORD handler, UINT mode);
 /* The DLL path or name behind a HIC ("" for a function). */
 const char *ic_driver_name(HIC hic);
 
+/*
+ * "; it looked for ..., which isn't here" for the DLLs and registry keys
+ * the codec looked for and didn't find when it opened, or "": for a
+ * failure further on.
+ */
+const char *ic_open_note(HIC hic);
+
 /* Whether hic is an open codec. */
 int ic_valid(HIC hic);
 

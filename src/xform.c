@@ -13,6 +13,7 @@
 #include "dshow/dshow.h"
 #include "loader/pe.h"
 #include "media/audio.h"
+#include "vfw/driver.h"
 #include "common/log.h"
 #include "xform.h"
 
@@ -185,11 +186,20 @@ HRESULT xform_find_output(const char *path, const CLSID *selected, int audio,
 	return matches ? VFW_E_DUPLICATE_NAME : CLASS_E_CLASSNOTAVAILABLE;
 }
 
+/* What the last failed xform_create on this thread looked for. */
+static __thread char open_note[600];
+
+const char *xform_open_note(void)
+{
+	return open_note;
+}
+
 HRESULT xform_create(const char *path, const struct xform_class *c,
 		     struct xform **out)
 {
 	HRESULT hr;
 
+	open_note[0] = 0;
 	if (!path || !c || !out)
 		return E_POINTER;
 	*out = NULL;
@@ -197,11 +207,13 @@ HRESULT xform_create(const char *path, const struct xform_class *c,
 	if (!x)
 		return E_OUTOFMEMORY;
 	x->c = *c;
+	struct looked_mark mark = drv_looked_mark();
 	hr = c->acm ? acm_codec_open(path, &x->codec) :
 	     c->dmo ? dmo_object_open(path, &c->clsid, &x->object, &x->mo) :
 		      dshow_filter_create(path, &c->clsid, &x->server,
 					  &x->filter);
 	if (FAILED(hr)) {
+		drv_looked_for(mark, open_note, sizeof(open_note));
 		free(x);
 		return hr;
 	}
@@ -213,6 +225,7 @@ HRESULT xform_open(const char *path, const CLSID *selected, int audio,
 		   int encoder, struct xform **x, struct xform_class *found)
 {
 	struct xform_class c;
+	open_note[0] = 0;
 	HRESULT hr = xform_find(path, selected, audio, encoder, &c);
 
 	if (x)

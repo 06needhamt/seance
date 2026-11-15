@@ -3,6 +3,7 @@
  * user32, called through the export table the way a DLL's imports reach
  * it: classes, windows and messages, timers, strings, and the rest.
  */
+#include <sched.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -920,6 +921,313 @@ static void test_fixture(void)
 	mod_free(m);
 }
 
+/* Messages sent to a window of another thread run on that thread. */
+static DWORD ran_on;
+static BOOL in_send_seen;
+static HWND owned;
+static HANDLE owned_ready, owned_go;
+
+static LRESULT WINAPI owned_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+	K32(DWORD, GetCurrentThreadId, void);
+	FN(BOOL, InSendMessage, void);
+	FN(BOOL, ReplyMessage, LRESULT);
+	FN(void, PostQuitMessage, int);
+	FN(LRESULT, DefWindowProcA, HWND, UINT, WPARAM, LPARAM);
+
+	switch (msg) {
+	case WM_USER + 1:
+		ran_on = GetCurrentThreadId();
+		in_send_seen = InSendMessage();
+		return 42;
+	case WM_USER + 2:
+		ReplyMessage(7);	/* the sender has its answer from here */
+		return 9;
+	case WM_USER + 3: {
+		K32(void, ExitThread, DWORD);
+		ExitThread(11);		/* its sender gets 0 */
+		return 0;
+	}
+	case WM_USER + 4: {
+		/* Sends back to wp, a window of the thread sending this. */
+		FN(LRESULT, SendMessageTimeoutA, HWND, UINT, WPARAM, LPARAM,
+		   UINT, UINT, PDWORD_PTR);
+		DWORD_PTR r;
+		return SendMessageTimeoutA((HWND)wp, WM_USER + 1, 0, 0, 0, 200,
+					   &r) ? 1 : 2;
+	}
+	case WM_DESTROY:
+		PostQuitMessage(0);
+		return 0;
+	}
+	return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+static HWND make_owned(void)
+{
+	FN(HWND, CreateWindowExA, DWORD, LPCSTR, LPCSTR, DWORD, int, int, int,
+	   int, HWND, HMENU, HINSTANCE, LPVOID);
+	return CreateWindowExA(0, "vfw-owned", "", 0, 0, 0, 1, 1, NULL, NULL,
+			       NULL, NULL);
+}
+
+/* Makes a window and runs its message loop until WM_QUIT, as VTZ32 does. */
+static DWORD WINAPI pump(LPVOID arg)
+{
+	FN(BOOL, GetMessageA, LPMSG, HWND, UINT, UINT);
+	FN(LRESULT, DispatchMessageA, const MSG *);
+	K32(BOOL, SetEvent, HANDLE);
+	MSG m;
+
+	owned = make_owned();
+	SetEvent(owned_ready);
+	while (GetMessageA(&m, NULL, 0, 0) > 0)
+		DispatchMessageA(&m);
+	return 5;
+}
+
+/* Makes a window, then waits without looking at its messages. */
+static DWORD WINAPI busy(LPVOID arg)
+{
+	FN(BOOL, PeekMessageA, LPMSG, HWND, UINT, UINT, UINT);
+	K32(BOOL, SetEvent, HANDLE);
+	K32(DWORD, WaitForSingleObject, HANDLE, DWORD);
+	MSG m;
+
+	*(HWND *)arg = make_owned();
+	SetEvent(owned_ready);
+	WaitForSingleObject(owned_go, INFINITE);
+	PeekMessageA(&m, NULL, 0, 0, PM_NOREMOVE);	/* runs what was given up on */
+	return 0;
+}
+
+static void test_sent_messages(void)
+{
+	FN(ATOM, RegisterClassA, const WNDCLASSA *);
+	FN(LRESULT, SendMessageA, HWND, UINT, WPARAM, LPARAM);
+	FN(LRESULT, SendMessageTimeoutA, HWND, UINT, WPARAM, LPARAM, UINT, UINT,
+	   PDWORD_PTR);
+	FN(BOOL, SendNotifyMessageA, HWND, UINT, WPARAM, LPARAM);
+	FN(BOOL, InSendMessage, void);
+	FN(BOOL, ReplyMessage, LRESULT);
+	FN(BOOL, IsWindow, HWND);
+	FN(BOOL, DestroyWindow, HWND);
+	FN(BOOL, PeekMessageA, LPMSG, HWND, UINT, UINT, UINT);
+	K32(DWORD, GetCurrentThreadId, void);
+	K32(HANDLE, CreateThread, LPSECURITY_ATTRIBUTES, SIZE_T,
+	    LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD);
+	K32(HANDLE, CreateEventA, LPSECURITY_ATTRIBUTES, BOOL, BOOL, LPCSTR);
+	K32(BOOL, SetEvent, HANDLE);
+	K32(DWORD, WaitForSingleObject, HANDLE, DWORD);
+	K32(BOOL, GetExitCodeThread, HANDLE, LPDWORD);
+	K32(BOOL, CloseHandle, HANDLE);
+	K32(DWORD, GetLastError, void);
+
+	WNDCLASSA wc = { .lpfnWndProc = owned_proc, .lpszClassName = "vfw-owned" };
+	CHECK(RegisterClassA(&wc) != 0);
+	CHECK(!InSendMessage());
+	CHECK(!ReplyMessage(1));
+	owned_ready = CreateEventA(NULL, FALSE, FALSE, NULL);
+	owned_go = CreateEventA(NULL, TRUE, FALSE, NULL);
+
+	DWORD tid = 0;
+	HANDLE t = CreateThread(NULL, 0, pump, NULL, 0, &tid);
+	CHECK(t != NULL);
+	CHECK_EQ(WaitForSingleObject(owned_ready, 5000), WAIT_OBJECT_0);
+	CHECK(owned != NULL);
+	CHECK_EQ(SendMessageA(owned, WM_USER + 1, 0, 0), 42);
+	CHECK_EQ(ran_on, tid);
+	CHECK(in_send_seen);
+	CHECK_EQ(SendMessageA(owned, WM_USER + 2, 0, 0), 7);
+	DWORD_PTR res = 0;
+	CHECK(SendMessageTimeoutA(owned, WM_USER + 1, 0, 0, 0, 5000, &res));
+	CHECK_EQ(res, 42);
+	ran_on = 0;
+	CHECK(SendNotifyMessageA(owned, WM_USER + 1, 0, 0));
+	/* WM_CLOSE: its DestroyWindow, and the WM_QUIT WM_DESTROY posts, are
+	 * the owner's, so its loop ends. */
+	SendMessageA(owned, WM_CLOSE, 0, 0);
+	CHECK_EQ(WaitForSingleObject(t, 5000), WAIT_OBJECT_0);
+	DWORD code = 0;
+	CHECK(GetExitCodeThread(t, &code) && code == 5);
+	CHECK_EQ(ran_on, tid);	/* the notification ran there too */
+	CHECK(!IsWindow(owned));
+	CloseHandle(t);
+
+	/* An owner that isn't looking: the timeout, then the message runs
+	 * when it does look. */
+	HWND h2 = NULL;
+	t = CreateThread(NULL, 0, busy, &h2, 0, &tid);
+	CHECK_EQ(WaitForSingleObject(owned_ready, 5000), WAIT_OBJECT_0);
+	res = 1;
+	/* A timeout of 0 is a wait that ends at once, not a notification. */
+	CHECK(!SendMessageTimeoutA(h2, WM_USER + 1, 0, 0, 0, 0, &res));
+	CHECK_EQ(GetLastError(), 1460);	/* ERROR_TIMEOUT */
+	CHECK(!SendMessageTimeoutA(h2, WM_USER + 1, 0, 0, 0, 30, &res));
+	CHECK_EQ(GetLastError(), 1460);	/* ERROR_TIMEOUT */
+	ran_on = 0;
+	SetEvent(owned_go);
+	CHECK_EQ(WaitForSingleObject(t, 5000), WAIT_OBJECT_0);
+	CHECK_EQ(ran_on, tid);
+	CloseHandle(t);
+	/* Its thread has ended: the message is the caller's to run. */
+	CHECK_EQ(SendMessageA(h2, WM_USER + 1, 0, 0), 42);
+	CHECK_EQ(ran_on, GetCurrentThreadId());
+	DestroyWindow(h2);
+	/* Its WM_DESTROY, run here, posted this thread a WM_QUIT. */
+	MSG m;
+	CHECK(PeekMessageA(&m, NULL, 0, 0, PM_REMOVE) && m.message == WM_QUIT);
+	CHECK(!PeekMessageA(&m, NULL, 0, 0, PM_REMOVE));
+	CloseHandle(owned_ready);
+	CloseHandle(owned_go);
+}
+
+/* Blocks in GetMessage on a queue with nothing coming. */
+static DWORD WINAPI idle_loop(LPVOID arg)
+{
+	FN(BOOL, GetMessageA, LPMSG, HWND, UINT, UINT);
+	FN(BOOL, PeekMessageA, LPMSG, HWND, UINT, UINT, UINT);
+	K32(BOOL, SetEvent, HANDLE);
+	MSG m;
+
+	PeekMessageA(&m, NULL, 0, 0, PM_NOREMOVE);	/* makes its queue */
+	SetEvent(arg);
+	GetMessageA(&m, NULL, 0, 0);
+	return 1;
+}
+
+/* Busy in host code until told, then into GetMessage: a request made
+ * while it was busy, with no wake to follow, is seen before it sleeps. */
+static volatile int late_go;
+static DWORD WINAPI late_loop(LPVOID arg)
+{
+	FN(BOOL, GetMessageA, LPMSG, HWND, UINT, UINT);
+	FN(BOOL, PeekMessageA, LPMSG, HWND, UINT, UINT, UINT);
+	K32(BOOL, SetEvent, HANDLE);
+	MSG m;
+
+	PeekMessageA(&m, NULL, 0, 0, PM_NOREMOVE);
+	SetEvent(arg);
+	while (!__atomic_load_n(&late_go, __ATOMIC_ACQUIRE))
+		sched_yield();
+	GetMessageA(&m, NULL, 0, 0);
+	return 1;
+}
+
+/* Sends to a window whose owner never looks, and waits. */
+static HWND never_looks;
+static DWORD WINAPI blocked_sender(LPVOID arg)
+{
+	FN(LRESULT, SendMessageA, HWND, UINT, WPARAM, LPARAM);
+	K32(BOOL, SetEvent, HANDLE);
+
+	SetEvent(arg);
+	SendMessageA(never_looks, WM_USER + 1, 0, 0);
+	return 1;
+}
+
+/* Threads ended in user32's waits, or while handling a sent message. */
+static void test_send_endings(void)
+{
+	FN(LRESULT, SendMessageTimeoutA, HWND, UINT, WPARAM, LPARAM, UINT, UINT,
+	   PDWORD_PTR);
+	FN(BOOL, SendNotifyMessageA, HWND, UINT, WPARAM, LPARAM);
+	FN(BOOL, DestroyWindow, HWND);
+	FN(BOOL, PeekMessageA, LPMSG, HWND, UINT, UINT, UINT);
+	K32(HANDLE, CreateThread, LPSECURITY_ATTRIBUTES, SIZE_T,
+	    LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD);
+	K32(HANDLE, CreateEventA, LPSECURITY_ATTRIBUTES, BOOL, BOOL, LPCSTR);
+	K32(BOOL, SetEvent, HANDLE);
+	K32(DWORD, WaitForSingleObject, HANDLE, DWORD);
+	K32(BOOL, GetExitCodeThread, HANDLE, LPDWORD);
+	K32(BOOL, TerminateThread, HANDLE, DWORD);
+	K32(BOOL, CloseHandle, HANDLE);
+	K32(DWORD, GetLastError, void);
+	DWORD code = 0;
+	DWORD_PTR res = 0;
+	MSG m;
+
+	HANDLE ready = CreateEventA(NULL, FALSE, FALSE, NULL);
+	owned_ready = CreateEventA(NULL, FALSE, FALSE, NULL);
+	owned_go = CreateEventA(NULL, TRUE, FALSE, NULL);
+
+	/* Asleep in GetMessage, it is woken to end. */
+	HANDLE t = CreateThread(NULL, 0, idle_loop, ready, 0, NULL);
+	CHECK_EQ(WaitForSingleObject(ready, 5000), WAIT_OBJECT_0);
+	CHECK(TerminateThread(t, 3));
+	CHECK_EQ(WaitForSingleObject(t, 5000), WAIT_OBJECT_0);
+	CHECK(GetExitCodeThread(t, &code) && code == 3);
+	CloseHandle(t);
+
+	/* Asked while busy; TerminateThread gives up waiting, then the
+	 * thread goes to sleep in GetMessage and must end there. */
+	t = CreateThread(NULL, 0, late_loop, ready, 0, NULL);
+	CHECK_EQ(WaitForSingleObject(ready, 5000), WAIT_OBJECT_0);
+	CHECK(TerminateThread(t, 6));
+	__atomic_store_n(&late_go, 1, __ATOMIC_RELEASE);
+	CHECK_EQ(WaitForSingleObject(t, 5000), WAIT_OBJECT_0);
+	CHECK(GetExitCodeThread(t, &code) && code == 6);
+	CloseHandle(t);
+
+	/* Waiting on a reply, likewise; the message still runs later. */
+	t = CreateThread(NULL, 0, busy, &never_looks, 0, NULL);
+	CHECK_EQ(WaitForSingleObject(owned_ready, 5000), WAIT_OBJECT_0);
+	HANDLE s = CreateThread(NULL, 0, blocked_sender, ready, 0, NULL);
+	CHECK_EQ(WaitForSingleObject(ready, 5000), WAIT_OBJECT_0);
+	CHECK(TerminateThread(s, 4));
+	CHECK_EQ(WaitForSingleObject(s, 5000), WAIT_OBJECT_0);
+	CHECK(GetExitCodeThread(s, &code) && code == 4);
+	CloseHandle(s);
+	ran_on = 0;
+	SetEvent(owned_go);
+	CHECK_EQ(WaitForSingleObject(t, 5000), WAIT_OBJECT_0);
+	CHECK(ran_on != 0);
+	CloseHandle(t);
+	DestroyWindow(never_looks);
+	while (PeekMessageA(&m, NULL, 0, 0, PM_REMOVE))
+		;	/* its WM_DESTROY's WM_QUIT */
+
+	/* A procedure handling a sent message ends its thread: the sender
+	 * has 0, not a wait that never ends. */
+	t = CreateThread(NULL, 0, pump, NULL, 0, NULL);
+	CHECK_EQ(WaitForSingleObject(owned_ready, 5000), WAIT_OBJECT_0);
+	res = 1;
+	CHECK(SendMessageTimeoutA(owned, WM_USER + 3, 0, 0, 0, 5000, &res));
+	CHECK_EQ(res, 0);
+	CHECK_EQ(WaitForSingleObject(t, 5000), WAIT_OBJECT_0);
+	CHECK(GetExitCodeThread(t, &code) && code == 11);
+	CloseHandle(t);
+	DestroyWindow(owned);
+	while (PeekMessageA(&m, NULL, 0, 0, PM_REMOVE))
+		;
+
+	/* SMTO_BLOCK: what is sent to the waiting sender waits too. */
+	t = CreateThread(NULL, 0, pump, NULL, 0, NULL);
+	CHECK_EQ(WaitForSingleObject(owned_ready, 5000), WAIT_OBJECT_0);
+	HWND mine = make_owned();
+	CHECK(SendMessageTimeoutA(owned, WM_USER + 4, (WPARAM)mine, 0,
+				  SMTO_NORMAL, 5000, &res));
+	CHECK_EQ(res, 1);
+	CHECK(SendMessageTimeoutA(owned, WM_USER + 4, (WPARAM)mine, 0,
+				  SMTO_BLOCK, 5000, &res));
+	CHECK_EQ(res, 2);
+	PeekMessageA(&m, NULL, 0, 0, PM_NOREMOVE);	/* runs what timed out */
+
+	/* Pointers can't be sent without waiting. */
+	CHECK(!SendNotifyMessageA(owned, WM_SETTEXT, 0, (LPARAM)"x"));
+	CHECK_EQ(GetLastError(), 1159);	/* ERROR_MESSAGE_SYNC_ONLY */
+
+	SendMessageTimeoutA(owned, WM_CLOSE, 0, 0, 0, 5000, &res);
+	CHECK_EQ(WaitForSingleObject(t, 5000), WAIT_OBJECT_0);
+	CloseHandle(t);
+	DestroyWindow(mine);
+	while (PeekMessageA(&m, NULL, 0, 0, PM_REMOVE))
+		;
+	CloseHandle(ready);
+	CloseHandle(owned_ready);
+	CloseHandle(owned_go);
+}
+
 int main(void)
 {
 	CHECK_EQ(lowmem_reserve(), 0);
@@ -934,6 +1242,8 @@ int main(void)
 
 	test_classes_and_windows();
 	test_messages();
+	test_sent_messages();
+	test_send_endings();
 	test_strings();
 	test_misc();
 	test_clipboard();

@@ -102,15 +102,35 @@ CRTFN(void *) crt__onexit(void *func)
 	return func && register_onexit((pfv)func) ? func : NULL;
 }
 
-/* __dllonexit: a DLL-specific variant taking the caller's own exit-table
- * bounds; those exist for a CRT that keeps its own per-DLL table walked at
- * unload, which this harness doesn't model, so it's folded into the same
- * one process-exit table as _onexit. */
-CRTFN(void *) crt___dllonexit(void *func, void *start, void *end)
+/*
+ * __dllonexit: atexit for a DLL whose CRT keeps its own table, walked when
+ * it detaches (MinGW's dllcrt1: *begin is a block from malloc, *end the
+ * next free slot, and the DLL frees the block at DLL_PROCESS_DETACH). The
+ * function goes at *end, the block growing as msvcrt's does, so it runs
+ * when the DLL unloads, not at process exit after it is gone.
+ */
+CRTFN(void *) crt___dllonexit(void *func, pfv **begin, pfv **end)
 {
-	(void)start;
-	(void)end;
-	return crt__onexit(func);
+	if (!func || !begin || !end)
+		return NULL;
+	pthread_mutex_lock(&onexit_lock);
+	pfv *b = *begin, *e = *end;
+	size_t n = b && e > b ? (size_t)(e - b) : 0;
+	size_t cap = b ? win_usable(b) / sizeof(*b) : 0;
+	if (n + 1 > cap) {
+		size_t grow = n < 32 ? 32 : n < 512 ? n : 512;
+		pfv *nb = win_realloc(b, (n + grow) * sizeof(*b));
+		if (!nb) {
+			pthread_mutex_unlock(&onexit_lock);
+			return NULL;
+		}
+		b = nb;
+	}
+	b[n] = (pfv)func;
+	*begin = b;
+	*end = b + n + 1;
+	pthread_mutex_unlock(&onexit_lock);
+	return func;
 }
 
 /*

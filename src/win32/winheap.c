@@ -19,7 +19,29 @@
 #include <string.h>
 #include <sys/mman.h>
 
+#include "common/log.h"
 #include "win32/internal.h"
+
+/*
+ * A pointer that can't start a block: every heap here, and Windows', hands
+ * out blocks aligned to 8 at least. Some codecs free a pointer they rounded
+ * up themselves (vfwbw.dll frees one 13 bytes into its block); a Windows
+ * heap fails that HeapFree, which msvcrt's free ignores, where libc would
+ * abort. It is left alone, and the block leaks, as there.
+ */
+static int not_a_block(const void *p)
+{
+	static int warned;
+
+	if (!((uintptr_t)p & 7))
+		return 0;
+	if (!__atomic_exchange_n(&warned, 1, __ATOMIC_RELAXED))
+		vfw_warn("free(%p): not a block of the heap (misaligned); "
+			 "ignored, as Windows does", p);
+	else
+		TRACE("free(%p): misaligned; ignored", p);
+	return 1;
+}
 
 int win_zero_memory(void)
 {
@@ -41,7 +63,11 @@ void *win_alloc(size_t n, size_t size)
 
 void *win_calloc(size_t n, size_t size) { return calloc(n, size); }
 void *win_realloc(void *p, size_t n) { return realloc(p, n); }
-void win_free(void *p) { free(p); }
+void win_free(void *p)
+{
+	if (!not_a_block(p))
+		free(p);
+}
 size_t win_usable(void *p) { return malloc_usable_size(p); }
 
 #else
@@ -186,7 +212,7 @@ size_t win_usable(void *p)
 
 void win_free(void *p)
 {
-	if (!p)
+	if (!p || not_a_block(p))
 		return;
 	if (!is_low(p)) {
 		free(p);

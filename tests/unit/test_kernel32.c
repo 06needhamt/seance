@@ -1015,6 +1015,12 @@ static void test_legacy(void)
 	FN(ATOM, GlobalFindAtomA, LPCSTR);
 	FN(ATOM, GlobalDeleteAtom, ATOM);
 	FN(UINT, GlobalGetAtomNameA, ATOM, LPSTR, int);
+	FN(ATOM, GlobalAddAtomW, LPCWSTR);
+	FN(ATOM, GlobalFindAtomW, LPCWSTR);
+	FN(UINT, GlobalGetAtomNameW, ATOM, LPWSTR, int);
+	FN(ATOM, AddAtomW, LPCWSTR);
+	FN(ATOM, FindAtomA, LPCSTR);
+	FN(ATOM, DeleteAtom, ATOM);
 	FN(void, FatalAppExitA, UINT, LPCSTR);
 	char buf[32];
 
@@ -1035,6 +1041,68 @@ static void test_legacy(void)
 	CHECK_EQ(GlobalFindAtomA("SeanceAtom"), atom);
 	CHECK_EQ(GlobalDeleteAtom(atom), 0);
 	CHECK_EQ(GlobalFindAtomA("SeanceAtom"), 0);
+
+	/* The W forms share the tables with the A forms (scmpack.dll). */
+	static const WCHAR wname[] = { 'W', 'i', 'd', 'e', 'A', 't', 'o', 'm', 0 };
+	static const WCHAR wupper[] = { 'W', 'I', 'D', 'E', 'A', 'T', 'O', 'M', 0 };
+	WCHAR wbuf[16];
+	atom = GlobalAddAtomW(wname);
+	CHECK(atom >= 0xc000);
+	CHECK_EQ(GlobalFindAtomA("wideatom"), atom);
+	CHECK_EQ(GlobalFindAtomW(wupper), atom);
+	CHECK_EQ(GlobalGetAtomNameW(atom, wbuf, 16), 8);
+	CHECK(!memcmp(wbuf, wname, sizeof(wname)));
+	CHECK_EQ(GlobalGetAtomNameW(atom, wbuf, 5), 4);
+	CHECK(!memcmp(wbuf, wname, 4 * sizeof(WCHAR)) && !wbuf[4]);
+	CHECK_EQ(GlobalGetAtomNameA(atom, buf, sizeof(buf)), 8);
+	CHECK_STR(buf, "WideAtom");
+	CHECK_EQ(GlobalAddAtomW((LPCWSTR)(ULONG_PTR)42), 42);
+	/* An ANSI name and its UTF-16 form are one atom. */
+	{
+		static const WCHAR cafe[] = { 'c', 'a', 'f', 0xe9, 0 };
+		ATOM c = GlobalAddAtomW(cafe);
+		CHECK(c >= 0xc000);
+		CHECK_EQ(GlobalFindAtomA("caf\xe9"), c);
+		CHECK_EQ(GlobalGetAtomNameA(c, buf, sizeof(buf)), 4);
+		CHECK_STR(buf, "caf\xe9");
+		CHECK_EQ(GlobalDeleteAtom(c), 0);
+		/* 255 characters that take three bytes each in UTF-8. */
+		WCHAR wide[256];
+		for (int i = 0; i < 255; i++)
+			wide[i] = 0x4e00;
+		wide[255] = 0;
+		c = GlobalAddAtomW(wide);
+		CHECK(c >= 0xc000);
+		WCHAR back[256];
+		CHECK_EQ(GlobalGetAtomNameW(c, back, 256), 255);
+		CHECK(!memcmp(back, wide, sizeof(wide)));
+		CHECK_EQ(GlobalDeleteAtom(c), 0);
+	}
+	CHECK_EQ(GlobalDeleteAtom(atom), 0);
+	CHECK_EQ(GlobalFindAtomW(wname), 0);
+	/* Both forms of GetVolumeInformation give the same volume. */
+	{
+		FN(BOOL, GetVolumeInformationA, LPCSTR, LPSTR, DWORD, LPDWORD,
+		   LPDWORD, LPDWORD, LPSTR, DWORD);
+		FN(BOOL, GetVolumeInformationW, LPCWSTR, LPWSTR, DWORD, LPDWORD,
+		   LPDWORD, LPDWORD, LPWSTR, DWORD);
+		DWORD sa = 0, sw = 1, mc = 0, fl = 0;
+		WCHAR vn[8], fsn[3];
+		CHECK(GetVolumeInformationA("C:\\", buf, sizeof(buf), &sa, NULL,
+					    NULL, NULL, 0));
+		CHECK_STR(buf, "VFW");
+		CHECK(GetVolumeInformationW(NULL, vn, 8, &sw, &mc, &fl, fsn, 3));
+		CHECK(vn[0] == 'V' && vn[1] == 'F' && vn[2] == 'W' && !vn[3]);
+		CHECK(fsn[0] == 'N' && fsn[1] == 'T' && !fsn[2]);
+		CHECK_EQ(sw, sa);
+		CHECK_EQ(mc, 255);
+	}
+	/* Local atoms are a table of their own. */
+	atom = AddAtomW(wname);
+	CHECK(atom >= 0xc000);
+	CHECK_EQ(FindAtomA("WideAtom"), atom);
+	CHECK_EQ(GlobalFindAtomW(wname), 0);
+	CHECK_EQ(DeleteAtom(atom), 0);
 
 	pid_t child = fork();
 	CHECK(child >= 0);
@@ -1068,6 +1136,8 @@ static void test_resource_languages(void)
 					    LONG_PTR);
 	FN(BOOL, EnumResourceLanguagesA, HMODULE, LPCSTR, LPCSTR, callback,
 	   LONG_PTR);
+	FN(BOOL, EnumResourceLanguagesW, HMODULE, LPCWSTR, LPCWSTR, callback,
+	   LONG_PTR);
 	const char *dir = getenv("VFW_FIXTURES");
 	char path[512];
 
@@ -1087,6 +1157,15 @@ static void test_resource_languages(void)
 	CHECK_EQ(count, 1);
 	CHECK(!EnumResourceLanguagesA((HMODULE)m->base, (LPCSTR)RT_STRING,
 				      (LPCSTR)999, count_resource_language,
+				      (LONG_PTR)&count));
+	/* The W form, as scmpack.dll's unpacker asks for it. */
+	count = 0;
+	CHECK(EnumResourceLanguagesW((HMODULE)m->base, (LPCWSTR)RT_STRING,
+				     (LPCWSTR)1, count_resource_language,
+				     (LONG_PTR)&count));
+	CHECK_EQ(count, 1);
+	CHECK(!EnumResourceLanguagesW((HMODULE)m->base, (LPCWSTR)RT_STRING,
+				      (LPCWSTR)999, count_resource_language,
 				      (LONG_PTR)&count));
 	mod_free(m);
 }
@@ -1324,6 +1403,10 @@ static void test_fixture(void)
 	CHECK(selftest != NULL);
 	if (selftest)
 		CHECK_EQ(selftest(), 0);
+	int (CDECL *terminate)(void) = mod_get_proc(m, "k32_terminate_test");
+	CHECK(terminate != NULL);
+	if (terminate)
+		CHECK_EQ(terminate(), 0);
 	mod_free(m);
 }
 

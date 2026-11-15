@@ -57,7 +57,7 @@ struct filter {
 	DWORD held_packet;
 	DWORDLONG frames_done;
 	DWORD packets;
-	BOOL split, hold, float_switch, rate_switch, switched;
+	BOOL split, hold, float_switch, rate_switch, switched, odd;
 };
 struct enum_pins { IEnumPins iface; LONG refs; struct filter *filter; ULONG pos; };
 
@@ -218,6 +218,10 @@ static IPersistStreamVtbl persist_vtbl={persist_qi,persist_addref,persist_releas
  *   TESTFILTER_AUDIO_RATE   from the second packet on, the decoder claims
  *                           twice the sample rate: a change no file can
  *                           follow, which the host must refuse cleanly
+ *   TESTFILTER_AUDIO_ODD    the encoder's output subtype is no format tag's,
+ *                           and its format type not WAVEFORMATEX, as Ogg
+ *                           Vorbis encoders' are (testfilter.c registers
+ *                           that subtype)
  * The encoder always gathers PCM into whole packets and gives the last,
  * short one at the end of the stream.
  */
@@ -226,6 +230,9 @@ static const GUID st_pcm={0x00000001,0x0000,0x0010,{0x80,0x00,0x00,0xaa,0x00,0x3
 static const GUID st_float={0x00000003,0x0000,0x0010,{0x80,0x00,0x00,0xaa,0x00,0x38,0x9b,0x71}};
 static const GUID st_tsta={WAVE_FORMAT_TSTA,0x0000,0x0010,{0x80,0x00,0x00,0xaa,0x00,0x38,0x9b,0x71}};
 static const GUID fmt_wave={0x05589f81,0xc356,0x11ce,{0xbf,0x01,0x00,0xaa,0x00,0x55,0x59,0x5a}};
+/* {5E6C9B3A-3A7D-4F0E-9C11-0D2B7A6E4F80} and ...3B: TESTFILTER_AUDIO_ODD's subtype and format type */
+static const GUID st_odd={0x5e6c9b3a,0x3a7d,0x4f0e,{0x9c,0x11,0x0d,0x2b,0x7a,0x6e,0x4f,0x80}};
+static const GUID fmt_odd={0x5e6c9b3b,0x3a7d,0x4f0e,{0x9c,0x11,0x0d,0x2b,0x7a,0x6e,0x4f,0x80}};
 
 static REFERENCE_TIME frames_time(DWORDLONG frames,DWORD rate){return (REFERENCE_TIME)tsta_ticks(frames,rate);}
 
@@ -283,6 +290,20 @@ static HRESULT audio_output_type(struct filter*f,const AM_MEDIA_TYPE*mt,AM_MEDIA
 		if(pcm_bits(mt)!=in->wBitsPerSample||out->nChannels!=in->nChannels||
 		   out->nSamplesPerSec!=in->nSamplesPerSec)return VFW_E_TYPE_NOT_ACCEPTED;
 		return copy_type(full,mt);
+	}
+	if(f->odd){
+		static const GUID none;
+		if(!eq(&mt->majortype,&mt_audio)||(!eq(&mt->subtype,&none)&&!eq(&mt->subtype,&st_odd)))
+			return VFW_E_TYPE_NOT_ACCEPTED;
+		for(DWORD i=0;i<sizeof(*full);i++)((BYTE*)full)[i]=0;
+		full->majortype=mt_audio;
+		full->subtype=st_odd;
+		full->formattype=fmt_odd;
+		full->cbFormat=sizeof(WAVEFORMATEX)+2;
+		if(!(full->pbFormat=CoTaskMemAlloc(full->cbFormat)))return E_OUTOFMEMORY;
+		tsta_format((WAVEFORMATEX*)full->pbFormat,in->wBitsPerSample,in->nChannels,
+			    in->nSamplesPerSec,(DWORD)f->window);
+		return S_OK;
 	}
 	if(!eq(&mt->majortype,&mt_audio)||!eq(&mt->subtype,&st_tsta))return VFW_E_TYPE_NOT_ACCEPTED;
 	if(mt->pbFormat){
@@ -959,5 +980,6 @@ static HRESULT WINAPI filter_vendor(IBaseFilter*p,LPWSTR*out){return E_NOTIMPL;}
 static IBaseFilterVtbl filter_vtbl={filter_qi,filter_addref,filter_release,filter_class,filter_stop,filter_pause,filter_run,filter_state,filter_set_clock,filter_get_clock,filter_enum,filter_find,filter_info,filter_join,filter_vendor};
 
 static BOOL env_on(const char*name){char value[2];return GetEnvironmentVariableA(name,value,sizeof(value))==1&&value[0]=='1';}
-HRESULT testfilter_create(BOOL encoder,BOOL audio,REFIID iid,void**out){if(!out)return E_POINTER;*out=NULL;struct filter*f=alloc(sizeof(*f));if(!f)return E_OUTOFMEMORY;f->audio=audio;f->split=env_on("TESTFILTER_AUDIO_SPLIT");f->hold=env_on("TESTFILTER_AUDIO_HOLD");f->float_switch=env_on("TESTFILTER_AUDIO_FLOAT");f->rate_switch=env_on("TESTFILTER_AUDIO_RATE");f->iface.lpVtbl=&filter_vtbl;f->compression.lpVtbl=&compression_vtbl;f->codec_api.lpVtbl=&codec_api_vtbl;f->codec_api_only=env_on("TESTFILTER_CODECAPI");f->persist.lpVtbl=&persist_vtbl;f->refs=1;f->encoder=encoder;f->quality=0.75;f->async=env_on("TESTFILTER_ASYNC");f->no_eos=env_on("TESTFILTER_NO_EOS");f->require_segment=env_on("TESTFILTER_REQUIRE_SEGMENT");f->peer_info=env_on("TESTFILTER_PEER_INFO");f->dynamic=env_on("TESTFILTER_DYNAMIC");f->dynamic_extra=env_on("TESTFILTER_DYNAMIC_EXTRA");f->no_preroll=env_on("TESTFILTER_NO_PREROLL");f->notify_error=env_on("TESTFILTER_NOTIFY_ERROR");f->strict=env_on("TESTFILTER_STRICT");f->own_allocator=env_on("TESTFILTER_OWN_ALLOCATOR");f->own_output=env_on("TESTFILTER_OWN_OUTPUT");f->no_proposal=env_on("TESTFILTER_NO_PROPOSAL");f->intra=env_on("TESTFILTER_INTRA");f->own_layout=env_on("TESTFILTER_OWN_LAYOUT");InitializeCriticalSection(&f->transform_lock);f->input=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_INPUT};f->output=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_OUTPUT};InterlockedIncrement(&objects);HRESULT hr=filter_qi(&f->iface,iid,out);filter_release(&f->iface);return hr;}
+/* With TESTFILTER_MISSING_DLL=1 a filter needs a DLL that isn't there, as one whose vendor's engine is missing: it loads it, and fails. */
+HRESULT testfilter_create(BOOL encoder,BOOL audio,REFIID iid,void**out){if(!out)return E_POINTER;*out=NULL;if(env_on("TESTFILTER_MISSING_DLL")&&!LoadLibraryA("seance_absent_engine.dll"))return E_FAIL;struct filter*f=alloc(sizeof(*f));if(!f)return E_OUTOFMEMORY;f->audio=audio;f->split=env_on("TESTFILTER_AUDIO_SPLIT");f->hold=env_on("TESTFILTER_AUDIO_HOLD");f->float_switch=env_on("TESTFILTER_AUDIO_FLOAT");f->rate_switch=env_on("TESTFILTER_AUDIO_RATE");f->odd=env_on("TESTFILTER_AUDIO_ODD");f->iface.lpVtbl=&filter_vtbl;f->compression.lpVtbl=&compression_vtbl;f->codec_api.lpVtbl=&codec_api_vtbl;f->codec_api_only=env_on("TESTFILTER_CODECAPI");f->persist.lpVtbl=&persist_vtbl;f->refs=1;f->encoder=encoder;f->quality=0.75;f->async=env_on("TESTFILTER_ASYNC");f->no_eos=env_on("TESTFILTER_NO_EOS");f->require_segment=env_on("TESTFILTER_REQUIRE_SEGMENT");f->peer_info=env_on("TESTFILTER_PEER_INFO");f->dynamic=env_on("TESTFILTER_DYNAMIC");f->dynamic_extra=env_on("TESTFILTER_DYNAMIC_EXTRA");f->no_preroll=env_on("TESTFILTER_NO_PREROLL");f->notify_error=env_on("TESTFILTER_NOTIFY_ERROR");f->strict=env_on("TESTFILTER_STRICT");f->own_allocator=env_on("TESTFILTER_OWN_ALLOCATOR");f->own_output=env_on("TESTFILTER_OWN_OUTPUT");f->no_proposal=env_on("TESTFILTER_NO_PROPOSAL");f->intra=env_on("TESTFILTER_INTRA");f->own_layout=env_on("TESTFILTER_OWN_LAYOUT");InitializeCriticalSection(&f->transform_lock);f->input=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_INPUT};f->output=(struct pin){.iface={&pin_vtbl},.mem={&mem_vtbl},.filter=f,.direction=PINDIR_OUTPUT};InterlockedIncrement(&objects);HRESULT hr=filter_qi(&f->iface,iid,out);filter_release(&f->iface);return hr;}
 LONG testfilter_objects(void){return objects;}
