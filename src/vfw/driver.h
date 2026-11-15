@@ -38,6 +38,13 @@ int drv_valid(HDRVR h);
 /* The DLL behind a driver (NULL for a procedure or a bad handle). */
 struct module *drv_module(HDRVR h);
 
+/*
+ * "; it looked for ..., which aren't here" for what the driver's module
+ * looked for and didn't find when it was first opened, or "". It stays
+ * valid while h is open.
+ */
+const char *drv_open_note(HDRVR h);
+
 /* The number of open drivers (for tests). */
 unsigned drv_open_count(void);
 

@@ -365,6 +365,14 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	VFW_ENV_TESTCODEC_NEEDS_DLL=4 $emu "$harness" encode \
 		"$fixtures/testcodec.dll" "$work/v.y4m" -o "$work/x.avi" 2>&1 |
 		grep -q "refused DRV_LOAD; it looked for the registry key HKLM.Software.Seance Test.Codec, which isn't set"
+	# And one that opens without it, to fail later, names it then.
+	VFW_ENV_TESTCODEC_NEEDS_DLL=5 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/v.y4m" -o "$work/x.avi" 2>&1 |
+		grep -q "ICM_COMPRESS, frame 0: ICERR_INTERNAL; it looked for the registry key HKLM.Software.Seance Test.Codec, which isn't set"
+	# One that wants the output buffer's biSize set before it fills it in.
+	VFW_ENV_TESTCODEC_SIZED_OUT=1 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/v.y4m" -o "$work/x.avi" \
+		>/dev/null 2>&1
 	# YUV a codec writes upside down: RGB instead, or turned over.
 	{
 		printf 'YUV4MPEG2 W16 H16 F25:1 Ip A1:1 C420jpeg\nFRAME\n'

@@ -757,6 +757,44 @@ to a cause; what was seance's is fixed, and the rest is recorded here.
   - Opening a DirectShow filter or DMO now names the DLLs and registry keys
     it looked for and didn't find, as opening a VfW driver does: "it looked
     for PAVEDIUS.DLL, which isn't here (add its directory to VFW_PATH)".
+- **Intel H.261 and H.263** (`h261_32.ax`, `h263_32.ax`, NetMeeting-era
+  VfW codecs): they encode in real time only.
+  - Their rate control times frames with `timeGetTime` and refuses a delta
+    frame that arrives sooner than the frame interval (`ICERR_INTERNAL`).
+    seance compresses as fast as it can, so the first delta frame fails.
+  - Fed one frame per 110 ms with `--rate 10`, H.261 encodes at CIF (4
+    frames, 1 key). H.263 then fails inside the codec, through a NULL local.
+  - `--keyint 1` (every frame a keyframe) encodes with H.263.
+  - seance doesn't pace an encode to real time.
+- **Broadway** (`bw10.dll`, BW10): the encoder drives Data Translation's
+  Broadway capture card through `VTACCESS.dll` (`_VT_GetHardwareBuffer`).
+  It needs that hardware.
+- **TechSmith screen codecs** (`tsccvid.dll`, TSCC; `tsc2_codec32.dll`,
+  TSC2): their compressors are locked to TechSmith's products ("TSCC allows
+  compression only if you have registered ... Camtasia Studio", "TSC2 only
+  allows compression from TechSmith products"). seance doesn't get round
+  that.
+- **Duck TrueMotion 2X** (`tm2x.dll`, TM2X): it needs its installer.
+  - `ICM_COMPRESS_BEGIN` loads a compression profile, a `.cfg` file in the
+    directory that `HKLM\Software\Duck\VFW Encoder/Decoder\TM2X`
+    `DuckDir` names. There is no key and no `.cfg` in the zip, so the
+    encoder engine is never made.
+  - `ICM_COMPRESS` then faults on it, catches the fault and returns
+    `0x8000ffff`. Its installer also has serial-number and trial modes.
+  - A codec can open without the registry keys or DLLs it looks for and fail
+    only later. An `ICM_COMPRESS_BEGIN` or `ICM_COMPRESS` failure now names
+    them too: "it looked for the registry key
+    HKLM\Software\Duck\VFW Encoder/Decoder\TM2X, which isn't set".
+- **March Networks H.263** (`TxsH263.dll`, T263): it round-trips now, 27.9
+  dB at CIF.
+  - Its `ICM_COMPRESS_GET_FORMAT` refuses an output buffer whose `biSize`
+    is under 40. seance passed a zeroed one and now sets `biSize` first, as
+    a caller that copies its input format in does.
+  - It decompresses only to 8-bit paletted output while
+    `HKCU\Software\MarchNetworks\H263` `"8bit Decoding"` is 1, which it
+    writes by default. Set it to 0 in the registry file for 16 or 32 bits
+    (`--output-format BGR32`); with MMX it doesn't give 24.
+  - It also takes its vendor's own MYUV and TXSY formats.
 
 ## In-repository baseline
 

@@ -7,7 +7,7 @@
 
 #include "common/error.h"
 
-static _Thread_local char last_error[512];
+static _Thread_local char last_error[1024];
 
 void vfw_set_error(const char *fmt, ...)
 {

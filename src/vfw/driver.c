@@ -25,6 +25,8 @@ struct drv_module {
 	struct module *mod;	/* NULL for a bare procedure */
 	DRIVERPROC proc;
 	unsigned opens;
+	/* What its first open looked for and didn't find ("" for nothing). */
+	char note[600];
 };
 
 struct drv_instance {
@@ -169,6 +171,18 @@ struct module *drv_module(HDRVR h)
 	return m;
 }
 
+const char *drv_open_note(HDRVR h)
+{
+	const char *note = "";
+
+	pthread_mutex_lock(&lock);
+	int s = slot_of(h, 1);
+	if (s >= 0)
+		note = instances[s].dm->note;
+	pthread_mutex_unlock(&lock);
+	return note;
+}
+
 unsigned drv_open_count(void)
 {
 	unsigned n = 0;
@@ -302,6 +316,13 @@ static HDRVR open_instance(struct module *mod, DRIVERPROC proc,
 		goto fail;
 	}
 
+	/*
+	 * A driver can open without what it looked for and fail only later
+	 * (tm2x.dll in ICM_COMPRESS, without its installer's registry key):
+	 * keep the note for that failure's message.
+	 */
+	if (first)
+		drv_looked_for(mark, dm->note, sizeof(dm->note));
 	pthread_mutex_lock(&lock);
 	instances[slot].id = id;
 	instances[slot].opening = 0;
