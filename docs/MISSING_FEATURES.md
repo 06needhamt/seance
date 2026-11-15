@@ -694,6 +694,24 @@ to a cause; what was seance's is fixed, and the rest is recorded here.
     session to drive it; this wasn't pursued.
   - Cropping a decoder's larger picture to the input's size is Phase 5's
     padded-output item.
+- **Canopus DV** (`csccdvc.dll` 2.03 and `cscdvsd.dll` 2.07, DV
+  encoder and decoder): these don't match the zip's `csedv.dll` (3.11), so
+  they don't work here. `csccdvcx.dll` (3.02) is not an encoder; it doesn't
+  take dvsd either.
+  - Both get their DV engine's entry points from `csedv`'s only export,
+    `_SoftEngine@4`. It returns each address minus a constant, and the
+    caller adds the constants it was built with.
+  - csccdvc's constants still match. But it passes the engine a function
+    pointer (an entry of its own per-format table) where csedv 3.11 takes
+    a pointer to the table. The engine calls through the function's first
+    four bytes and faults (`SIGSEGV at 0x53ec8b55`, in `ICM_COMPRESS`).
+  - cscdvsd's constants don't match, so the address it calls is wild
+    (`0xd9d00d04`, in `ICM_DECOMPRESS`).
+  - They need the `csedv.dll` they were released with, which isn't in the
+    zip.
+  - A crash at an address in no module now also names up to three stack
+    words that point into modules (`[sp+0x1c] csccdvc.dll+0x15bf4`). These
+    usually include the caller.
 
 ## In-repository baseline
 

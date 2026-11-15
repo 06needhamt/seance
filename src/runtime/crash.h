@@ -65,10 +65,11 @@ void crash_exit(int sig) __attribute__((noreturn));
 /*
  * Prints the same report a fault reaching on_fault would, for pc/fault_addr
  * on the calling thread, then dies of sig as it would without the handler.
- * seh.c calls this once its dispatch of a hardware fault finds no handler
+ * sp is the stack pointer at the fault, for naming the callers of a jump
+ * to nowhere. seh.c calls this once its dispatch of a hardware fault finds no handler
  * in the fs:[0] chain that takes it.
  */
-void crash_report_and_die(int sig, const void *pc, const void *fault_addr)
-	__attribute__((noreturn));
+void crash_report_and_die(int sig, const void *pc, const void *fault_addr,
+			  const void *sp) __attribute__((noreturn));
 
 #endif /* VFW_RUNTIME_CRASH_H */

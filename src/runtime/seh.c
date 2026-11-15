@@ -307,7 +307,8 @@ static void __attribute__((noreturn)) seh_run_chain(void)
 		resume_context(&ctx);
 
 	crash_report_and_die(sig, (const void *)(uintptr_t)ctx.Eip,
-			     (const void *)(uintptr_t)rec.ExceptionInformation[1]);
+			     (const void *)(uintptr_t)rec.ExceptionInformation[1],
+			     (const void *)(uintptr_t)ctx.Esp);
 }
 
 int seh_take_fault(int sig, siginfo_t *si, void *ucontext)

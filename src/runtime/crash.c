@@ -131,7 +131,41 @@ static const char *signame(int sig)
 	}
 }
 
-static void report_fault(int sig, const void *pc, const void *fault_addr)
+static int mapping_prot(uintptr_t addr);
+
+/*
+ * For a jump to nowhere (pc in no module): the first few words on the
+ * stack that point into a module, likely return addresses, which say
+ * where the jump came from.
+ */
+static void report_callers(const void *pc, const void *sp)
+{
+	char where[160], line[256];
+	uintptr_t p = (uintptr_t)sp, page = 0;
+	size_t ps = (size_t)getpagesize();
+	int found = 0;
+
+	if (!sp || mod_describe_address_try(pc, where, sizeof(where)))
+		return;
+	for (int i = 0; i < 64 && found < 3; i++, p += sizeof(void *)) {
+		if ((p & ~(ps - 1)) != page) {
+			page = p & ~(ps - 1);
+			int prot = mapping_prot(page);
+			if (prot < 0 || !(prot & PROT_READ))
+				break;
+		}
+		const void *v = *(const void *const *)p;
+		if (!mod_describe_address_try(v, where, sizeof(where)))
+			continue;
+		snprintf(line, sizeof(line), "seance:   [sp+%#x] %s\n",
+			 (unsigned)(i * sizeof(void *)), where);
+		put(line);
+		found++;
+	}
+}
+
+static void report_fault(int sig, const void *pc, const void *fault_addr,
+			 const void *sp)
 {
 	char where[160], line[400];
 
@@ -150,6 +184,7 @@ static void report_fault(int sig, const void *pc, const void *fault_addr)
 		snprintf(line, sizeof(line), "seance: crash: %s at %s\n",
 			 signame(sig), where);
 	put(line);
+	report_callers(pc, sp);
 	report_call(mine);
 }
 
@@ -165,9 +200,10 @@ static void recover(int sig)
 	}
 }
 
-void crash_report_and_die(int sig, const void *pc, const void *fault_addr)
+void crash_report_and_die(int sig, const void *pc, const void *fault_addr,
+			  const void *sp)
 {
-	report_fault(sig, pc, fault_addr);
+	report_fault(sig, pc, fault_addr, sp);
 	recover(sig);
 	crash_exit(sig);
 }
@@ -270,7 +306,12 @@ static void on_fault(int sig, siginfo_t *si, void *ctx)
 	if (seh_take_fault(sig, si, uc))
 		return;
 
-	report_fault(sig, pc, si->si_addr);
+#if defined(__x86_64__)
+	const void *sp = (const void *)uc->uc_mcontext.gregs[REG_RSP];
+#else
+	const void *sp = (const void *)uc->uc_mcontext.gregs[REG_ESP];
+#endif
+	report_fault(sig, pc, si->si_addr, sp);
 	if (si->si_code > 0) {		/* a fault, not a signal sent */
 		recover(sig);
 		crash_exit(sig);

@@ -87,7 +87,8 @@
  * ICM_COMPRESS_GET_SIZE and the output format), as wtvc.dll does.
  *
  * Two private messages misbehave on purpose, for the harness's crash and
- * hang reports: TESTCODEC_CRASH writes through a null pointer and
+ * hang reports: TESTCODEC_CRASH writes through a null pointer,
+ * TESTCODEC_JUMP calls the address in lParam1 (which maps nothing), and
  * TESTCODEC_HANG never returns.
  * Built like old MSVC code, with a 4-byte stack boundary.
  */
@@ -101,6 +102,7 @@
 #define MAX_LOG 64
 #define TESTCODEC_CRASH (ICM_USER + 100)
 #define TESTCODEC_HANG  (ICM_USER + 101)
+#define TESTCODEC_JUMP  (ICM_USER + 102)
 
 struct state {
 	DWORD quality;
@@ -801,6 +803,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 	case TESTCODEC_CRASH:
 		*(volatile DWORD *)l1 = 1;	/* l1 is 0 */
 		return ICERR_OK;
+	case TESTCODEC_JUMP:
+		return ((LRESULT (WINAPI *)(void))l1)();
 	case TESTCODEC_HANG:
 		for (;;)
 			*(volatile DWORD *)&inst->magic;

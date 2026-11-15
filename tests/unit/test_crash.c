@@ -19,13 +19,14 @@
 #define TST0 mmioFOURCC('T', 'S', 'T', '0')
 #define TESTCODEC_CRASH (ICM_USER + 100)
 #define TESTCODEC_HANG  (ICM_USER + 101)
+#define TESTCODEC_JUMP  (ICM_USER + 102)
 
 /*
  * Runs msg against the codec in a child with VFW_TIMEOUT set to timeout
  * (or unset for 0). Returns the wait status and the child's stderr.
  */
-static int run_child(const char *codec, UINT msg, const char *timeout,
-		     char *err, size_t size)
+static int run_child_arg(const char *codec, UINT msg, uintptr_t arg,
+			 const char *timeout, char *err, size_t size)
 {
 	int fds[2];
 	if (pipe(fds))
@@ -46,7 +47,7 @@ static int run_child(const char *codec, UINT msg, const char *timeout,
 		HIC hic = ic_open_dll(codec, ICTYPE_VIDEO, TST0, ICMODE_QUERY);
 		if (!hic)
 			_exit(91);
-		ic_send(hic, msg, 0, 0);
+		ic_send(hic, msg, (DWORD_PTR)arg, 0);
 		_exit(92);		/* it should not come back */
 	}
 	close(fds[1]);
@@ -59,6 +60,12 @@ static int run_child(const char *codec, UINT msg, const char *timeout,
 	int status = 0;
 	waitpid(pid, &status, 0);
 	return status;
+}
+
+static int run_child(const char *codec, UINT msg, const char *timeout,
+		     char *err, size_t size)
+{
+	return run_child_arg(codec, msg, 0, timeout, err, size);
 }
 
 /* mov eax, 42; ret */
@@ -213,6 +220,19 @@ int main(void)
 		CHECK(strstr(err, "in DriverProc(DRV_USER+0x") &&
 		      strstr(err, ") of testcodec.dll"));
 		printf("crash report:\n%s", err);
+
+		/*
+		 * A call to an address in no module also names the stack words
+		 * that point into one: here the return into testcodec (at sp+0 on
+		 * i386; further up on x64, past the home space).
+		 */
+		st = run_child_arg(codec, TESTCODEC_JUMP, 0x5000, NULL, err,
+				   sizeof(err));
+		CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 128 + SIGSEGV);
+		CHECK(strstr(err, "seance: crash: SIGSEGV at 0x5000"));
+		CHECK(strstr(err, "] testcodec.dll+0x"));
+		CHECK(strstr(err, "in DriverProc(DRV_USER+0x"));
+		printf("jump report:\n%s", err);
 
 		/*
 		 * The crash ends the process with 128 + the signal, not by it

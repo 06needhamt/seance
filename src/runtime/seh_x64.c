@@ -509,7 +509,8 @@ dispatch_exception(EXCEPTION_RECORD *rec, CONTEXT *ctx, int sig)
 	if (sig)
 		crash_report_and_die(sig, (const void *)(uintptr_t)ctx->Rip,
 				     (const void *)(uintptr_t)
-				     rec->ExceptionInformation[1]);
+				     rec->ExceptionInformation[1],
+				     (const void *)(uintptr_t)ctx->Rsp);
 	report_unhandled_exception(rec);
 	crash_exit(SIGABRT);
 }
