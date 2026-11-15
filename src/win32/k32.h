@@ -49,6 +49,14 @@ HGLOBAL global_realloc(HGLOBAL h, SIZE_T size, UINT flags);
 /* The Unix fd behind a file handle, or -1. */
 int file_handle_fd(HANDLE h);
 
+struct kobject;
+/* Associates a file with a completion port (a reference is taken); 0 if not. */
+int file_set_port(HANDLE file, struct kobject *port, ULONG_PTR key);
+
+/* Queues a completion packet on a port (KOBJ_IOCP). */
+BOOL iocp_post(struct kobject *port, DWORD bytes, ULONG_PTR key,
+	       LPOVERLAPPED ov);
+
 /* GetStdHandle. */
 HANDLE file_std_handle(DWORD which);
 
@@ -80,6 +88,10 @@ BOOL event_signal(HANDLE h, int pulse);
 
 /* Runs Fls callbacks and thread cleanup for the exiting thread. */
 void thread_exit_cleanup(void);
+
+/* Set by user32: ends the exiting thread's message queue, before the
+ * thread is seen to have ended. */
+extern void (*thread_end_hook)(void);
 
 /* ExitThread. */
 void thread_exit(DWORD code) __attribute__((noreturn));

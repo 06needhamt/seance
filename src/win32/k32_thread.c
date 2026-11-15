@@ -116,8 +116,14 @@ HANDLE thread_handle_current(void)
 static PFLS_CALLBACK_FUNCTION fls_callbacks[TEB_TLS_MAX];
 static pthread_mutex_t fls_lock = PTHREAD_MUTEX_INITIALIZER;
 
+void (*thread_end_hook)(void);
+
 void thread_exit_cleanup(void)
 {
+	void (*hook)(void) = __atomic_load_n(&thread_end_hook, __ATOMIC_ACQUIRE);
+
+	if (hook)
+		hook();
 	for (DWORD i = 0; i < TEB_TLS_MAX; i++) {
 		pthread_mutex_lock(&fls_lock);
 		PFLS_CALLBACK_FUNCTION cb = fls_callbacks[i];

@@ -38,7 +38,10 @@ struct file {
 	int fd;
 	int std;		/* 0-2 for the standard streams: never closed */
 	int delete_on_close;
+	int overlapped;		/* opened with FILE_FLAG_OVERLAPPED */
 	char *path;
+	struct kobject *port;	/* completion port, from CreateIoCompletionPort */
+	ULONG_PTR key;
 };
 
 static void file_destroy(struct kobject *o)
@@ -49,8 +52,51 @@ static void file_destroy(struct kobject *o)
 		close(f->fd);
 	if (f->delete_on_close && f->path)
 		unlink(f->path);
+	if (f->port)
+		kobj_unref(f->port);
 	free(f->path);
 	free(f);
+}
+
+int file_set_port(HANDLE h, struct kobject *port, ULONG_PTR key)
+{
+	struct file *f = (struct file *)handle_ref(h, KOBJ_FILE);
+	struct kobject *none = NULL;
+
+	if (!f)
+		return 0;
+	/* A handle is associated with one port, once. */
+	kobj_ref(port);
+	if (!__atomic_compare_exchange_n(&f->port, &none, port, 0,
+					 __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+		kobj_unref(port);
+		kobj_unref(&f->obj);
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return 0;
+	}
+	f->key = key;
+	kobj_unref(&f->obj);
+	return 1;
+}
+
+/*
+ * Finishes overlapped I/O, which never stays pending here: the result goes
+ * in the OVERLAPPED, its event is set, and a handle opened for overlapped
+ * I/O and associated with a port queues a packet, unless the event handle's
+ * low bit asks for none.
+ */
+static void io_complete(struct file *f, LPOVERLAPPED ov, BOOL ok, DWORD total)
+{
+	if (!ov)
+		return;
+	ov->Internal = ok ? 0 : 0xC0000001;	/* STATUS_UNSUCCESSFUL */
+	ov->InternalHigh = total;
+	UINT_PTR ev = (UINT_PTR)ov->hEvent;
+	if (ev & ~(UINT_PTR)1)
+		event_signal((HANDLE)(ev & ~(UINT_PTR)1), 0);
+	struct kobject *port = __atomic_load_n(&f->port, __ATOMIC_ACQUIRE);
+	if (ok && f->overlapped && port && !(ev & 1))
+		iocp_post(port, total, f->key, ov);
 }
 
 static HANDLE file_handle_new(int fd, int std, const char *path)
@@ -236,6 +282,7 @@ static HANDLE create_file(const void *name, int wide, DWORD access,
 	if (h != INVALID_HANDLE_VALUE) {
 		struct file *f = (struct file *)handle_ref(h, KOBJ_FILE);
 		f->delete_on_close = (flags & FILE_FLAG_DELETE_ON_CLOSE) != 0;
+		f->overlapped = (flags & FILE_FLAG_OVERLAPPED) != 0;
 		kobj_unref(&f->obj);
 		win_set_error(exists && (disposition == CREATE_ALWAYS ||
 					 disposition == OPEN_ALWAYS) ?
@@ -296,8 +343,7 @@ WINFN(BOOL) k32_ReadFile(HANDLE h, LPVOID buf, DWORD n, LPDWORD done,
 	}
 	if (done)
 		*done = total;
-	if (ov)
-		ov->InternalHigh = total;
+	io_complete(f, ov, ok, total);
 	kobj_unref(&f->obj);
 	return ok;
 }
@@ -328,8 +374,7 @@ WINFN(BOOL) k32_WriteFile(HANDLE h, LPCVOID buf, DWORD n, LPDWORD done,
 	}
 	if (done)
 		*done = total;
-	if (ov)
-		ov->InternalHigh = total;
+	io_complete(f, ov, ok, total);
 	kobj_unref(&f->obj);
 	return ok;
 }

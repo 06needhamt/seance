@@ -607,8 +607,9 @@ WINFN(HANDLE) k32_CreateSemaphoreExW(LPSECURITY_ATTRIBUTES sa, LONG initial,
 /*
  * I/O completion ports, as the work queues codecs (capavi32) make of them:
  * PostQueuedCompletionStatus queues a packet, GetQueuedCompletionStatus
- * takes the oldest. There is no overlapped I/O to complete (file I/O here is
- * synchronous), so associating a file with a port only returns the port.
+ * takes the oldest. File I/O finishes at once here, so a file associated
+ * with a port queues its packet as ReadFile or WriteFile returns
+ * (k32_file.c io_complete).
  * The queue lives under the wait lock, so the port is waitable too.
  */
 struct iocp_packet {
@@ -641,7 +642,6 @@ static int iocp_signaled(struct kobject *obj, DWORD tid)
 WINFN(HANDLE) k32_CreateIoCompletionPort(HANDLE file, HANDLE existing,
 					 ULONG_PTR key, DWORD threads)
 {
-	/* No I/O completes through the port here; a file is only checked. */
 	if (file != INVALID_HANDLE_VALUE) {
 		struct kobject *f = handle_ref(file, KOBJ_FILE);
 		if (!f)
@@ -652,12 +652,12 @@ WINFN(HANDLE) k32_CreateIoCompletionPort(HANDLE file, HANDLE existing,
 		struct kobject *o = handle_ref(existing, KOBJ_IOCP);
 		if (!o)
 			return NULL;
-		kobj_unref(o);
-		if (file == INVALID_HANDLE_VALUE) {
+		int ok = file != INVALID_HANDLE_VALUE &&
+			 file_set_port(file, o, key);
+		if (file == INVALID_HANDLE_VALUE)
 			win_set_error(ERROR_INVALID_PARAMETER);
-			return NULL;
-		}
-		return existing;
+		kobj_unref(o);
+		return ok ? existing : NULL;
 	}
 	struct iocp *p = calloc(1, sizeof(*p));
 	if (!p) {
@@ -667,19 +667,23 @@ WINFN(HANDLE) k32_CreateIoCompletionPort(HANDLE file, HANDLE existing,
 	kobj_init(&p->obj, KOBJ_IOCP, iocp_destroy);
 	p->obj.signaled = iocp_signaled;
 	p->tail = &p->head;
-	return handle_new(&p->obj);	/* on failure it freed p */
+	kobj_ref(&p->obj);
+	HANDLE h = handle_new(&p->obj);	/* on failure it dropped one ref */
+	if (h && file != INVALID_HANDLE_VALUE && !file_set_port(file, &p->obj, key)) {
+		handle_close(h);
+		h = NULL;
+	}
+	kobj_unref(&p->obj);
+	return h;
 }
 
-WINFN(BOOL) k32_PostQueuedCompletionStatus(HANDLE port, DWORD bytes,
-					   ULONG_PTR key, LPOVERLAPPED ov)
+BOOL iocp_post(struct kobject *port, DWORD bytes, ULONG_PTR key,
+	       LPOVERLAPPED ov)
 {
-	struct iocp *p = (struct iocp *)handle_ref(port, KOBJ_IOCP);
-	struct iocp_packet *pk;
+	struct iocp *p = (struct iocp *)port;
+	struct iocp_packet *pk = calloc(1, sizeof(*pk));
 
-	if (!p)
-		return FALSE;
-	if (!(pk = calloc(1, sizeof(*pk)))) {
-		kobj_unref(&p->obj);
+	if (!pk) {
 		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
 		return FALSE;
 	}
@@ -691,8 +695,19 @@ WINFN(BOOL) k32_PostQueuedCompletionStatus(HANDLE port, DWORD bytes,
 	p->tail = &pk->next;
 	wait_broadcast();
 	wait_unlock();
-	kobj_unref(&p->obj);
 	return TRUE;
+}
+
+WINFN(BOOL) k32_PostQueuedCompletionStatus(HANDLE port, DWORD bytes,
+					   ULONG_PTR key, LPOVERLAPPED ov)
+{
+	struct kobject *p = handle_ref(port, KOBJ_IOCP);
+
+	if (!p)
+		return FALSE;
+	BOOL ok = iocp_post(p, bytes, key, ov);
+	kobj_unref(p);
+	return ok;
 }
 
 /* Takes up to max packets, waiting up to timeout for the first; 0 if none. */

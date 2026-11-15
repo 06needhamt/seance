@@ -1199,6 +1199,10 @@ static void test_iocp(void)
 	FN(k, DWORD, GetLastError, void);
 	FN(k, HANDLE, CreateFileA, LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES,
 	   DWORD, DWORD, HANDLE);
+	FN(k, BOOL, ReadFile, HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
+	FN(k, BOOL, WriteFile, HANDLE, LPCVOID, DWORD, LPDWORD, LPOVERLAPPED);
+	FN(k, HANDLE, CreateEventA, LPSECURITY_ATTRIBUTES, BOOL, BOOL, LPCSTR);
+	FN(k, BOOL, ResetEvent, HANDLE);
 
 	HANDLE port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1);
 	CHECK(port != NULL);
@@ -1227,6 +1231,56 @@ static void test_iocp(void)
 			       NULL);
 	CHECK(f != INVALID_HANDLE_VALUE);
 	CHECK(CreateIoCompletionPort(f, port, 5, 0) == port);
+	/* Once, only (capavi32 waits on the port for its reads). */
+	CHECK(CreateIoCompletionPort(f, port, 6, 0) == NULL);
+	CHECK_EQ(GetLastError(), ERROR_INVALID_PARAMETER);
+	/* Its I/O queues a packet with the file's key, and sets the event. */
+	HANDLE ev = CreateEventA(NULL, TRUE, FALSE, NULL);
+	OVERLAPPED wo = { .hEvent = ev };
+	DWORD n = 0;
+	CHECK(WriteFile(f, "abcdef", 6, &n, &wo));
+	CHECK_EQ(WaitForSingleObject(ev, 0), WAIT_OBJECT_0);
+	CHECK(wo.Internal == 0 && wo.InternalHigh == 6);
+	got = NULL;
+	CHECK(GetQueuedCompletionStatus(port, &bytes, &key, &got, 0));
+	CHECK(bytes == 6 && key == 5 && got == &wo);
+	char rb[4] = { 0 };
+	OVERLAPPED ro = { .Offset = 2 };
+	CHECK(ReadFile(f, rb, 3, &n, &ro));
+	CHECK(GetQueuedCompletionStatus(port, &bytes, &key, &got, 0));
+	CHECK(bytes == 3 && key == 5 && got == &ro && !memcmp(rb, "cde", 3));
+	/* The event handle's low bit asks for no packet. */
+	ResetEvent(ev);
+	OVERLAPPED quiet = { .hEvent = (HANDLE)((UINT_PTR)ev | 1) };
+	CHECK(ReadFile(f, rb, 1, &n, &quiet));
+	CHECK_EQ(WaitForSingleObject(ev, 0), WAIT_OBJECT_0);
+	CHECK(!GetQueuedCompletionStatus(port, &bytes, &key, &got, 0));
+	/* A file that isn't overlapped queues nothing. */
+	HANDLE sf = CreateFileA("C:\\iocp2.bin", GENERIC_READ | GENERIC_WRITE, 0,
+				NULL, CREATE_ALWAYS, FILE_FLAG_DELETE_ON_CLOSE,
+				NULL);
+	CHECK(CreateIoCompletionPort(sf, port, 7, 0) == port);
+	OVERLAPPED so = { 0 };
+	CHECK(WriteFile(sf, "x", 1, &n, &so));
+	CHECK(!GetQueuedCompletionStatus(port, &bytes, &key, &got, 0));
+	CHECK(CloseHandle(sf));
+	/* A port made from the file directly; the file keeps it alive. */
+	HANDLE port2 = CreateIoCompletionPort(f, NULL, 8, 0);
+	CHECK(port2 == NULL);	/* f already has a port */
+	HANDLE g = CreateFileA("C:\\iocp3.bin", GENERIC_READ | GENERIC_WRITE, 0,
+			       NULL, CREATE_ALWAYS,
+			       FILE_FLAG_OVERLAPPED | FILE_FLAG_DELETE_ON_CLOSE,
+			       NULL);
+	port2 = CreateIoCompletionPort(g, NULL, 9, 0);
+	CHECK(port2 != NULL);
+	OVERLAPPED go = { 0 };
+	CHECK(WriteFile(g, "y", 1, &n, &go));
+	CHECK(GetQueuedCompletionStatus(port2, &bytes, &key, &got, 0));
+	CHECK(key == 9 && got == &go);
+	CHECK(CloseHandle(port2));
+	CHECK(WriteFile(g, "z", 1, &n, &go));	/* no packet reader; no crash */
+	CHECK(CloseHandle(g));
+	CHECK(CloseHandle(ev));
 	CHECK(CloseHandle(f));
 	/* A handle that isn't a file is refused. */
 	CHECK(CreateIoCompletionPort((HANDLE)0x1230, port, 5, 0) == NULL);
