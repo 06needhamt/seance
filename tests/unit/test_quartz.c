@@ -214,6 +214,25 @@ static void check_moniker(IMoniker *mon, const char *path)
 			FN(oa, void, SysFreeString, BSTR);
 			if (v.vt == VT_BSTR)
 				SysFreeString(v.bstrVal);
+			/*
+			 * A type asked for, with the rest of the VARIANT unset:
+			 * what is there isn't freed. A locked array there makes
+			 * clearing it fail, as a stale pointer would crash.
+			 */
+			FN(oa, HRESULT, SafeArrayDestroy, SAFEARRAY *);
+			SAFEARRAY stale;
+			memset(&stale, 0, sizeof(stale));
+			stale.cDims = 1;
+			stale.cLocks = 1;
+			memset(&v, 0, sizeof(v));
+			v.vt = VT_ARRAY | VT_UI1;
+			v.parray = &stale;
+			CHECK_EQ(bag->lpVtbl->Read(bag, fcc, &v, NULL), S_OK);
+			CHECK(v.vt == (VT_ARRAY | VT_UI1) && v.parray &&
+			      v.parray != &stale);
+			if (v.parray && v.parray != &stale)
+				SafeArrayDestroy(v.parray);
+			CHECK_EQ(stale.cLocks, 1);
 			mod_free(oa);
 		}
 		WCHAR *none = wide("Missing");

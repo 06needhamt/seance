@@ -437,7 +437,7 @@ int cli_open_codec(const char *arg, const char *fourcc, FOURCC guess,
 		size_t nfound = vfw_dll_handlers(c->target, found, NULL, 64);
 		for (size_t i = 0; i < nfound; i++) {
 			HIC h = try_open(c, found[i], modes, nmodes);
-			ICINFO info;
+			ICINFO info = { 0 };
 			if (h && ic_get_info(h, &info, sizeof(info)) &&
 			    (!nameless || (info.fccHandler &&
 					   (info.szName[0] ||

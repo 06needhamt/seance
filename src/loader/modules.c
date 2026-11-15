@@ -881,7 +881,13 @@ static void ldr_seed(void)
 	list_init(&ldr.InMemoryOrderModuleList);
 	list_init(&ldr.InInitializationOrderModuleList);
 	peb_get()->Ldr = &ldr;
-	mod_main();
+	/*
+	 * The main image heads the load order, even when mod_main() made it
+	 * first: its ldr_add() is what brought us here, with seeded set.
+	 */
+	struct module *m = mod_main();
+	if (m && !m->ldr)
+		ldr_add(m, 0);
 	static const char *const first[] = { "ntdll.dll", "kernel32.dll" };
 	for (size_t i = 0; i < sizeof(first) / sizeof(first[0]); i++) {
 		const struct builtin_dll *b = builtin_find(first[i]);

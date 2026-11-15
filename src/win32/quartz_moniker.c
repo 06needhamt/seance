@@ -367,9 +367,17 @@ WINFN(HRESULT) bag_Read(IPropertyBag *self, LPCOLESTR name, VARIANT *value,
 	if (FAILED(hr))
 		return hr;
 	if (value->vt != VT_EMPTY && value->vt != v.vt) {
+		/*
+		 * Only value's vt is the caller's: its union is unset, so the
+		 * conversion goes to an empty VARIANT of our own.
+		 */
 		VARTYPE want = value->vt;
-		hr = oa_VariantChangeTypeEx(value, &v, 0, 0, want);
+		VARIANT out;
+		oa_VariantInit(&out);
+		hr = oa_VariantChangeTypeEx(&out, &v, 0, 0, want);
 		oa_VariantClear(&v);
+		if (SUCCEEDED(hr))
+			*value = out;
 		return hr;
 	}
 	*value = v;

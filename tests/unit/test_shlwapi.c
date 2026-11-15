@@ -211,6 +211,14 @@ static void test_wide(void)
 		out[i] = 'x';
 	out[MAX_PATH - 2] = 0;
 	CHECK(!PathAppendW(out, sub) && wstrlen(out) == MAX_PATH - 2);
+	/* The result is canonicalised, as Windows does. */
+	WCHAR *up = utf8_to_utf16_dup("C:\\a\\b");
+	WCHAR *upr = utf8_to_utf16_dup("..\\c\\.\\d");
+	memcpy(out, up, (wstrlen(up) + 1) * sizeof(WCHAR));
+	CHECK(PathAppendW(out, upr));
+	a = utf16_to_utf8_dup(out);
+	CHECK_STR(a, "C:\\a\\c\\d");
+	free(a); free(up); free(upr);
 	free(base); free(sub);
 
 	FN(BOOL, PathStripToRootA, LPSTR);

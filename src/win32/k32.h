@@ -57,6 +57,17 @@ int file_set_port(HANDLE file, struct kobject *port, ULONG_PTR key);
 BOOL iocp_post(struct kobject *port, DWORD bytes, ULONG_PTR key,
 	       LPOVERLAPPED ov);
 
+/*
+ * The same in two steps, for I/O that must not start without room for its
+ * packet: iocp_packet_new allocates one (NULL with the error set), and
+ * iocp_queue fills and queues it, or iocp_packet_free drops it.
+ */
+struct iocp_packet;
+struct iocp_packet *iocp_packet_new(void);
+void iocp_queue(struct kobject *port, struct iocp_packet *pk, DWORD bytes,
+		ULONG_PTR key, LPOVERLAPPED ov);
+void iocp_packet_free(struct iocp_packet *pk);
+
 /* GetStdHandle. */
 HANDLE file_std_handle(DWORD which);
 

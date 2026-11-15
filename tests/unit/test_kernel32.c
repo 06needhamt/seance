@@ -1057,6 +1057,27 @@ static void test_legacy(void)
 	CHECK_EQ(GlobalGetAtomNameA(atom, buf, sizeof(buf)), 8);
 	CHECK_STR(buf, "WideAtom");
 	CHECK_EQ(GlobalAddAtomW((LPCWSTR)(ULONG_PTR)42), 42);
+	/* An ANSI name and its UTF-16 form are one atom. */
+	{
+		static const WCHAR cafe[] = { 'c', 'a', 'f', 0xe9, 0 };
+		ATOM c = GlobalAddAtomW(cafe);
+		CHECK(c >= 0xc000);
+		CHECK_EQ(GlobalFindAtomA("caf\xe9"), c);
+		CHECK_EQ(GlobalGetAtomNameA(c, buf, sizeof(buf)), 4);
+		CHECK_STR(buf, "caf\xe9");
+		CHECK_EQ(GlobalDeleteAtom(c), 0);
+		/* 255 characters that take three bytes each in UTF-8. */
+		WCHAR wide[256];
+		for (int i = 0; i < 255; i++)
+			wide[i] = 0x4e00;
+		wide[255] = 0;
+		c = GlobalAddAtomW(wide);
+		CHECK(c >= 0xc000);
+		WCHAR back[256];
+		CHECK_EQ(GlobalGetAtomNameW(c, back, 256), 255);
+		CHECK(!memcmp(back, wide, sizeof(wide)));
+		CHECK_EQ(GlobalDeleteAtom(c), 0);
+	}
 	CHECK_EQ(GlobalDeleteAtom(atom), 0);
 	CHECK_EQ(GlobalFindAtomW(wname), 0);
 	/* Both forms of GetVolumeInformation give the same volume. */

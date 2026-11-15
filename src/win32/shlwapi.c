@@ -131,8 +131,21 @@ WINFN(BOOL) sl_PathFileExistsA(LPCSTR p)
 { char *u=path_to_unix(p); struct stat st; BOOL ok=u && !stat(u,&st); free(u); return ok; }
 WINFN(BOOL) sl_PathIsDirectoryA(LPCSTR p)
 { char *u=path_to_unix(p); struct stat st; BOOL ok=u && !stat(u,&st) && S_ISDIR(st.st_mode); free(u); return ok; }
+static void canonicalize_a(char *out, const char *in);
+/* The two joined with one backslash, then "." and ".." folded out. */
 WINFN(BOOL) sl_PathAppendA(LPSTR p, LPCSTR more)
-{ while (sep(*more)) more++; if (!sl_PathAddBackslashA(p)) return FALSE; if (strlen(p)+strlen(more)>=MAX_PATH) return FALSE; strcat(p,more); return TRUE; }
+{
+	char tmp[MAX_PATH * 2];
+	if (!p || !more) return FALSE;
+	while (sep(*more)) more++;
+	size_t n = strlen(p), m = strlen(more);
+	int slash = n && !sep(p[n-1]);
+	if (n + slash + m >= MAX_PATH) return FALSE;
+	snprintf(tmp, sizeof(tmp), "%s%s%s", p, slash ? "\\" : "", more);
+	canonicalize_a(p, tmp);
+	return TRUE;
+}
+WINFN(BOOL) sl_PathCanonicalizeW(LPWSTR out, LPCWSTR in);
 WINFN(BOOL) sl_PathAppendW(LPWSTR p, LPCWSTR more)
 {
 	if (!p || !more) return FALSE;
@@ -140,9 +153,11 @@ WINFN(BOOL) sl_PathAppendW(LPWSTR p, LPCWSTR more)
 	size_t n = wstrlen(p), m = wstrlen(more);
 	int slash = n && p[n-1] != '\\' && p[n-1] != '/';
 	if (n + slash + m >= MAX_PATH) return FALSE;
-	if (slash) p[n++] = '\\';
-	memcpy(p + n, more, (m + 1) * sizeof(WCHAR));
-	return TRUE;
+	WCHAR tmp[MAX_PATH];
+	memcpy(tmp, p, n * sizeof(WCHAR));
+	if (slash) tmp[n++] = '\\';
+	memcpy(tmp + n, more, (m + 1) * sizeof(WCHAR));
+	return sl_PathCanonicalizeW(p, tmp);
 }
 /* "\\x" after a directory is on its drive (or share): C:\\x. */
 WINFN(LPSTR) sl_PathCombineA(LPSTR out, LPCSTR dir, LPCSTR file)

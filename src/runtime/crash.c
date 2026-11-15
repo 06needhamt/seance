@@ -143,17 +143,25 @@ static void report_callers(const void *pc, const void *sp)
 	char where[160], line[256];
 	uintptr_t p = (uintptr_t)sp, page = 0;
 	size_t ps = (size_t)getpagesize();
-	int found = 0;
+	int found = 0, have_page = 0;
 
 	if (!sp || mod_describe_address_try(pc, where, sizeof(where)))
 		return;
 	for (int i = 0; i < 64 && found < 3; i++, p += sizeof(void *)) {
-		if ((p & ~(ps - 1)) != page) {
-			page = p & ~(ps - 1);
-			int prot = mapping_prot(page);
-			if (prot < 0 || !(prot & PROT_READ))
-				break;
+		/* Both ends of the word: an unaligned one can cross a page. */
+		uintptr_t ends[2] = { p, p + sizeof(void *) - 1 };
+		int readable = 1;
+		for (int e = 0; e < 2 && readable; e++) {
+			uintptr_t pg = ends[e] & ~(ps - 1);
+			if (have_page && pg == page)
+				continue;
+			int prot = mapping_prot(pg);
+			readable = prot >= 0 && (prot & PROT_READ);
+			page = pg;
+			have_page = 1;
 		}
+		if (!readable || ends[1] < p)
+			break;
 		const void *v = *(const void *const *)p;
 		if (!mod_describe_address_try(v, where, sizeof(where)))
 			continue;

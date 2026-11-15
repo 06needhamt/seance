@@ -40,7 +40,12 @@ struct file {
 	int delete_on_close;
 	int overlapped;		/* opened with FILE_FLAG_OVERLAPPED */
 	char *path;
-	struct kobject *port;	/* completion port, from CreateIoCompletionPort */
+	/* Its completion port and key, set once by CreateIoCompletionPort. */
+	struct port_link *link;
+};
+
+struct port_link {
+	struct kobject *port;
 	ULONG_PTR key;
 };
 
@@ -52,8 +57,10 @@ static void file_destroy(struct kobject *o)
 		close(f->fd);
 	if (f->delete_on_close && f->path)
 		unlink(f->path);
-	if (f->port)
-		kobj_unref(f->port);
+	if (f->link) {
+		kobj_unref(f->link->port);
+		free(f->link);
+	}
 	free(f->path);
 	free(f);
 }
@@ -61,31 +68,57 @@ static void file_destroy(struct kobject *o)
 int file_set_port(HANDLE h, struct kobject *port, ULONG_PTR key)
 {
 	struct file *f = (struct file *)handle_ref(h, KOBJ_FILE);
-	struct kobject *none = NULL;
+	struct port_link *none = NULL, *link;
 
 	if (!f)
 		return 0;
-	/* A handle is associated with one port, once. */
+	if (!(link = malloc(sizeof(*link)))) {
+		kobj_unref(&f->obj);
+		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
+		return 0;
+	}
+	/* Port and key are published together; a handle gets one, once. */
+	link->port = port;
+	link->key = key;
 	kobj_ref(port);
-	if (!__atomic_compare_exchange_n(&f->port, &none, port, 0,
+	if (!__atomic_compare_exchange_n(&f->link, &none, link, 0,
 					 __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
 		kobj_unref(port);
+		free(link);
 		kobj_unref(&f->obj);
 		win_set_error(ERROR_INVALID_PARAMETER);
 		return 0;
 	}
-	f->key = key;
 	kobj_unref(&f->obj);
 	return 1;
 }
 
 /*
- * Finishes overlapped I/O, which never stays pending here: the result goes
- * in the OVERLAPPED, its event is set, and a handle opened for overlapped
- * I/O and associated with a port queues a packet, unless the event handle's
- * low bit asks for none.
+ * Overlapped I/O never stays pending here. A handle opened for overlapped
+ * I/O and associated with a port queues a packet when it finishes, unless
+ * the event handle's low bit asks for none: io_start reserves that packet
+ * before the I/O, which doesn't start (FALSE, the error set) without one.
  */
-static void io_complete(struct file *f, LPOVERLAPPED ov, BOOL ok, DWORD total)
+struct io_done {
+	const struct port_link *link;
+	struct iocp_packet *packet;
+};
+
+static BOOL io_start(struct file *f, LPOVERLAPPED ov, struct io_done *d)
+{
+	d->link = NULL;
+	d->packet = NULL;
+	if (!ov || !f->overlapped || ((UINT_PTR)ov->hEvent & 1))
+		return TRUE;
+	d->link = __atomic_load_n(&f->link, __ATOMIC_ACQUIRE);
+	if (d->link && !(d->packet = iocp_packet_new()))
+		return FALSE;
+	return TRUE;
+}
+
+/* The result goes in the OVERLAPPED, its event is set, the packet queued. */
+static void io_complete(struct io_done *d, LPOVERLAPPED ov, BOOL ok,
+			DWORD total)
 {
 	if (!ov)
 		return;
@@ -94,9 +127,10 @@ static void io_complete(struct file *f, LPOVERLAPPED ov, BOOL ok, DWORD total)
 	UINT_PTR ev = (UINT_PTR)ov->hEvent;
 	if (ev & ~(UINT_PTR)1)
 		event_signal((HANDLE)(ev & ~(UINT_PTR)1), 0);
-	struct kobject *port = __atomic_load_n(&f->port, __ATOMIC_ACQUIRE);
-	if (ok && f->overlapped && port && !(ev & 1))
-		iocp_post(port, total, f->key, ov);
+	if (ok && d->packet)
+		iocp_queue(d->link->port, d->packet, total, d->link->key, ov);
+	else
+		iocp_packet_free(d->packet);
 }
 
 static HANDLE file_handle_new(int fd, int std, const char *path)
@@ -323,6 +357,11 @@ WINFN(BOOL) k32_ReadFile(HANDLE h, LPVOID buf, DWORD n, LPDWORD done,
 		*done = 0;
 	if (!f)
 		return FALSE;
+	struct io_done d;
+	if (!io_start(f, ov, &d)) {
+		kobj_unref(&f->obj);
+		return FALSE;
+	}
 	off_t pos = ov ? (off_t)(((ULONGLONG)ov->OffsetHigh << 32) | ov->Offset) : 0;
 	/* Disk files are read in full; pipes and consoles return what they have. */
 	struct stat st;
@@ -343,7 +382,7 @@ WINFN(BOOL) k32_ReadFile(HANDLE h, LPVOID buf, DWORD n, LPDWORD done,
 	}
 	if (done)
 		*done = total;
-	io_complete(f, ov, ok, total);
+	io_complete(&d, ov, ok, total);
 	kobj_unref(&f->obj);
 	return ok;
 }
@@ -359,6 +398,11 @@ WINFN(BOOL) k32_WriteFile(HANDLE h, LPCVOID buf, DWORD n, LPDWORD done,
 		*done = 0;
 	if (!f)
 		return FALSE;
+	struct io_done d;
+	if (!io_start(f, ov, &d)) {
+		kobj_unref(&f->obj);
+		return FALSE;
+	}
 	off_t pos = ov ? (off_t)(((ULONGLONG)ov->OffsetHigh << 32) | ov->Offset) : 0;
 	while (total < n) {
 		ssize_t r = ov ? pwrite(f->fd, (const BYTE *)buf + total,
@@ -374,7 +418,7 @@ WINFN(BOOL) k32_WriteFile(HANDLE h, LPCVOID buf, DWORD n, LPDWORD done,
 	}
 	if (done)
 		*done = total;
-	io_complete(f, ov, ok, total);
+	io_complete(&d, ov, ok, total);
 	kobj_unref(&f->obj);
 	return ok;
 }

@@ -677,16 +677,26 @@ WINFN(HANDLE) k32_CreateIoCompletionPort(HANDLE file, HANDLE existing,
 	return h;
 }
 
-BOOL iocp_post(struct kobject *port, DWORD bytes, ULONG_PTR key,
-	       LPOVERLAPPED ov)
+struct iocp_packet *iocp_packet_new(void)
 {
-	struct iocp *p = (struct iocp *)port;
 	struct iocp_packet *pk = calloc(1, sizeof(*pk));
 
-	if (!pk) {
+	if (!pk)
 		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
-		return FALSE;
-	}
+	return pk;
+}
+
+void iocp_packet_free(struct iocp_packet *pk)
+{
+	free(pk);
+}
+
+void iocp_queue(struct kobject *port, struct iocp_packet *pk, DWORD bytes,
+		ULONG_PTR key, LPOVERLAPPED ov)
+{
+	struct iocp *p = (struct iocp *)port;
+
+	pk->next = NULL;
 	pk->e.lpCompletionKey = key;
 	pk->e.lpOverlapped = ov;
 	pk->e.dwNumberOfBytesTransferred = bytes;
@@ -695,6 +705,16 @@ BOOL iocp_post(struct kobject *port, DWORD bytes, ULONG_PTR key,
 	p->tail = &pk->next;
 	wait_broadcast();
 	wait_unlock();
+}
+
+BOOL iocp_post(struct kobject *port, DWORD bytes, ULONG_PTR key,
+	       LPOVERLAPPED ov)
+{
+	struct iocp_packet *pk = iocp_packet_new();
+
+	if (!pk)
+		return FALSE;
+	iocp_queue(port, pk, bytes, key, ov);
 	return TRUE;
 }
 

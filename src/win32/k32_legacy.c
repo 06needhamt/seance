@@ -96,24 +96,62 @@ static UINT get_atom_name(struct atom *table, ATOM atom, LPSTR out, int size)
 	if (table[i].name) { n = strlen(table[i].name); if (n >= (UINT)size) n = size - 1; memcpy(out, table[i].name, n); out[n] = 0; }
 	pthread_mutex_unlock(&atom_lock); return n;
 }
-WINFN(ATOM) k32_GlobalFindAtomA(LPCSTR n) { return find_atom(atoms, n); }
-WINFN(ATOM) k32_GlobalAddAtomA(LPCSTR n) { return add_atom(atoms, n); }
-WINFN(ATOM) k32_GlobalDeleteAtom(ATOM a) { return delete_atom(atoms, a); }
-WINFN(UINT) k32_GlobalGetAtomNameA(ATOM a, LPSTR o, int n) { return get_atom_name(atoms, a, o, n); }
-WINFN(ATOM) k32_FindAtomA(LPCSTR n) { return find_atom(local_atoms, n); }
-WINFN(ATOM) k32_AddAtomA(LPCSTR n) { return add_atom(local_atoms, n); }
-WINFN(ATOM) k32_DeleteAtom(ATOM a) { return delete_atom(local_atoms, a); }
-WINFN(UINT) k32_GetAtomNameA(ATOM a, LPSTR o, int n) { return get_atom_name(local_atoms, a, o, n); }
 /*
- * The W forms hold names as UTF-8 in the same tables, so an atom added
- * through one form is found through the other. An integer atom passes
- * through as it is.
+ * The tables hold names as UTF-8, so an atom added through one form is
+ * found through the other: the A forms convert from and to the ANSI code
+ * page, the W forms from and to UTF-16. An integer atom passes through as
+ * it is. A name is at most 255 characters; ATOM_NAME_MAX bytes hold that
+ * many in UTF-8.
  */
-static int atom_name_a(LPCWSTR name, char out[256])
+#define ATOM_NAME_MAX (255 * 3 + 1)
+static ATOM atom_a(ATOM (*fn)(struct atom *, LPCSTR), struct atom *table,
+		   LPCSTR name)
+{
+	if (!name || (ULONG_PTR)name <= 0xffff)
+		return fn(table, name);
+	char *u = acp_to_utf8(name);
+	if (!u) {
+		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
+		return 0;
+	}
+	ATOM r = fn(table, u);
+	free(u);
+	return r;
+}
+static UINT atom_name_acp(struct atom *table, ATOM atom, LPSTR out, int size)
+{
+	char u[ATOM_NAME_MAX];
+	if (!out || size <= 0)
+		return 0;
+	if (atom < 0xc000)
+		return get_atom_name(table, atom, out, size);
+	if (!get_atom_name(table, atom, u, sizeof(u)))
+		return 0;
+	char *a = utf8_to_acp_dup(u);
+	if (!a)
+		return 0;
+	size_t n = strlen(a);
+	if (n >= (size_t)size)
+		n = (size_t)size - 1;
+	memcpy(out, a, n);
+	out[n] = 0;
+	free(a);
+	return (UINT)n;
+}
+WINFN(ATOM) k32_GlobalFindAtomA(LPCSTR n) { return atom_a(find_atom, atoms, n); }
+WINFN(ATOM) k32_GlobalAddAtomA(LPCSTR n) { return atom_a(add_atom, atoms, n); }
+WINFN(ATOM) k32_GlobalDeleteAtom(ATOM a) { return delete_atom(atoms, a); }
+WINFN(UINT) k32_GlobalGetAtomNameA(ATOM a, LPSTR o, int n) { return atom_name_acp(atoms, a, o, n); }
+WINFN(ATOM) k32_FindAtomA(LPCSTR n) { return atom_a(find_atom, local_atoms, n); }
+WINFN(ATOM) k32_AddAtomA(LPCSTR n) { return atom_a(add_atom, local_atoms, n); }
+WINFN(ATOM) k32_DeleteAtom(ATOM a) { return delete_atom(local_atoms, a); }
+WINFN(UINT) k32_GetAtomNameA(ATOM a, LPSTR o, int n) { return atom_name_acp(local_atoms, a, o, n); }
+static int atom_name_utf8(LPCWSTR name, char out[ATOM_NAME_MAX])
 {
 	if (!name || (ULONG_PTR)name <= 0xffff)
 		return 0;
-	if (cp_from_utf16(CP_UTF8, name, -1, out, 256, '?', NULL) < 0) {
+	if (wstrlen(name) > 255 ||
+	    cp_from_utf16(CP_UTF8, name, -1, out, ATOM_NAME_MAX, '?', NULL) < 0) {
 		win_set_error(ERROR_INVALID_PARAMETER);
 		return -1;
 	}
@@ -122,13 +160,13 @@ static int atom_name_a(LPCWSTR name, char out[256])
 static ATOM atom_w(ATOM (*fn)(struct atom *, LPCSTR), struct atom *table,
 		   LPCWSTR name)
 {
-	char a[256];
-	int r = atom_name_a(name, a);
+	char a[ATOM_NAME_MAX];
+	int r = atom_name_utf8(name, a);
 	return r < 0 ? 0 : fn(table, r ? a : (LPCSTR)name);
 }
 static UINT atom_name_w(struct atom *table, ATOM atom, LPWSTR out, int size)
 {
-	char a[256];
+	char a[ATOM_NAME_MAX];
 	if (!out || size <= 0 || !get_atom_name(table, atom, a, sizeof(a)))
 		return 0;
 	int n = cp_to_utf16(CP_UTF8, a, -1, NULL, 0, 0);

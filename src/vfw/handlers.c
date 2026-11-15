@@ -316,11 +316,16 @@ static size_t scan_companions(const struct pe_image *img, const char *path,
 	struct companions c = { .n = 0 };
 	char *dir = strdup(path), *slash = dir ? strrchr(dir, '/') : NULL;
 
-	if (!slash) {
-		free(dir);
+	if (!dir)
 		return n;
+	/* A bare name is in the current directory. */
+	if (slash) {
+		*slash = 0;
+	} else {
+		free(dir);
+		if (!(dir = strdup(".")))
+			return n;
 	}
-	*slash = 0;
 	pe_foreach_import(img, add_companion_name, &c);
 	add_companion = 1;
 	for (size_t i = 0; i < c.n; i++) {
