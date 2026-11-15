@@ -265,6 +265,18 @@ static const REGFILTERPINS2 audio_encoder_pins[] = {
 	{ 0, 1, 1, pcm_types, 0, NULL, NULL },
 	{ REG_PINFLAG_B_OUTPUT, 1, 1, tsta_types, 0, NULL, NULL },
 };
+/*
+ * With TESTFILTER_AUDIO_ODD=1, the encoder's output is registered as a
+ * subtype that is no format tag's, as Ogg Vorbis encoders register theirs.
+ */
+/* {5E6C9B3A-3A7D-4F0E-9C11-0D2B7A6E4F80} */
+static const GUID st_odd = { 0x5e6c9b3a, 0x3a7d, 0x4f0e,
+	{ 0x9c, 0x11, 0x0d, 0x2b, 0x7a, 0x6e, 0x4f, 0x80 } };
+static const REGPINTYPES odd_types[] = { { &mt_audio, &st_odd } };
+static const REGFILTERPINS2 odd_encoder_pins[] = {
+	{ 0, 1, 1, pcm_types, 0, NULL, NULL },
+	{ REG_PINFLAG_B_OUTPUT, 1, 1, odd_types, 0, NULL, NULL },
+};
 
 static HRESULT register_audio(void)
 {
@@ -284,7 +296,11 @@ static HRESULT register_audio(void)
 					&rf2);
 	if (SUCCEEDED(hr)) {
 		rf2.dwMerit = MERIT_DO_NOT_USE;
-		rf2.rgPins2 = audio_encoder_pins;
+		char value[2];
+		rf2.rgPins2 = GetEnvironmentVariableA("TESTFILTER_AUDIO_ODD",
+						      value, sizeof(value)) == 1 &&
+			      value[0] == '1' ? odd_encoder_pins :
+			      audio_encoder_pins;
 		hr = fm->lpVtbl->RegisterFilter(fm, &clsid_audio_encoder,
 						audio_encoder_name, NULL,
 						&audio_compressors, NULL, &rf2);

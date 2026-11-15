@@ -736,6 +736,20 @@ to a cause; what was seance's is fixed, and the rest is recorded here.
   - `seance register` the three swc* DLLs first.
   - DigiVCap's other FOURCCs (MPEG-2, HD, dvsl) want
     `HKLM\Software\Movie2`, which Matrox's software installs.
+- **OggDS** (`oggds.dll`: Ogg splitter and muxer, Vorbis encoder and
+  decoder): its Vorbis encoder now connects, but seance can't store what it
+  makes.
+  - It registers its output as a subtype that is no format tag's. seance
+    asked such an encoder for the subtype of format tag 0, which it never
+    offers. An encoder registered with no tag now gets its first audio
+    output.
+  - That output's format is OggDS's own (`{6BDDFA7E-9F22-46A9-AB5E-884EFF294D9F}`),
+    meant for its Ogg muxer, not a WAVEFORMATEX, so it can't go into an AVI
+    or WAV. seance now says so, where it used to say the encoder took no PCM.
+  - Its decoder takes the same type, which only its Ogg splitter gives.
+    seance reads no Ogg.
+  - Fixed on the way: the PCM retry compared formats past the end of a
+    16-byte `fmt ` chunk.
 
 ## In-repository baseline
 

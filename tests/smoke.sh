@@ -167,6 +167,17 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		"$work/in.pcm" -o "$work/in.wav" 2>/dev/null
 	$emu "$harness" encode "$f" "$work/in.wav" -o "$work/t.avi" 2>/dev/null
 	$emu "$harness" avi "$work/t.avi" | grep -q "wave format 0x7354"
+	# An encoder registered with no format tag (as Ogg Vorbis encoders
+	# are) is connected; output a file can't hold is named as such.
+	odd=$(VFW_REGISTRY= VFW_ENV_TESTFILTER_AUDIO_ODD=1 $emu "$harness" \
+		encode "$f" "$work/in.wav" -o "$work/odd.avi" 2>&1) && {
+		echo "smoke: an encoder's non-WAVEFORMATEX output was taken" >&2
+		exit 1
+	}
+	case $odd in
+	*"isn't a WAVEFORMATEX"*) ;;
+	*) echo "smoke: odd audio encoder: $odd" >&2; exit 1 ;;
+	esac
 	for mode in "" SPLIT HOLD FLOAT; do
 		env ${mode:+VFW_ENV_TESTFILTER_AUDIO_$mode=1} $emu "$harness" \
 			decode "$f" "$work/t.avi" -o "$work/out.pcm" 2>/dev/null
