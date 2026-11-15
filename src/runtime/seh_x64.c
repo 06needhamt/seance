@@ -50,10 +50,12 @@ _Static_assert(OFF(R8) == 0xb8 && OFF(R10) == 0xc8 && OFF(R11) == 0xd0 &&
  * returns (rsp past the return address, rip the return address), the
  * segment registers, flags and the FXSAVE state.
  *
- * vfw_restore_context(ctx): the reverse, never returning. It builds a
- * flags/return-address pair below the target stack and ends in popfq; ret,
- * so no register is needed for the jump; what it writes lies in space the
- * target stack has already given up.
+ * vfw_restore_context(ctx): the reverse, never returning. It builds an
+ * iretq frame below the target stack and ends in iretq, as NtContinue
+ * does, so no register is needed for the jump and the flags take effect
+ * with it: a trap flag it sets traps after the first instruction at the
+ * target, not before. What it writes lies in space the target stack has
+ * already given up.
  */
 __asm__(
 	".text\n"
@@ -97,12 +99,20 @@ __asm__(
 	".globl vfw_restore_context\n"
 	".type vfw_restore_context, @function\n"
 	"vfw_restore_context:\n"
-	"	movq 0x98(%rcx), %r10\n"
-	"	subq $16, %r10\n"
-	"	movl 0x44(%rcx), %r11d\n"
-	"	movq %r11, (%r10)\n"
+	"	movq 0x98(%rcx), %r11\n"
+	"	leaq -40(%r11), %r10\n"
+	"	movq %r11, 24(%r10)\n"	/* rsp */
 	"	movq 0xf8(%rcx), %r11\n"
+	"	movq %r11, (%r10)\n"		/* rip */
+	"	movl %cs, %r11d\n"
 	"	movq %r11, 8(%r10)\n"
+	"	movl %ss, %r11d\n"
+	"	movq %r11, 32(%r10)\n"
+	"	movl 0x44(%rcx), %r11d\n"
+	/* The flags user code may set (iretq leaves IF and IOPL alone). */
+	"	andl $0x00240fd5, %r11d\n"
+	"	orl $0x202, %r11d\n"
+	"	movq %r11, 16(%r10)\n"
 	"	testl $8, 0x30(%rcx)\n"
 	"	jz 1f\n"
 	"	fxrstor 0x100(%rcx)\n"
@@ -123,8 +133,7 @@ __asm__(
 	"	movq 0xc8(%rcx), %r10\n"
 	"	movq 0x78(%rcx), %rax\n"
 	"	movq 0x80(%rcx), %rcx\n"
-	"	popfq\n"
-	"	ret\n"
+	"	iretq\n"
 	".size vfw_restore_context, .-vfw_restore_context\n"
 
 	/*

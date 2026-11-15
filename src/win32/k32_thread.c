@@ -183,9 +183,12 @@ static void *thread_main(void *arg)
 	return NULL;
 }
 
-WINFN(HANDLE) k32_CreateThread(LPSECURITY_ATTRIBUTES sa, SIZE_T stack,
-			       LPTHREAD_START_ROUTINE start, LPVOID param,
-			       DWORD flags, LPDWORD tid)
+/*
+ * CreateThread; with close_on_exit (_beginthread), the thread closes its
+ * own handle as it ends, which it knows from before it starts.
+ */
+static HANDLE spawn(SIZE_T stack, LPTHREAD_START_ROUTINE start, LPVOID param,
+		    DWORD flags, LPDWORD tid, int close_on_exit)
 {
 	struct thread *t = thread_new();
 	pthread_attr_t attr;
@@ -205,6 +208,9 @@ WINFN(HANDLE) k32_CreateThread(LPSECURITY_ATTRIBUTES sa, SIZE_T stack,
 		kobj_unref(&t->obj);
 		return NULL;
 	}
+	if (close_on_exit)
+		t->close_on_exit = h;
+	kobj_ref(&t->obj);	/* ours, while we look at it: it may end first */
 
 	if (stack < DEFAULT_STACK)
 		stack = DEFAULT_STACK;
@@ -215,6 +221,7 @@ WINFN(HANDLE) k32_CreateThread(LPSECURITY_ATTRIBUTES sa, SIZE_T stack,
 	pthread_attr_destroy(&attr);
 	if (err) {
 		handle_close(h);
+		kobj_unref(&t->obj);
 		kobj_unref(&t->obj);
 		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
 		return NULL;
@@ -234,7 +241,15 @@ WINFN(HANDLE) k32_CreateThread(LPSECURITY_ATTRIBUTES sa, SIZE_T stack,
 		*tid = t->tid;
 	}
 	TRACE("CreateThread(%p, %p) = %p", (void *)start, param, h);
+	kobj_unref(&t->obj);
 	return h;
+}
+
+WINFN(HANDLE) k32_CreateThread(LPSECURITY_ATTRIBUTES sa, SIZE_T stack,
+			       LPTHREAD_START_ROUTINE start, LPVOID param,
+			       DWORD flags, LPDWORD tid)
+{
+	return spawn(stack, start, param, flags, tid, 0);
 }
 
 HANDLE thread_create(LPTHREAD_START_ROUTINE start, LPVOID param)
@@ -335,20 +350,8 @@ WINFN(DWORD) k32_SuspendThread(HANDLE h)
 HANDLE thread_create_ex(SIZE_T stack, LPTHREAD_START_ROUTINE start, LPVOID param,
 			DWORD flags, LPDWORD tid)
 {
-	if (!(flags & THREAD_CLOSE_ON_EXIT))
-		return k32_CreateThread(NULL, stack, start, param, flags, tid);
-	/* Suspended until the handle is recorded, so it can't end first. */
-	flags &= ~THREAD_CLOSE_ON_EXIT;
-	HANDLE h = k32_CreateThread(NULL, stack, start, param,
-				    flags | CREATE_SUSPENDED, tid);
-	struct thread *t = h ? thread_from(h) : NULL;
-	if (t) {
-		t->close_on_exit = h;
-		kobj_unref(&t->obj);
-		if (!(flags & CREATE_SUSPENDED))
-			k32_ResumeThread(h);
-	}
-	return h;
+	return spawn(stack, start, param, flags & ~THREAD_CLOSE_ON_EXIT, tid,
+		     (flags & THREAD_CLOSE_ON_EXIT) != 0);
 }
 
 WINFN(BOOL) k32_TerminateThread(HANDLE h, DWORD code)

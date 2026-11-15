@@ -285,6 +285,11 @@ static void test_wininet(void)
 	n = sizeof(buf);
 	CHECK(InternetCanonicalizeUrlA("http://h/a%20b%41", buf, &n, ICU_DECODE));
 	CHECK_STR(buf, "http://h/a%20bA");
+	/* In browser mode, the query is left as it is, escapes and all. */
+	n = sizeof(buf);
+	CHECK(InternetCanonicalizeUrlA("http://h/%41?q=%26x", buf, &n,
+				       ICU_DECODE | ICU_BROWSER_MODE));
+	CHECK_STR(buf, "http://h/A?q=%26x");
 	/* "." and ".." resolve, unless ICU_NO_META. */
 	n = sizeof(buf);
 	CHECK(InternetCanonicalizeUrlA("http://h/a/./b/../c?x=../y", buf, &n, 0));

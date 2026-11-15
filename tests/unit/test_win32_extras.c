@@ -7,6 +7,8 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -1179,6 +1181,22 @@ static void test_process_memory(void)
 	CHECK(!WriteProcessMemory(self, p, p + 0x2000, 4, &n) && n == 0);
 	CHECK(!memcmp(p, "qqqq", 4));
 	CHECK(!WriteProcessMemory((HANDLE)0x1234, p, "a", 1, &n));
+	/* A page that can't be made writable (a read-only file mapped shared)
+	 * after a writable one: nothing is written to either. */
+	char tmpl[] = "/tmp/vfw-wpm-XXXXXX";
+	int fd = mkstemp(tmpl);
+	CHECK(fd >= 0 && ftruncate(fd, 0x1000) == 0);
+	int ro = open(tmpl, O_RDONLY);
+	unlink(tmpl);
+	close(fd);
+	CHECK(ro >= 0 && mmap(p + 0x1000, 0x1000, PROT_READ, MAP_SHARED | MAP_FIXED,
+			      ro, 0) == p + 0x1000);
+	close(ro);
+	memcpy(p + 0xffc, "mmmm", 4);
+	CHECK(!WriteProcessMemory(self, p + 0xffc, "12345678", 8, &n) && n == 0);
+	CHECK_EQ(GetLastError(), ERROR_PARTIAL_COPY);
+	CHECK(!memcmp(p + 0xffc, "mmmm", 4));
+	CHECK(VirtualQuery(p, &mbi, sizeof(mbi)) && mbi.Protect == PAGE_READWRITE);
 	VirtualFree(p, 0, MEM_RELEASE);
 	mod_free(k);
 }
@@ -1472,6 +1490,68 @@ static void test_mmio_more(struct module *m, const char *root)
 			    '.', 'b', 'i', 'n', 0 };
 	CHECK(mmioOpenW(wrel, NULL, MMIO_EXIST) != NULL);
 	CHECK(wrel[0] == 'C' && wrel[1] == ':' && wrel[2] == '\\' && wrel[3] == 'm');
+
+	/* A memory file is its own buffer: mmioGetInfo shows the block, and
+	 * a caller writing straight into it is taken back. */
+	FN(m, MMRESULT, mmioSetBuffer, HMMIO, LPSTR, LONG, UINT);
+	char block[8] = "abcdefgh";
+	memset(&info, 0, sizeof(info));
+	info.fccIOProc = FOURCC_MEM;
+	info.pchBuffer = block;
+	info.cchBuffer = 8;
+	h = mmioOpenA(NULL, &info, MMIO_READWRITE);
+	CHECK(h != NULL);
+	CHECK_EQ(mmioSeek(h, 2, SEEK_SET), 2);
+	CHECK_EQ(mmioGetInfo(h, &info, 0), 0);
+	CHECK(info.pchBuffer == block && info.cchBuffer == 8);
+	CHECK(info.pchNext == block + 2 && info.pchEndRead == block + 8 &&
+	      info.pchEndWrite == block + 8);
+	*info.pchNext++ = 'X';
+	info.dwFlags |= MMIO_DIRTY;
+	CHECK_EQ(mmioSetInfo(h, &info, 0), 0);
+	CHECK_EQ(mmioSeek(h, 0, SEEK_CUR), 3);
+	CHECK(!memcmp(block, "abXdefgh", 8));
+	/* A caller's block cannot grow. */
+	CHECK_EQ(mmioAdvance(h, &info, MMIO_WRITE), MMIOERR_CANNOTEXPAND);
+	/* mmioSetBuffer puts a new block in: reads come from it. */
+	char block2[4] = "wxyz";
+	CHECK_EQ(mmioSetBuffer(h, block2, 4, 0), 0);
+	CHECK_EQ(mmioSeek(h, 0, SEEK_CUR), 3);
+	CHECK_EQ(mmioRead(h, got, 4), 1);
+	CHECK(got[0] == 'z');
+	CHECK_EQ(mmioSeek(h, 0, SEEK_END), 4);
+	/* With no buffer given, the data moves to one of our own. */
+	CHECK_EQ(mmioSetBuffer(h, NULL, 6, 0), 0);
+	CHECK_EQ(mmioSeek(h, 0, SEEK_SET), 0);
+	CHECK_EQ(mmioRead(h, got, 8), 4);
+	CHECK(!memcmp(got, "wxyz", 4));
+	CHECK_EQ(mmioSetBuffer(h, NULL, 0, 0), MMSYSERR_INVALPARAM);
+	mmioClose(h, 0);
+
+	/* A block of our own grows by adwInfo[0] when mmioAdvance asks. */
+	memset(&info, 0, sizeof(info));
+	info.fccIOProc = FOURCC_MEM;
+	info.cchBuffer = 4;
+	info.adwInfo[0] = 4;
+	h = mmioOpenA(NULL, &info, MMIO_CREATE | MMIO_READWRITE);
+	CHECK(h != NULL);
+	CHECK_EQ(mmioGetInfo(h, &info, 0), 0);
+	CHECK_EQ(info.cchBuffer, 4);
+	memcpy(info.pchNext, "1234", 4);
+	info.pchNext += 4;
+	info.dwFlags |= MMIO_DIRTY;
+	CHECK_EQ(mmioAdvance(h, &info, MMIO_WRITE), 0);
+	CHECK_EQ(info.cchBuffer, 8);
+	CHECK(info.pchNext == info.pchBuffer + 4 &&
+	      info.pchEndWrite == info.pchBuffer + 8);
+	memcpy(info.pchNext, "56", 2);
+	info.pchNext += 2;
+	info.dwFlags |= MMIO_DIRTY;
+	CHECK_EQ(mmioSetInfo(h, &info, 0), 0);
+	CHECK_EQ(mmioSeek(h, 0, SEEK_SET), 0);
+	CHECK_EQ(mmioRead(h, got, 16), 6);
+	CHECK(!memcmp(got, "123456", 6));
+	mmioClose(h, 0);
 	mod_free(k);
 }
 

@@ -672,13 +672,14 @@ static char *canonicalize(const char *u, DWORD flags)
 		unsigned char c = (unsigned char)u[i];
 		if (c == '?' || c == '#')
 			in_extra = 1;
-		if ((flags & ICU_DECODE) && c == '%' && i + 2 < n &&
+		/* ICU_BROWSER_MODE leaves what follows '?' or '#' as it is. */
+		int as_is = in_extra && (flags & ICU_BROWSER_MODE);
+		if ((flags & ICU_DECODE) && !as_is && c == '%' && i + 2 < n &&
 		    hexval(u[i + 1]) >= 0 && hexval(u[i + 2]) >= 0) {
 			c = (unsigned char)(hexval(u[i + 1]) * 16 + hexval(u[i + 2]));
 			i += 2;
 		}
-		if (!(flags & ICU_NO_ENCODE) && !(in_extra && (flags & ICU_BROWSER_MODE)) &&
-		    unsafe(c, flags)) {
+		if (!(flags & ICU_NO_ENCODE) && !as_is && unsafe(c, flags)) {
 			o += sprintf(o, "%%%02X", c);
 			continue;
 		}
