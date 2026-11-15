@@ -372,6 +372,13 @@ static void test_packer_fixture(void)
 	dword_fn step = mod_get_proc(m, "pk_single_step");
 	if (!VFW_SANITIZER_BUILD)
 		CHECK(step && step() == 1);
+	/* "int 1", icebp and hlt raise what Windows raises for them. */
+	dword_fn hw = mod_get_proc(m, "pk_hw_faults");
+	if (!VFW_SANITIZER_BUILD)
+		CHECK(hw && hw() == 7);
+	/* PEB->Ldr lists the modules, as code that walks it expects. */
+	dword_fn ldr = mod_get_proc(m, "pk_peb_ldr");
+	CHECK(ldr && ldr() == 15);
 	mod_free(m);
 }
 
@@ -388,8 +395,10 @@ static void test_builtin_modules(void)
 	CHECK(gate_break() && mod_from_address(gate_break()) == k32);
 	CHECK(((const BYTE *)gate_break())[0] == 0xcc &&
 	      ((const BYTE *)gate_break())[1] == 0xc3);
+	/* Listed in PEB->Ldr from the start, so it may be loaded already. */
+	int refs = k32->refcount;
 	CHECK(mod_load("kernel32.dll", NULL) == k32);
-	CHECK_EQ(k32->refcount, 2);
+	CHECK_EQ(k32->refcount, refs + 1);
 	mod_free(k32);
 
 	CHECK(mod_get_proc(k32, "GetTickCount") != NULL);

@@ -626,6 +626,53 @@ to a cause; what was seance's is fixed, and the rest is recorded here.
   - at once in guest code;
   - when it wakes, if it is waiting or sleeping in seance;
   - before it starts, if it hasn't run.
+- **CapAvi32** (`capavi32.dll`, CAPA): round-trips now (lossless).
+  - It is a capture codec. Its frames go to `C:\capavi.000`, and the AVI
+    holds only short references into that file, so the AVI is no use
+    without it.
+  - It reads that file with overlapped `ReadFile` on a handle it has
+    associated with a completion port, and then waits on the port. seance's
+    file I/O never stays pending, and associating a file with a port did
+    nothing, so no packet came and the decode hung.
+  - Now a handle associated with a port records it, and overlapped
+    `ReadFile` and `WriteFile` on a handle opened with
+    `FILE_FLAG_OVERLAPPED` queue a packet as they return. As on Windows,
+    no packet is queued when the event handle's low bit is set. The
+    OVERLAPPED's event is set, and `Internal` holds the status.
+- **VTZ32** (`VTZ32.DLL`, VDTZ): round-trips now (49 dB).
+  - On `DRV_LOAD` it starts a thread that makes a window and runs its
+    message loop. On `DRV_FREE` it sends that window `WM_CLOSE` with
+    `SendMessage` and waits for the thread to end.
+  - seance ran a message sent to another thread's window on the sender's
+    thread. So `WM_DESTROY`'s `PostQuitMessage` quit the wrong queue, the
+    window's thread never ended, and `DRV_FREE` hung.
+  - Now a message sent to a window of another, live thread runs on that
+    thread when it next looks at its queue: in `GetMessage`,
+    `PeekMessage`, `WaitMessage`, `MsgWaitForMultipleObjects`, or while
+    it sends a message itself. The sender waits and runs what is sent to
+    it meanwhile.
+  - `SendMessageTimeout` gives up after its timeout (`ERROR_TIMEOUT`), and
+    `SendNotifyMessage` doesn't wait. `InSendMessage` and `ReplyMessage`
+    work.
+  - A window whose thread has ended still gets the message on the caller's
+    thread, as before.
+- **DiAVC** (`diavc.ax`): protected by a code virtualizer, and doesn't work
+  here. As it is created, it runs code that raises faults on purpose for an
+  `__except` filter, itself virtualized, to act on. Three of the things it
+  relies on were missing in seance, and are now there:
+  - `PEB->Ldr` was NULL. It now holds Windows' loader lists (load,
+    memory and initialisation order), seeded as Windows XP has them (the
+    main image, ntdll, kernel32) and kept with the modules loaded.
+  - A general-protection fault, such as `int 1` (CD 01) from user mode, is
+    reported as Windows reports it: an access violation reading -1. A
+    privileged instruction (`hlt`, `cli`, ...) is reported as
+    `STATUS_PRIVILEGED_INSTRUCTION`.
+  - `icebp` (F1) is reported as a single step, past the instruction, not
+    as a breakpoint.
+  - With these, its filter still sends it into a loop of faults (writing
+    to its own code at +0x801a8). Why wasn't worked out: that would mean
+    reversing the virtualized filter. `VFW_TRACE` now names each handler
+    that continues execution, and where.
 
 ## In-repository baseline
 

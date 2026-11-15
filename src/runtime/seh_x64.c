@@ -807,37 +807,15 @@ int seh_take_fault(int sig, siginfo_t *si, void *ucontext)
 	}
 
 	memset(&pending.rec, 0, sizeof(pending.rec));
-	pending.rec.ExceptionAddress = (void *)(uintptr_t)c->Rip;
-	switch (sig) {
-	case SIGSEGV:
-	case SIGBUS:
-		pending.rec.ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
-		pending.rec.NumberParameters = 2;
-		pending.rec.ExceptionInformation[0] = (g[REG_ERR] & 2) ? 1 : 0;
-		pending.rec.ExceptionInformation[1] =
-			(DWORD_PTR)(uintptr_t)si->si_addr;
-		break;
-	case SIGILL:
-		pending.rec.ExceptionCode = EXCEPTION_ILLEGAL_INSTRUCTION;
-		break;
-	case SIGFPE:
+	if (sig == SIGFPE) {
+		pending.rec.ExceptionAddress = (void *)(uintptr_t)c->Rip;
 		pending.rec.ExceptionCode = code_from_fpe(si->si_code);
-		break;
-	case SIGTRAP:
-		if (si->si_code == TRAP_TRACE) {
-			pending.rec.ExceptionCode = EXCEPTION_SINGLE_STEP;
-			c->EFlags &= ~0x100u;
-		} else {
-			/* int3: reported at the breakpoint, as on Windows. */
-			pending.rec.ExceptionCode = EXCEPTION_BREAKPOINT;
-			pending.rec.NumberParameters = 1;
-			c->Rip--;
-			pending.rec.ExceptionAddress = (void *)(uintptr_t)c->Rip;
-		}
-		break;
-	default:
-		pending.rec.ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
-		break;
+	} else {
+		ULONG_PTR pc = c->Rip;
+		seh_fault_record(&pending.rec, sig, si, (unsigned long)g[REG_TRAPNO],
+				 (unsigned long)g[REG_ERR], &pc,
+				 (DWORD *)&c->EFlags);
+		c->Rip = pc;
 	}
 
 	/* Room below the faulting stack (past any red zone), laid out as if

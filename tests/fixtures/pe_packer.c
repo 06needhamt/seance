@@ -6,6 +6,8 @@
  * walking kernel32's export directory; and it hands CreateThread a cdecl
  * routine, which leaves its argument on the stack.
  */
+#include <stddef.h>
+
 #include "fixture.h"
 
 static HMODULE k32;
@@ -167,4 +169,133 @@ EXPORT DWORD pk_single_step(void)
 #endif
 	SetUnhandledExceptionFilter(old);
 	return steps;
+}
+
+static DWORD hw_seen;
+
+/* Checks each hardware fault as Windows reports it, and steps over it. */
+static LONG WINAPI check_fault(EXCEPTION_POINTERS *ep)
+{
+	const EXCEPTION_RECORD *r = ep->ExceptionRecord;
+#ifdef _WIN64
+	DWORD64 *pc = &ep->ContextRecord->Rip;
+#else
+	DWORD *pc = &ep->ContextRecord->Eip;
+#endif
+	const BYTE *at = (const BYTE *)(ULONG_PTR)*pc;
+
+	switch (r->ExceptionCode) {
+	case EXCEPTION_ACCESS_VIOLATION:
+		/* "int 1" (CD 01): refused, as a read of -1, at itself. */
+		if (at[0] != 0xcd || at[1] != 0x01 || r->NumberParameters != 2 ||
+		    r->ExceptionInformation[0] != 0 ||
+		    r->ExceptionInformation[1] != (ULONG_PTR)-1)
+			return EXCEPTION_CONTINUE_SEARCH;
+		hw_seen |= 1;
+		*pc += 2;
+		return EXCEPTION_CONTINUE_EXECUTION;
+	case EXCEPTION_SINGLE_STEP:
+		/* icebp (F1): past it. */
+		if (at[-1] != 0xf1)
+			return EXCEPTION_CONTINUE_SEARCH;
+		hw_seen |= 2;
+		return EXCEPTION_CONTINUE_EXECUTION;
+	case EXCEPTION_PRIV_INSTRUCTION:
+		/* hlt: at itself. */
+		if (at[0] != 0xf4)
+			return EXCEPTION_CONTINUE_SEARCH;
+		hw_seen |= 4;
+		*pc += 1;
+		return EXCEPTION_CONTINUE_EXECUTION;
+	}
+	return EXCEPTION_CONTINUE_SEARCH;
+}
+
+/* "int 1", icebp and hlt, as protectors use them: 7 if each came right. */
+EXPORT DWORD pk_hw_faults(void)
+{
+	LPTOP_LEVEL_EXCEPTION_FILTER old = SetUnhandledExceptionFilter(check_fault);
+	hw_seen = 0;
+	__asm__ volatile(".byte 0xcd, 0x01\n nop" ::: "memory");
+	__asm__ volatile(".byte 0xf1\n nop" ::: "memory");
+	__asm__ volatile("hlt\n nop" ::: "memory");
+	SetUnhandledExceptionFilter(old);
+	return hw_seen;
+}
+
+/* PEB_LDR_DATA and LDR_DATA_TABLE_ENTRY, as far as a module walk goes. */
+struct pk_ustr {
+	USHORT len, max;
+	WCHAR *buf;
+};
+
+struct pk_ldr_entry {
+	LIST_ENTRY load, memory, init;
+	void *base;
+	void *entry;
+	ULONG size;
+	struct pk_ustr full, name;
+};
+
+static int name_is(const struct pk_ustr *u, const char *want)
+{
+	size_t n = u->len / sizeof(WCHAR), i;
+
+	for (i = 0; i < n && want[i]; i++) {
+		WCHAR c = u->buf[i];
+		if (c >= 'A' && c <= 'Z')
+			c += 'a' - 'A';
+		if (c != (WCHAR)want[i])
+			return 0;
+	}
+	return i == n && !want[i];
+}
+
+/*
+ * Walks PEB->Ldr as shellcode-style API lookup does. Bits: 1 the main
+ * image heads the load order, 2 kernel32 is listed at its handle, 4 ntdll
+ * heads the initialisation order, 8 this DLL is listed with its size.
+ */
+EXPORT DWORD pk_peb_ldr(void)
+{
+	BYTE *peb;
+#ifdef _WIN64
+	__asm__("movq %%gs:0x60, %0" : "=r"(peb));
+	BYTE *ldr = *(BYTE **)(peb + 0x18);
+	LIST_ENTRY *load = (LIST_ENTRY *)(ldr + 0x10);
+	LIST_ENTRY *init = (LIST_ENTRY *)(ldr + 0x30);
+	void *image = *(void **)(peb + 0x10);
+#else
+	__asm__("movl %%fs:0x30, %0" : "=r"(peb));
+	BYTE *ldr = *(BYTE **)(peb + 0x0c);
+	LIST_ENTRY *load = (LIST_ENTRY *)(ldr + 0x0c);
+	LIST_ENTRY *init = (LIST_ENTRY *)(ldr + 0x1c);
+	void *image = *(void **)(peb + 0x08);
+#endif
+	DWORD r = 0;
+	HMODULE self = NULL;
+
+	if (!ldr)
+		return 0;
+	GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+			   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			   (LPCSTR)(void *)pk_peb_ldr, &self);
+	if (load->Flink != load &&
+	    ((struct pk_ldr_entry *)load->Flink)->base == image)
+		r |= 1;
+	for (LIST_ENTRY *e = load->Flink; e != load; e = e->Flink) {
+		struct pk_ldr_entry *m = (struct pk_ldr_entry *)e;
+		if (name_is(&m->name, "kernel32.dll") &&
+		    m->base == GetModuleHandleA("kernel32.dll"))
+			r |= 2;
+		if (m->base == (void *)self && m->size >= 0x1000)
+			r |= 8;
+	}
+	if (init->Flink != init) {
+		struct pk_ldr_entry *m = (struct pk_ldr_entry *)
+			((BYTE *)init->Flink - offsetof(struct pk_ldr_entry, init));
+		if (name_is(&m->name, "ntdll.dll"))
+			r |= 4;
+	}
+	return r;
 }
