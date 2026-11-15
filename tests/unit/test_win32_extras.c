@@ -7,6 +7,9 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -1040,6 +1043,1016 @@ static void test_splitpath(void)
 	CHECK(wdir[0] == 'x' && wdir[1] == '\\' && !wdir[2]);
 	CHECK(wn[0] == 'y' && !wn[1]);
 	CHECK(we[0] == '.' && we[1] == 'z' && !we[2]);
+
+	/* _makepath (ffdshow.ax, from msvcr71). */
+	struct module *m71 = mod_load("msvcr71.dll", NULL);
+	CHECK(m71 != NULL);
+	if (!m71)
+		return;
+	CFN(m71, void, _makepath, char *, const char *, const char *, const char *,
+	    const char *);
+	char path[128];
+	_makepath(path, "C", "\\dir", "file", "avi");
+	CHECK_STR(path, "C:\\dir\\file.avi");
+	_makepath(path, NULL, "d/", "f", ".x");
+	CHECK_STR(path, "d/f.x");
+	_makepath(path, "", "", "f", NULL);
+	CHECK_STR(path, "f");
+	mod_free(m71);
+}
+
+/*
+ * The functions codecs in the catalogue zip trapped on: Tool Help
+ * (DivXDecH264), Read/WriteProcessMemory (dsfs), completion ports
+ * (capavi32), mmio (ravi32), SHGetValue (vgmv2k2dx), class longs (the LEAD
+ * encoders) and UnrealizeObject (dsvc).
+ */
+static void test_toolhelp(void)
+{
+	struct module *k = mod_load("kernel32.dll", NULL);
+	CHECK(k != NULL);
+	if (!k)
+		return;
+	FN(k, HANDLE, CreateToolhelp32Snapshot, DWORD, DWORD);
+	FN(k, BOOL, Process32First, HANDLE, LPPROCESSENTRY32);
+	FN(k, BOOL, Process32Next, HANDLE, LPPROCESSENTRY32);
+	FN(k, BOOL, Process32FirstW, HANDLE, LPPROCESSENTRY32W);
+	FN(k, BOOL, Module32First, HANDLE, LPMODULEENTRY32);
+	FN(k, BOOL, Module32Next, HANDLE, LPMODULEENTRY32);
+	FN(k, BOOL, Module32FirstW, HANDLE, LPMODULEENTRY32W);
+	FN(k, BOOL, Thread32First, HANDLE, LPTHREADENTRY32);
+	FN(k, BOOL, Thread32Next, HANDLE, LPTHREADENTRY32);
+	FN(k, BOOL, CloseHandle, HANDLE);
+	FN(k, DWORD, GetLastError, void);
+	FN(k, DWORD, GetCurrentThreadId, void);
+
+	HANDLE s = CreateToolhelp32Snapshot(TH32CS_SNAPALL, 0);
+	CHECK(s != INVALID_HANDLE_VALUE);
+	PROCESSENTRY32 pe = { .dwSize = sizeof(pe) };
+	CHECK(Process32First(s, &pe));
+	CHECK_EQ(pe.th32ProcessID, (DWORD)getpid());
+	CHECK_STR(pe.szExeFile, "seance.exe");
+	CHECK(!Process32Next(s, &pe));
+	CHECK_EQ(GetLastError(), ERROR_NO_MORE_FILES);
+	PROCESSENTRY32W pw = { .dwSize = sizeof(pw) };
+	CHECK(Process32FirstW(s, &pw) && pw.szExeFile[0] == 's');
+	/* Too small a dwSize is refused. */
+	pe.dwSize = 8;
+	CHECK(!Process32First(s, &pe));
+	CHECK_EQ(GetLastError(), ERROR_BAD_LENGTH);
+
+	MODULEENTRY32 me = { .dwSize = sizeof(me) };
+	int n = 0, k32 = 0;
+	for (BOOL ok = Module32First(s, &me); ok; ok = Module32Next(s, &me)) {
+		n++;
+		if (me.hModule == (HMODULE)k->base) {
+			k32++;
+			CHECK_STR(me.szModule, "kernel32.dll");
+			CHECK(strstr(me.szExePath, "kernel32.dll") != NULL);
+			CHECK(me.modBaseAddr == k->base && me.modBaseSize >= 0x1000);
+		}
+	}
+	CHECK(n >= 2);
+	CHECK_EQ(k32, 1);
+	MODULEENTRY32W mw = { .dwSize = sizeof(mw) };
+	CHECK(Module32FirstW(s, &mw) && mw.szModule[0]);
+
+	THREADENTRY32 te = { .dwSize = sizeof(te) };
+	CHECK(Thread32First(s, &te));
+	CHECK_EQ(te.th32ThreadID, GetCurrentThreadId());
+	CHECK_EQ(te.th32OwnerProcessID, (DWORD)getpid());
+	CHECK(!Thread32Next(s, &te));
+	CHECK(CloseHandle(s));
+
+	/* A process-only snapshot has no modules. */
+	s = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	CHECK(!Module32First(s, &me));
+	CHECK(!Thread32First(s, &te));
+	CloseHandle(s);
+	mod_free(k);
+}
+
+static void test_process_memory(void)
+{
+	struct module *k = mod_load("kernel32.dll", NULL);
+	if (!k)
+		return;
+	FN(k, BOOL, ReadProcessMemory, HANDLE, LPCVOID, LPVOID, SIZE_T, SIZE_T *);
+	FN(k, BOOL, WriteProcessMemory, HANDLE, LPVOID, LPCVOID, SIZE_T, SIZE_T *);
+	FN(k, LPVOID, VirtualAlloc, LPVOID, SIZE_T, DWORD, DWORD);
+	FN(k, BOOL, VirtualFree, LPVOID, SIZE_T, DWORD);
+	FN(k, SIZE_T, VirtualQuery, LPCVOID, PMEMORY_BASIC_INFORMATION, SIZE_T);
+	FN(k, DWORD, GetLastError, void);
+	HANDLE self = (HANDLE)(LONG_PTR)-1;
+	char src[] = "seance", dst[8] = "";
+	SIZE_T n = 0;
+
+	CHECK(ReadProcessMemory(self, src, dst, sizeof(src), &n));
+	CHECK_EQ(n, sizeof(src));
+	CHECK_STR(dst, "seance");
+	/* A read that runs off the end of a mapping copies what it can. */
+	BYTE *p = VirtualAlloc(NULL, 0x3000, MEM_RESERVE, PAGE_NOACCESS);
+	CHECK(p != NULL);
+	VirtualAlloc(p, 0x1000, MEM_COMMIT, PAGE_READWRITE);
+	memset(p + 0xff0, 'x', 16);
+	char buf[32];
+	CHECK(!ReadProcessMemory(self, p + 0xff0, buf, 32, &n));
+	CHECK_EQ(GetLastError(), ERROR_PARTIAL_COPY);
+	CHECK_EQ(n, 16);
+	CHECK(!ReadProcessMemory(self, NULL, buf, 4, &n) && n == 0);
+	/* Writes reach read-only pages, as on Windows. */
+	VirtualAlloc(p + 0x1000, 0x1000, MEM_COMMIT, PAGE_READONLY);
+	CHECK(WriteProcessMemory(self, p + 0x1000, "abc", 4, &n) && n == 4);
+	CHECK_STR((const char *)p + 0x1000, "abc");
+	/* Across a read-write and a read-only page, each keeps its own. */
+	CHECK(WriteProcessMemory(self, p + 0xffe, "wxyz", 4, &n) && n == 4);
+	CHECK(!memcmp(p + 0xffe, "wxyz", 4));
+	MEMORY_BASIC_INFORMATION mbi;
+	CHECK(VirtualQuery(p, &mbi, sizeof(mbi)) && mbi.Protect == PAGE_READWRITE);
+	CHECK(VirtualQuery(p + 0x1000, &mbi, sizeof(mbi)) &&
+	      mbi.Protect == PAGE_READONLY);
+	/* A range that runs into reserved memory writes nothing. */
+	CHECK(!WriteProcessMemory(self, p + 0x1ffe, "1234", 4, &n) && n == 0);
+	CHECK_EQ(GetLastError(), ERROR_PARTIAL_COPY);
+	CHECK(p[0x1ffe] != '1');
+	/* So does one whose source is bad. */
+	memcpy(p, "qqqq", 4);
+	CHECK(!WriteProcessMemory(self, p, NULL, 4, &n) && n == 0);
+	CHECK(!WriteProcessMemory(self, p, p + 0x2000, 4, &n) && n == 0);
+	CHECK(!memcmp(p, "qqqq", 4));
+	CHECK(!WriteProcessMemory((HANDLE)0x1234, p, "a", 1, &n));
+	/* A page that can't be made writable (a read-only file mapped shared)
+	 * after a writable one: nothing is written to either. */
+	char tmpl[] = "/tmp/vfw-wpm-XXXXXX";
+	int fd = mkstemp(tmpl);
+	CHECK(fd >= 0 && ftruncate(fd, 0x1000) == 0);
+	int ro = open(tmpl, O_RDONLY);
+	unlink(tmpl);
+	close(fd);
+	CHECK(ro >= 0 && mmap(p + 0x1000, 0x1000, PROT_READ, MAP_SHARED | MAP_FIXED,
+			      ro, 0) == p + 0x1000);
+	close(ro);
+	memcpy(p + 0xffc, "mmmm", 4);
+	CHECK(!WriteProcessMemory(self, p + 0xffc, "12345678", 8, &n) && n == 0);
+	CHECK_EQ(GetLastError(), ERROR_PARTIAL_COPY);
+	CHECK(!memcmp(p + 0xffc, "mmmm", 4));
+	CHECK(VirtualQuery(p, &mbi, sizeof(mbi)) && mbi.Protect == PAGE_READWRITE);
+	VirtualFree(p, 0, MEM_RELEASE);
+	mod_free(k);
+}
+
+static void test_iocp(void)
+{
+	struct module *k = mod_load("kernel32.dll", NULL);
+	if (!k)
+		return;
+	FN(k, HANDLE, CreateIoCompletionPort, HANDLE, HANDLE, ULONG_PTR, DWORD);
+	FN(k, BOOL, PostQueuedCompletionStatus, HANDLE, DWORD, ULONG_PTR, LPOVERLAPPED);
+	FN(k, BOOL, GetQueuedCompletionStatus, HANDLE, DWORD *, ULONG_PTR *,
+	   LPOVERLAPPED *, DWORD);
+	FN(k, BOOL, GetQueuedCompletionStatusEx, HANDLE, LPOVERLAPPED_ENTRY,
+	   ULONG, ULONG *, DWORD, BOOL);
+	FN(k, DWORD, WaitForSingleObject, HANDLE, DWORD);
+	FN(k, BOOL, CloseHandle, HANDLE);
+	FN(k, DWORD, GetLastError, void);
+	FN(k, HANDLE, CreateFileA, LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES,
+	   DWORD, DWORD, HANDLE);
+
+	HANDLE port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1);
+	CHECK(port != NULL);
+	DWORD bytes = 0;
+	ULONG_PTR key = 0;
+	OVERLAPPED ov, *got = &ov;
+	CHECK(!GetQueuedCompletionStatus(port, &bytes, &key, &got, 0));
+	CHECK_EQ(GetLastError(), WAIT_TIMEOUT);
+	CHECK(got == NULL);
+	CHECK_EQ(WaitForSingleObject(port, 0), WAIT_TIMEOUT);
+	CHECK(PostQueuedCompletionStatus(port, 10, 1, &ov));
+	CHECK(PostQueuedCompletionStatus(port, 20, 2, NULL));
+	CHECK(PostQueuedCompletionStatus(port, 30, 3, NULL));
+	CHECK_EQ(WaitForSingleObject(port, 0), WAIT_OBJECT_0);
+	CHECK(GetQueuedCompletionStatus(port, &bytes, &key, &got, INFINITE));
+	CHECK(bytes == 10 && key == 1 && got == &ov);
+	OVERLAPPED_ENTRY e[4];
+	ULONG removed = 0;
+	CHECK(GetQueuedCompletionStatusEx(port, e, 4, &removed, 0, FALSE));
+	CHECK_EQ(removed, 2);
+	CHECK(e[0].lpCompletionKey == 2 && e[1].dwNumberOfBytesTransferred == 30);
+	/* Associating an overlapped file with the port gives the port back. */
+	HANDLE f = CreateFileA("C:\\iocp.bin", GENERIC_READ | GENERIC_WRITE, 0,
+			       NULL, CREATE_ALWAYS,
+			       FILE_FLAG_OVERLAPPED | FILE_FLAG_DELETE_ON_CLOSE,
+			       NULL);
+	CHECK(f != INVALID_HANDLE_VALUE);
+	CHECK(CreateIoCompletionPort(f, port, 5, 0) == port);
+	CHECK(CloseHandle(f));
+	/* A handle that isn't a file is refused. */
+	CHECK(CreateIoCompletionPort((HANDLE)0x1230, port, 5, 0) == NULL);
+	CHECK_EQ(GetLastError(), ERROR_INVALID_HANDLE);
+	CHECK(CreateIoCompletionPort(port, port, 5, 0) == NULL);
+	CHECK(!PostQueuedCompletionStatus((HANDLE)0x1234, 0, 0, NULL));
+	CHECK(CloseHandle(port));
+	mod_free(k);
+}
+
+/* I/O procedures for the mmio tests: one that counts opens and reads
+ * nothing, and one whose 4-byte writes fail. */
+static int counted_opens;
+
+static LRESULT WINAPI counting_proc(LPSTR p, UINT msg, LPARAM l1, LPARAM l2)
+{
+	if (msg == MMIOM_OPEN)
+		counted_opens++;
+	return 0;
+}
+
+static LRESULT WINAPI other_proc(LPSTR p, UINT msg, LPARAM l1, LPARAM l2)
+{
+	return 0;
+}
+
+static LRESULT WINAPI failing_proc(LPSTR p, UINT msg, LPARAM l1, LPARAM l2)
+{
+	MMIOINFO *mi = (MMIOINFO *)p;
+
+	switch (msg) {
+	case MMIOM_OPEN:
+	case MMIOM_CLOSE:
+		return 0;
+	case MMIOM_WRITE:
+	case MMIOM_WRITEFLUSH:
+		if (l2 == 4)
+			return -1;
+		mi->lDiskOffset += (LONG)l2;
+		return l2;
+	case MMIOM_SEEK:
+		mi->lDiskOffset = l2 == SEEK_SET ? (LONG)l1 :
+				  mi->lDiskOffset + (LONG)l1;
+		return mi->lDiskOffset;
+	}
+	return -1;
+}
+
+static void test_mmio_more(struct module *m, const char *root)
+{
+	FN(m, HMMIO, mmioOpenA, LPSTR, LPMMIOINFO, DWORD);
+	FN(m, HMMIO, mmioOpenW, LPWSTR, LPMMIOINFO, DWORD);
+	FN(m, MMRESULT, mmioClose, HMMIO, UINT);
+	FN(m, LONG, mmioRead, HMMIO, HPSTR, LONG);
+	FN(m, LONG, mmioWrite, HMMIO, const char *, LONG);
+	FN(m, LONG, mmioSeek, HMMIO, LONG, int);
+	FN(m, MMRESULT, mmioAscend, HMMIO, LPMMCKINFO, UINT);
+	FN(m, MMRESULT, mmioDescend, HMMIO, LPMMCKINFO, const MMCKINFO *, UINT);
+	FN(m, MMRESULT, mmioCreateChunk, HMMIO, LPMMCKINFO, UINT);
+	FN(m, MMRESULT, mmioGetInfo, HMMIO, LPMMIOINFO, UINT);
+	FN(m, MMRESULT, mmioSetInfo, HMMIO, const MMIOINFO *, UINT);
+	FN(m, MMRESULT, mmioAdvance, HMMIO, LPMMIOINFO, UINT);
+	FN(m, LPMMIOPROC, mmioInstallIOProcA, FOURCC, LPMMIOPROC, DWORD);
+	struct module *k = mod_load("kernel32.dll", NULL);
+	FN(k, HANDLE, CreateFileA, LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES,
+	   DWORD, DWORD, HANDLE);
+	FN(k, DWORD, SetFilePointer, HANDLE, LONG, PLONG, DWORD);
+	FN(k, BOOL, CloseHandle, HANDLE);
+	FN(k, BOOL, ReadFile, HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
+	char path[512], got[64];
+	BYTE disk[128];
+	MMIOINFO info;
+	FILE *f;
+	size_t len;
+
+	/* Through a 16-byte buffer: chunks and data across its edges. */
+	char bname[128] = "C:\\mmio-buf.riff";
+	memset(&info, 0, sizeof(info));
+	info.cchBuffer = 16;
+	HMMIO h = mmioOpenA(bname, &info, MMIO_CREATE | MMIO_READWRITE |
+						MMIO_ALLOCBUF);
+	CHECK(h != NULL);
+	if (h) {
+		MMCKINFO riff = { .fccType = mmioFOURCC('B', 'U', 'F', 'F') };
+		MMCKINFO ck = { .ckid = mmioFOURCC('d', 'a', 't', 'a') };
+		CHECK_EQ(mmioCreateChunk(h, &riff, MMIO_CREATERIFF), 0);
+		CHECK_EQ(mmioCreateChunk(h, &ck, 0), 0);
+		CHECK_EQ(mmioWrite(h, "abcdefghijklmnopqrstuvwxyz0123456789ABCD", 40), 40);
+		CHECK_EQ(mmioAscend(h, &ck, 0), 0);
+		CHECK_EQ(ck.cksize, 40);
+		CHECK_EQ(mmioAscend(h, &riff, 0), 0);
+		CHECK_EQ(riff.cksize, 52);
+		CHECK_EQ(mmioSeek(h, 0, SEEK_SET), 0);
+		MMCKINFO r2 = { .fccType = mmioFOURCC('B', 'U', 'F', 'F') };
+		MMCKINFO c2 = { .ckid = mmioFOURCC('d', 'a', 't', 'a') };
+		CHECK_EQ(mmioDescend(h, &r2, NULL, MMIO_FINDRIFF), 0);
+		CHECK_EQ(mmioDescend(h, &c2, &r2, MMIO_FINDCHUNK), 0);
+		CHECK_EQ(mmioRead(h, got, 40), 40);
+		CHECK(!memcmp(got, "abcdefghijklmnopqrstuvwxyz0123456789ABCD", 40));
+		CHECK_EQ(mmioSeek(h, 0, SEEK_END), 60);
+		CHECK_EQ(mmioClose(h, 0), 0);
+	}
+	snprintf(path, sizeof(path), "%s/drive_c/mmio-buf.riff", root);
+	len = (f = fopen(path, "rb")) ? fread(disk, 1, sizeof(disk), f) : 0;
+	if (f)
+		fclose(f);
+	CHECK_EQ(len, 60);
+	CHECK(!memcmp(disk, "RIFF\x34\0\0\0BUFFdata\x28\0\0\0abcd", 24));
+
+	/* Filling the buffer directly: mmioGetInfo, mmioAdvance, mmioSetInfo. */
+	char dname[128] = "C:\\mmio-direct.bin";
+	memset(&info, 0, sizeof(info));
+	info.cchBuffer = 8;
+	h = mmioOpenA(dname, &info, MMIO_CREATE | MMIO_WRITE | MMIO_ALLOCBUF);
+	CHECK(h != NULL);
+	if (h) {
+		MMIOINFO mi;
+		CHECK_EQ(mmioGetInfo(h, &mi, 0), 0);
+		CHECK(mi.pchBuffer && mi.cchBuffer == 8 &&
+		      mi.pchEndWrite == mi.pchBuffer + 8);
+		for (char c = 'a'; c < 'a' + 11; c++) {
+			if (mi.pchNext == mi.pchEndWrite) {
+				mi.dwFlags |= MMIO_DIRTY;
+				CHECK_EQ(mmioAdvance(h, &mi, MMIO_WRITE), 0);
+			}
+			*mi.pchNext++ = c;
+		}
+		mi.dwFlags |= MMIO_DIRTY;
+		CHECK_EQ(mmioSetInfo(h, &mi, 0), 0);
+		CHECK_EQ(mmioClose(h, 0), 0);
+	}
+	snprintf(path, sizeof(path), "%s/drive_c/mmio-direct.bin", root);
+	len = (f = fopen(path, "rb")) ? fread(disk, 1, sizeof(disk), f) : 0;
+	if (f)
+		fclose(f);
+	CHECK_EQ(len, 11);
+	CHECK(!memcmp(disk, "abcdefghijk", 11));
+	/* And draining it, four bytes at a time. */
+	memset(&info, 0, sizeof(info));
+	info.cchBuffer = 4;
+	h = mmioOpenA(dname, &info, MMIO_READ | MMIO_ALLOCBUF);
+	CHECK(h != NULL);
+	if (h) {
+		MMIOINFO mi;
+		size_t n = 0;
+		CHECK_EQ(mmioGetInfo(h, &mi, 0), 0);
+		while (n < sizeof(got)) {
+			if (mi.pchNext == mi.pchEndRead) {
+				CHECK_EQ(mmioAdvance(h, &mi, MMIO_READ), 0);
+				if (mi.pchNext == mi.pchEndRead)
+					break;
+			}
+			got[n++] = *mi.pchNext++;
+		}
+		CHECK_EQ(n, 11);
+		CHECK(!memcmp(got, "abcdefghijk", 11));
+		CHECK_EQ(mmioSetInfo(h, &mi, 0), 0);
+		CHECK_EQ(mmioSeek(h, 0, SEEK_CUR), 11);
+		mmioClose(h, 0);
+	}
+	/* Unbuffered, there is no buffer to advance. */
+	h = mmioOpenA(dname, NULL, MMIO_READ);
+	CHECK(h != NULL);
+	if (h) {
+		CHECK_EQ(mmioAdvance(h, NULL, MMIO_READ), MMIOERR_UNBUFFERED);
+		mmioClose(h, 0);
+	}
+
+	/* No name: the file handle in adwInfo[0], from where it is, kept
+	 * open with MMIO_FHOPEN. */
+	HANDLE fh = CreateFileA("C:\\mmio-direct.bin", GENERIC_READ, 0, NULL,
+				OPEN_EXISTING, 0, NULL);
+	CHECK(fh != INVALID_HANDLE_VALUE);
+	CHECK_EQ(SetFilePointer(fh, 4, NULL, FILE_BEGIN), 4);
+	memset(&info, 0, sizeof(info));
+	info.fccIOProc = FOURCC_DOS;
+	info.adwInfo[0] = (DWORD)(ULONG_PTR)fh;
+	h = mmioOpenA(NULL, &info, MMIO_READ);
+	CHECK(h != NULL);
+	if (h) {
+		CHECK_EQ(mmioSeek(h, 0, SEEK_CUR), 4);
+		CHECK_EQ(mmioRead(h, got, 3), 3);
+		CHECK(!memcmp(got, "efg", 3));
+		CHECK_EQ(mmioClose(h, MMIO_FHOPEN), 0);
+	}
+	DWORD rd = 0;
+	CHECK(ReadFile(fh, got, 2, &rd, NULL) && rd == 2 && !memcmp(got, "hi", 2));
+	CHECK(CloseHandle(fh));
+
+	/* An installed procedure comes first, DOS's too. */
+	counted_opens = 0;
+	CHECK(mmioInstallIOProcA(FOURCC_DOS, counting_proc, MMIO_INSTALLPROC) ==
+	      counting_proc);
+	char nowhere[128] = "C:\\not-there.bin";
+	h = mmioOpenA(nowhere, NULL, MMIO_READ);
+	CHECK(h != NULL && counted_opens == 1);
+	if (h)
+		mmioClose(h, 0);
+	CHECK(mmioInstallIOProcA(FOURCC_DOS, NULL, MMIO_REMOVEPROC) ==
+	      counting_proc);
+	CHECK(mmioOpenA(nowhere, NULL, MMIO_READ) == NULL);
+	/* The latest installed is found, and removed, first. */
+	FOURCC t1 = mmioFOURCC('T', 'S', 'T', '1');
+	mmioInstallIOProcA(t1, counting_proc, MMIO_INSTALLPROC);
+	mmioInstallIOProcA(t1, other_proc, MMIO_INSTALLPROC);
+	CHECK(mmioInstallIOProcA(t1, NULL, MMIO_FINDPROC) == other_proc);
+	CHECK(mmioInstallIOProcA(t1, NULL, MMIO_REMOVEPROC) == other_proc);
+	CHECK(mmioInstallIOProcA(t1, NULL, MMIO_FINDPROC) == counting_proc);
+	CHECK(mmioInstallIOProcA(t1, NULL, MMIO_REMOVEPROC) == counting_proc);
+	CHECK(mmioInstallIOProcA(t1, NULL, MMIO_FINDPROC) == NULL);
+
+	/* A failed size write leaves the chunk and the position as they were. */
+	memset(&info, 0, sizeof(info));
+	info.pIOProc = failing_proc;
+	h = mmioOpenA(NULL, &info, MMIO_WRITE);
+	CHECK(h != NULL);
+	if (h) {
+		MMCKINFO ck = { .ckid = mmioFOURCC('f', 'a', 'i', 'l') };
+		CHECK_EQ(mmioCreateChunk(h, &ck, 0), 0);
+		CHECK_EQ(mmioWrite(h, "abc", 3), 3);
+		CHECK_EQ(mmioAscend(h, &ck, 0), MMIOERR_CANNOTWRITE);
+		CHECK_EQ(ck.cksize, 0);
+		CHECK(ck.dwFlags & MMIO_DIRTY);
+		CHECK_EQ(mmioSeek(h, 0, SEEK_CUR), 11);
+		mmioClose(h, 0);
+	}
+
+	/* MMIO_GETTEMP makes a name, and opens nothing. */
+	char tmp[128] = "";
+	memset(&info, 0, sizeof(info));
+	CHECK(mmioOpenA(tmp, &info, MMIO_GETTEMP) == (HMMIO)MMSYSERR_NOERROR);
+	CHECK_EQ(info.wErrorRet, 0);
+	CHECK(tmp[0] && tmp[1] == ':' && strstr(tmp, "MMI"));
+	char drive_tmp[128] = "C:F";
+	CHECK(mmioOpenA(drive_tmp, NULL, MMIO_GETTEMP) == (HMMIO)MMSYSERR_NOERROR);
+	CHECK(!strncmp(drive_tmp, "C:\\F", 4));
+
+	/* MMIO_EXIST gives back the full name, A and W. */
+	char rel[128] = "mmio-direct.bin";
+	CHECK(mmioOpenA(rel, NULL, MMIO_EXIST) != NULL);
+	CHECK_STR(rel, "C:\\mmio-direct.bin");
+	WCHAR wrel[128] = { 'm', 'm', 'i', 'o', '-', 'd', 'i', 'r', 'e', 'c', 't',
+			    '.', 'b', 'i', 'n', 0 };
+	CHECK(mmioOpenW(wrel, NULL, MMIO_EXIST) != NULL);
+	CHECK(wrel[0] == 'C' && wrel[1] == ':' && wrel[2] == '\\' && wrel[3] == 'm');
+
+	/* A memory file is its own buffer: mmioGetInfo shows the block, and
+	 * a caller writing straight into it is taken back. */
+	FN(m, MMRESULT, mmioSetBuffer, HMMIO, LPSTR, LONG, UINT);
+	char block[8] = "abcdefgh";
+	memset(&info, 0, sizeof(info));
+	info.fccIOProc = FOURCC_MEM;
+	info.pchBuffer = block;
+	info.cchBuffer = 8;
+	h = mmioOpenA(NULL, &info, MMIO_READWRITE);
+	CHECK(h != NULL);
+	CHECK_EQ(mmioSeek(h, 2, SEEK_SET), 2);
+	CHECK_EQ(mmioGetInfo(h, &info, 0), 0);
+	CHECK(info.pchBuffer == block && info.cchBuffer == 8);
+	CHECK(info.pchNext == block + 2 && info.pchEndRead == block + 8 &&
+	      info.pchEndWrite == block + 8);
+	*info.pchNext++ = 'X';
+	info.dwFlags |= MMIO_DIRTY;
+	CHECK_EQ(mmioSetInfo(h, &info, 0), 0);
+	CHECK_EQ(mmioSeek(h, 0, SEEK_CUR), 3);
+	CHECK(!memcmp(block, "abXdefgh", 8));
+	/* A caller's block cannot grow. */
+	CHECK_EQ(mmioAdvance(h, &info, MMIO_WRITE), MMIOERR_CANNOTEXPAND);
+	/* mmioSetBuffer puts a new block in: reads come from it. */
+	char block2[4] = "wxyz";
+	CHECK_EQ(mmioSetBuffer(h, block2, 4, 0), 0);
+	CHECK_EQ(mmioSeek(h, 0, SEEK_CUR), 3);
+	CHECK_EQ(mmioRead(h, got, 4), 1);
+	CHECK(got[0] == 'z');
+	CHECK_EQ(mmioSeek(h, 0, SEEK_END), 4);
+	/* With no buffer given, the data moves to one of our own. */
+	CHECK_EQ(mmioSetBuffer(h, NULL, 6, 0), 0);
+	CHECK_EQ(mmioSeek(h, 0, SEEK_SET), 0);
+	CHECK_EQ(mmioRead(h, got, 8), 4);
+	CHECK(!memcmp(got, "wxyz", 4));
+	CHECK_EQ(mmioSetBuffer(h, NULL, 0, 0), MMSYSERR_INVALPARAM);
+	mmioClose(h, 0);
+
+	/* A block of our own grows by adwInfo[0] when mmioAdvance asks. */
+	memset(&info, 0, sizeof(info));
+	info.fccIOProc = FOURCC_MEM;
+	info.cchBuffer = 4;
+	info.adwInfo[0] = 4;
+	h = mmioOpenA(NULL, &info, MMIO_CREATE | MMIO_READWRITE);
+	CHECK(h != NULL);
+	CHECK_EQ(mmioGetInfo(h, &info, 0), 0);
+	CHECK_EQ(info.cchBuffer, 4);
+	memcpy(info.pchNext, "1234", 4);
+	info.pchNext += 4;
+	info.dwFlags |= MMIO_DIRTY;
+	CHECK_EQ(mmioAdvance(h, &info, MMIO_WRITE), 0);
+	CHECK_EQ(info.cchBuffer, 8);
+	CHECK(info.pchNext == info.pchBuffer + 4 &&
+	      info.pchEndWrite == info.pchBuffer + 8);
+	memcpy(info.pchNext, "56", 2);
+	info.pchNext += 2;
+	info.dwFlags |= MMIO_DIRTY;
+	CHECK_EQ(mmioSetInfo(h, &info, 0), 0);
+	CHECK_EQ(mmioSeek(h, 0, SEEK_SET), 0);
+	CHECK_EQ(mmioRead(h, got, 16), 6);
+	CHECK(!memcmp(got, "123456", 6));
+	mmioClose(h, 0);
+	mod_free(k);
+}
+
+static void test_mmio(const char *root)
+{
+	struct module *m = mod_load("winmm.dll", NULL);
+	CHECK(m != NULL);
+	if (!m)
+		return;
+	FN(m, HMMIO, mmioOpenA, LPSTR, LPMMIOINFO, DWORD);
+	FN(m, MMRESULT, mmioClose, HMMIO, UINT);
+	FN(m, LONG, mmioRead, HMMIO, HPSTR, LONG);
+	FN(m, LONG, mmioWrite, HMMIO, const char *, LONG);
+	FN(m, LONG, mmioSeek, HMMIO, LONG, int);
+	FN(m, MMRESULT, mmioFlush, HMMIO, UINT);
+	FN(m, MMRESULT, mmioDescend, HMMIO, LPMMCKINFO, const MMCKINFO *, UINT);
+	FN(m, MMRESULT, mmioAscend, HMMIO, LPMMCKINFO, UINT);
+	FN(m, MMRESULT, mmioCreateChunk, HMMIO, LPMMCKINFO, UINT);
+	FN(m, FOURCC, mmioStringToFOURCCA, LPCSTR, UINT);
+	FN(m, HMMIO, mmioOpenW, LPWSTR, LPMMIOINFO, DWORD);
+
+	CHECK_EQ(mmioStringToFOURCCA("wav", MMIO_TOUPPER), mmioFOURCC('W', 'A', 'V', ' '));
+	CHECK_EQ(mmioStringToFOURCCA("RIFFX", 0), FOURCC_RIFF);
+
+	/* Writes a RIFF 'TEST' file with a 3-byte 'abcd' chunk in a LIST. */
+	char name[128] = "C:\\mmio.riff";
+	MMIOINFO info;
+	memset(&info, 0, sizeof(info));
+	HMMIO h = mmioOpenA(name, &info, MMIO_CREATE | MMIO_WRITE);
+	CHECK(h != NULL);
+	if (!h)
+		goto out;
+	MMCKINFO riff = { .fccType = mmioFOURCC('T', 'E', 'S', 'T') };
+	MMCKINFO list = { .fccType = mmioFOURCC('l', 'i', 's', 't') };
+	MMCKINFO ck = { .ckid = mmioFOURCC('a', 'b', 'c', 'd') };
+	CHECK_EQ(mmioCreateChunk(h, &riff, MMIO_CREATERIFF), 0);
+	CHECK_EQ(mmioCreateChunk(h, &list, MMIO_CREATELIST), 0);
+	CHECK_EQ(mmioCreateChunk(h, &ck, 0), 0);
+	CHECK_EQ(mmioWrite(h, "xyz", 3), 3);
+	CHECK_EQ(mmioAscend(h, &ck, 0), 0);
+	CHECK_EQ(ck.cksize, 3);
+	CHECK_EQ(mmioAscend(h, &list, 0), 0);
+	CHECK_EQ(mmioAscend(h, &riff, 0), 0);
+	CHECK_EQ(riff.cksize, 4 + 12 + 8 + 4);
+	CHECK_EQ(mmioFlush(h, 0), 0);
+	CHECK_EQ(mmioClose(h, 0), 0);
+
+	/* The bytes on disk. */
+	char path[512];
+	snprintf(path, sizeof(path), "%s/drive_c/mmio.riff", root);
+	FILE *f = fopen(path, "rb");
+	BYTE disk[64];
+	size_t len = f ? fread(disk, 1, sizeof(disk), f) : 0;
+	if (f)
+		fclose(f);
+	CHECK_EQ(len, 36);
+	CHECK(!memcmp(disk, "RIFF\x1c\0\0\0TESTLIST\x10\0\0\0listabcd\x03\0\0\0xyz\0", 36));
+
+	/* Reads it back, finding the chunks. */
+	h = mmioOpenA(name, NULL, MMIO_READ);
+	CHECK(h != NULL);
+	MMCKINFO r2 = { .fccType = mmioFOURCC('T', 'E', 'S', 'T') }, l2, c2;
+	CHECK_EQ(mmioDescend(h, &r2, NULL, MMIO_FINDRIFF), 0);
+	CHECK_EQ(r2.dwDataOffset, 8);
+	l2.fccType = mmioFOURCC('l', 'i', 's', 't');
+	CHECK_EQ(mmioDescend(h, &l2, &r2, MMIO_FINDLIST), 0);
+	c2.ckid = mmioFOURCC('n', 'o', 'n', 'e');
+	CHECK_EQ(mmioDescend(h, &c2, &l2, MMIO_FINDCHUNK), MMIOERR_CHUNKNOTFOUND);
+	CHECK_EQ(mmioSeek(h, l2.dwDataOffset + 4, SEEK_SET), (LONG)l2.dwDataOffset + 4);
+	c2.ckid = mmioFOURCC('a', 'b', 'c', 'd');
+	CHECK_EQ(mmioDescend(h, &c2, &l2, MMIO_FINDCHUNK), 0);
+	char got[4] = "";
+	CHECK_EQ(mmioRead(h, got, 3), 3);
+	CHECK(!memcmp(got, "xyz", 3));
+	CHECK_EQ(mmioAscend(h, &c2, 0), 0);
+	CHECK_EQ(mmioSeek(h, 0, SEEK_CUR), 36);
+	CHECK_EQ(mmioRead(h, got, 3), 0);
+	mmioClose(h, 0);
+
+	/* A memory file. */
+	char mem[16] = "0123456789";
+	memset(&info, 0, sizeof(info));
+	info.fccIOProc = FOURCC_MEM;
+	info.pchBuffer = mem;
+	info.cchBuffer = 10;
+	h = mmioOpenA(NULL, &info, MMIO_READWRITE);
+	CHECK(h != NULL);
+	CHECK_EQ(mmioSeek(h, 4, SEEK_SET), 4);
+	CHECK_EQ(mmioRead(h, got, 3), 3);
+	CHECK(!memcmp(got, "456", 3));
+	CHECK_EQ(mmioWrite(h, "AB", 2), 2);
+	CHECK(!memcmp(mem, "0123456AB9", 10));
+	CHECK_EQ(mmioSeek(h, 0, SEEK_END), 10);
+	CHECK_EQ(mmioRead(h, got, 3), 0);
+	mmioClose(h, 0);
+
+	/* A missing file. */
+	memset(&info, 0, sizeof(info));
+	char missing[] = "C:\\no-such.riff";
+	CHECK(mmioOpenA(missing, &info, MMIO_READ) == NULL);
+	CHECK_EQ(info.wErrorRet, MMIOERR_FILENOTFOUND);
+	CHECK(mmioOpenA(name, NULL, MMIO_EXIST) != NULL);
+	WCHAR wname[] = { 'C', ':', '\\', 'm', 'm', 'i', 'o', '.', 'r', 'i', 'f', 'f', 0 };
+	h = mmioOpenW(wname, NULL, MMIO_READ);
+	CHECK(h != NULL);
+	if (h)
+		mmioClose(h, 0);
+	test_mmio_more(m, root);
+out:
+	mod_free(m);
+}
+
+static void test_sh_value(void)
+{
+	struct module *m = mod_load("shlwapi.dll", NULL);
+	CHECK(m != NULL);
+	if (!m)
+		return;
+	FN(m, DWORD, SHSetValueA, HKEY, LPCSTR, LPCSTR, DWORD, LPCVOID, DWORD);
+	FN(m, DWORD, SHGetValueA, HKEY, LPCSTR, LPCSTR, DWORD *, void *, DWORD *);
+	FN(m, DWORD, SHGetValueW, HKEY, LPCWSTR, LPCWSTR, DWORD *, void *, DWORD *);
+	FN(m, DWORD, SHDeleteValueA, HKEY, LPCSTR, LPCSTR);
+	FN(m, DWORD, SHDeleteKeyA, HKEY, LPCSTR);
+	const char *sub = "Software\\seance-test\\sh";
+	DWORD v = 1234, type = 0, out = 0, cb = sizeof(out);
+
+	CHECK_EQ(SHSetValueA(HKEY_CURRENT_USER, sub, "n", REG_DWORD, &v, 4), 0);
+	CHECK_EQ(SHGetValueA(HKEY_CURRENT_USER, sub, "n", &type, &out, &cb), 0);
+	CHECK(type == REG_DWORD && out == 1234 && cb == 4);
+	CHECK_EQ(SHSetValueA(HKEY_CURRENT_USER, sub, "s", REG_SZ, "hello", 6), 0);
+	char s[16];
+	cb = sizeof(s);
+	CHECK_EQ(SHGetValueA(HKEY_CURRENT_USER, sub, "s", &type, s, &cb), 0);
+	CHECK_STR(s, "hello");
+	WCHAR wsub[64], ws[16];
+	size_t i = 0;
+	for (; sub[i]; i++)
+		wsub[i] = sub[i];
+	wsub[i] = 0;
+	WCHAR wn[] = { 's', 0 };
+	cb = sizeof(ws);
+	CHECK_EQ(SHGetValueW(HKEY_CURRENT_USER, wsub, wn, &type, ws, &cb), 0);
+	CHECK(ws[0] == 'h' && ws[5] == 0);
+	CHECK_EQ(SHDeleteValueA(HKEY_CURRENT_USER, sub, "n"), 0);
+	cb = sizeof(out);
+	CHECK_EQ(SHGetValueA(HKEY_CURRENT_USER, sub, "n", &type, &out, &cb),
+		 ERROR_FILE_NOT_FOUND);
+	CHECK_EQ(SHDeleteValueA(HKEY_CURRENT_USER, "Software\\no-such", "n"),
+		 ERROR_FILE_NOT_FOUND);
+	SHDeleteKeyA(HKEY_CURRENT_USER, "Software\\seance-test");
+	mod_free(m);
+}
+
+static LRESULT WINAPI test_wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+	return msg == 0x0081;	/* WM_NCCREATE goes on */
+}
+
+static void test_class_long(void)
+{
+	struct module *u = mod_load("user32.dll", NULL);
+	struct module *g = mod_load("gdi32.dll", NULL);
+	CHECK(u && g);
+	if (!u || !g)
+		return;
+	FN(u, ATOM, RegisterClassA, const WNDCLASSA *);
+	FN(u, BOOL, UnregisterClassA, LPCSTR, HINSTANCE);
+	FN(u, HWND, CreateWindowExA, DWORD, LPCSTR, LPCSTR, DWORD, int, int, int,
+	   int, HWND, HMENU, HINSTANCE, LPVOID);
+	FN(u, BOOL, DestroyWindow, HWND);
+	FN(u, DWORD, GetClassLongA, HWND, int);
+	FN(u, DWORD, SetClassLongA, HWND, int, LONG);
+	FN(u, WORD, GetClassWord, HWND, int);
+	FN(g, BOOL, UnrealizeObject, HGDIOBJ);
+	FN(g, HGDIOBJ, GetStockObject, int);
+
+	WNDCLASSA wc;
+	memset(&wc, 0, sizeof(wc));
+	wc.style = 0x0002;
+	wc.lpfnWndProc = test_wndproc;
+	wc.cbClsExtra = 8;
+	wc.cbWndExtra = 4;
+	wc.lpszClassName = "SeanceClassLong";
+	ATOM atom = RegisterClassA(&wc);
+	CHECK(atom != 0);
+	HWND w = CreateWindowExA(0, "SeanceClassLong", "", 0, 0, 0, 10, 10, NULL,
+				 NULL, NULL, NULL);
+	CHECK(w != NULL);
+	CHECK_EQ(GetClassLongA(w, GCL_STYLE), 0x0002);
+	CHECK_EQ(GetClassLongA(w, GCL_CBCLSEXTRA), 8);
+	CHECK_EQ(GetClassLongA(w, GCL_CBWNDEXTRA), 4);
+	CHECK_EQ(GetClassWord(w, GCW_ATOM), atom);
+	CHECK_EQ(GetClassLongA(w, 4), 0);
+	CHECK_EQ(SetClassLongA(w, 4, 0x1234), 0);
+	CHECK_EQ(GetClassLongA(w, 4), 0x1234);
+	CHECK_EQ(SetClassLongA(w, GCL_STYLE, 0x0001), 0x0002);
+	CHECK_EQ(GetClassLongA(w, GCL_STYLE), 0x0001);
+	/* Out of the extra bytes. */
+	CHECK_EQ(GetClassLongA(w, 6), 0);
+	DestroyWindow(w);
+	UnregisterClassA("SeanceClassLong", NULL);
+
+	CHECK(UnrealizeObject(GetStockObject(BLACK_BRUSH)));
+	CHECK(!UnrealizeObject(NULL));
+	mod_free(g);
+	mod_free(u);
+}
+
+/* The _mbs* family and the rest of what mfc42.dll imports from msvcrt
+ * (WaveT2.dll), and SearchPath (ffdshow.ax). */
+static void test_mbcs_searchpath(const char *root)
+{
+	struct module *m = mod_load("msvcrt.dll", NULL);
+	struct module *k = mod_load("kernel32.dll", NULL);
+	CHECK(m && k);
+	if (!m || !k)
+		return;
+	CFN(m, BYTE *, _mbsrchr, const BYTE *, unsigned);
+	CFN(m, BYTE *, _mbsstr, const BYTE *, const BYTE *);
+	CFN(m, int, _mbsnbicmp, const BYTE *, const BYTE *, size_t);
+	CFN(m, BYTE *, _mbsupr, BYTE *);
+	CFN(m, BYTE *, _mbsrev, BYTE *);
+	CFN(m, BYTE *, _mbsinc, const BYTE *);
+	CFN(m, BYTE *, _mbsdec, const BYTE *, const BYTE *);
+	CFN(m, size_t, _mbclen, const BYTE *);
+	CFN(m, int, _ismbcspace, unsigned);
+	CFN(m, int *, __p___argc, void);
+	CFN(m, char ***, __p___argv, void);
+	CFN(m, char *, _fullpath, char *, const char *, size_t);
+	CFN(m, LONG, mktime, int *);
+	CFN(m, void *, _expand, void *, size_t);
+	CFN(m, void *, malloc, size_t);
+	CFN(m, void, free, void *);
+	const BYTE *mbctype = get(m, "_mbctype");
+	const BYTE *s = (const BYTE *)"a\\b\\c.avi";
+
+	CHECK(_mbsrchr(s, '\\') == s + 3);
+	CHECK(_mbsstr(s, (const BYTE *)"c.") == s + 4);
+	CHECK_EQ(_mbsnbicmp((const BYTE *)"ABCx", (const BYTE *)"abcy", 3), 0);
+	CHECK(_mbsnbicmp((const BYTE *)"ABCx", (const BYTE *)"abcy", 4) < 0);
+	BYTE buf[16] = "abC";
+	CHECK_STR((char *)_mbsupr(buf), "ABC");
+	CHECK_STR((char *)_mbsrev(buf), "CBA");
+	CHECK(_mbsinc(s) == s + 1 && _mbsdec(s, s + 2) == s + 1 && !_mbsdec(s, s));
+	CHECK_EQ(_mbclen(s), 1);
+	CHECK(_ismbcspace(' ') && !_ismbcspace('x'));
+	CHECK(mbctype['A' + 1] == 0x10 && mbctype['a' + 1] == 0x20 && !mbctype[0x81 + 1]);
+	CHECK(*__p___argc() == 1 && !strcmp((*__p___argv())[0], "seance.exe"));
+	char full[300];
+	CHECK(_fullpath(full, "C:\\x\\..\\y.txt", sizeof(full)) == full);
+	CHECK_STR(full, "C:\\y.txt");
+	CHECK(_fullpath(full, "C:\\x", 3) == NULL);
+	int tm[9] = { 0, 0, 0, 32, 0, 100, 0, 0, 0 };	/* 2000-01-32 */
+	CHECK_EQ(mktime(tm), 949363200);
+	CHECK(tm[3] == 1 && tm[4] == 1 && tm[6] == 2);	/* 1 Feb, a Tuesday */
+	void *p = malloc(16);
+	CHECK(_expand(p, 8) == p && _expand(p, 1 << 20) == NULL);
+	free(p);
+
+	FN(k, DWORD, SearchPathA, LPCSTR, LPCSTR, LPCSTR, DWORD, LPSTR, LPSTR *);
+	char path[512], found[300], *part = NULL;
+	snprintf(path, sizeof(path), "%s/drive_c/sp", root);
+	mkdir(path, 0755);
+	snprintf(path, sizeof(path), "%s/drive_c/sp/codec.ini", root);
+	FILE *f = fopen(path, "w");
+	if (f)
+		fclose(f);
+	DWORD n = SearchPathA("C:\\nowhere;C:\\sp", "codec", ".ini", sizeof(found),
+			      found, &part);
+	CHECK_EQ(n, strlen("C:\\sp\\codec.ini"));
+	CHECK_STR(found, "C:\\sp\\codec.ini");
+	CHECK(part && !strcmp(part, "codec.ini"));
+	CHECK_EQ(SearchPathA("C:\\sp", "missing.ini", NULL, sizeof(found), found, NULL), 0);
+	CHECK_EQ(SearchPathA(NULL, "C:\\sp\\codec.ini", NULL, sizeof(found), found, NULL),
+		 strlen("C:\\sp\\codec.ini"));
+	CHECK_EQ(SearchPathA("C:\\sp", "codec.ini", NULL, 4, found, NULL),
+		 strlen("C:\\sp\\codec.ini") + 1);
+	/* A dot in a directory name isn't the name's extension, after either
+	 * separator. */
+	snprintf(path, sizeof(path), "%s/drive_c/sp/v1.d", root);
+	mkdir(path, 0755);
+	snprintf(path, sizeof(path), "%s/drive_c/sp/v1.d/codec.ini", root);
+	if ((f = fopen(path, "w")))
+		fclose(f);
+	CHECK(SearchPathA("C:\\sp", "v1.d\\codec", ".ini", sizeof(found), found,
+			  NULL) > 0);
+	CHECK(strstr(found, "codec.ini") != NULL);
+	CHECK(SearchPathA("C:\\sp", "v1.d/codec", ".ini", sizeof(found), found,
+			  NULL) > 0);
+	CHECK(strstr(found, "codec.ini") != NULL);
+	mod_free(k);
+	mod_free(m);
+}
+
+/* An IUnknown that counts its references, for PropVariantCopy. */
+static LONG unk_refs;
+
+static HRESULT STUB_WINAPI unk_qi(IUnknown *u, REFIID iid, void **out)
+{
+	*out = NULL;
+	return E_NOINTERFACE;
+}
+
+static ULONG STUB_WINAPI unk_addref(IUnknown *u) { return ++unk_refs; }
+static ULONG STUB_WINAPI unk_release(IUnknown *u) { return --unk_refs; }
+
+static IUnknownVtbl counted_vtbl = { unk_qi, unk_addref, unk_release };
+static IUnknown counted_unk = { &counted_vtbl };
+
+static volatile int beginthread_ran;
+
+static void CDECL beginthread_routine(void *arg)
+{
+	beginthread_ran = (int)(intptr_t)arg;
+}
+
+/* The second round of imports from the zip's codecs: msvcrt's wide-string
+ * and misc functions (ffdshow, WaveT2), ETW and PropVariant (wmdrmsdk),
+ * change notifications and DelayLoadFailureHook. */
+static void test_more_imports(const char *root)
+{
+	struct module *m = mod_load("msvcrt.dll", NULL);
+	struct module *k = mod_load("kernel32.dll", NULL);
+	struct module *a = mod_load("advapi32.dll", NULL);
+	struct module *o = mod_load("ole32.dll", NULL);
+	CHECK(m && k && a && o);
+	if (!m || !k || !a || !o)
+		return;
+	CFN(m, LONG, wcstol, const WCHAR *, WCHAR **, int);
+	CFN(m, ULONG, wcstoul, const WCHAR *, WCHAR **, int);
+	CFN(m, double, wcstod, const WCHAR *, WCHAR **);
+	CFN(m, int, _wtoi, const WCHAR *);
+	CFN(m, WCHAR *, _itow, int, WCHAR *, int);
+	CFN(m, WCHAR *, wcstok, WCHAR *, const WCHAR *);
+	CFN(m, int, iswspace, unsigned short);
+	CFN(m, int, iswupper, unsigned short);
+	CFN(m, void, _swab, const char *, char *, int);
+	CFN(m, char *, _strtime, char *);
+	CFN(m, int, __CppXcptFilter, unsigned, void *);
+	CFN(m, BYTE *, _mbsnbcpy, BYTE *, const BYTE *, size_t);
+	CFN(m, BYTE *, _mbsspnp, const BYTE *, const BYTE *);
+	CFN(m, size_t, _mbsnbcnt, const BYTE *, size_t);
+	CFN(m, void, _ftime32, void *);
+	CFN(m, uintptr_t, _beginthread, void (CDECL *)(void *), unsigned, void *);
+	const double *huge = get(m, "_HUGE");
+	WCHAR num[] = { ' ', '-', '4', '2', 'x', 0 }, *end = NULL;
+
+	CHECK_EQ(wcstol(num, &end, 10), -42);
+	CHECK(end == num + 4);
+	WCHAR big[] = { '9', '9', '9', '9', '9', '9', '9', '9', '9', '9', '9', 0 };
+	CHECK_EQ(wcstol(big, NULL, 10), 0x7fffffff);
+	WCHAR hex[] = { '0', 'x', 'f', 'f', 0 };
+	CHECK_EQ(wcstoul(hex, NULL, 0), 255);
+	/* A negative value wraps; one whose magnitude doesn't fit saturates. */
+	WCHAR m1[] = { '-', '1', 0 };
+	CHECK_EQ(wcstoul(m1, NULL, 10), 0xffffffffu);
+	WCHAR mbig[] = { '-', '9', '9', '9', '9', '9', '9', '9', '9', '9', '9', 0 };
+	errno = 0;
+	CHECK_EQ(wcstoul(mbig, NULL, 10), 0xffffffffu);
+	CHECK_EQ(errno, ERANGE);
+	errno = 0;
+	CHECK_EQ(wcstoul(big, NULL, 10), 0xffffffffu);
+	CHECK_EQ(errno, ERANGE);
+	/* Any number of leading zeros, past the old 512-character limit. */
+	WCHAR zeros[700];
+	for (int i = 0; i < 698; i++)
+		zeros[i] = '0';
+	zeros[698] = '7';
+	zeros[699] = 0;
+	end = NULL;
+	CHECK_EQ(wcstol(zeros, &end, 10), 7);
+	CHECK(end == zeros + 699);
+	CHECK_EQ(wcstoul(zeros, NULL, 10), 7);
+	WCHAR flt[] = { '2', '.', '5', 'e', '1', 0 };
+	CHECK(wcstod(flt, NULL) == 25.0);
+	CHECK_EQ(_wtoi(num), -42);
+	WCHAR out[16];
+	_itow(-255, out, 10);
+	CHECK(out[0] == '-' && out[1] == '2' && out[3] == '5' && !out[4]);
+	_itow(255, out, 16);
+	CHECK(out[0] == 'f' && out[1] == 'f' && !out[2]);
+	WCHAR toks[] = { 'a', ',', ',', 'b', 'c', 0 }, delim[] = { ',', 0 };
+	WCHAR *t1 = wcstok(toks, delim), *t2 = wcstok(NULL, delim);
+	CHECK(t1 == toks && !toks[1] && t2 == toks + 3 && !wcstok(NULL, delim));
+	CHECK(iswspace(' ') && iswspace(0x09) && !iswspace('x'));
+	CHECK(iswupper('A') && !iswupper('a'));
+	char sw[4];
+	_swab("abcd", sw, 4);
+	CHECK(!memcmp(sw, "badc", 4));
+	char tbuf[9];
+	CHECK(_strtime(tbuf) == tbuf && strlen(tbuf) == 8 && tbuf[2] == ':');
+	CHECK_EQ(__CppXcptFilter(0xE06D7363, NULL), 1);
+	CHECK_EQ(__CppXcptFilter(0xC0000005, NULL), 0);
+	CHECK(*huge > 1e308);
+	BYTE nb[8];
+	memset(nb, 'z', sizeof(nb));
+	_mbsnbcpy(nb, (const BYTE *)"ab", 4);
+	CHECK(!memcmp(nb, "ab\0\0zz", 6));
+	/* Counts stop at n even when the string isn't terminated within it. */
+	BYTE unterminated[4] = { 'a', 'b', 'c', 'd' };
+	CHECK_EQ(_mbsnbcnt(unterminated, 3), 3);
+	CHECK_EQ(_mbsnbcnt((const BYTE *)"ab", 5), 2);
+	/* _ftime32 fills a 32-bit time, and nothing past the struct. */
+	struct { int32_t time; unsigned short ms; short tz, dst; BYTE after[8]; }
+		tb32;
+	memset(&tb32, 0xa5, sizeof(tb32));
+	_ftime32(&tb32);
+	CHECK(tb32.time > 1600000000 && tb32.ms < 1000);
+	CHECK(tb32.after[0] == 0xa5 && tb32.after[7] == 0xa5);
+	const BYTE *sp = (const BYTE *)"  x";
+	CHECK(_mbsspnp(sp, (const BYTE *)" ") == sp + 2);
+	CHECK(_mbsspnp(sp, (const BYTE *)" x") == NULL);
+
+	FN(k, DWORD, WaitForSingleObject, HANDLE, DWORD);
+	FN(k, BOOL, CloseHandle, HANDLE);
+	beginthread_ran = 0;
+	uintptr_t th = _beginthread(beginthread_routine, 0, (void *)7);
+	CHECK(th && th != (uintptr_t)-1);
+	/* Its handle closes itself when it ends, so it is never waited on. */
+	for (int i = 0; i < 500 && th && th != (uintptr_t)-1; i++) {
+		if (beginthread_ran &&
+		    WaitForSingleObject((HANDLE)th, 0) == WAIT_FAILED)
+			break;
+		usleep(10000);
+	}
+	CHECK_EQ(beginthread_ran, 7);
+	CHECK_EQ(WaitForSingleObject((HANDLE)th, 0), WAIT_FAILED);
+	CHECK(!CloseHandle((HANDLE)th));
+
+	FN(k, HANDLE, FindFirstChangeNotificationA, LPCSTR, BOOL, DWORD);
+	FN(k, BOOL, FindNextChangeNotification, HANDLE);
+	FN(k, BOOL, FindCloseChangeNotification, HANDLE);
+	FN(k, FARPROC, DelayLoadFailureHook, LPCSTR, LPCSTR);
+	HANDLE ch = FindFirstChangeNotificationA("C:\\", FALSE, 1);
+	CHECK(ch != INVALID_HANDLE_VALUE);
+	CHECK_EQ(WaitForSingleObject(ch, 0), WAIT_TIMEOUT);
+	CHECK(FindNextChangeNotification(ch));
+	CHECK(FindCloseChangeNotification(ch));
+	CHECK(FindFirstChangeNotificationA("C:\\no\\such", FALSE, 1) == INVALID_HANDLE_VALUE);
+	CHECK(DelayLoadFailureHook("x.dll", "f") == NULL);
+	(void)root;
+
+	FN(a, ULONG, RegisterTraceGuidsW, void *, void *, const GUID *, ULONG, void *,
+	   LPCWSTR, LPCWSTR, uint64_t *);
+	FN(a, ULONG, UnregisterTraceGuids, uint64_t);
+	FN(a, ULONG, GetTraceEnableFlags, uint64_t);
+	uint64_t th64 = 0;
+	CHECK_EQ(RegisterTraceGuidsW((void *)1, NULL, &IID_IUnknown, 0, NULL, NULL,
+				     NULL, &th64), 0);
+	CHECK(th64 != 0);
+	CHECK_EQ(GetTraceEnableFlags(th64), 0);
+	CHECK_EQ(UnregisterTraceGuids(th64), 0);
+
+	FN(o, HRESULT, PropVariantCopy, VARIANT *, const VARIANT *);
+	FN(o, HRESULT, PropVariantClear, VARIANT *);
+	FN(o, void *, CoTaskMemAlloc, SIZE_T);
+	VARIANT src, dst;
+	memset(&src, 0, sizeof(src));
+	src.vt = VT_LPSTR;
+	char *str = CoTaskMemAlloc(6);
+	memcpy(str, "hello", 6);
+	*(char **)((BYTE *)&src + 8) = str;
+	CHECK_EQ(PropVariantCopy(&dst, &src), S_OK);
+	char *copy = *(char **)((BYTE *)&dst + 8);
+	CHECK(copy && copy != str && !strcmp(copy, "hello"));
+	CHECK_EQ(PropVariantClear(&dst), S_OK);
+	CHECK_EQ(dst.vt, VT_EMPTY);
+	CHECK_EQ(PropVariantClear(&src), S_OK);
+	memset(&src, 0, sizeof(src));
+	src.vt = VT_I4;
+	src.lVal = 5;
+	CHECK(PropVariantCopy(&dst, &src) == S_OK && dst.vt == VT_I4 && dst.lVal == 5);
+	/* A FILETIME is a value; a stream is a reference, counted. */
+	memset(&src, 0, sizeof(src));
+	src.vt = 64;	/* VT_FILETIME */
+	*(ULONGLONG *)((BYTE *)&src + 8) = 0x01d0123456789abcULL;
+	memset(&dst, 0xee, sizeof(dst));
+	CHECK_EQ(PropVariantCopy(&dst, &src), S_OK);
+	CHECK(dst.vt == 64 &&
+	      *(ULONGLONG *)((BYTE *)&dst + 8) == 0x01d0123456789abcULL);
+	CHECK_EQ(PropVariantClear(&dst), S_OK);
+	IUnknown *stream = &counted_unk;
+	unk_refs = 1;
+	memset(&src, 0, sizeof(src));
+	src.vt = 66;	/* VT_STREAM */
+	*(IUnknown **)((BYTE *)&src + 8) = stream;
+	CHECK_EQ(PropVariantCopy(&dst, &src), S_OK);
+	CHECK(dst.vt == 66 && *(IUnknown **)((BYTE *)&dst + 8) == stream);
+	CHECK_EQ(unk_refs, 2);
+	CHECK_EQ(PropVariantClear(&dst), S_OK);
+	CHECK_EQ(unk_refs, 1);
+	/* A type it can't copy leaves dst as it was. */
+	memset(&src, 0, sizeof(src));
+	src.vt = 0x7ff;
+	memset(&dst, 0x5a, sizeof(dst));
+	CHECK(FAILED(PropVariantCopy(&dst, &src)));
+	CHECK(((BYTE *)&dst)[8] == 0x5a);
+	mod_free(o);
+	mod_free(a);
+	mod_free(k);
+	mod_free(m);
 }
 
 int main(void)
@@ -1071,6 +2084,14 @@ int main(void)
 	test_oledlg_dbghelp();
 	test_netapi32();
 	test_splitpath();
+	test_mbcs_searchpath(root);
+	test_more_imports(root);
+	test_toolhelp();
+	test_process_memory();
+	test_iocp();
+	test_mmio(root);
+	test_sh_value();
+	test_class_long();
 
 	char cmd[512];
 	snprintf(cmd, sizeof(cmd), "rm -rf '%s'", root);

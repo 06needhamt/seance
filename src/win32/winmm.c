@@ -404,6 +404,9 @@ static const struct builtin_export exports[] = {
 	BUILTIN_END
 };
 
-static const struct builtin_export *const tables[] = { exports, NULL };
+extern const struct builtin_export winmm_mmio_exports[];
+
+static const struct builtin_export *const tables[] = { exports, winmm_mmio_exports,
+							NULL };
 
 const struct builtin_dll builtin_winmm = { "winmm.dll", NULL, tables, 0 };

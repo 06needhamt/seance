@@ -817,6 +817,20 @@ WINFN(BOOL) gdi_MoveToEx(HDC hdc, int x, int y, LPPOINT old)
 	return ok;
 }
 
+WINFN(BOOL) gdi_GetCurrentPositionEx(HDC hdc, LPPOINT pt)
+{
+	BOOL ok = FALSE;
+
+	gdi_lock();
+	struct gdi_obj *d = gdi_get(hdc, OBJ_DC);
+	if (d && pt) {
+		*pt = d->u.dc.s.pos;
+		ok = TRUE;
+	}
+	gdi_unlock();
+	return ok;
+}
+
 WINFN(BOOL) gdi_GdiFlush(void)
 {
 	return TRUE;
@@ -927,6 +941,9 @@ WINFN(HPALETTE) gdi_SelectPalette(HDC hdc, HPALETTE h, BOOL background)
 	gdi_unlock();
 	return prev;
 }
+
+/* Brush origins and palettes need no resetting here: there is no display. */
+WINFN(BOOL) gdi_UnrealizeObject(HGDIOBJ h) { return h != NULL; }
 
 /* A true-colour device has no system palette to realise into. */
 WINFN(UINT) gdi_RealizePalette(HDC hdc)
@@ -1458,6 +1475,7 @@ static const struct builtin_export exports[] = {
 	E(GetBkMode),
 	E(GetClipBox),
 	E(GetCurrentObject),
+	E(GetCurrentPositionEx),
 	E(GetDeviceCaps),
 	E(GetMapMode),
 	E(GetNearestColor),
@@ -1506,6 +1524,7 @@ static const struct builtin_export exports[] = {
 	E(SetWindowExtEx),
 	E(TextOutA),
 	E(TextOutW),
+	E(UnrealizeObject),
 	BUILTIN_END
 };
 

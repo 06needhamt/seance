@@ -179,6 +179,12 @@ NOT_A_SOCKET(getpeername, SOCKET s, void *addr, int *len)
 NOT_A_SOCKET(getsockname, SOCKET s, void *addr, int *len)
 NOT_A_SOCKET(WSASend, SOCKET s, void *bufs, DWORD n, DWORD *sent, DWORD flags, void *ov, void *cb)
 
+/* Winsock 1's blocking hooks: nothing ever blocks here. */
+WINFN(int) ws_WSACancelBlockingCall(void) { return 0; }
+WINFN(BOOL) ws_WSAIsBlocking(void) { return FALSE; }
+WINFN(void *) ws_WSASetBlockingHook(void *hook) { (void)hook; return NULL; }
+WINFN(int) ws_WSAUnhookBlockingHook(void) { return 0; }
+
 WINFN(SOCKET) ws_accept(SOCKET s, void *addr, int *len)
 {
 	win_set_error(WSAENOTSOCK);
@@ -487,8 +493,12 @@ static const struct builtin_export exports[] = {
 	O(getservbyname, 55),
 	O(getservbyport, 56),
 	O(gethostname, 57),
+	O(WSASetBlockingHook, 109),
+	O(WSAUnhookBlockingHook, 110),
 	O(WSAGetLastError, 111),
 	O(WSASetLastError, 112),
+	O(WSACancelBlockingCall, 113),
+	O(WSAIsBlocking, 114),
 	O(WSAStartup, 115),
 	O(WSACleanup, 116),
 	O(__WSAFDIsSet, 151),
@@ -533,8 +543,12 @@ static const struct builtin_export wsock32_exports[] = {
 	O(getservbyname, 55),
 	O(getservbyport, 56),
 	O(gethostname, 57),
+	O(WSASetBlockingHook, 109),
+	O(WSAUnhookBlockingHook, 110),
 	O(WSAGetLastError, 111),
 	O(WSASetLastError, 112),
+	O(WSACancelBlockingCall, 113),
+	O(WSAIsBlocking, 114),
 	O(WSAStartup, 115),
 	O(WSACleanup, 116),
 	O(__WSAFDIsSet, 151),

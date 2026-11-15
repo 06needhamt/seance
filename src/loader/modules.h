@@ -105,6 +105,13 @@ void mod_free(struct module *mod);
  */
 void mod_thread_notify(DWORD reason);
 
+/*
+ * Holds the loader lock across several of these calls, so that no module
+ * is loaded or unloaded between them (the lock is recursive).
+ */
+void mod_lock(void);
+void mod_unlock(void);
+
 /* Formats addr as "module+0xrva", or just the address if not in a module. */
 void mod_describe_address(const void *addr, char *out, size_t outsz);
 

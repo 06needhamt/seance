@@ -43,13 +43,22 @@ struct builtin_dll {
 	const struct builtin_export *const *tables;	/* NULL-terminated */
 	/*
 	 * Used only when no DLL of that name is found on disk, so a native
-	 * copy placed on the search path wins. Set for the CRT (msvcrt.dll
-	 * and its versioned names), which codecs sometimes ship themselves.
+	 * copy placed on the search path wins: BUILTIN_FALLBACK for every name
+	 * it answers to, BUILTIN_FALLBACK_ALIASES for its aliases alone. The
+	 * CRT is the latter: codecs ship their own msvcr71/80/90.dll, which
+	 * win, but msvcrt.dll is one of Windows' KnownDLLs, always loaded from
+	 * system32 even when an older copy sits beside the codec.
 	 */
 	int fallback;
 };
 
+#define BUILTIN_FALLBACK         1
+#define BUILTIN_FALLBACK_ALIASES 2
+
 #define BUILTIN_END { NULL, 0, NULL }
+
+/* Whether a DLL called name on the search path is used instead of b. */
+int builtin_shadowable(const struct builtin_dll *b, const char *name);
 
 /* The DLL's named exports in sorted order: count, and the i-th one. */
 size_t builtin_count(const struct builtin_dll *dll);
@@ -70,7 +79,7 @@ void *builtin_export_ordinal(const struct builtin_dll *dll, WORD ordinal);
  * A page holding just a DOS and PE header, to serve as a built-in
  * module's HMODULE (some code inspects the header behind a handle).
  */
-BYTE *builtin_fake_image(void);
+BYTE *builtin_fake_image(const struct builtin_dll *dll);
 void builtin_free_image(BYTE *base);
 
 #endif /* VFW_RUNTIME_BUILTIN_H */

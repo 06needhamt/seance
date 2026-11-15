@@ -14,6 +14,9 @@
 /* Whether hwnd is a live window (the desktop included). */
 int user_is_window(HWND hwnd);
 
+/* DestroyWindow, for the clipboard: an owner renders what it promised. */
+void user_clipboard_owner_destroyed(HWND hwnd);
+
 /* The desktop window. */
 HWND user_desktop(void);
 

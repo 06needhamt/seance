@@ -225,11 +225,19 @@ CRTFN(int *) crt____mb_cur_max_func(void)
 
 CRTFN(unsigned) crt____lc_codepage_func(void) { return 0; }
 
+/*
+ * Restores the guard page after a stack overflow was caught. The stack's
+ * guard here is the host's own, which never goes away, so there is
+ * nothing to restore: success.
+ */
+CRTFN(int) crt__resetstkoflw(void) { return 1; }
+
 #define E(n) { #n + 0, 0, (void *)crt_##n }
 #define M(name, fn) { name, 0, (void *)fn }
 
 const struct builtin_export crt_modern_exports[] = {
 	M("_time64", crt__time64),
+	M("_resetstkoflw", crt__resetstkoflw),
 	M("_time32", crt__time32),
 	M("_gmtime64", crt__gmtime64),
 	M("_localtime64", crt__localtime64),

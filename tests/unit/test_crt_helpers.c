@@ -100,6 +100,7 @@ int main(void)
 	CHECK_EQ(call_ftol("_ftol", 3.75), 3);
 	CHECK_EQ(call_ftol("_ftol", -3.75), -3);
 	CHECK_EQ(call_ftol("_ftol2", 42.9), 42);
+	CHECK_EQ(call_ftol("_ftol2_sse", -7.5), -7);
 
 	return test_summary("test_crt_helpers");
 }

@@ -38,6 +38,21 @@ LONG WINAPI filt_continue(EXCEPTION_POINTERS *ep, void *frame)
 	return EXCEPTION_CONTINUE_EXECUTION;
 }
 
+/* __except for a breakpoint, or for a single step. */
+LONG WINAPI filt_break(EXCEPTION_POINTERS *ep, void *frame)
+{
+	return ep->ExceptionRecord->ExceptionCode == EXCEPTION_BREAKPOINT ?
+		EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH;
+}
+
+LONG WINAPI filt_step(EXCEPTION_POINTERS *ep, void *frame)
+{
+	filt_calls++;
+	return ep->ExceptionRecord->ExceptionCode == EXCEPTION_SINGLE_STEP &&
+	       !(ep->ContextRecord->EFlags & 0x100) ?
+		EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH;
+}
+
 /* The __finally body. */
 void WINAPI fin_funclet(BOOLEAN abnormal, void *frame)
 {
@@ -180,6 +195,37 @@ __asm__(
 	"	.text\n"
 	"	.seh_endproc\n"
 
+	/* Calls DebugBreak, whose int3 is in kernel32. */
+	".globl do_break\n"
+	".seh_proc do_break\n"
+	"do_break:\n"
+	"	subq $40, %rsp\n"
+	"	.seh_stackalloc 40\n"
+	"	.seh_endprologue\n"
+	"	call *__imp_DebugBreak(%rip)\n"
+	"	addq $40, %rsp\n"
+	"	ret\n"
+	"	.seh_endproc\n"
+
+	/* Sets the trap flag: a single-step exception after the next one. */
+	".globl do_step\n"
+	".seh_proc do_step\n"
+	"do_step:\n"
+	"	subq $40, %rsp\n"
+	"	.seh_stackalloc 40\n"
+	"	.seh_endprologue\n"
+	"	pushfq\n"
+	"	orq $0x100, (%rsp)\n"
+	"	popfq\n"
+	"	nop\n"
+	"	nop\n"
+	"	addq $40, %rsp\n"
+	"	ret\n"
+	"	.seh_endproc\n"
+
+	"catcher seh64_debugbreak, do_break, filt_break\n"
+	"catcher seh64_step, do_step, filt_step\n"
+
 	/* A __try/__except(filt_av) that does not catch what do_raise raises. */
 	"catcher seh64_reject, do_raise, filt_av\n"
 
@@ -314,6 +360,7 @@ __asm__(
 	"	.ascii \" -export:seh64_filter -export:seh64_nested\"\n"
 	"	.ascii \" -export:seh64_continue -export:seh64_fpreg\"\n"
 	"	.ascii \" -export:seh64_longjmp -export:seh64_top\"\n"
+	"	.ascii \" -export:seh64_debugbreak -export:seh64_step\"\n"
 	"	.ascii \" -export:seh_unhandled_crash\"\n"
 	".text\n");
 

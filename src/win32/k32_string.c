@@ -3,10 +3,12 @@
  * kernel32: code pages, lstr*, string comparison and mapping, character
  * types and locale information. The locale is always en-US (0x409).
  */
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "runtime/gate.h"
 #include "win32/codepage.h"
 #include "win32/internal.h"
 #include "win32/k32.h"
@@ -577,6 +579,75 @@ WINFN(BOOL) k32_EnumSystemLocalesW(LOCALE_ENUMPROCW fn, DWORD flags)
 	return TRUE;
 }
 
+/*
+ * Calendar information for the one calendar the default locale (US
+ * English) has, Gregorian: each value is handed to the callback once. A
+ * type without a value (era names, which the Gregorian calendar lacks)
+ * enumerates nothing, which is success.
+ */
+#define CAL_ICALINTVALUE   0x01
+#define CAL_SCALNAME       0x02
+#define CAL_IYEAROFFSETRANGE 0x03
+#define CAL_SERASTRING     0x04
+#define CAL_SSHORTDATE     0x05
+#define CAL_SLONGDATE      0x06
+#define CAL_SYEARMONTH     0x2f
+#define CAL_GREGORIAN      1
+#define ENUM_ALL_CALENDARS 0xffffffff
+#define CAL_RETURN_NUMBER  0x20000000
+
+static const char *calendar_value(DWORD cal, DWORD type)
+{
+	if (cal != CAL_GREGORIAN && cal != ENUM_ALL_CALENDARS)
+		return NULL;
+	switch (type & ~(CAL_RETURN_NUMBER | LOCALE_NOUSEROVERRIDE |
+			 LOCALE_USE_CP_ACP)) {
+	case CAL_ICALINTVALUE:	return "1";
+	case CAL_SCALNAME:	return "Gregorian Calendar";
+	case CAL_SSHORTDATE:	return "M/d/yyyy";
+	case CAL_SLONGDATE:	return "dddd, MMMM dd, yyyy";
+	case CAL_SYEARMONTH:	return "MMMM, yyyy";
+	default:		return NULL;
+	}
+}
+
+WINFN(BOOL) k32_EnumCalendarInfoA(void *proc, LCID lcid, DWORD cal,
+				  DWORD type)
+{
+	(void)lcid;
+	if (!proc) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	const char *v = calendar_value(cal, type);
+	if (v) {
+		uintptr_t arg = (uintptr_t)v;
+		gate_call(proc, 1, &arg);
+	}
+	return TRUE;
+}
+
+WINFN(BOOL) k32_EnumCalendarInfoW(void *proc, LCID lcid, DWORD cal,
+				  DWORD type)
+{
+	(void)lcid;
+	if (!proc) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	const char *v = calendar_value(cal, type);
+	if (v) {
+		WCHAR w[64];
+		size_t i = 0;
+		for (; v[i] && i < 63; i++)
+			w[i] = (WCHAR)(BYTE)v[i];
+		w[i] = 0;
+		uintptr_t arg = (uintptr_t)w;
+		gate_call(proc, 1, &arg);
+	}
+	return TRUE;
+}
+
 #define E(name) { #name, 0, (void *)k32_##name }
 
 const struct builtin_export k32_string_exports[] = {
@@ -621,6 +692,15 @@ const struct builtin_export k32_string_exports[] = {
 	E(lstrcpyA),
 	E(lstrcpyW),
 	E(lstrcpynA),
+	/* The names without a suffix, which kernel32 also exports (ANSI). */
+	{ "lstrcat", 0, (void *)k32_lstrcatA },
+	{ "lstrcmp", 0, (void *)k32_lstrcmpA },
+	{ "lstrcmpi", 0, (void *)k32_lstrcmpiA },
+	{ "lstrcpy", 0, (void *)k32_lstrcpyA },
+	{ "lstrcpyn", 0, (void *)k32_lstrcpynA },
+	{ "lstrlen", 0, (void *)k32_lstrlenA },
+	E(EnumCalendarInfoA),
+	E(EnumCalendarInfoW),
 	E(lstrcpynW),
 	E(lstrlenA),
 	E(lstrlenW),

@@ -64,7 +64,10 @@ char *k32_full_path(const char *name);
 /* CreateThread with the defaults, for threads the built-in DLLs run. */
 HANDLE thread_create(LPTHREAD_START_ROUTINE start, LPVOID param);
 
-/* CreateThread, for _beginthreadex: stack size, CREATE_SUSPENDED, thread id. */
+/* CreateThread, for _beginthreadex: stack size, CREATE_SUSPENDED, thread id.
+ * With THREAD_CLOSE_ON_EXIT (for _beginthread) the handle closes itself
+ * when the thread ends. */
+#define THREAD_CLOSE_ON_EXIT 0x80000000u
 HANDLE thread_create_ex(SIZE_T stack, LPTHREAD_START_ROUTINE start, LPVOID param,
 			DWORD flags, LPDWORD tid);
 

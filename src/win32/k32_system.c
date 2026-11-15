@@ -1023,6 +1023,30 @@ WINFN(void) k32_OutputDebugStringW(LPCWSTR s)
 
 WINFN(BOOL) k32_IsDebuggerPresent(void) { return FALSE; }
 
+/*
+ * A breakpoint exception, which the caller's own handler may take. On x64
+ * the handlers are found by unwinding, and seance's own code has no unwind
+ * data, so this jumps (leaving the caller's return address on top) to the
+ * "int3; ret" in kernel32's image: a leaf there unwinds to the caller, as
+ * Windows' DebugBreak does. i386's handlers are on the fs:[0] chain.
+ */
+#if defined(__x86_64__)
+__attribute__((naked)) WINFN(void) k32_DebugBreak(void)
+{
+	__asm__ volatile("movq vfw_gate_break_addr(%rip), %rax\n"
+			 "testq %rax, %rax\n"
+			 "jz 1f\n"
+			 "jmp *%rax\n"
+			 "1: int3\n"
+			 "ret\n");
+}
+#else
+WINFN(void) k32_DebugBreak(void)
+{
+	__asm__ volatile("int3");
+}
+#endif
+
 static UINT error_mode;
 
 WINFN(UINT) k32_SetErrorMode(UINT mode)
@@ -1279,6 +1303,7 @@ const struct builtin_export k32_system_exports[] = {
 	E(GetWindowsDirectoryA),
 	E(GetWindowsDirectoryW),
 	E(IsDebuggerPresent),
+	E(DebugBreak),
 	E(IsProcessorFeaturePresent),
 	E(OutputDebugStringA),
 	E(OutputDebugStringW),

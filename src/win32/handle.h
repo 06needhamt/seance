@@ -27,6 +27,9 @@ enum kobj_type {
 	KOBJ_FIND,
 	KOBJ_KEY,
 	KOBJ_TOKEN,
+	KOBJ_SNAPSHOT,
+	KOBJ_IOCP,
+	KOBJ_CHANGE,
 };
 
 struct kobject {

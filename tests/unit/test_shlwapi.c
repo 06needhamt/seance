@@ -213,6 +213,39 @@ static void test_kernelbase(void)
 	mod_free(kb);
 }
 
+/* PathCanonicalize and PathCompactPathEx (ffdshow.ax). */
+static void test_canonicalize(void)
+{
+	FN(BOOL, PathCanonicalizeA, LPSTR, LPCSTR);
+	FN(BOOL, PathCanonicalizeW, LPWSTR, LPCWSTR);
+	FN(BOOL, PathCompactPathExA, LPSTR, LPCSTR, UINT, DWORD);
+	static const struct { const char *in, *out; } cases[] = {
+		{ "C:\\a\\.\\b\\..\\c", "C:\\a\\c" },
+		{ "C:\\a\\..\\..\\b", "C:\\b" },
+		{ "C:\\a\\b\\", "C:\\a\\b\\" },
+		{ "\\\\srv\\share\\x\\..\\y", "\\\\srv\\share\\y" },
+		{ "a\\..\\..", "\\" },
+		{ "C:\\..", "C:\\" },
+	};
+	char out[MAX_PATH];
+
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		CHECK(PathCanonicalizeA(out, cases[i].in));
+		CHECK_STR(out, cases[i].out);
+	}
+	WCHAR win[] = { 'C', ':', '\\', 'x', '\\', '.', '.', '\\', 'y', 0 }, wout[MAX_PATH];
+	CHECK(PathCanonicalizeW(wout, win));
+	CHECK(wout[0] == 'C' && wout[3] == 'y' && !wout[4]);
+
+	CHECK(PathCompactPathExA(out, "C:\\short.avi", 64, 0));
+	CHECK_STR(out, "C:\\short.avi");
+	CHECK(PathCompactPathExA(out, "C:\\long\\directory\\name\\file.avi", 20, 0));
+	CHECK_EQ(strlen(out), 19);
+	CHECK(strstr(out, "...\\file.avi") != NULL);
+	CHECK(PathCompactPathExA(out, "C:\\averyveryverylongfilename.avi", 10, 0));
+	CHECK_EQ(strlen(out), 9);
+}
+
 int main(void)
 {
 	CHECK_EQ(runtime_enter(), 0);
@@ -222,6 +255,7 @@ int main(void)
 		test_strings();
 		test_paths();
 		test_wide();
+		test_canonicalize();
 		mod_free(dll);
 	}
 	test_kernelbase();

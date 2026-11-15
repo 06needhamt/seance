@@ -664,6 +664,7 @@ static void test_text(void)
 	FN(HFONT, CreateFontA, int, int, int, int, int, DWORD, DWORD, DWORD, DWORD,
 	   DWORD, DWORD, DWORD, DWORD, LPCSTR);
 	FN(BOOL, MoveToEx, HDC, int, int, LPPOINT);
+	FN(BOOL, GetCurrentPositionEx, HDC, LPPOINT);
 	struct module *user = mod_load("user32.dll", NULL);
 	CHECK(user != NULL);
 	if (!user)
@@ -733,6 +734,8 @@ static void test_text(void)
 	POINT cp;
 	CHECK(MoveToEx(dc, 0, 0, NULL));
 	CHECK(TextOutA(dc, 50, 50, "ab", 2));
+	POINT gp;
+	CHECK(GetCurrentPositionEx(dc, &gp) && gp.x == 2 * cw && gp.y == 0);
 	CHECK(MoveToEx(dc, 0, 0, &cp));
 	CHECK(cp.x == 2 * cw && cp.y == 0);
 	SetTextAlign(dc, TA_LEFT | TA_TOP);

@@ -159,6 +159,9 @@ const struct builtin_export crt_helpers_exports[] = {
 #if !defined(__x86_64__)
 	E(_allmul), E(_alldiv), E(_aulldiv), E(_allrem), E(_aullrem),
 	EASM(_ftol), EASM(_ftol2), EASM(_allshl), EASM(_allshr), EASM(_aullshr),
+	/* Vista's msvcrt: the same contract (st(0) to edx:eax, popped); the
+	 * SSE2 path is only faster. */
+	{ "_ftol2_sse", 0, (void *)_ftol },
 #endif
 	BUILTIN_END
 };

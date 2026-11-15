@@ -22,6 +22,7 @@
 #include "win32/codepage.h"
 #include "win32/gdi.h"
 #include "win32/internal.h"
+#include "win32/k32.h"
 #include "win32/path.h"
 #include "win32/user.h"
 
@@ -821,10 +822,287 @@ static UINT register_name(char *name)
 WINFN(UINT) user_RegisterWindowMessageA(LPCSTR name) { return register_name(acp_to_utf8(name)); }
 WINFN(UINT) user_RegisterWindowMessageW(LPCWSTR name) { return register_name(utf16_to_utf8_dup(name)); }
 
+/*
+ * The clipboard, kept in the process: with no desktop to share it with,
+ * what a DLL puts there is what it gets back. SetClipboardData hands the
+ * data to the clipboard, as on Windows, which frees it when emptied (GDI
+ * objects with DeleteObject, memory with GlobalFree; private formats stay
+ * the application's). One thread at a time has it open. A NULL handle asks
+ * for delayed rendering: GetClipboardData then sends the owner
+ * WM_RENDERFORMAT, which puts the data there; an owner that is destroyed
+ * is sent WM_RENDERALLFORMATS first, and what it leaves unrendered goes.
+ * EmptyClipboard sends the previous owner WM_DESTROYCLIPBOARD.
+ */
+#define CLIP_FORMATS 16
+#ifndef WM_RENDERFORMAT
+#define WM_RENDERFORMAT 0x0305
+#endif
+#ifndef WM_RENDERALLFORMATS
+#define WM_RENDERALLFORMATS 0x0306
+#endif
+#ifndef WM_DESTROYCLIPBOARD
+#define WM_DESTROYCLIPBOARD 0x0307
+#endif
+#define CLIP_BITMAP 2
+#define CLIP_PALETTE 9
+#define CLIP_DSPBITMAP 0x82
+#define CLIP_PRIVATEFIRST 0x0200
+#define CLIP_PRIVATELAST 0x02ff
+#define CLIP_GDIOBJFIRST 0x0300
+#define CLIP_GDIOBJLAST 0x03ff
+static struct { UINT format; HANDLE data; } clip[CLIP_FORMATS];
+static pthread_mutex_t clip_lock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+static DWORD clip_thread;		/* that has it open, or 0 */
+static HWND clip_window;		/* that opened it */
+static HWND clip_owner;			/* that last emptied it */
+static UINT rendering;			/* the format WM_RENDERFORMAT asked for */
+
+static void clip_release(UINT format, HANDLE data)
+{
+	/* Private formats' handles stay the application's to free. */
+	if (!data || (format >= CLIP_PRIVATEFIRST && format <= CLIP_PRIVATELAST))
+		return;
+	if (format == CLIP_BITMAP || format == CLIP_PALETTE ||
+	    format == CLIP_DSPBITMAP ||
+	    (format >= CLIP_GDIOBJFIRST && format <= CLIP_GDIOBJLAST)) {
+		BOOL (WINAPI *del)(HGDIOBJ) =
+			builtin_export(&builtin_gdi32, "DeleteObject");
+		if (del)
+			del(data);
+	} else {
+		global_free(data);
+	}
+}
+
+static void clip_empty(void)
+{
+	for (int i = 0; i < CLIP_FORMATS; i++) {
+		if (clip[i].format)
+			clip_release(clip[i].format, clip[i].data);
+		clip[i].format = 0;
+		clip[i].data = NULL;
+	}
+}
+
+/* 1 if this thread has the clipboard open (call with clip_lock held). */
+static int clip_mine(void)
+{
+	return clip_thread && clip_thread == thread_current_id();
+}
+
+WINFN(BOOL) user_OpenClipboard(HWND owner)
+{
+	DWORD me = thread_current_id();
+	BOOL ok = TRUE;
+
+	pthread_mutex_lock(&clip_lock);
+	if (clip_thread && clip_thread != me) {
+		win_set_error(ERROR_ACCESS_DENIED);
+		ok = FALSE;
+	} else {
+		clip_thread = me;
+		clip_window = owner;
+	}
+	pthread_mutex_unlock(&clip_lock);
+	return ok;
+}
+
+WINFN(BOOL) user_CloseClipboard(void)
+{
+	BOOL ok = TRUE;
+
+	pthread_mutex_lock(&clip_lock);
+	if (!clip_mine()) {
+		win_set_error(ERROR_CLIPBOARD_NOT_OPEN);
+		ok = FALSE;
+	} else {
+		clip_thread = 0;
+		clip_window = NULL;
+	}
+	pthread_mutex_unlock(&clip_lock);
+	return ok;
+}
+
+static LRESULT clip_send(HWND hwnd, UINT msg, WPARAM wp)
+{
+	LRESULT (WINAPI *send)(HWND, UINT, WPARAM, LPARAM) =
+		builtin_export(builtin_find("user32.dll"), "SendMessageW");
+	return send ? send(hwnd, msg, wp, 0) : 0;
+}
+
+WINFN(BOOL) user_EmptyClipboard(void)
+{
+	pthread_mutex_lock(&clip_lock);
+	if (!clip_mine()) {
+		pthread_mutex_unlock(&clip_lock);
+		win_set_error(ERROR_CLIPBOARD_NOT_OPEN);
+		return FALSE;
+	}
+	HWND old = clip_owner;
+	pthread_mutex_unlock(&clip_lock);
+	/* The previous owner frees what it kept for the data; it can't lose
+	 * the clipboard meanwhile, as this thread has it open. */
+	if (old)
+		clip_send(old, WM_DESTROYCLIPBOARD, 0);
+	pthread_mutex_lock(&clip_lock);
+	clip_empty();
+	clip_owner = clip_window;
+	pthread_mutex_unlock(&clip_lock);
+	return TRUE;
+}
+
+void user_clipboard_owner_destroyed(HWND hwnd)
+{
+	pthread_mutex_lock(&clip_lock);
+	int owner = hwnd && clip_owner == hwnd;
+	int promised = 0;
+	for (int i = 0; owner && i < CLIP_FORMATS; i++)
+		promised |= clip[i].format && !clip[i].data;
+	pthread_mutex_unlock(&clip_lock);
+	if (!owner)
+		return;
+	/* It renders what it promised (opening the clipboard to do so). */
+	if (promised)
+		clip_send(hwnd, WM_RENDERALLFORMATS, 0);
+	pthread_mutex_lock(&clip_lock);
+	if (clip_owner == hwnd) {
+		for (int i = 0; i < CLIP_FORMATS; i++)
+			if (clip[i].format && !clip[i].data)
+				clip[i].format = 0;
+		clip_owner = NULL;
+	}
+	pthread_mutex_unlock(&clip_lock);
+}
+
+WINFN(HANDLE) user_SetClipboardData(UINT format, HANDLE data)
+{
+	int free_slot = -1, slot = -1;
+	HANDLE ret = NULL;
+
+	pthread_mutex_lock(&clip_lock);
+	/* The owner answers WM_RENDERFORMAT without opening the clipboard. */
+	int allowed = clip_mine() || (rendering && rendering == format);
+	if (!allowed || !format) {
+		win_set_error(allowed ? ERROR_INVALID_PARAMETER :
+			      ERROR_CLIPBOARD_NOT_OPEN);
+		goto out;
+	}
+	for (int i = 0; i < CLIP_FORMATS && slot < 0; i++) {
+		if (clip[i].format == format)
+			slot = i;
+		else if (!clip[i].format && free_slot < 0)
+			free_slot = i;
+	}
+	if (slot < 0 && (slot = free_slot) < 0) {
+		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
+		goto out;
+	}
+	if (clip[slot].format == format && clip[slot].data != data)
+		clip_release(format, clip[slot].data);
+	clip[slot].format = format;
+	clip[slot].data = data;
+	ret = data;	/* NULL for delayed rendering, as on Windows */
+	win_set_error(ERROR_SUCCESS);
+out:
+	pthread_mutex_unlock(&clip_lock);
+	return ret;
+}
+
+/* The slot holding format, or -1 (call with clip_lock held). */
+static int clip_find(UINT format)
+{
+	for (int i = 0; i < CLIP_FORMATS; i++)
+		if (clip[i].format && clip[i].format == format)
+			return i;
+	return -1;
+}
+
+WINFN(HANDLE) user_GetClipboardData(UINT format)
+{
+	pthread_mutex_lock(&clip_lock);
+	int i = clip_find(format);
+	HANDLE data = i >= 0 ? clip[i].data : NULL;
+	HWND owner = clip_owner;
+	pthread_mutex_unlock(&clip_lock);
+	if (i < 0 || data || !owner)
+		return data;
+
+	/*
+	 * Delayed: the owner renders it now, on its own thread, with the
+	 * lock not held; while it does, it may set that format.
+	 */
+	pthread_mutex_lock(&clip_lock);
+	UINT was = rendering;
+	rendering = format;
+	pthread_mutex_unlock(&clip_lock);
+	clip_send(owner, WM_RENDERFORMAT, format);
+	pthread_mutex_lock(&clip_lock);
+	rendering = was;
+	i = clip_find(format);
+	data = i >= 0 ? clip[i].data : NULL;
+	pthread_mutex_unlock(&clip_lock);
+	return data;
+}
+
+/* Data there, or promised (delayed rendering), counts as available. */
+WINFN(BOOL) user_IsClipboardFormatAvailable(UINT format)
+{
+	pthread_mutex_lock(&clip_lock);
+	BOOL there = clip_find(format) >= 0;
+	pthread_mutex_unlock(&clip_lock);
+	return there;
+}
+
+WINFN(int) user_CountClipboardFormats(void)
+{
+	int n = 0;
+
+	pthread_mutex_lock(&clip_lock);
+	for (int i = 0; i < CLIP_FORMATS; i++)
+		n += clip[i].format != 0;
+	pthread_mutex_unlock(&clip_lock);
+	return n;
+}
+
+WINFN(UINT) user_EnumClipboardFormats(UINT format)
+{
+	int seen = !format;
+	UINT next = 0;
+
+	pthread_mutex_lock(&clip_lock);
+	for (int i = 0; i < CLIP_FORMATS && !next; i++) {
+		if (!clip[i].format)
+			continue;
+		if (seen)
+			next = clip[i].format;
+		else
+			seen = clip[i].format == format;
+	}
+	pthread_mutex_unlock(&clip_lock);
+	return next;
+}
+
+WINFN(HWND) user_GetClipboardOwner(void)
+{
+	pthread_mutex_lock(&clip_lock);
+	HWND h = clip_owner;
+	pthread_mutex_unlock(&clip_lock);
+	return h;
+}
+
 #define E(name) { #name, 0, (void *)user_##name }
 
 static const struct builtin_export exports[] = {
 	E(BeginPaint),
+	E(CloseClipboard),
+	E(CountClipboardFormats),
+	E(EmptyClipboard),
+	E(EnumClipboardFormats),
+	E(GetClipboardData),
+	E(GetClipboardOwner),
+	E(IsClipboardFormatAvailable),
+	E(OpenClipboard),
+	E(SetClipboardData),
 	E(ClipCursor),
 	E(CopyRect),
 	E(DestroyCursor),

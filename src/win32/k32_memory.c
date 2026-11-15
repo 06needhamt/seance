@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/sysinfo.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #include "loader/modules.h"
@@ -1102,6 +1103,171 @@ WINFN(void) k32_RtlFillMemory(void *dst, SIZE_T len, BYTE fill)
 	memset(dst, fill, len);
 }
 
+/*
+ * Read/WriteProcessMemory, for the one process there is (dsfs.dll reads its
+ * own memory this way to probe it): a copy that fails with
+ * ERROR_PARTIAL_COPY, not a fault, where the memory isn't there. The kernel
+ * checks the addresses for us; process_vm_* on ourselves needs no rights.
+ */
+static int self_process(HANDLE h)
+{
+	if (h == (HANDLE)(LONG_PTR)-1)
+		return 1;
+	win_set_error(ERROR_INVALID_HANDLE);
+	return 0;
+}
+
+static SIZE_T vm_copy(void *local, void *remote, SIZE_T size, int write)
+{
+	SIZE_T done = 0;
+
+	while (done < size) {
+		BYTE *lo = (BYTE *)local + done, *re = (BYTE *)remote + done;
+		SIZE_T left = size - done;
+		struct iovec l = { lo, left };
+		struct iovec r = { re, left };
+		ssize_t n = write ? process_vm_writev(getpid(), &l, 1, &r, 1, 0) :
+				    process_vm_readv(getpid(), &l, 1, &r, 1, 0);
+		if (n <= 0) {
+			if (n < 0 && errno == EINTR)
+				continue;
+			if (n < 0 && errno == ENOSYS) {
+				/* No process_vm_*: check both sides, then copy. */
+				if (bad_ptr(re, left, write) ||
+				    bad_ptr(lo, left, !write))
+					break;
+				if (write)
+					memcpy(re, lo, left);
+				else
+					memcpy(lo, re, left);
+				return size;
+			}
+			break;
+		}
+		done += (SIZE_T)n;
+	}
+	return done;
+}
+
+WINFN(BOOL) k32_ReadProcessMemory(HANDLE process, LPCVOID addr, LPVOID buf,
+				  SIZE_T size, SIZE_T *read)
+{
+	if (read)
+		*read = 0;
+	if (!self_process(process))
+		return FALSE;
+	SIZE_T n = vm_copy(buf, (void *)addr, size, 0);
+	if (read)
+		*read = n;
+	if (n < size) {
+		win_set_error(ERROR_PARTIAL_COPY);
+		return FALSE;
+	}
+	return TRUE;
+}
+
+/* TRUE if [p, p + size) is all committed memory, of whatever protection. */
+static BOOL all_committed(const void *p, SIZE_T size)
+{
+	const BYTE *a = p, *end = a + size;
+	MEMORY_BASIC_INFORMATION info;
+
+	if (!p || end < a)
+		return FALSE;
+	while (a < end) {
+		if (!query(a, &info) || info.State != MEM_COMMIT ||
+		    info.Protect == PAGE_NOACCESS)
+			return FALSE;
+		a = (const BYTE *)info.BaseAddress + info.RegionSize;
+	}
+	return TRUE;
+}
+
+/* A destination region made writable for WriteProcessMemory. */
+struct lifted {
+	BYTE *base;
+	SIZE_T size;
+	DWORD old;
+};
+
+static void restore_lifted(const struct lifted *l, size_t n)
+{
+	DWORD ignored;
+
+	for (size_t i = 0; i < n; i++)
+		k32_VirtualProtect(l[i].base, l[i].size, l[i].old, &ignored);
+}
+
+/*
+ * Windows makes read-only and code pages writable for the copy, too. The
+ * whole destination is checked and made writable first, region by region,
+ * so a range that is bad, or can't be made writable, writes nothing; then
+ * it is copied, and each region gets its own protection back.
+ */
+WINFN(BOOL) k32_WriteProcessMemory(HANDLE process, LPVOID addr, LPCVOID buf,
+				   SIZE_T size, SIZE_T *written)
+{
+	BYTE *dst = addr;
+	const BYTE *src = buf;
+	struct lifted *lifted = NULL;
+	size_t nlifted = 0, cap = 0;
+	SIZE_T done = 0;
+
+	if (written)
+		*written = 0;
+	if (!self_process(process))
+		return FALSE;
+	if (size && (bad_ptr(buf, size, 0) || !all_committed(addr, size))) {
+		win_set_error(ERROR_PARTIAL_COPY);
+		return FALSE;
+	}
+	for (SIZE_T at = 0; at < size;) {
+		MEMORY_BASIC_INFORMATION info;
+		DWORD ignored;
+		if (!query(dst + at, &info))
+			goto refuse;
+		SIZE_T chunk = (BYTE *)info.BaseAddress + info.RegionSize -
+			       (dst + at);
+		if (chunk > size - at)
+			chunk = size - at;
+		if (info.Protect != PAGE_READWRITE &&
+		    info.Protect != PAGE_EXECUTE_READWRITE) {
+			if (nlifted == cap) {
+				size_t ncap = cap ? cap * 2 : 8;
+				struct lifted *g =
+					realloc(lifted, ncap * sizeof(*g));
+				if (!g)
+					goto refuse;
+				lifted = g;
+				cap = ncap;
+			}
+			if (!k32_VirtualProtect(dst + at, chunk,
+						PAGE_EXECUTE_READWRITE, &ignored))
+				goto refuse;
+			lifted[nlifted++] = (struct lifted){ dst + at, chunk,
+							     info.Protect };
+		}
+		at += chunk;
+	}
+	done = vm_copy((void *)src, dst, size, 1);
+	__builtin___clear_cache((char *)dst, (char *)dst + done);
+	restore_lifted(lifted, nlifted);
+	free(lifted);
+	if (written)
+		*written = done;
+	if (done < size) {
+		win_set_error(ERROR_PARTIAL_COPY);
+		return FALSE;
+	}
+	return TRUE;
+
+refuse:
+	restore_lifted(lifted, nlifted);
+	free(lifted);
+	win_set_error(ERROR_PARTIAL_COPY);
+	return FALSE;
+}
+
 const struct builtin_export k32_memory_exports[] = {
 	E(RtlFillMemory),
 	E(RtlMoveMemory),
@@ -1144,6 +1310,7 @@ const struct builtin_export k32_memory_exports[] = {
 	E(LocalReAlloc),
 	E(LocalSize),
 	E(LocalUnlock),
+	E(ReadProcessMemory),
 	E(VirtualAlloc),
 	E(VirtualAllocEx),
 	E(VirtualFree),
@@ -1152,5 +1319,6 @@ const struct builtin_export k32_memory_exports[] = {
 	E(VirtualProtect),
 	E(VirtualQuery),
 	E(VirtualUnlock),
+	E(WriteProcessMemory),
 	BUILTIN_END
 };
