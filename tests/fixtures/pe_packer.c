@@ -142,3 +142,29 @@ EXPORT DWORD pk_breakpoints(void)
 	SetUnhandledExceptionFilter(old);
 	return breaks;
 }
+
+static DWORD steps;
+
+/* Counts single steps, which come with the trap flag already cleared. */
+static LONG WINAPI count_step(EXCEPTION_POINTERS *ep)
+{
+	if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP ||
+	    (ep->ContextRecord->EFlags & 0x100))
+		return EXCEPTION_CONTINUE_SEARCH;
+	steps++;
+	return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+/* Sets the trap flag over two nops: one single step, so 1. */
+EXPORT DWORD pk_single_step(void)
+{
+	LPTOP_LEVEL_EXCEPTION_FILTER old = SetUnhandledExceptionFilter(count_step);
+	steps = 0;
+#ifdef _WIN64
+	__asm__ volatile("pushfq\n orq $0x100, (%%rsp)\n popfq\n nop\n nop" ::: "cc", "memory");
+#else
+	__asm__ volatile("pushfl\n orl $0x100, (%%esp)\n popfl\n nop\n nop" ::: "cc", "memory");
+#endif
+	SetUnhandledExceptionFilter(old);
+	return steps;
+}

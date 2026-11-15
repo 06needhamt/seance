@@ -3,10 +3,12 @@
  * version.dll, called through its export table: version blocks from
  * files, loaded modules and the built-in DLLs, and VerQueryValue on them.
  */
+#include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include "loader/modules.h"
 #include "loader/pe.h"
@@ -71,6 +73,26 @@ static void test_file(void)
 	DWORD size = GetFileVersionInfoSizeA(path, &handle);
 	CHECK_EQ(size, res * 2 + 4);
 	CHECK_EQ(handle, 0);
+
+	/* A KnownDLL's name with a path reads that file, not the built-in. */
+	char dir[] = "/tmp/vfw-version-XXXXXX", copy[512];
+	if (mkdtemp(dir)) {
+		snprintf(copy, sizeof(copy), "%s/msvcrt.dll", dir);
+		FILE *in = fopen(unix_path, "rb"), *out = fopen(copy, "wb");
+		char chunk[4096];
+		size_t got;
+		while (in && out && (got = fread(chunk, 1, sizeof(chunk), in)))
+			fwrite(chunk, 1, got, out);
+		if (in)
+			fclose(in);
+		if (out)
+			fclose(out);
+		char *wcopy = path_to_windows(copy);
+		CHECK(wcopy && GetFileVersionInfoSizeA(wcopy, NULL) == size);
+		free(wcopy);
+		unlink(copy);
+		rmdir(dir);
+	}
 
 	BYTE *block = calloc(1, size);
 	CHECK(block && GetFileVersionInfoA(path, 0, size, block));

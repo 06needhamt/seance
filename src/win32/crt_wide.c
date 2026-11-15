@@ -24,13 +24,14 @@
 
 #define CRTFN(ret) static ret STUB_CDECL
 
-/* The ASCII prefix of s a number could be read from, one char per WCHAR,
- * so offsets into it are offsets into s. */
+/* The ASCII prefix of s a number could be read from (all of it: strto*
+ * skip any number of leading zeros), one char per WCHAR, so offsets into
+ * it are offsets into s. */
 static char *num_prefix(const WCHAR *s)
 {
 	size_t n = 0;
 
-	while (s[n] && s[n] < 0x80 && n < 512)
+	while (s[n] && s[n] < 0x80)
 		n++;
 	char *a = malloc(n + 1);
 	if (!a)
@@ -75,18 +76,23 @@ CRTFN(ULONG) crt_wcstoul(const WCHAR *s, WCHAR **end, int base)
 			*end = (WCHAR *)s;
 		return 0;
 	}
+	const char *d = a;
+	while (*d == ' ' || (*d >= '\t' && *d <= '\r'))
+		d++;
+	int neg = *d == '-';
 	errno = 0;
 	unsigned long long v = strtoull(a, &e, base);
-	int neg = strchr(a, '-') && strchr(a, '-') < e;
+	int range = errno == ERANGE;
 	if (end)
 		*end = (WCHAR *)s + (e - a);
 	free(a);
-	/* As strtoul: a negated value wraps, one too big saturates. */
-	if (!neg && v > UINT32_MAX) {
+	/* As strtoul: the magnitude must fit, and a negative one then wraps. */
+	unsigned long long mag = neg ? 0ULL - v : v;
+	if (range || mag > UINT32_MAX) {
 		errno = ERANGE;
 		return UINT32_MAX;
 	}
-	return (ULONG)v;
+	return neg ? (ULONG)(0U - (ULONG)mag) : (ULONG)mag;
 }
 
 CRTFN(double) crt_wcstod(const WCHAR *s, WCHAR **end)
@@ -202,6 +208,25 @@ CRTFN(void) crt__ftime(struct crt_timeb *tb)
 	tb->dstflag = 0;
 }
 
+/* struct __timeb32: the same with a 32-bit time, on both architectures. */
+struct crt_timeb32 {
+	int32_t time;
+	unsigned short millitm;
+	short timezone;
+	short dstflag;
+};
+
+CRTFN(void) crt__ftime32(struct crt_timeb32 *tb)
+{
+	struct timeval tv;
+
+	gettimeofday(&tv, NULL);
+	tb->time = (int32_t)tv.tv_sec;
+	tb->millitm = (unsigned short)(tv.tv_usec / 1000);
+	tb->timezone = 0;
+	tb->dstflag = 0;
+}
+
 CRTFN(LONG) crt__filelength(int fd)
 {
 	struct stat st;
@@ -276,7 +301,7 @@ const struct builtin_export crt_wide_exports[] = {
 	E(_difftime64),
 	E(_filelength),
 	E(_ftime),
-	{ "_ftime32", 0, (void *)crt__ftime },
+	E(_ftime32),
 	E(_itow),
 	E(_stricoll),
 	E(_strdate),

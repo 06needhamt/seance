@@ -923,7 +923,12 @@ char *k32_full_path(const char *name)
 		return NULL;
 	if (name[0] && name[1] == ':' && (name[2] == '\\' || name[2] == '/'))
 		snprintf(buf, sizeof(buf), "%s", name);
+	else if (name[0] && name[1] == ':' &&
+		 (name[0] | 0x20) == (cwd[0] | 0x20))
+		/* "C:file": relative to that drive's directory, the current one */
+		snprintf(buf, sizeof(buf), "%s\\%s", cwd, name + 2);
 	else if (name[0] && name[1] == ':')
+		/* another drive's: its root, as no other drive has a directory */
 		snprintf(buf, sizeof(buf), "%c:\\%s", name[0], name + 2);
 	else if (name[0] == '\\' || name[0] == '/')
 		snprintf(buf, sizeof(buf), "%.2s%s", cwd, name);
@@ -1031,7 +1036,10 @@ static DWORD search_path(const void *path, const void *name, const void *ext,
 		win_set_error(ERROR_INVALID_PARAMETER);
 		goto out;
 	}
-	const char *base = strrchr(n, '\\') ? strrchr(n, '\\') + 1 : n;
+	const char *base = n;
+	for (const char *c = n; *c; c++)
+		if (*c == '\\' || *c == '/' || (c == n + 1 && *c == ':'))
+			base = c + 1;
 	const char *add = e && *e && !strchr(base, '.') ? e : "";
 	if (p) {
 		dirs = strdup(p);
@@ -1145,12 +1153,7 @@ static HANDLE change_notification(const void *path, int wide)
 	kobj_init(o, KOBJ_CHANGE, change_destroy);
 	o->signaled = change_signaled;
 	HANDLE h = handle_new(o);
-	if (!h) {
-		kobj_unref(o);
-		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
-		return INVALID_HANDLE_VALUE;
-	}
-	return h;
+	return h ? h : INVALID_HANDLE_VALUE;	/* handle_new freed it */
 }
 
 WINFN(HANDLE) k32_FindFirstChangeNotificationA(LPCSTR path, BOOL subtree, DWORD filter)

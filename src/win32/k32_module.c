@@ -515,17 +515,22 @@ static void snapshot_destroy(struct kobject *obj)
 
 static int snapshot_modules(struct snapshot *s)
 {
-	size_t n = mod_list(NULL, 0);
-	HMODULE *hs = calloc(n ? n : 1, sizeof(*hs));
+	HMODULE *hs = NULL;
+	size_t n, cap = 0;
+	int ok = 0;
 
-	if (!hs)
-		return 0;
-	n = mod_list(hs, n);
-	s->mods = calloc(n ? n : 1, sizeof(*s->mods));
-	if (!s->mods) {
-		free(hs);
-		return 0;
+	/* The modules are read under the loader lock, so none goes away. */
+	mod_lock();
+	while ((n = mod_list(hs, cap)) > cap) {
+		HMODULE *more = realloc(hs, n * sizeof(*hs));
+		if (!more)
+			goto out;
+		hs = more;
+		cap = n;
 	}
+	s->mods = calloc(n ? n : 1, sizeof(*s->mods));
+	if (!s->mods)
+		goto out;
 	for (size_t i = 0; i < n; i++) {
 		struct module *m = module_of(hs[i]);
 		if (!m)
@@ -535,6 +540,7 @@ static int snapshot_modules(struct snapshot *s)
 		const IMAGE_NT_HEADERS32 *nt =
 			(const IMAGE_NT_HEADERS32 *)(m->base + dos->e_lfanew);
 		sm->base = m->base;
+		/* at the same offset in the 32- and 64-bit optional headers */
 		sm->size = nt->OptionalHeader.SizeOfImage;
 		sm->name = strdup(m->name);
 		sm->path = module_path(m);
@@ -545,8 +551,11 @@ static int snapshot_modules(struct snapshot *s)
 		}
 		s->nmods++;
 	}
+	ok = 1;
+out:
+	mod_unlock();
 	free(hs);
-	return 1;
+	return ok;
 }
 
 WINFN(HANDLE) k32_CreateToolhelp32Snapshot(DWORD flags, DWORD pid)
@@ -572,12 +581,7 @@ WINFN(HANDLE) k32_CreateToolhelp32Snapshot(DWORD flags, DWORD pid)
 		return INVALID_HANDLE_VALUE;
 	}
 	HANDLE h = handle_new(&s->obj);
-	if (!h) {
-		kobj_unref(&s->obj);
-		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
-		return INVALID_HANDLE_VALUE;
-	}
-	return h;
+	return h ? h : INVALID_HANDLE_VALUE;	/* handle_new freed it */
 }
 
 /* The snapshot behind h, referenced, if the caller's dwSize is at least min. */

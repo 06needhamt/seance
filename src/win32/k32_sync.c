@@ -641,6 +641,13 @@ static int iocp_signaled(struct kobject *obj, DWORD tid)
 WINFN(HANDLE) k32_CreateIoCompletionPort(HANDLE file, HANDLE existing,
 					 ULONG_PTR key, DWORD threads)
 {
+	/* No I/O completes through the port here; a file is only checked. */
+	if (file != INVALID_HANDLE_VALUE) {
+		struct kobject *f = handle_ref(file, KOBJ_FILE);
+		if (!f)
+			return NULL;
+		kobj_unref(f);
+	}
 	if (existing) {
 		struct kobject *o = handle_ref(existing, KOBJ_IOCP);
 		if (!o)
@@ -660,12 +667,7 @@ WINFN(HANDLE) k32_CreateIoCompletionPort(HANDLE file, HANDLE existing,
 	kobj_init(&p->obj, KOBJ_IOCP, iocp_destroy);
 	p->obj.signaled = iocp_signaled;
 	p->tail = &p->head;
-	HANDLE h = handle_new(&p->obj);
-	if (!h) {
-		kobj_unref(&p->obj);
-		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
-	}
-	return h;
+	return handle_new(&p->obj);	/* on failure it freed p */
 }
 
 WINFN(BOOL) k32_PostQueuedCompletionStatus(HANDLE port, DWORD bytes,

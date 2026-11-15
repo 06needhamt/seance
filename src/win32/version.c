@@ -237,9 +237,8 @@ static BYTE *version_block(const char *name, const void *ret, DWORD *size)
 			base = p + 1;
 	const struct builtin_dll *b = builtin_find(base);
 
+	/* A path names that file, KnownDLL or not: this reads it, not loads it. */
 	if (base != name) {
-		if (b && !builtin_shadowable(b, base))
-			return builtin_block(b->name, size);
 		char *u = path_to_unix(name);
 		if (u && !access(u, F_OK)) {
 			BYTE *block = file_block(u, size);

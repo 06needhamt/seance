@@ -1024,16 +1024,88 @@ LRESULT WINAPI user_DefWindowProcA(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 	return def_proc(hwnd, msg, wp, lp, 0);
 }
 
+/*
+ * A window procedure read with the other encoding's Get*LongPtr (A on a
+ * Unicode window, or W on an ANSI one) comes back as a handle, as on
+ * Windows, which CallWindowProc recognises and calls with the messages
+ * converted. Setting a handle back sets the procedure it stands for.
+ */
+#define PROC_HANDLES 256
+#define PROC_HANDLE_BASE ((uintptr_t)0xffff0000u)
+static struct { WNDPROC proc; int unicode; } proc_handles[PROC_HANDLES];
+static int nproc_handles;
+static pthread_mutex_t proc_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int proc_handle_index(WNDPROC p)
+{
+	uintptr_t v = (uintptr_t)p;
+
+	if (v < PROC_HANDLE_BASE || v >= PROC_HANDLE_BASE + PROC_HANDLES)
+		return -1;
+	return (int)(v - PROC_HANDLE_BASE);
+}
+
+/* What a caller of the given encoding is told the procedure is. */
+static WNDPROC proc_for_caller(WNDPROC proc, int proc_unicode, int unicode)
+{
+	WNDPROC r = proc;
+
+	if (!proc || proc_unicode == unicode || proc_handle_index(proc) >= 0)
+		return proc;
+	pthread_mutex_lock(&proc_lock);
+	int i;
+	for (i = 0; i < nproc_handles; i++)
+		if (proc_handles[i].proc == proc &&
+		    proc_handles[i].unicode == proc_unicode)
+			break;
+	if (i == nproc_handles && i < PROC_HANDLES) {
+		proc_handles[i].proc = proc;
+		proc_handles[i].unicode = proc_unicode;
+		nproc_handles++;
+	}
+	if (i < nproc_handles)
+		r = (WNDPROC)(PROC_HANDLE_BASE + (uintptr_t)i);
+	pthread_mutex_unlock(&proc_lock);
+	return r;
+}
+
+/* The procedure, and its encoding, that value (a handle or not) names. */
+static WNDPROC proc_from_caller(WNDPROC value, int unicode, int *proc_unicode)
+{
+	int i = proc_handle_index(value);
+
+	*proc_unicode = unicode;
+	if (i < 0)
+		return value;
+	pthread_mutex_lock(&proc_lock);
+	WNDPROC p = i < nproc_handles ? proc_handles[i].proc : NULL;
+	if (p)
+		*proc_unicode = proc_handles[i].unicode;
+	pthread_mutex_unlock(&proc_lock);
+	return p;
+}
+
+static LRESULT call_window_proc(WNDPROC proc, HWND hwnd, UINT msg, WPARAM wp,
+				LPARAM lp, int unicode)
+{
+	int proc_unicode;
+	WNDPROC p = proc_from_caller(proc, unicode, &proc_unicode);
+
+	if (!p)
+		return 0;
+	return call_proc(p, proc_unicode, hwnd, msg, wp, lp, unicode);
+}
+
 WINFN(LRESULT) user_CallWindowProcA(WNDPROC proc, HWND hwnd, UINT msg,
 				    WPARAM wp, LPARAM lp)
 {
-	return proc ? proc(hwnd, msg, wp, lp) : 0;
+	return call_window_proc(proc, hwnd, msg, wp, lp, 0);
 }
 
 WINFN(LRESULT) user_CallWindowProcW(WNDPROC proc, HWND hwnd, UINT msg,
 				    WPARAM wp, LPARAM lp)
 {
-	return proc ? proc(hwnd, msg, wp, lp) : 0;
+	return call_window_proc(proc, hwnd, msg, wp, lp, 1);
 }
 
 WINFN(BOOL) user_IsWindow(HWND hwnd)
@@ -1307,11 +1379,10 @@ static LONG_PTR window_long(HWND hwnd, int index, int set, LONG_PTR value,
 #endif
 	switch (index) {
 	case GWLP_WNDPROC:
-		old = (LONG_PTR)w->proc;
-		if (set) {
-			w->proc = (WNDPROC)value;
-			w->unicode = unicode;
-		}
+		old = (LONG_PTR)proc_for_caller(w->proc, w->unicode, unicode);
+		if (set)
+			w->proc = proc_from_caller((WNDPROC)value, unicode,
+						   &w->unicode);
 		break;
 	case GWLP_HINSTANCE:
 		old = (LONG_PTR)w->inst;
@@ -1398,11 +1469,10 @@ static LONG_PTR class_long(HWND hwnd, int index, int set, LONG_PTR value,
 #endif
 	switch (index) {
 	case GCLP_WNDPROC:
-		old = (LONG_PTR)c->proc;
-		if (set) {
-			c->proc = (WNDPROC)value;
-			c->unicode = unicode;
-		}
+		old = (LONG_PTR)proc_for_caller(c->proc, c->unicode, unicode);
+		if (set)
+			c->proc = proc_from_caller((WNDPROC)value, unicode,
+						   &c->unicode);
 		break;
 	case GCLP_HMODULE:
 		old = (LONG_PTR)c->inst;

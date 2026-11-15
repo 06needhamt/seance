@@ -716,10 +716,27 @@ struct clipdata {
 	BYTE *pClipData;
 };
 
+#ifndef VT_FILETIME
+#define VT_FILETIME 64
+#endif
+#ifndef VT_STREAM
+#define VT_STREAM 66
+#define VT_STORAGE 67
+#define VT_STREAMED_OBJECT 68
+#define VT_STORED_OBJECT 69
+#endif
+
 static int task_mem_type(VARTYPE vt)
 {
 	return vt == VT_LPSTR || vt == VT_LPWSTR || vt == VT_CLSID ||
 	       vt == VT_BLOB || vt == VT_CF;
+}
+
+/* An IStream or IStorage, which the PROPVARIANT holds a reference to. */
+static int interface_type(VARTYPE vt)
+{
+	return vt == VT_STREAM || vt == VT_STORAGE ||
+	       vt == VT_STREAMED_OBJECT || vt == VT_STORED_OBJECT;
 }
 
 WINFN(HRESULT) ole_PropVariantClear(VARIANT *pv)
@@ -735,7 +752,12 @@ WINFN(HRESULT) ole_PropVariantClear(VARIANT *pv)
 		if (pv->vt == VT_CF && p)
 			ole_CoTaskMemFree(((struct clipdata *)p)->pClipData);
 		ole_CoTaskMemFree(p);
-	} else if (pv->vt != VT_EMPTY && pv->vt != VT_NULL) {
+	} else if (interface_type(pv->vt)) {
+		IUnknown *u = *(IUnknown **)val;
+		if (u)
+			u->lpVtbl->Release(u);
+	} else if (pv->vt != VT_EMPTY && pv->vt != VT_NULL &&
+		   pv->vt != VT_FILETIME) {
 		HRESULT hr = oa_VariantClear(pv);
 		if (FAILED(hr))
 			return hr;
@@ -752,20 +774,37 @@ static void *dup_task(const void *p, size_t n)
 	return d;
 }
 
+/* The copy is built aside and stored in dst only once it is complete. */
 WINFN(HRESULT) ole_PropVariantCopy(VARIANT *dst, const VARIANT *src)
 {
+	VARIANT tmp;
+
 	if (!dst || !src)
 		return E_INVALIDARG;
 	if (src->vt & VT_VECTOR)
 		return DISP_E_BADVARTYPE;
-	if (!task_mem_type(src->vt)) {
-		memset(dst, 0, sizeof(*dst));
-		return src->vt == VT_EMPTY || src->vt == VT_NULL ?
-		       (*dst = *src, S_OK) : oa_VariantCopy(dst, src);
+	memset(&tmp, 0, sizeof(tmp));
+	if (src->vt == VT_EMPTY || src->vt == VT_NULL ||
+	    src->vt == VT_FILETIME) {
+		*dst = *src;
+		return S_OK;
 	}
-	*dst = *src;
+	if (interface_type(src->vt)) {
+		IUnknown *u = *(IUnknown *const *)((const BYTE *)src + 8);
+		if (u)
+			u->lpVtbl->AddRef(u);
+		*dst = *src;
+		return S_OK;
+	}
+	if (!task_mem_type(src->vt)) {
+		HRESULT hr = oa_VariantCopy(&tmp, src);
+		if (SUCCEEDED(hr))
+			*dst = tmp;
+		return hr;
+	}
+	tmp = *src;
 	const BYTE *sv = (const BYTE *)src + 8;
-	BYTE *dv = (BYTE *)dst + 8;
+	BYTE *dv = (BYTE *)&tmp + 8;
 	const void *p = src->vt == VT_BLOB ? *(void *const *)(sv + sizeof(void *)) :
 					     *(void *const *)sv;
 	void *copy = NULL;
@@ -783,8 +822,12 @@ WINFN(HRESULT) ole_PropVariantCopy(VARIANT *dst, const VARIANT *src)
 		if (!out)
 			return E_OUTOFMEMORY;
 		*out = *cd;
-		out->pClipData = cd->cbSize > 4 && cd->pClipData ?
-				 dup_task(cd->pClipData, cd->cbSize - 4) : NULL;
+		out->pClipData = NULL;
+		if (cd->cbSize > 4 && cd->pClipData &&
+		    !(out->pClipData = dup_task(cd->pClipData, cd->cbSize - 4))) {
+			ole_CoTaskMemFree(out);
+			return E_OUTOFMEMORY;
+		}
 		copy = out;
 	} else if (p && n) {
 		if (!(copy = dup_task(p, n)))
@@ -794,6 +837,7 @@ WINFN(HRESULT) ole_PropVariantCopy(VARIANT *dst, const VARIANT *src)
 		*(void **)(dv + sizeof(void *)) = copy;
 	else
 		*(void **)dv = copy;
+	*dst = tmp;
 	return S_OK;
 }
 

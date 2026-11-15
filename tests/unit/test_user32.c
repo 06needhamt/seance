@@ -243,6 +243,48 @@ static void test_classes_and_windows(void)
 	CHECK_EQ(GetWindowLongA(h, 8), 0);
 	CHECK_EQ(GetLastError(), ERROR_INVALID_INDEX);
 	CHECK(GetWindowLongPtrA(h, GWLP_WNDPROC) == (LONG_PTR)proc_a);
+	/* Read as Unicode, the ANSI procedure is a handle CallWindowProcW
+	 * converts through; set back, it is the procedure again. */
+	{
+#if defined(__x86_64__)
+#define PTR "Ptr"
+#else
+#define PTR ""		/* the Ptr forms are these, on Win32 */
+#endif
+		LONG_PTR (WINAPI *GetWLPW)(HWND, int) =
+			get_from(u32, "GetWindowLong" PTR "W");
+		LONG_PTR (WINAPI *SetWLPW)(HWND, int, LONG_PTR) =
+			get_from(u32, "SetWindowLong" PTR "W");
+		ULONG_PTR (WINAPI *GetCLPA)(HWND, int) =
+			get_from(u32, "GetClassLong" PTR "A");
+		ULONG_PTR (WINAPI *GetCLPW)(HWND, int) =
+			get_from(u32, "GetClassLong" PTR "W");
+		ULONG_PTR (WINAPI *SetCLPW)(HWND, int, LONG_PTR) =
+			get_from(u32, "SetClassLong" PTR "W");
+		LONG_PTR (WINAPI *GetWLPA)(HWND, int) =
+			get_from(u32, "GetWindowLong" PTR "A");
+		FN(LRESULT, CallWindowProcW, WNDPROC, HWND, UINT, WPARAM, LPARAM);
+		FN(LRESULT, CallWindowProcA, WNDPROC, HWND, UINT, WPARAM, LPARAM);
+		FN(BOOL, IsWindowUnicode, HWND);
+		LONG_PTR wp = GetWLPW(h, GWLP_WNDPROC);
+		CHECK(wp && wp != (LONG_PTR)proc_a);
+		CHECK(GetWLPW(h, GWLP_WNDPROC) == wp);	/* stable */
+		log_buf[0] = '\0';
+		CHECK_EQ(CallWindowProcW((WNDPROC)wp, h, WM_SETTEXT, 0,
+					 (LPARAM)w("hi")), TRUE);
+		CHECK_STR(log_buf, "settext:hi");
+		CHECK_EQ(CallWindowProcA((WNDPROC)wp, h, WM_USER, 4, 2), 42);
+		CHECK(SetWLPW(h, GWLP_WNDPROC, wp) == wp);
+		CHECK(GetWLPA(h, GWLP_WNDPROC) == (LONG_PTR)proc_a);
+		CHECK(!IsWindowUnicode(h));
+		/* The same for the class's procedure. */
+		ULONG_PTR cp = GetCLPW(h, GCLP_WNDPROC);
+		CHECK(cp && cp != (ULONG_PTR)proc_a);
+		CHECK(GetCLPA(h, GCLP_WNDPROC) == (ULONG_PTR)proc_a);
+		CHECK(SetCLPW(h, GCLP_WNDPROC, (LONG_PTR)cp) == cp);
+		CHECK(GetCLPA(h, GCLP_WNDPROC) == (ULONG_PTR)proc_a);
+		log_buf[0] = '\0';
+	}
 	/* The Ptr forms keep the whole pointer. */
 	CHECK_EQ(SetWindowLongPtrA(h, GWLP_USERDATA, (LONG_PTR)&log_buf), 77);
 	CHECK(GetWindowLongPtrA(h, GWLP_USERDATA) == (LONG_PTR)&log_buf);
@@ -485,6 +527,111 @@ static void test_strings(void)
 	CHECK_EQ((BYTE)oem[0], 0x82);	/* e-acute in code page 437 */
 	CHECK(OemToCharA(oem, oem));
 	CHECK_EQ((BYTE)oem[0], 0xe9);
+}
+
+#define WM_RENDERFORMAT 0x0305
+#define CF_TEXT 1
+#define CF_BITMAP 2
+
+/* The clipboard: one thread at a time, delayed rendering, GDI data. */
+static int renders;
+static UINT render_format;
+
+static LRESULT WINAPI render_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+	if (msg == WM_RENDERFORMAT) {
+		HANDLE (WINAPI *set)(UINT, HANDLE) =
+			(HANDLE (WINAPI *)(UINT, HANDLE))get_from(u32, "SetClipboardData");
+		HGLOBAL (WINAPI *alloc)(UINT, SIZE_T) =
+			(HGLOBAL (WINAPI *)(UINT, SIZE_T))get_from(k32, "GlobalAlloc");
+		renders++;
+		render_format = (UINT)wp;
+		set((UINT)wp, alloc(GMEM_MOVEABLE, 16));
+		return 0;
+	}
+	return def_a(hwnd, msg, wp, lp);
+}
+
+static volatile BOOL other_opened = -1;
+
+static DWORD WINAPI open_elsewhere(void *arg)
+{
+	BOOL (WINAPI *open)(HWND) =
+		(BOOL (WINAPI *)(HWND))get_from(u32, "OpenClipboard");
+	BOOL (WINAPI *close)(void) =
+		(BOOL (WINAPI *)(void))get_from(u32, "CloseClipboard");
+	other_opened = open(NULL);
+	if (other_opened)
+		close();
+	return 0;
+}
+
+static void test_clipboard(void)
+{
+	FN(ATOM, RegisterClassA, const WNDCLASSA *);
+	FN(HWND, CreateWindowExA, DWORD, LPCSTR, LPCSTR, DWORD, int, int, int,
+	   int, HWND, HMENU, HINSTANCE, LPVOID);
+	FN(BOOL, DestroyWindow, HWND);
+	FN(BOOL, OpenClipboard, HWND);
+	FN(BOOL, CloseClipboard, void);
+	FN(BOOL, EmptyClipboard, void);
+	FN(HANDLE, SetClipboardData, UINT, HANDLE);
+	FN(HANDLE, GetClipboardData, UINT);
+	FN(BOOL, IsClipboardFormatAvailable, UINT);
+	FN(HWND, GetClipboardOwner, void);
+	GDI(HBITMAP, CreateBitmap, int, int, UINT, UINT, const void *);
+	GDI(DWORD, GetObjectType, HGDIOBJ);
+	K32(HGLOBAL, GlobalAlloc, UINT, SIZE_T);
+	K32(HANDLE, CreateThread, LPSECURITY_ATTRIBUTES, SIZE_T,
+	    LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD);
+	K32(DWORD, WaitForSingleObject, HANDLE, DWORD);
+	K32(BOOL, CloseHandle, HANDLE);
+	const UINT delayed = 0xc321;
+
+	def_a = (WNDPROC)get_from(u32, "DefWindowProcA");
+	WNDCLASSA wc;
+	memset(&wc, 0, sizeof(wc));
+	wc.lpfnWndProc = render_proc;
+	wc.lpszClassName = "ClipOwner";
+	CHECK(RegisterClassA(&wc));
+	HWND owner = CreateWindowExA(0, "ClipOwner", "", 0, 0, 0, 1, 1, NULL,
+				     NULL, NULL, NULL);
+	CHECK(owner != NULL);
+
+	CHECK(OpenClipboard(owner));
+	CHECK(EmptyClipboard());
+	CHECK(GetClipboardOwner() == owner);
+	HBITMAP bm = CreateBitmap(1, 1, 1, 32, NULL);
+	CHECK(bm && GetObjectType(bm) == OBJ_BITMAP);
+	CHECK(SetClipboardData(CF_BITMAP, bm) == bm);
+	CHECK(SetClipboardData(CF_TEXT, GlobalAlloc(GMEM_MOVEABLE, 8)) != NULL);
+	CHECK(SetClipboardData(delayed, NULL) != NULL);
+	CHECK(IsClipboardFormatAvailable(delayed));
+
+	/* Another thread can't open it while this one has it. */
+	HANDLE t = CreateThread(NULL, 0, open_elsewhere, NULL, 0, NULL);
+	CHECK(t && WaitForSingleObject(t, 5000) == WAIT_OBJECT_0);
+	CloseHandle(t);
+	CHECK_EQ(other_opened, FALSE);
+	CHECK(CloseClipboard());
+	CHECK(!CloseClipboard());
+	t = CreateThread(NULL, 0, open_elsewhere, NULL, 0, NULL);
+	CHECK(t && WaitForSingleObject(t, 5000) == WAIT_OBJECT_0);
+	CloseHandle(t);
+	CHECK_EQ(other_opened, TRUE);
+
+	/* Asking for the delayed format has the owner render it, once. */
+	CHECK(OpenClipboard(NULL));
+	renders = 0;
+	HANDLE got = GetClipboardData(delayed);
+	CHECK(got != NULL && renders == 1 && render_format == delayed);
+	CHECK(GetClipboardData(delayed) == got && renders == 1);
+	/* Emptying deletes the bitmap, as a GDI object. */
+	CHECK(EmptyClipboard());
+	CHECK_EQ(GetObjectType(bm), 0);
+	CHECK(!IsClipboardFormatAvailable(delayed));
+	CHECK(CloseClipboard());
+	DestroyWindow(owner);
 }
 
 static void test_misc(void)
@@ -730,6 +877,7 @@ int main(void)
 	test_messages();
 	test_strings();
 	test_misc();
+	test_clipboard();
 	test_fixture();
 
 	mod_free(u32);

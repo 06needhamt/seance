@@ -259,7 +259,8 @@ BYTE *builtin_fake_image(const struct builtin_dll *dll)
 		strings += strlen(builtin_entry(dll, i)->name) + 1;
 	size_t edata_size = n ? sizeof(IMAGE_EXPORT_DIRECTORY) +
 			    n * (4 + 4 + 2) + strings : 0;
-	size_t gate = is_k32 ? round_up(gate_code_size(), STUB_SIZE) : 0;
+	/* the gate, then DebugBreak's int3; ret (gate_break) */
+	size_t gate = is_k32 ? round_up(gate_break_offset() + 2, STUB_SIZE) : 0;
 	size_t text_size = gate + n * STUB_SIZE;
 	DWORD edata_rva = 0x1000;
 	DWORD text_rva = (DWORD)round_up(edata_rva + edata_size, 0x1000);
@@ -362,6 +363,7 @@ BYTE *builtin_fake_image(const struct builtin_dll *dll)
 		memcpy(base + text_rva, gate_code(), gate_code_size());
 		memset(base + text_rva + gate_code_size(), 0xcc,
 		       gate - gate_code_size());
+		base[text_rva + gate_break_offset() + 1] = 0xc3;	/* ret */
 	}
 
 	mprotect(base, text_size ? text_rva : size, PROT_READ);

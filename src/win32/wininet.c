@@ -415,6 +415,14 @@ static int parse_url(const char *u, struct parsed *p)
 			h = at + 1;
 		}
 		size_t c = h;
+		if (h < ae && u[h] == '[') {
+			/* an IPv6 literal, brackets and all: its colons aren't
+			 * the port's */
+			while (c < ae && u[c] != ']')
+				c++;
+			if (c < ae)
+				c++;
+		}
 		while (c < ae && u[c] != ':')
 			c++;
 		p->host = (struct part){ h, c - h };
@@ -432,10 +440,41 @@ static int parse_url(const char *u, struct parsed *p)
 	return 1;
 }
 
+static int hexval(char c);
+
+/* Decodes %XX escapes in place, in characters of the given width; returns
+ * the new length. */
+static size_t decode_in_place(void *s, size_t n, int wide)
+{
+#define AT(k) (wide ? (unsigned)((WCHAR *)s)[k] : (unsigned)((BYTE *)s)[k])
+	size_t o = 0;
+
+	for (size_t i = 0; i < n; i++) {
+		unsigned c = AT(i);
+		if (c == '%' && i + 2 < n && AT(i + 1) < 0x80 && AT(i + 2) < 0x80 &&
+		    hexval((char)AT(i + 1)) >= 0 && hexval((char)AT(i + 2)) >= 0) {
+			c = (unsigned)(hexval((char)AT(i + 1)) * 16 +
+				       hexval((char)AT(i + 2)));
+			i += 2;
+		}
+		if (wide)
+			((WCHAR *)s)[o++] = (WCHAR)c;
+		else
+			((BYTE *)s)[o++] = (BYTE)c;
+	}
+#undef AT
+	if (wide)
+		((WCHAR *)s)[o] = 0;
+	else
+		((BYTE *)s)[o] = 0;
+	return o;
+}
+
 /* Fills one component of a URL_COMPONENTS: a pointer into the URL when the
- * caller gave a length and no buffer, a copy when it gave both. */
+ * caller gave a length and no buffer, a copy when it gave both (decoded
+ * with ICU_DECODE or ICU_ESCAPE). */
 static int set_part(const void *url, int wide, struct part pt, void *field,
-		    DWORD *len)
+		    DWORD *len, int decode)
 {
 	void **ptr = field;
 
@@ -457,7 +496,7 @@ static int set_part(const void *url, int wide, struct part pt, void *field,
 		memcpy(*ptr, (const char *)url + pt.off, pt.len);
 		((char *)*ptr)[pt.len] = 0;
 	}
-	*len = (DWORD)pt.len;
+	*len = (DWORD)(decode ? decode_in_place(*ptr, pt.len, wide) : pt.len);
 	return 1;
 }
 
@@ -482,12 +521,16 @@ static BOOL crack_url(const void *url, DWORD len, DWORD flags, void *comps,
 	int si = scheme_index(u + p.scheme.off, p.scheme.len);
 	c->nScheme = si < 0 ? INTERNET_SCHEME_UNKNOWN : schemes[si].scheme;
 	c->nPort = (INTERNET_PORT)(p.has_port ? p.port : si < 0 ? 0 : schemes[si].port);
-	int ok = set_part(url, wide, p.scheme, &c->lpszScheme, &c->dwSchemeLength);
-	ok &= set_part(url, wide, p.host, &c->lpszHostName, &c->dwHostNameLength);
-	ok &= set_part(url, wide, p.user, &c->lpszUserName, &c->dwUserNameLength);
-	ok &= set_part(url, wide, p.pass, &c->lpszPassword, &c->dwPasswordLength);
-	ok &= set_part(url, wide, p.path, &c->lpszUrlPath, &c->dwUrlPathLength);
-	ok &= set_part(url, wide, p.extra, &c->lpszExtraInfo, &c->dwExtraInfoLength);
+	int dec = (flags & (ICU_DECODE | ICU_ESCAPE)) != 0;
+	/* Not asked for the extra information, the path keeps it. */
+	if (!c->dwExtraInfoLength)
+		p.path.len += p.extra.len;
+	int ok = set_part(url, wide, p.scheme, &c->lpszScheme, &c->dwSchemeLength, 0);
+	ok &= set_part(url, wide, p.host, &c->lpszHostName, &c->dwHostNameLength, dec);
+	ok &= set_part(url, wide, p.user, &c->lpszUserName, &c->dwUserNameLength, dec);
+	ok &= set_part(url, wide, p.pass, &c->lpszPassword, &c->dwPasswordLength, dec);
+	ok &= set_part(url, wide, p.path, &c->lpszUrlPath, &c->dwUrlPathLength, dec);
+	ok &= set_part(url, wide, p.extra, &c->lpszExtraInfo, &c->dwExtraInfoLength, dec);
 	free(u);
 	if (!ok) {
 		win_set_error(ERROR_INSUFFICIENT_BUFFER);
@@ -568,7 +611,55 @@ static int unsafe(unsigned char c, DWORD flags)
 	return c <= ' ' || c >= 0x7f || strchr("<>\"{}|\\^`", c);
 }
 
-/* InternetCanonicalizeUrl's work (malloc()ed). */
+/* RFC 3986's remove_dot_segments, on path[0, n), into out (n + 1 bytes);
+ * returns the new length. */
+static size_t remove_dots(const char *path, size_t n, char *out)
+{
+	char *buf = strndup(path, n), *p = buf;
+	size_t o = 0;
+
+	if (!buf) {
+		memcpy(out, path, n);
+		out[n] = 0;
+		return n;
+	}
+	while (*p) {
+		if (!strncmp(p, "../", 3)) {
+			p += 3;
+		} else if (!strncmp(p, "./", 2) || !strncmp(p, "/./", 3)) {
+			p += 2;	/* "./" goes; "/./" becomes "/" */
+		} else if (!strcmp(p, "/.")) {
+			p += 1;
+			*p = '/';
+		} else if (!strncmp(p, "/../", 4) || !strcmp(p, "/..")) {
+			if (p[3]) {
+				p += 3;		/* "/../x" becomes "/x" */
+			} else {
+				p += 2;		/* "/.." becomes "/" */
+				*p = '/';
+			}
+			while (o > 0 && out[o - 1] != '/')	/* drop a segment */
+				o--;
+			if (o > 0)
+				o--;
+		} else if (!strcmp(p, ".") || !strcmp(p, "..")) {
+			break;
+		} else {
+			size_t j = p[0] == '/' ? 1 : 0;
+			j += strcspn(p + j, "/");
+			memcpy(out + o, p, j);
+			o += j;
+			p += j;
+		}
+	}
+	out[o] = 0;
+	free(buf);
+	return o;
+}
+
+/* InternetCanonicalizeUrl's work (malloc()ed): escapes decoded (ICU_DECODE),
+ * unsafe characters encoded (unless ICU_NO_ENCODE), then "." and ".."
+ * segments resolved in the path (unless ICU_NO_META). */
 static char *canonicalize(const char *u, DWORD flags)
 {
 	size_t n = strlen(u);
@@ -581,11 +672,10 @@ static char *canonicalize(const char *u, DWORD flags)
 		unsigned char c = (unsigned char)u[i];
 		if (c == '?' || c == '#')
 			in_extra = 1;
-		if ((flags & ICU_DECODE) && c == '%' && i + 2 < n + 0 &&
+		if ((flags & ICU_DECODE) && c == '%' && i + 2 < n &&
 		    hexval(u[i + 1]) >= 0 && hexval(u[i + 2]) >= 0) {
-			*o++ = (char)(hexval(u[i + 1]) * 16 + hexval(u[i + 2]));
+			c = (unsigned char)(hexval(u[i + 1]) * 16 + hexval(u[i + 2]));
 			i += 2;
-			continue;
 		}
 		if (!(flags & ICU_NO_ENCODE) && !(in_extra && (flags & ICU_BROWSER_MODE)) &&
 		    unsafe(c, flags)) {
@@ -595,6 +685,20 @@ static char *canonicalize(const char *u, DWORD flags)
 		*o++ = (char)c;
 	}
 	*o = 0;
+
+	struct parsed p;
+	if (!(flags & ICU_NO_META) && parse_url(out, &p) && p.path.len &&
+	    out[p.path.off] == '/') {
+		char *fixed = malloc(strlen(out) + 2);
+		if (fixed) {
+			memcpy(fixed, out, p.path.off);
+			size_t m = remove_dots(out + p.path.off, p.path.len,
+					       fixed + p.path.off);
+			strcpy(fixed + p.path.off + m, out + p.extra.off);
+			free(out);
+			out = fixed;
+		}
+	}
 	return out;
 }
 
@@ -646,7 +750,8 @@ static char *combine(const char *base, const char *rel)
 	if (rel[0] == '/') {
 		keep = pb.path.off;
 	} else if (rel[0] == '?' || rel[0] == '#' || !rel[0]) {
-		keep = rel[0] == '#' && base[pb.extra.off] == '?' ?
+		/* "#f" and "" keep the base's query; "?q" replaces it. */
+		keep = rel[0] != '?' && base[pb.extra.off] == '?' ?
 		       pb.extra.off + strcspn(base + pb.extra.off, "#") :
 		       pb.extra.off;
 	} else {
@@ -758,7 +863,7 @@ static BOOL create_url(const void *comps, DWORD flags, void *buf, LPDWORD len,
 	const char *sname = *scheme ? scheme : schemes[si].name;
 	int authority = si < 0 ? *host != 0 : schemes[si].authority;
 	size_t size = strlen(sname) + strlen(host) + strlen(user) + strlen(pass) +
-		      strlen(path) + strlen(extra) + 32;
+		      3 * (strlen(path) + strlen(extra)) + 32;
 	if (!(out = malloc(size))) {
 		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
 		goto done;
@@ -770,7 +875,20 @@ static BOOL create_url(const void *comps, DWORD flags, void *buf, LPDWORD len,
 	o += sprintf(o, "%s", host);
 	if (c->nPort && (si < 0 || c->nPort != schemes[si].port))
 		o += sprintf(o, ":%u", c->nPort);
-	sprintf(o, "%s%s", path, extra);
+	if (flags & ICU_ESCAPE) {
+		/* the path and extra information, with unsafe characters
+		 * escaped */
+		for (const char *q = path; *q; q++)
+			o += unsafe((unsigned char)*q, 0) ?
+			     sprintf(o, "%%%02X", (unsigned char)*q) :
+			     sprintf(o, "%c", *q);
+		for (const char *q = extra; *q; q++)
+			o += unsafe((unsigned char)*q, 0) ?
+			     sprintf(o, "%%%02X", (unsigned char)*q) :
+			     sprintf(o, "%c", *q);
+	} else {
+		sprintf(o, "%s%s", path, extra);
+	}
 	ok = out_str(out, buf, len, wide);
 done:
 	free(scheme);

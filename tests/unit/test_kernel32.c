@@ -897,6 +897,12 @@ static void test_files(void)
 	snprintf(unix_name, sizeof(unix_name),
 		 "%s/drive_c/windows/temp/relative.txt", root);
 	CHECK(stat(unix_name, &st) == 0);
+	CHECK(GetFullPathNameA("C:relative.txt", sizeof(buf), buf, NULL));
+	CHECK_STR(buf, "C:\\windows\\temp\\relative.txt");
+	CHECK(GetFullPathNameA("c:..\\up.txt", sizeof(buf), buf, NULL));
+	CHECK_STR(buf, "C:\\windows\\up.txt");
+	CHECK(GetFullPathNameA("D:other.txt", sizeof(buf), buf, NULL));
+	CHECK_STR(buf, "D:\\other.txt");
 	CHECK(DeleteFileA("C:relative.txt"));	/* that drive's directory */
 	CHECK(!SetCurrentDirectoryA("C:\\nowhere"));
 	CHECK(!SetCurrentDirectoryA("C:\\WINDOWS\\TEMP\\Test File.txt"));
