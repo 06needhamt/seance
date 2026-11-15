@@ -212,7 +212,13 @@ static void *thread_main(void *arg)
 	if (terminated) {
 		/* As Windows: no FLS callbacks, and no DLL_THREAD_DETACH (the
 		 * DLL ending it may well be in its DllMain, holding the loader
-		 * lock that sending one would wait for). */
+		 * lock that sending one would wait for). Its message queue
+		 * ends first, so a sender who sees it done gets the answer
+		 * for an ended owner. */
+		void (*hook)(void) = __atomic_load_n(&thread_end_hook,
+						     __ATOMIC_ACQUIRE);
+		if (hook)
+			hook();
 		wait_lock();
 		t->exit_code = code;
 		t->done = 1;
@@ -415,11 +421,17 @@ HANDLE thread_create_ex(SIZE_T stack, LPTHREAD_START_ROUTINE start, LPVOID param
 #define SIGTERM_THREAD (SIGRTMIN + 3)
 
 static void on_terminate(int sig, siginfo_t *info, void *ctx);
+static int add_host_text(struct dl_phdr_info *info, size_t size, void *ctx);
 
 static void terminate_init(void)
 {
 	struct sigaction sa;
 
+	/*
+	 * The table of host code ranges is made once, before the handler
+	 * that reads it is installed, and never changes after.
+	 */
+	dl_iterate_phdr(add_host_text, NULL);
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_sigaction = on_terminate;
 	sa.sa_flags = SA_SIGINFO;
@@ -478,8 +490,10 @@ static void on_terminate(int sig, siginfo_t *info, void *ctx)
 	end_terminated(t);
 }
 
+void (*thread_wake_hook)(void);
+
 /* In a sleep, woken: ends the thread if TerminateThread asked. */
-static void thread_terminated_check(void)
+void thread_terminated_check(void)
 {
 	struct thread *t = self;
 
@@ -494,6 +508,7 @@ void thread_wake_check(void)
 
 	if (t && t->can_jump && __atomic_load_n(&t->in_routine, __ATOMIC_ACQUIRE) &&
 	    __atomic_load_n(&t->terminate, __ATOMIC_ACQUIRE)) {
+		wait_terminate_undo();
 		wait_unlock();
 		wait_release_held();
 		end_terminated(t);
@@ -509,12 +524,15 @@ WINFN(BOOL) k32_TerminateThread(HANDLE h, DWORD code)
 		return FALSE;
 	if (t == self) {
 		kobj_unref(&t->obj);
+		/* Ending itself, it still runs none of its cleanup. */
+		if (t->can_jump) {
+			t->term_code = code;
+			end_terminated(t);
+		}
 		thread_exit(code);
 	}
 	TRACE("TerminateThread(%p, %u): thread %u", h, code, t->tid);
 	pthread_once(&once, terminate_init);
-	nhost_text = 0;
-	dl_iterate_phdr(add_host_text, NULL);
 
 	t->term_code = code;
 	__atomic_store_n(&t->terminate, 1, __ATOMIC_SEQ_CST);
@@ -541,6 +559,10 @@ WINFN(BOOL) k32_TerminateThread(HANDLE h, DWORD code)
 		wait_lock();
 		wait_broadcast();
 		wait_unlock();
+		void (*wake)(void) = __atomic_load_n(&thread_wake_hook,
+						     __ATOMIC_ACQUIRE);
+		if (wake)
+			wake();
 		struct timespec ts = { 0, 10 * 1000000L };
 		nanosleep(&ts, NULL);
 	}

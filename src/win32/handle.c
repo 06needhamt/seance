@@ -225,6 +225,24 @@ void wait_hold(struct kobject *const *objs, DWORD n)
 	nheld = n;
 }
 
+static __thread void (*term_undo)(void *);
+static __thread void *term_undo_ctx;
+
+void wait_on_terminate(void (*undo)(void *ctx), void *ctx)
+{
+	term_undo = undo;
+	term_undo_ctx = ctx;
+}
+
+void wait_terminate_undo(void)
+{
+	void (*undo)(void *) = term_undo;
+
+	term_undo = NULL;
+	if (undo)
+		undo(term_undo_ctx);
+}
+
 void wait_release_held(void)
 {
 	DWORD n = nheld;

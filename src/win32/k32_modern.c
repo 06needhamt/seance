@@ -153,10 +153,25 @@ struct cv_lock {
 	void *ctx;
 };
 
+struct cv_wait {
+	lock_word *w;
+	struct cv_waiter *me;
+};
+
+/* A thread ended while it waits leaves no node on its dead stack. */
+static void cv_undo(void *ctx)
+{
+	struct cv_wait *cw = ctx;
+
+	if (!cw->me->signaled)
+		cv_remove(cw->w, cw->me);
+}
+
 static BOOL cv_sleep(PCONDITION_VARIABLE cv, DWORD ms, const struct cv_lock *l)
 {
 	lock_word *w = word(&cv->Ptr);
 	struct cv_waiter me = { NULL, NULL, 0 };
+	struct cv_wait cw = { w, &me };
 	struct timespec deadline;
 	BOOL woken = TRUE;
 
@@ -164,6 +179,7 @@ static BOOL cv_sleep(PCONDITION_VARIABLE cv, DWORD ms, const struct cv_lock *l)
 		wait_deadline(ms, &deadline);
 	wait_lock();
 	cv_enqueue(w, &me);
+	wait_on_terminate(cv_undo, &cw);
 	l->release(l->ctx);
 	while (!me.signaled) {
 		if (wait_block(ms == INFINITE ? NULL : &deadline) && !me.signaled) {
@@ -172,6 +188,7 @@ static BOOL cv_sleep(PCONDITION_VARIABLE cv, DWORD ms, const struct cv_lock *l)
 			break;
 		}
 	}
+	wait_on_terminate(NULL, NULL);
 	wait_unlock();
 	l->acquire(l->ctx);
 	if (!woken)

@@ -123,6 +123,23 @@ static DWORD WINAPI srw_waiter(LPVOID arg)
 	return 0;
 }
 
+/* srw_waiter on the variable given, under the same lock. */
+static DWORD WINAPI srw_waiter_on(LPVOID arg)
+{
+	FN(void, AcquireSRWLockExclusive, PSRWLOCK);
+	FN(void, ReleaseSRWLockExclusive, PSRWLOCK);
+	FN(BOOL, SleepConditionVariableSRW, PCONDITION_VARIABLE, PSRWLOCK, DWORD,
+	   ULONG);
+
+	AcquireSRWLockExclusive(&lock);
+	ready++;
+	while (!__atomic_load_n(&woken, __ATOMIC_SEQ_CST))
+		SleepConditionVariableSRW(arg, &lock, INFINITE, 0);
+	woken++;
+	ReleaseSRWLockExclusive(&lock);
+	return 0;
+}
+
 static DWORD WINAPI cs_waiter(LPVOID arg)
 {
 	FN(void, EnterCriticalSection, LPCRITICAL_SECTION);
@@ -147,6 +164,58 @@ static void wait_ready(LONG n)
 	for (int i = 0; i < 1000 && __atomic_load_n(&ready, __ATOMIC_SEQ_CST) < n; i++)
 		Sleep(5);
 	Sleep(20);	/* and past releasing the lock to wait */
+}
+
+/*
+ * A thread TerminateThread ends inside its wait leaves no waiter behind:
+ * the next wake-up goes to a thread that is waiting.
+ */
+static CONDITION_VARIABLE term_cv;
+static SRWLOCK term_lock;
+
+static DWORD WINAPI term_waiter(LPVOID arg)
+{
+	FN(void, AcquireSRWLockExclusive, PSRWLOCK);
+	FN(BOOL, SleepConditionVariableSRW, PCONDITION_VARIABLE, PSRWLOCK, DWORD,
+	   ULONG);
+
+	AcquireSRWLockExclusive(&term_lock);
+	ready++;
+	for (;;)
+		SleepConditionVariableSRW(&term_cv, &term_lock, INFINITE, 0);
+	return 0;
+}
+
+static void test_cv_terminated_waiter(void)
+{
+	FN(BOOL, TerminateThread, HANDLE, DWORD);
+	FN(DWORD, WaitForSingleObject, HANDLE, DWORD);
+	FN(BOOL, CloseHandle, HANDLE);
+	FN(void, WakeConditionVariable, PCONDITION_VARIABLE);
+	FN(void, AcquireSRWLockExclusive, PSRWLOCK);
+	FN(void, ReleaseSRWLockExclusive, PSRWLOCK);
+
+	ready = woken = 0;
+	HANDLE t = start_thread(term_waiter, NULL);
+	wait_ready(1);
+	CHECK(term_cv.Ptr != NULL);
+	CHECK(TerminateThread(t, 7));
+	CHECK_EQ(WaitForSingleObject(t, 10000), WAIT_OBJECT_0);
+	CloseHandle(t);
+	CHECK(term_cv.Ptr == NULL);
+
+	/* Its lock was left free by the wait; the next waiter gets the wake. */
+	AcquireSRWLockExclusive(&term_lock);
+	ReleaseSRWLockExclusive(&term_lock);
+	ready = woken = 0;
+	HANDLE w = start_thread(srw_waiter_on, &term_cv);
+	wait_ready(1);
+	AcquireSRWLockExclusive(&lock);
+	woken = 1;
+	ReleaseSRWLockExclusive(&lock);
+	WakeConditionVariable(&term_cv);
+	join(w);
+	CHECK_EQ(woken, 2);
 }
 
 static void test_condition_variables(void)
@@ -845,6 +914,7 @@ int main(void)
 
 	test_srw();
 	test_condition_variables();
+	test_cv_terminated_waiter();
 	test_init_once();
 	test_slist();
 	test_version();

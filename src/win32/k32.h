@@ -104,6 +104,16 @@ void thread_exit_cleanup(void);
  * thread is seen to have ended. */
 extern void (*thread_end_hook)(void);
 
+/* Set by user32: wakes threads asleep in its own waits, so a thread
+ * TerminateThread ends sees the request (thread_terminated_check). */
+extern void (*thread_wake_hook)(void);
+
+/*
+ * Ends the calling thread if TerminateThread has asked it to; called,
+ * holding no locks, by a thread woken in a wait of its own.
+ */
+void thread_terminated_check(void);
+
 /* ExitThread. */
 void thread_exit(DWORD code) __attribute__((noreturn));
 

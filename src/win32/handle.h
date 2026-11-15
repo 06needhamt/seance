@@ -86,6 +86,16 @@ void wait_hold(struct kobject *const *objs, DWORD n);
 void wait_release_held(void);
 
 /*
+ * What a wait that put something of its own (on its stack) where other
+ * threads see it must undo if TerminateThread ends the thread inside it:
+ * undo(ctx) runs with the wait lock held, before the thread's stack is
+ * left. NULL clears it once the wait is over.
+ */
+void wait_on_terminate(void (*undo)(void *ctx), void *ctx);
+/* Runs and clears that, with the wait lock held (thread_wake_check). */
+void wait_terminate_undo(void);
+
+/*
  * Waits for one (all == FALSE) or all of objs, like WaitForMultipleObjects.
  * Returns WAIT_OBJECT_0 + i, WAIT_TIMEOUT or WAIT_FAILED.
  */
