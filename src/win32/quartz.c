@@ -624,7 +624,8 @@ WINFN(HRESULT) fm2_UnregisterFilter(IFilterMapper2 *self,
 
 /*
  * Writes a version 2 FilterData whatever the version given, as Windows
- * does; a moniker for the new registration isn't made (*moniker is NULL).
+ * does, and gives back a device moniker for the new registration, through
+ * which the caller may add values of its own.
  */
 WINFN(HRESULT) fm2_RegisterFilter(IFilterMapper2 *self, REFCLSID filter,
 				  LPCWSTR name, IMoniker **moniker,
@@ -674,6 +675,8 @@ WINFN(HRESULT) fm2_RegisterFilter(IFilterMapper2 *self, REFCLSID filter,
 	/* Registering again replaces the registration. */
 	capture_remove(filter, &f.category);
 	capture_add(&f);
+	if (moniker)
+		return qz_moniker_new(path, moniker);
 	return S_OK;
 }
 

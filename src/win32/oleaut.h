@@ -34,6 +34,8 @@ HRESULT STUB_WINAPI oa_VariantChangeTypeEx(VARIANTARG *dst,
 HRESULT oa_validate_vt(VARTYPE vt);
 
 /* SAFEARRAYs. */
+SAFEARRAY *STUB_WINAPI oa_SafeArrayCreateVector(VARTYPE vt, LONG lbound,
+					    ULONG count);
 HRESULT STUB_WINAPI oa_SafeArrayDestroy(SAFEARRAY *psa);
 HRESULT STUB_WINAPI oa_SafeArrayCopy(SAFEARRAY *psa, SAFEARRAY **out);
 HRESULT STUB_WINAPI oa_VectorFromBstr(BSTR b, SAFEARRAY **out);

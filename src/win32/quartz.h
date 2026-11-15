@@ -69,4 +69,14 @@ int qz_filterdata_parse(const BYTE *data, DWORD size, struct qz_filter *f);
 void quartz_capture_begin(void);
 size_t quartz_capture_end(struct qz_filter **out);
 
+/*
+ * A device moniker for the filter registration at the registry key path
+ * (quartz_moniker.c): BindToStorage(IID_IPropertyBag) reads and writes the
+ * key's values. qz_moniker_path gives a moniker's path back, or NULL if it
+ * isn't one of these.
+ */
+typedef struct IMoniker IMoniker;
+HRESULT qz_moniker_new(const char *path, IMoniker **out);
+const char *qz_moniker_path(IMoniker *moniker);
+
 #endif /* VFW_WIN32_QUARTZ_H */

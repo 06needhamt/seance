@@ -673,6 +673,27 @@ to a cause; what was seance's is fixed, and the rest is recorded here.
     to its own code at +0x801a8). Why wasn't worked out: that would mean
     reversing the virtualized filter. `VFW_TRACE` now names each handler
     that continues execution, and where.
+- **racodec / racode64** (`racodec.ax`, `racode64.ax`, RASC; the
+  RemotelyAnywhere screen codec): registers and opens now, but nothing
+  round-trips.
+  - Its `DllRegisterServer` registers the encoder under
+    VideoCompressorCategory, then calls `BindToStorage(IID_IPropertyBag)` on
+    the moniker that `IFilterMapper2::RegisterFilter` returns, to write
+    `FccHandler`. seance returned no moniker, so the call went through
+    NULL.
+  - `RegisterFilter` now returns a device moniker for the registration. Its
+    property bag reads and writes the instance key's values (REG_SZ as
+    `VT_BSTR`, REG_DWORD as `VT_I4`, REG_BINARY as `VT_ARRAY | VT_UI1`), as
+    Windows' `CDeviceMoniker` does.
+  - The encoder's samples are its input frames, uncompressed, whatever the
+    input format (I420 or RGB32).
+  - The decoder offers only RGB32 output, and makes the picture square on
+    purpose: max(width, height) both ways, for sizes up to 640. So the
+    sweep sees "a different picture". Let through, it decodes those
+    streams as black frames. The pair probably expects a RemotelyAnywhere
+    session to drive it; this wasn't pursued.
+  - Cropping a decoder's larger picture to the input's size is Phase 5's
+    padded-output item.
 
 ## In-repository baseline
 
