@@ -1527,6 +1527,21 @@ static void test_mbcs_searchpath(const char *root)
 	mod_free(m);
 }
 
+/* An IUnknown that counts its references, for PropVariantCopy. */
+static LONG unk_refs;
+
+static HRESULT STUB_WINAPI unk_qi(IUnknown *u, REFIID iid, void **out)
+{
+	*out = NULL;
+	return E_NOINTERFACE;
+}
+
+static ULONG STUB_WINAPI unk_addref(IUnknown *u) { return ++unk_refs; }
+static ULONG STUB_WINAPI unk_release(IUnknown *u) { return --unk_refs; }
+
+static IUnknownVtbl counted_vtbl = { unk_qi, unk_addref, unk_release };
+static IUnknown counted_unk = { &counted_vtbl };
+
 static volatile int beginthread_ran;
 
 static void CDECL beginthread_routine(void *arg)
@@ -1690,6 +1705,31 @@ static void test_more_imports(const char *root)
 	src.vt = VT_I4;
 	src.lVal = 5;
 	CHECK(PropVariantCopy(&dst, &src) == S_OK && dst.vt == VT_I4 && dst.lVal == 5);
+	/* A FILETIME is a value; a stream is a reference, counted. */
+	memset(&src, 0, sizeof(src));
+	src.vt = 64;	/* VT_FILETIME */
+	*(ULONGLONG *)((BYTE *)&src + 8) = 0x01d0123456789abcULL;
+	memset(&dst, 0xee, sizeof(dst));
+	CHECK_EQ(PropVariantCopy(&dst, &src), S_OK);
+	CHECK(dst.vt == 64 &&
+	      *(ULONGLONG *)((BYTE *)&dst + 8) == 0x01d0123456789abcULL);
+	CHECK_EQ(PropVariantClear(&dst), S_OK);
+	IUnknown *stream = &counted_unk;
+	unk_refs = 1;
+	memset(&src, 0, sizeof(src));
+	src.vt = 66;	/* VT_STREAM */
+	*(IUnknown **)((BYTE *)&src + 8) = stream;
+	CHECK_EQ(PropVariantCopy(&dst, &src), S_OK);
+	CHECK(dst.vt == 66 && *(IUnknown **)((BYTE *)&dst + 8) == stream);
+	CHECK_EQ(unk_refs, 2);
+	CHECK_EQ(PropVariantClear(&dst), S_OK);
+	CHECK_EQ(unk_refs, 1);
+	/* A type it can't copy leaves dst as it was. */
+	memset(&src, 0, sizeof(src));
+	src.vt = 0x7ff;
+	memset(&dst, 0x5a, sizeof(dst));
+	CHECK(FAILED(PropVariantCopy(&dst, &src)));
+	CHECK(((BYTE *)&dst)[8] == 0x5a);
 	mod_free(o);
 	mod_free(a);
 	mod_free(k);
