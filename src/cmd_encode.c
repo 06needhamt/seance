@@ -727,8 +727,8 @@ static int encode_com(const char *target, const CLSID *selected,
 	compression = found.compression;
 	hr = xform_create(target, &found, &x);
 	if (FAILED(hr)) {
-		fprintf(stderr, "seance: cannot open encoder in %s (%s)\n", target,
-			dshow_hr_name(hr, error));
+		fprintf(stderr, "seance: cannot open encoder in %s (%s)%s\n",
+			target, dshow_hr_name(hr, error), xform_open_note());
 		goto done;
 	}
 	if (!rate)

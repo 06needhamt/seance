@@ -750,6 +750,13 @@ to a cause; what was seance's is fixed, and the rest is recorded here.
     seance reads no Ogg.
   - Fixed on the way: the PCM retry compared formats past the end of a
     16-byte `fmt ` chunk.
+- **Canopus DirectShow codecs** (`csDShowcodc.dll`: DV, DVCPRO50/HD, HQ,
+  Lossless and MPEG2-Intra decoders, HQ encoder): they need Canopus's
+  engine, `PAVEDIUS.DLL`, which isn't in the zip. Each filter loads it when
+  created and fails (`E_FAIL`) without it.
+  - Opening a DirectShow filter or DMO now names the DLLs and registry keys
+    it looked for and didn't find, as opening a VfW driver does: "it looked
+    for PAVEDIUS.DLL, which isn't here (add its directory to VFW_PATH)".
 
 ## In-repository baseline
 

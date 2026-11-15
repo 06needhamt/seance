@@ -762,8 +762,8 @@ int encode_audio(const struct audio_codec_job *j)
 		goto done;
 	}
 	if (FAILED(hr = xform_create(j->codec, &found, &x))) {
-		fprintf(stderr, "seance: cannot open the encoder in %s (%s)\n",
-			j->codec, dshow_hr_name(hr, name));
+		fprintf(stderr, "seance: cannot open the encoder in %s (%s)%s\n",
+			j->codec, dshow_hr_name(hr, name), xform_open_note());
 		goto done;
 	}
 	if (j->state && load_state(x, j->state))

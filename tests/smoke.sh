@@ -178,6 +178,13 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	*"isn't a WAVEFORMATEX"*) ;;
 	*) echo "smoke: odd audio encoder: $odd" >&2; exit 1 ;;
 	esac
+	# A filter that can't be created names the DLL it looked for.
+	missing=$(VFW_ENV_TESTFILTER_MISSING_DLL=1 $emu "$harness" encode "$f" \
+		"$work/in.wav" -o "$work/x.avi" 2>&1) && exit 1
+	case $missing in
+	*"looked for seance_absent_engine.dll, which isn't here"*) ;;
+	*) echo "smoke: missing DLL: $missing" >&2; exit 1 ;;
+	esac
 	for mode in "" SPLIT HOLD FLOAT; do
 		env ${mode:+VFW_ENV_TESTFILTER_AUDIO_$mode=1} $emu "$harness" \
 			decode "$f" "$work/t.avi" -o "$work/out.pcm" 2>/dev/null

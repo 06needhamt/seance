@@ -56,7 +56,12 @@ HRESULT xform_find(const char *path, const CLSID *selected, int audio,
  */
 HRESULT xform_find_output(const char *path, const CLSID *selected, int audio,
 			  int encoder, DWORD output, struct xform_class *found);
-/* Creates the class (found, or known) and holds it. */
+/*
+ * Creates the class (found, or known) and holds it. On failure,
+ * xform_open_note() is "; it looked for ..., which isn't here" naming the
+ * DLLs and registry keys its open looked for and didn't find, or "".
+ */
+const char *xform_open_note(void);
 HRESULT xform_create(const char *path, const struct xform_class *c,
 		     struct xform **x);
 /* xform_find, then xform_create. */
