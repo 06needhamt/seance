@@ -712,6 +712,30 @@ to a cause; what was seance's is fixed, and the rest is recorded here.
   - A crash at an address in no module now also names up to three stack
     words that point into modules (`[sp+0x1c] csccdvc.dll+0x15bf4`). These
     usually include the caller.
+- **BHA XVD video encoder** (`BHA_XVDVEnc.dll`, a DMO with VGMV output):
+  locked by its vendor, so it doesn't work here.
+  - Its normal path opens its encoder engine through a stub that always
+    fails, so `GetOutputType` offers nothing (`DMO_E_NO_MORE_ITEMS`).
+  - Given an output type anyway, it takes it. Its first `ProcessInput`
+    then reads through its unsized frame queue's NULL front (`accessing
+    0x14`).
+  - A working encoder path sits behind a registry switch whose name the
+    DLL keeps encrypted. That is the vendor's gate, and seance doesn't set
+    it.
+- **Matrox software codecs** (`swcdvvfw.dll`, `swcjpegvfw.dll`,
+  `swcmpegvfw.dll`) and **DigiVCap** (`digivcap.dll`): DigiVCap round-trips
+  now, as dvsd, dv25, dv50 and mjpg (DV at 720x480: 33.8 dB, and 36.0 dB
+  decoding ffmpeg's DV).
+  - The swc* DLLs aren't DirectShow filters, hence "no filters". Each
+    registers a plain COM class, its engine for DigiVCap (the VfW driver),
+    with `InprocServer32` a bare `swcdvvfw.dll`.
+  - seance looked for a bare server name only on `VFW_PATH` and in the
+    current directory, so DigiVCap's `DRV_OPEN` failed. `CoGetClassObject`
+    and `CoCreateInstance` now look next to the calling DLL first, as
+    `LoadLibrary` does. (On Windows these DLLs are in system32.)
+  - `seance register` the three swc* DLLs first.
+  - DigiVCap's other FOURCCs (MPEG-2, HD, dvsl) want
+    `HKLM\Software\Movie2`, which Matrox's software installs.
 
 ## In-repository baseline
 

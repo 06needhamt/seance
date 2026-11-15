@@ -548,9 +548,12 @@ static IUnknown *registered(REFCLSID clsid, DWORD context)
 /*
  * Loads an InprocServer32 DLL (UTF-8) as LoadLibrary would, and keeps it
  * loaded: a Windows path maps to Unix, except that a system DLL named by
- * path is still the built-in one.
+ * path is still the built-in one. A bare name is looked for next to the
+ * module asking (caller, may be NULL) first, as LoadLibrary does: a
+ * vendor's codec and the COM servers it registers by bare name sit in
+ * the same directory (system32, on Windows).
  */
-static struct module *load_server(const char *name)
+static struct module *load_server(const char *name, struct module *caller)
 {
 	const char *base = name;
 	struct module *m;
@@ -563,7 +566,7 @@ static struct module *load_server(const char *name)
 		m = u ? mod_load(u, NULL) : NULL;
 		free(u);
 	} else {
-		m = mod_load(base, NULL);
+		m = mod_load(base, caller);
 	}
 	if (!m)
 		return NULL;
@@ -611,7 +614,8 @@ static char *system_class_dll(REFCLSID clsid)
 	return NULL;
 }
 
-static HRESULT inproc_class_object(REFCLSID clsid, REFIID riid, void **ppv)
+static HRESULT inproc_class_object(REFCLSID clsid, REFIID riid, void **ppv,
+				   struct module *caller)
 {
 	char g[GUID_CHARS], sub[64];
 
@@ -627,7 +631,7 @@ static HRESULT inproc_class_object(REFCLSID clsid, REFIID riid, void **ppv)
 		return REGDB_E_CLASSNOTREG;
 	}
 
-	struct module *m = load_server(dll);
+	struct module *m = load_server(dll, caller);
 	if (!m) {
 		TRACE("CoGetClassObject(%s): %s: %s", g, dll, vfw_error());
 		free(dll);
@@ -648,9 +652,8 @@ static HRESULT inproc_class_object(REFCLSID clsid, REFIID riid, void **ppv)
 	return hr;
 }
 
-WINFN(HRESULT) ole_CoGetClassObject(REFCLSID clsid, DWORD context,
-				    LPVOID server_info, REFIID riid,
-				    LPVOID *ppv)
+static HRESULT get_class_object(REFCLSID clsid, DWORD context, REFIID riid,
+				LPVOID *ppv, const void *ret)
 {
 	if (!ppv)
 		return E_INVALIDARG;
@@ -669,8 +672,18 @@ WINFN(HRESULT) ole_CoGetClassObject(REFCLSID clsid, DWORD context,
 		return hr;
 	}
 	if (context & CLSCTX_INPROC)
-		return inproc_class_object(clsid, riid, ppv);
+		return inproc_class_object(clsid, riid, ppv,
+					   win_caller_module(ret));
 	return REGDB_E_CLASSNOTREG;
+}
+
+WINFN(HRESULT) ole_CoGetClassObject(REFCLSID clsid, DWORD context,
+				    LPVOID server_info, REFIID riid,
+				    LPVOID *ppv)
+{
+	(void)server_info;
+	return get_class_object(clsid, context, riid, ppv,
+				__builtin_return_address(0));
 }
 
 WINFN(HRESULT) ole_CoCreateInstance(REFCLSID clsid, LPUNKNOWN outer,
@@ -683,8 +696,8 @@ WINFN(HRESULT) ole_CoCreateInstance(REFCLSID clsid, LPUNKNOWN outer,
 	*ppv = NULL;
 	if (!riid)
 		return E_INVALIDARG;
-	HRESULT hr = ole_CoGetClassObject(clsid, context, NULL,
-					  &iid_iclassfactory, (void **)&cf);
+	HRESULT hr = get_class_object(clsid, context, &iid_iclassfactory,
+				      (void **)&cf, __builtin_return_address(0));
 	if (FAILED(hr))
 		return hr;
 	hr = cf->lpVtbl->CreateInstance(cf, outer, riid, ppv);

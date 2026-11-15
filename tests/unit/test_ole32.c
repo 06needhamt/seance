@@ -616,6 +616,23 @@ static void test_inproc_server(void)
 				  &iid_factory, &p), CO_E_ERRORINDLL);
 	CHECK_EQ(CoGetClassObject(&clsid_test, CLSCTX_LOCAL_SERVER, NULL,
 				  &iid_factory, &p), REGDB_E_CLASSNOTREG);
+
+	/*
+	 * A server registered by bare name, as Matrox's swc*vfw.dll register
+	 * themselves for digivcap.dll: not on the search path here, but next
+	 * to the DLL asking for it, which finds it (and that it is no COM
+	 * server) through either call.
+	 */
+	HRESULT (CDECL *get)(const GUID *, int) = mod_get_proc(m, "com_get");
+	CHECK(get != NULL);
+	set_class_value(key, "pe_fourccs.dll");
+	unsetenv("VFW_PATH");
+	CHECK_EQ(CoGetClassObject(&clsid_test, CLSCTX_INPROC_SERVER, NULL,
+				  &iid_factory, &p), CO_E_DLLNOTFOUND);
+	if (get) {
+		CHECK_EQ(get(&clsid_test, 0), CO_E_ERRORINDLL);
+		CHECK_EQ(get(&clsid_test, 1), CO_E_ERRORINDLL);
+	}
 	CoUninitialize();
 	mod_free(m);
 }
