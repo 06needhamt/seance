@@ -71,6 +71,7 @@ typedef struct {
 #define ICU_ESCAPE        0x80000000
 #define ICU_DECODE        0x10000000
 #define ICU_NO_ENCODE     0x20000000
+#define ICU_NO_META       0x08000000
 #define ICU_BROWSER_MODE  0x02000000
 #define ICU_ENCODE_SPACES_ONLY 0x04000000
 

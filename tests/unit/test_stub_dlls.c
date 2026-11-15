@@ -247,7 +247,90 @@ static void test_wininet(void)
 	n = sizeof(buf);
 	CHECK(InternetCreateUrlA(&c, 0, buf, &n));
 	CHECK_STR(buf, "http://u@example.com:81/a.avi");
-	(void)wstr_eq;
+	c.nPort = 80;
+	c.lpszUserName = NULL;
+	c.lpszUrlPath = "/a b.avi";
+	c.lpszExtraInfo = "?t=a b";
+	n = sizeof(buf);
+	CHECK(InternetCreateUrlA(&c, ICU_ESCAPE, buf, &n));
+	CHECK_STR(buf, "http://example.com/a%20b.avi?t=a%20b");
+	c.lpszExtraInfo = NULL;
+
+	/* Not asked for the extra information, the path has the query. */
+	memset(&c, 0, sizeof(c));
+	c.dwStructSize = sizeof(c);
+	c.lpszUrlPath = path;
+	c.dwUrlPathLength = sizeof(path);
+	CHECK(InternetCrackUrlA(url, 0, 0, &c));
+	CHECK_STR(path, "/dir/file.avi?x=1#top");
+	/* ICU_DECODE decodes what it copies. */
+	c.dwUrlPathLength = sizeof(path);
+	CHECK(InternetCrackUrlA("http://h/a%20b%41", 0, ICU_DECODE, &c));
+	CHECK_STR(path, "/a bA");
+	CHECK_EQ(c.dwUrlPathLength, 5);
+	/* An IPv6 literal's colons aren't the port's. */
+	memset(&c, 0, sizeof(c));
+	c.dwStructSize = sizeof(c);
+	c.lpszHostName = host;
+	c.dwHostNameLength = sizeof(host);
+	CHECK(InternetCrackUrlA("http://[::1]:8080/x", 0, 0, &c));
+	CHECK_STR(host, "[::1]");
+	CHECK_EQ(c.nPort, 8080);
+	c.dwHostNameLength = sizeof(host);
+	CHECK(InternetCrackUrlA("http://[fe80::2]/x", 0, 0, &c));
+	CHECK_STR(host, "[fe80::2]");
+	CHECK_EQ(c.nPort, 80);
+
+	/* Decoding then re-encodes what is unsafe, unless ICU_NO_ENCODE. */
+	n = sizeof(buf);
+	CHECK(InternetCanonicalizeUrlA("http://h/a%20b%41", buf, &n, ICU_DECODE));
+	CHECK_STR(buf, "http://h/a%20bA");
+	/* "." and ".." resolve, unless ICU_NO_META. */
+	n = sizeof(buf);
+	CHECK(InternetCanonicalizeUrlA("http://h/a/./b/../c?x=../y", buf, &n, 0));
+	CHECK_STR(buf, "http://h/a/c?x=../y");
+	n = sizeof(buf);
+	CHECK(InternetCanonicalizeUrlA("http://h/a/../../b/..", buf, &n, 0));
+	CHECK_STR(buf, "http://h/");
+	n = sizeof(buf);
+	CHECK(InternetCanonicalizeUrlA("http://h/a/./b/../c", buf, &n, ICU_NO_META));
+	CHECK_STR(buf, "http://h/a/./b/../c");
+	static const struct {
+		const char *base, *rel, *want;
+	} more[] = {
+		{ "http://h/d/f?q", "", "http://h/d/f?q" },
+		{ "http://h/d/f?q#a", "#b", "http://h/d/f?q#b" },
+		{ "http://h/d/e/f", "../g", "http://h/d/g" },
+		{ "http://h/d/e/f", "./g", "http://h/d/e/g" },
+	};
+	for (size_t i = 0; i < sizeof(more) / sizeof(more[0]); i++) {
+		n = sizeof(buf);
+		CHECK(InternetCombineUrlA(more[i].base, more[i].rel, buf, &n, 0));
+		CHECK_STR(buf, more[i].want);
+	}
+
+	/* The same through the wide forms. */
+	FN(m, BOOL, InternetCanonicalizeUrlW, LPCWSTR, LPWSTR, LPDWORD, DWORD);
+	FN(m, BOOL, InternetCombineUrlW, LPCWSTR, LPCWSTR, LPWSTR, LPDWORD, DWORD);
+	WCHAR wbuf[128], wpath[64];
+	WCHAR wq[] = { 'h', 't', 't', 'p', ':', '/', '/', 'h', '/', 'a', '%', '4',
+		       '1', '?', 'q', 0 };
+	memset(&cw, 0, sizeof(cw));
+	cw.dwStructSize = sizeof(cw);
+	cw.lpszUrlPath = wpath;
+	cw.dwUrlPathLength = 64;
+	CHECK(InternetCrackUrlW(wq, 0, ICU_DECODE, &cw));
+	CHECK(wstr_eq(wpath, "/aA?q"));
+	WCHAR wd[] = { 'h', 't', 't', 'p', ':', '/', '/', 'h', '/', 'a', '/', '.',
+		       '.', '/', 'b', 0 };
+	n = 128;
+	CHECK(InternetCanonicalizeUrlW(wd, wbuf, &n, 0));
+	CHECK(wstr_eq(wbuf, "http://h/b"));
+	WCHAR wbase[] = { 'h', 't', 't', 'p', ':', '/', '/', 'h', '/', 'f', '?',
+			  'q', 0 }, wempty[] = { 0 };
+	n = 128;
+	CHECK(InternetCombineUrlW(wbase, wempty, wbuf, &n, 0));
+	CHECK(wstr_eq(wbuf, "http://h/f?q"));
 	mod_free(k);
 	mod_free(m);
 }

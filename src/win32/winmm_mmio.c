@@ -4,10 +4,12 @@
  * way): mmioOpen over a host file (FOURCC_DOS), a memory block (FOURCC_MEM)
  * or an application's I/O procedure, and the RIFF chunk walking on top.
  *
- * Files are unbuffered here: every mmioRead and mmioWrite goes straight to
- * the I/O procedure. MMIO_ALLOCBUF and mmioSetBuffer are accepted and do
- * nothing, and mmioAdvance, which only means something for a buffer the
- * caller fills directly, says MMIOERR_UNBUFFERED.
+ * A file is unbuffered unless it is opened with MMIO_ALLOCBUF, given a
+ * buffer of the caller's (pchBuffer and cchBuffer) or given one with
+ * mmioSetBuffer. Through a buffer, reads and writes go to it and the I/O
+ * procedure sees whole buffers, and the caller may fill or drain it itself
+ * with mmioGetInfo, mmioAdvance and mmioSetInfo. A FOURCC_MEM file is
+ * its memory block and stays unbuffered.
  */
 #include <ctype.h>
 #include <errno.h>
@@ -20,8 +22,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "runtime/builtin.h"
 #include "runtime/gate.h"
 #include "win32/codepage.h"
+#include "win32/handle.h"
 #include "win32/internal.h"
 #include "win32/k32.h"
 #include "win32/path.h"
@@ -29,26 +33,42 @@
 struct mmio {
 	MMIOINFO info;
 	int fd;			/* FOURCC_DOS */
+	HANDLE borrowed;	/* the handle an MMIO_FHOPEN-style open was given */
 	LONG mem_size;		/* FOURCC_MEM: bytes in pchBuffer */
 	int mem_owned;		/* FOURCC_MEM buffer allocated here */
+	char *own_buf;		/* an I/O buffer allocated here */
 };
 
-/* Installed I/O procedures (mmioInstallIOProc). */
+/* Installed I/O procedures (mmioInstallIOProc); the latest installed for a
+ * FOURCC is the one found, and the first removed. */
 #define MAX_PROCS 16
 static struct {
 	FOURCC fcc;
 	LPMMIOPROC proc;
+	unsigned seq;		/* installation order; 0 for a free slot */
 } procs[MAX_PROCS];
+static unsigned next_seq = 1;
 static pthread_mutex_t procs_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* The slot of the latest procedure for fcc (and proc, if given), or -1;
+ * with procs_lock held. */
+static int latest_proc(FOURCC fcc, LPMMIOPROC proc)
+{
+	int best = -1;
+
+	for (int i = 0; i < MAX_PROCS; i++)
+		if (procs[i].seq && procs[i].fcc == fcc &&
+		    (!proc || procs[i].proc == proc) &&
+		    (best < 0 || procs[i].seq > procs[best].seq))
+			best = i;
+	return best;
+}
 
 static LPMMIOPROC find_proc(FOURCC fcc)
 {
-	LPMMIOPROC p = NULL;
-
 	pthread_mutex_lock(&procs_lock);
-	for (int i = 0; i < MAX_PROCS && !p; i++)
-		if (procs[i].proc && procs[i].fcc == fcc)
-			p = procs[i].proc;
+	int i = latest_proc(fcc, NULL);
+	LPMMIOPROC p = i >= 0 ? procs[i].proc : NULL;
 	pthread_mutex_unlock(&procs_lock);
 	return p;
 }
@@ -91,6 +111,16 @@ static LRESULT builtin_proc(struct mmio *m, UINT msg, LPARAM l1, LPARAM l2)
 			mi->lDiskOffset = 0;
 			return 0;
 		} else {
+			if (!l1 && m->borrowed) {
+				/* No name: the file handle in adwInfo[0], used
+				 * from where it is. */
+				m->fd = file_handle_fd(m->borrowed);
+				off_t at = m->fd < 0 ? -1 : lseek(m->fd, 0, SEEK_CUR);
+				if (at < 0)
+					return MMIOERR_CANNOTOPEN;
+				mi->lDiskOffset = (LONG)at;
+				return 0;
+			}
 			char *path = host_path((const char *)l1);
 			if (!path)
 				return MMIOERR_FILENOTFOUND;
@@ -103,8 +133,14 @@ static LRESULT builtin_proc(struct mmio *m, UINT msg, LPARAM l1, LPARAM l2)
 			return 0;
 		}
 	case MMIOM_CLOSE:
-		if (!mem && m->fd >= 0 && close(m->fd))
+		if (m->borrowed) {
+			/* The handle is the caller's to keep with MMIO_FHOPEN;
+			 * otherwise closing the file closes it. */
+			if (!(l1 & MMIO_FHOPEN) && !handle_close(m->borrowed))
+				return MMIOERR_CANNOTCLOSE;
+		} else if (!mem && m->fd >= 0 && close(m->fd)) {
 			return MMIOERR_CANNOTCLOSE;
+		}
 		m->fd = -1;
 		return 0;
 	case MMIOM_READ: {
@@ -204,6 +240,194 @@ static struct mmio *mmio_of(HMMIO h)
 	return (struct mmio *)h;
 }
 
+/* Buffered I/O. info.lBufOffset is the file offset of pchBuffer; the data
+ * there runs to pchEndRead, and pchNext is the current position. */
+
+static int buffered(const struct mmio *m)
+{
+	return m->info.pchBuffer && m->info.cchBuffer > 0 &&
+	       !(m->info.fccIOProc == FOURCC_MEM && !m->info.pIOProc);
+}
+
+static LONG io_tell(const struct mmio *m)
+{
+	return buffered(m) ? m->info.lBufOffset +
+			     (LONG)(m->info.pchNext - m->info.pchBuffer) :
+			     m->info.lDiskOffset;
+}
+
+/* Empties the buffer, to start at the file offset at. */
+static void buffer_reset(struct mmio *m, LONG at)
+{
+	m->info.lBufOffset = at;
+	m->info.pchNext = m->info.pchEndRead = m->info.pchBuffer;
+	m->info.pchEndWrite = m->info.pchBuffer + m->info.cchBuffer;
+}
+
+/* Writes the buffer out if it was written to; 0, or an MMIOERR. */
+static MMRESULT buffer_flush(struct mmio *m)
+{
+	MMIOINFO *mi = &m->info;
+
+	if (!buffered(m) || !(mi->dwFlags & MMIO_DIRTY))
+		return 0;
+	HPSTR end = mi->pchNext > mi->pchEndRead ? mi->pchNext : mi->pchEndRead;
+	LONG n = (LONG)(end - mi->pchBuffer);
+	if (n > 0) {
+		if (mi->lDiskOffset != mi->lBufOffset &&
+		    send_msg(m, MMIOM_SEEK, mi->lBufOffset, SEEK_SET) == -1)
+			return MMIOERR_CANNOTSEEK;
+		if (send_msg(m, MMIOM_WRITE, (LPARAM)mi->pchBuffer, n) != n)
+			return MMIOERR_CANNOTWRITE;
+	}
+	mi->pchEndRead = end;
+	mi->dwFlags &= ~MMIO_DIRTY;
+	return 0;
+}
+
+/* Moves the buffer to the current position, filled from the file if
+ * fill; 0, or an MMIOERR. */
+static MMRESULT buffer_next(struct mmio *m, int fill)
+{
+	MMIOINFO *mi = &m->info;
+	MMRESULT r = buffer_flush(m);
+
+	if (r)
+		return r;
+	LONG at = io_tell(m);
+	buffer_reset(m, at);
+	if (!fill)
+		return 0;
+	if (mi->lDiskOffset != at &&
+	    send_msg(m, MMIOM_SEEK, at, SEEK_SET) == -1)
+		return MMIOERR_CANNOTSEEK;
+	LONG n = (LONG)send_msg(m, MMIOM_READ, (LPARAM)mi->pchBuffer,
+				mi->cchBuffer);
+	if (n < 0)
+		return MMIOERR_CANNOTREAD;
+	mi->pchEndRead = mi->pchBuffer + n;
+	return 0;
+}
+
+static LONG io_read(struct mmio *m, void *buf, LONG n)
+{
+	MMIOINFO *mi = &m->info;
+	LONG done = 0;
+
+	if (n < 0)
+		return -1;
+	if (!buffered(m))
+		return (LONG)send_msg(m, MMIOM_READ, (LPARAM)buf, n);
+	while (done < n) {
+		LONG avail = (LONG)(mi->pchEndRead - mi->pchNext);
+		if (avail <= 0) {
+			if (buffer_next(m, 1))
+				return done ? done : -1;
+			if (!(avail = (LONG)(mi->pchEndRead - mi->pchNext)))
+				break;		/* the end of the file */
+		}
+		if (avail > n - done)
+			avail = n - done;
+		memcpy((char *)buf + done, mi->pchNext, avail);
+		mi->pchNext += avail;
+		done += avail;
+	}
+	return done;
+}
+
+static LONG io_write(struct mmio *m, const void *buf, LONG n)
+{
+	MMIOINFO *mi = &m->info;
+	LONG done = 0;
+
+	if (n < 0)
+		return -1;
+	if (!buffered(m)) {
+		LONG r = (LONG)send_msg(m, MMIOM_WRITE, (LPARAM)buf, n);
+		if (r > 0)
+			mi->dwFlags |= MMIO_DIRTY;
+		return r;
+	}
+	while (done < n) {
+		LONG room = (LONG)(mi->pchEndWrite - mi->pchNext);
+		if (room <= 0) {
+			if (buffer_next(m, 0))
+				return done ? done : -1;
+			room = (LONG)(mi->pchEndWrite - mi->pchNext);
+		}
+		if (room > n - done)
+			room = n - done;
+		memcpy(mi->pchNext, (const char *)buf + done, room);
+		mi->pchNext += room;
+		if (mi->pchNext > mi->pchEndRead)
+			mi->pchEndRead = mi->pchNext;
+		mi->dwFlags |= MMIO_DIRTY;
+		done += room;
+	}
+	return done;
+}
+
+static LONG io_seek(struct mmio *m, LONG off, int whence)
+{
+	MMIOINFO *mi = &m->info;
+
+	if (!buffered(m))
+		return (LONG)send_msg(m, MMIOM_SEEK, off, whence);
+	LONG to;
+	if (whence == SEEK_END) {
+		if (buffer_flush(m))
+			return -1;
+		to = (LONG)send_msg(m, MMIOM_SEEK, off, SEEK_END);
+		if (to != -1)
+			buffer_reset(m, to);
+		return to;
+	}
+	to = whence == SEEK_SET ? off : whence == SEEK_CUR ? io_tell(m) + off : -1;
+	if (to < 0)
+		return -1;
+	/* Within what the buffer holds: just move in it. */
+	if (to >= mi->lBufOffset &&
+	    to <= mi->lBufOffset + (LONG)(mi->pchEndRead - mi->pchBuffer)) {
+		mi->pchNext = mi->pchBuffer + (to - mi->lBufOffset);
+		return to;
+	}
+	if (buffer_flush(m) || send_msg(m, MMIOM_SEEK, to, SEEK_SET) == -1)
+		return -1;
+	buffer_reset(m, to);
+	return to;
+}
+
+/* Gives m a buffer of size bytes (buf, or one of its own if NULL), or none
+ * for 0, keeping the position; 0, or an MMIOERR. */
+static MMRESULT set_buffer(struct mmio *m, LPSTR buf, LONG size)
+{
+	MMRESULT r = buffer_flush(m);
+	LONG at = io_tell(m);
+	char *own = NULL;
+
+	if (r)
+		return r;
+	if (size < 0)
+		return MMSYSERR_INVALPARAM;
+	if (size && !buf && !(buf = own = malloc(size)))
+		return MMIOERR_OUTOFMEMORY;
+	/* The procedure's own position is where the buffer leaves off. */
+	if (buffered(m) && m->info.lDiskOffset != at &&
+	    send_msg(m, MMIOM_SEEK, at, SEEK_SET) == -1) {
+		free(own);
+		return MMIOERR_CANNOTSEEK;
+	}
+	free(m->own_buf);
+	m->own_buf = own;
+	m->info.pchBuffer = size ? buf : NULL;
+	m->info.cchBuffer = size;
+	if (size)
+		buffer_reset(m, at);
+	else
+		m->info.pchNext = m->info.pchEndRead = m->info.pchEndWrite = NULL;
+	return 0;
+}
+
 /*
  * The procedure a file name asks for: "x.ABC+y" means ABC's installed
  * procedure, as Windows parses compound names; otherwise FOURCC_DOS.
@@ -225,25 +449,76 @@ static FOURCC name_fourcc(const char *name)
 	return find_proc(f) ? f : FOURCC_DOS;
 }
 
+/* name as a full Windows path, into name itself (128 bytes); 0 or -1. */
+static int qualify(LPSTR name)
+{
+	char *u = acp_to_utf8(name ? name : ""), *full;
+
+	full = u ? k32_full_path(u) : NULL;
+	free(u);
+	if (!full)
+		return -1;
+	char *a = utf8_to_acp_dup(full);
+	free(full);
+	if (!a)
+		return -1;
+	snprintf(name, 128, "%s", a);
+	free(a);
+	return 0;
+}
+
+/*
+ * MMIO_GETTEMP: a new temporary file's name, into name (128 bytes). It may
+ * name a drive and a prefix, as "C:F"; with neither, the temporary
+ * directory and "MMI". 0 or -1.
+ */
+static int temp_name(LPSTR name)
+{
+	const struct builtin_dll *k = builtin_find("kernel32.dll");
+	DWORD (WINAPI *temp_path)(DWORD, LPSTR) =
+		k ? builtin_export(k, "GetTempPathA") : NULL;
+	UINT (WINAPI *temp_file)(LPCSTR, LPCSTR, UINT, LPSTR) =
+		k ? builtin_export(k, "GetTempFileNameA") : NULL;
+	char dir[MAX_PATH], prefix[4] = "MMI", out[MAX_PATH];
+	const char *p = name ? name : "";
+
+	if (!temp_path || !temp_file)
+		return -1;
+	if (p[0] && p[1] == ':') {
+		snprintf(dir, sizeof(dir), "%c:\\", p[0]);
+		p += 2;
+	} else if (!temp_path(sizeof(dir), dir)) {
+		return -1;
+	}
+	if (*p)
+		snprintf(prefix, sizeof(prefix), "%s", p);
+	size_t n;
+	if (!temp_file(dir, prefix, 0, out) || (n = strlen(out)) >= 128)
+		return -1;
+	memcpy(name, out, n + 1);
+	return 0;
+}
+
 static HMMIO mmio_open(LPSTR name, LPMMIOINFO user, DWORD flags)
 {
 	if (user)
 		user->wErrorRet = 0;
 	if (flags & MMIO_PARSE) {
-		char *u = acp_to_utf8(name ? name : ""), *full;
-		full = u ? k32_full_path(u) : NULL;
-		free(u);
-		if (!full) {
+		if (qualify(name)) {
 			if (user)
 				user->wErrorRet = MMIOERR_FILENOTFOUND;
 			return NULL;
 		}
-		char *a = utf8_to_acp_dup(full);
-		free(full);
-		if (a)
-			snprintf(name, 128, "%s", a);
-		free(a);
 		return (HMMIO)TRUE;
+	}
+	if (flags & MMIO_GETTEMP) {
+		/* Only the name is made; as documented, success is
+		 * MMSYSERR_NOERROR cast to a handle. */
+		int bad = !name || temp_name(name);
+		if (user)
+			user->wErrorRet = bad ? MMIOERR_FILENOTFOUND : 0;
+		return (HMMIO)(ULONG_PTR)(bad ? MMIOERR_FILENOTFOUND :
+					  MMSYSERR_NOERROR);
 	}
 	if (flags & (MMIO_EXIST | MMIO_DELETE)) {
 		char *path = name ? host_path(name) : NULL;
@@ -252,6 +527,9 @@ static HMMIO mmio_open(LPSTR name, LPMMIOINFO user, DWORD flags)
 		if (ok && (flags & MMIO_DELETE))
 			ok = !unlink(path);
 		free(path);
+		/* MMIO_EXIST gives back the file's full name. */
+		if (ok && (flags & MMIO_EXIST) && !(flags & MMIO_DELETE))
+			qualify(name);
 		if (!ok && user)
 			user->wErrorRet = MMIOERR_FILENOTFOUND;
 		return ok ? (HMMIO)TRUE : NULL;
@@ -275,17 +553,24 @@ static HMMIO mmio_open(LPSTR name, LPMMIOINFO user, DWORD flags)
 		m->info.fccIOProc = 0;
 	else if (!m->info.fccIOProc)
 		m->info.fccIOProc = name_fourcc(name);
+	/* An installed procedure comes first, even for DOS and MEM. */
+	if (!m->info.pIOProc)
+		m->info.pIOProc = find_proc(m->info.fccIOProc);
 	if (!m->info.pIOProc && m->info.fccIOProc != FOURCC_DOS &&
-	    m->info.fccIOProc != FOURCC_MEM &&
-	    !(m->info.pIOProc = find_proc(m->info.fccIOProc))) {
+	    m->info.fccIOProc != FOURCC_MEM) {
 		free(m);
 		if (user)
 			user->wErrorRet = MMIOERR_CANNOTOPEN;
 		return NULL;
 	}
+	if (!name && !m->info.pIOProc && m->info.fccIOProc == FOURCC_DOS)
+		m->borrowed = (HANDLE)(ULONG_PTR)m->info.adwInfo[0];
 	m->info.dwFlags = flags & ~(MMIO_ALLOCBUF | MMIO_GETTEMP);
 	m->info.hmmio = (HMMIO)m;
-	if (m->info.fccIOProc == FOURCC_MEM && !m->info.pIOProc) {
+	int mem = m->info.fccIOProc == FOURCC_MEM && !m->info.pIOProc;
+	LPSTR io_buf = NULL;
+	LONG io_size = 0;
+	if (mem) {
 		if (!m->info.pchBuffer) {
 			/* A block of our own, growable by adwInfo[0]. */
 			LONG size = m->info.cchBuffer > 0 ? m->info.cchBuffer : 0;
@@ -302,12 +587,28 @@ static HMMIO mmio_open(LPSTR name, LPMMIOINFO user, DWORD flags)
 		/* A block opened for reading holds data already. */
 		m->mem_size = (flags & MMIO_CREATE) || m->mem_owned ?
 			      0 : m->info.cchBuffer;
+	} else {
+		/* The I/O buffer: the caller's, or one of ours. */
+		if (m->info.pchBuffer && m->info.cchBuffer > 0) {
+			io_buf = m->info.pchBuffer;
+			io_size = m->info.cchBuffer;
+		} else if (flags & MMIO_ALLOCBUF) {
+			io_size = m->info.cchBuffer > 0 ? m->info.cchBuffer :
+							  MMIO_DEFAULTBUFFER;
+		}
+		m->info.pchBuffer = NULL;
+		m->info.cchBuffer = 0;
 	}
 
 	LRESULT r = send_msg(m, MMIOM_OPEN, (LPARAM)name, 0);
+	if (!r && io_size && set_buffer(m, io_buf, io_size)) {
+		send_msg(m, MMIOM_CLOSE, MMIO_FHOPEN, 0);
+		r = MMIOERR_OUTOFMEMORY;
+	}
 	if (r) {
 		if (m->mem_owned)
 			free(m->info.pchBuffer);
+		free(m->own_buf);
 		free(m);
 		if (user)
 			user->wErrorRet = (UINT)r;
@@ -332,8 +633,10 @@ WINFN(HMMIO) mm_mmioOpenW(LPWSTR name, LPMMIOINFO info, DWORD flags)
 		free(u);
 	}
 	HMMIO h = mmio_open(name ? buf : NULL, info, flags);
-	if ((flags & MMIO_PARSE) && h && name) {
-		/* szFilename is 128 characters. */
+	/* The forms that give a name back: szFilename is 128 characters. */
+	int named = (flags & (MMIO_PARSE | MMIO_EXIST)) ? h != NULL :
+		    (flags & MMIO_GETTEMP) ? h == (HMMIO)MMSYSERR_NOERROR : 0;
+	if (named && name && !(flags & MMIO_DELETE)) {
 		int n = cp_to_utf16(CP_ACP, buf, -1, name, 128, 0);
 		if (n <= 0)
 			name[0] = 0;
@@ -347,37 +650,34 @@ WINFN(MMRESULT) mm_mmioClose(HMMIO h, UINT flags)
 
 	if (!m)
 		return MMSYSERR_INVALHANDLE;
+	MMRESULT f = buffer_flush(m);
 	MMRESULT r = (MMRESULT)send_msg(m, MMIOM_CLOSE, flags, 0);
 	if (m->mem_owned)
 		free(m->info.pchBuffer);
+	free(m->own_buf);
 	free(m);
-	return r;
+	return r ? r : f;
 }
 
 WINFN(LONG) mm_mmioRead(HMMIO h, HPSTR buf, LONG n)
 {
 	struct mmio *m = mmio_of(h);
 
-	return m ? (LONG)send_msg(m, MMIOM_READ, (LPARAM)buf, n) : -1;
+	return m ? io_read(m, buf, n) : -1;
 }
 
 WINFN(LONG) mm_mmioWrite(HMMIO h, const char *buf, LONG n)
 {
 	struct mmio *m = mmio_of(h);
 
-	if (!m)
-		return -1;
-	LONG r = (LONG)send_msg(m, MMIOM_WRITE, (LPARAM)buf, n);
-	if (r > 0)
-		m->info.dwFlags |= MMIO_DIRTY;
-	return r;
+	return m ? io_write(m, buf, n) : -1;
 }
 
 WINFN(LONG) mm_mmioSeek(HMMIO h, LONG off, int origin)
 {
 	struct mmio *m = mmio_of(h);
 
-	return m ? (LONG)send_msg(m, MMIOM_SEEK, off, origin) : -1;
+	return m ? io_seek(m, off, origin) : -1;
 }
 
 WINFN(MMRESULT) mm_mmioFlush(HMMIO h, UINT flags)
@@ -386,6 +686,11 @@ WINFN(MMRESULT) mm_mmioFlush(HMMIO h, UINT flags)
 
 	if (!m)
 		return MMSYSERR_INVALHANDLE;
+	MMRESULT r = buffer_flush(m);
+	if (r)
+		return r;
+	if (buffered(m) && (flags & MMIO_EMPTYBUF))
+		buffer_reset(m, io_tell(m));
 	m->info.dwFlags &= ~MMIO_DIRTY;
 	if (!m->info.pIOProc && m->info.fccIOProc == FOURCC_DOS && m->fd >= 0)
 		fsync(m->fd);
@@ -399,12 +704,31 @@ WINFN(MMRESULT) mm_mmioGetInfo(HMMIO h, LPMMIOINFO info, UINT flags)
 	if (!m || !info)
 		return MMSYSERR_INVALHANDLE;
 	*info = m->info;
-	/* No buffer the caller may fill directly. */
-	info->cchBuffer = 0;
-	info->pchBuffer = info->pchNext = info->pchEndRead =
-		info->pchEndWrite = NULL;
-	info->lBufOffset = info->lDiskOffset;
+	if (!buffered(m)) {
+		/* No buffer the caller may fill directly. */
+		info->cchBuffer = 0;
+		info->pchBuffer = info->pchNext = info->pchEndRead =
+			info->pchEndWrite = NULL;
+		info->lBufOffset = info->lDiskOffset;
+	}
 	return 0;
+}
+
+/* Takes back what the caller did to the buffer: its position, how much it
+ * holds, and whether the caller wrote to it. */
+static void take_buffer_state(struct mmio *m, const MMIOINFO *info)
+{
+	MMIOINFO *mi = &m->info;
+
+	if (!buffered(m) || info->pchBuffer != mi->pchBuffer)
+		return;
+	if (info->pchNext >= mi->pchBuffer && info->pchNext <= mi->pchEndWrite)
+		mi->pchNext = info->pchNext;
+	if (info->pchEndRead >= mi->pchBuffer &&
+	    info->pchEndRead <= mi->pchEndWrite)
+		mi->pchEndRead = info->pchEndRead;
+	if (info->dwFlags & MMIO_DIRTY)
+		mi->dwFlags |= MMIO_DIRTY;
 }
 
 WINFN(MMRESULT) mm_mmioSetInfo(HMMIO h, const MMIOINFO *info, UINT flags)
@@ -413,18 +737,44 @@ WINFN(MMRESULT) mm_mmioSetInfo(HMMIO h, const MMIOINFO *info, UINT flags)
 
 	if (!m || !info)
 		return MMSYSERR_INVALHANDLE;
+	take_buffer_state(m, info);
 	memcpy(m->info.adwInfo, info->adwInfo, sizeof(m->info.adwInfo));
 	return 0;
 }
 
 WINFN(MMRESULT) mm_mmioSetBuffer(HMMIO h, LPSTR buf, LONG size, UINT flags)
 {
-	return mmio_of(h) ? 0 : MMSYSERR_INVALHANDLE;
+	struct mmio *m = mmio_of(h);
+
+	if (!m)
+		return MMSYSERR_INVALHANDLE;
+	if (m->info.fccIOProc == FOURCC_MEM && !m->info.pIOProc)
+		return 0;	/* a memory file is its block */
+	return set_buffer(m, buf, size);
 }
 
+/*
+ * The caller has filled (MMIO_WRITE) or drained (MMIO_READ) the buffer up to
+ * pchNext: write it out if so, and move it on, read full again for reading.
+ */
 WINFN(MMRESULT) mm_mmioAdvance(HMMIO h, LPMMIOINFO info, UINT flags)
 {
-	return mmio_of(h) ? MMIOERR_UNBUFFERED : MMSYSERR_INVALHANDLE;
+	struct mmio *m = mmio_of(h);
+
+	if (!m)
+		return MMSYSERR_INVALHANDLE;
+	if (!buffered(m))
+		return MMIOERR_UNBUFFERED;
+	if (info)
+		take_buffer_state(m, info);
+	if ((flags & MMIO_WRITE) && m->info.pchNext > m->info.pchBuffer)
+		m->info.dwFlags |= MMIO_DIRTY;
+	MMRESULT r = buffer_next(m, !(flags & MMIO_WRITE));
+	if (r == MMIOERR_CANNOTWRITE && !(flags & MMIO_WRITE))
+		r = MMIOERR_CANNOTREAD;
+	if (info)
+		*info = m->info;
+	return r;
 }
 
 WINFN(LRESULT) mm_mmioSendMessage(HMMIO h, UINT msg, LPARAM l1, LPARAM l2)
@@ -473,28 +823,27 @@ WINFN(LPMMIOPROC) mm_mmioInstallIOProcA(FOURCC fcc, LPMMIOPROC proc,
 					DWORD flags)
 {
 	LPMMIOPROC r = NULL;
+	int i;
 
 	pthread_mutex_lock(&procs_lock);
 	if (flags & MMIO_INSTALLPROC) {
-		for (int i = 0; i < MAX_PROCS; i++)
-			if (!procs[i].proc) {
-				procs[i].fcc = fcc;
-				procs[i].proc = proc;
-				r = proc;
-				break;
-			}
+		for (i = 0; i < MAX_PROCS && procs[i].seq; i++)
+			;
+		if (i < MAX_PROCS && proc) {
+			procs[i].fcc = fcc;
+			procs[i].proc = proc;
+			procs[i].seq = next_seq++;
+			r = proc;
+		}
 	} else if (flags & MMIO_REMOVEPROC) {
-		for (int i = MAX_PROCS - 1; i >= 0; i--)
-			if (procs[i].proc && procs[i].fcc == fcc &&
-			    (!proc || procs[i].proc == proc)) {
-				r = procs[i].proc;
-				procs[i].proc = NULL;
-				break;
-			}
+		if ((i = latest_proc(fcc, proc)) >= 0) {
+			r = procs[i].proc;
+			procs[i].seq = 0;
+			procs[i].proc = NULL;
+		}
 	} else if (flags & MMIO_FINDPROC) {
-		for (int i = 0; i < MAX_PROCS && !r; i++)
-			if (procs[i].proc && procs[i].fcc == fcc)
-				r = procs[i].proc;
+		if ((i = latest_proc(fcc, NULL)) >= 0)
+			r = procs[i].proc;
 	}
 	pthread_mutex_unlock(&procs_lock);
 	return r;
@@ -535,15 +884,15 @@ static int read_header(struct mmio *m, MMCKINFO *ck)
 {
 	DWORD hdr[2];
 
-	if (send_msg(m, MMIOM_READ, (LPARAM)hdr, 8) != 8)
+	if (io_read(m, hdr, 8) != 8)
 		return 0;
 	ck->ckid = hdr[0];
 	ck->cksize = hdr[1];
 	ck->fccType = 0;
-	ck->dwDataOffset = (DWORD)m->info.lDiskOffset;
+	ck->dwDataOffset = (DWORD)io_tell(m);
 	ck->dwFlags = 0;
 	if (ck->ckid == FOURCC_RIFF || ck->ckid == FOURCC_LIST) {
-		if (send_msg(m, MMIOM_READ, (LPARAM)&ck->fccType, 4) != 4)
+		if (io_read(m, &ck->fccType, 4) != 4)
 			return 0;
 	}
 	return 1;
@@ -562,7 +911,7 @@ WINFN(MMRESULT) mm_mmioDescend(HMMIO h, LPMMCKINFO ck,
 	DWORD end = parent ? parent->dwDataOffset + parent->cksize : 0xffffffff;
 
 	for (;;) {
-		LONG pos = m->info.lDiskOffset;
+		LONG pos = io_tell(m);
 		if (parent && (DWORD)pos + 8 > end)
 			return MMIOERR_CHUNKNOTFOUND;
 		MMCKINFO c;
@@ -580,8 +929,7 @@ WINFN(MMRESULT) mm_mmioDescend(HMMIO h, LPMMCKINFO ck,
 			return 0;
 		}
 		DWORD next = c.dwDataOffset + c.cksize + (c.cksize & 1);
-		if (next <= (DWORD)pos ||
-		    send_msg(m, MMIOM_SEEK, (LPARAM)next, SEEK_SET) == -1)
+		if (next <= (DWORD)pos || io_seek(m, (LONG)next, SEEK_SET) == -1)
 			return MMIOERR_CHUNKNOTFOUND;
 	}
 }
@@ -595,29 +943,33 @@ WINFN(MMRESULT) mm_mmioAscend(HMMIO h, LPMMCKINFO ck, UINT flags)
 	if (!ck)
 		return MMSYSERR_INVALPARAM;
 	if (ck->dwFlags & MMIO_DIRTY) {
-		/* A chunk written since mmioCreateChunk: fix up its size. */
-		LONG cur = m->info.lDiskOffset;
+		/* A chunk written since mmioCreateChunk: fix up its size.
+		 * ck and the position change only once that is written. */
+		LONG cur = io_tell(m);
 		DWORD size = (DWORD)cur - ck->dwDataOffset;
 		if (size != ck->cksize) {
-			ck->cksize = size;
-			if (send_msg(m, MMIOM_SEEK, (LPARAM)(ck->dwDataOffset - 4),
-				     SEEK_SET) == -1 ||
-			    send_msg(m, MMIOM_WRITE, (LPARAM)&ck->cksize, 4) != 4)
-				return MMIOERR_CANNOTWRITE;
-			if (send_msg(m, MMIOM_SEEK, cur, SEEK_SET) == -1)
+			if (io_seek(m, (LONG)(ck->dwDataOffset - 4), SEEK_SET) == -1)
 				return MMIOERR_CANNOTSEEK;
+			if (io_write(m, &size, 4) != 4) {
+				io_seek(m, cur, SEEK_SET);
+				return MMIOERR_CANNOTWRITE;
+			}
+			if (io_seek(m, cur, SEEK_SET) == -1)
+				return MMIOERR_CANNOTSEEK;
+			ck->cksize = size;
 		}
 		if (size & 1) {
 			static const char pad;
-			if (send_msg(m, MMIOM_WRITE, (LPARAM)&pad, 1) != 1)
+			if (io_write(m, &pad, 1) != 1) {
+				io_seek(m, cur, SEEK_SET);
 				return MMIOERR_CANNOTWRITE;
+			}
 		}
 		ck->dwFlags &= ~MMIO_DIRTY;
 		return 0;
 	}
 	DWORD next = ck->dwDataOffset + ck->cksize + (ck->cksize & 1);
-	return send_msg(m, MMIOM_SEEK, (LPARAM)next, SEEK_SET) == -1 ?
-	       MMIOERR_CANNOTSEEK : 0;
+	return io_seek(m, (LONG)next, SEEK_SET) == -1 ? MMIOERR_CANNOTSEEK : 0;
 }
 
 WINFN(MMRESULT) mm_mmioCreateChunk(HMMIO h, LPMMCKINFO ck, UINT flags)
@@ -634,8 +986,8 @@ WINFN(MMRESULT) mm_mmioCreateChunk(HMMIO h, LPMMCKINFO ck, UINT flags)
 		ck->ckid = FOURCC_LIST;
 	DWORD hdr[3] = { ck->ckid, ck->cksize, ck->fccType };
 	LONG n = (flags & (MMIO_CREATERIFF | MMIO_CREATELIST)) ? 12 : 8;
-	LONG pos = m->info.lDiskOffset;
-	if (send_msg(m, MMIOM_WRITE, (LPARAM)hdr, n) != n)
+	LONG pos = io_tell(m);
+	if (io_write(m, hdr, n) != n)
 		return MMIOERR_CANNOTWRITE;
 	ck->dwDataOffset = (DWORD)pos + 8;
 	ck->dwFlags = MMIO_DIRTY;

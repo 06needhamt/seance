@@ -1237,6 +1237,244 @@ static void test_iocp(void)
 	mod_free(k);
 }
 
+/* I/O procedures for the mmio tests: one that counts opens and reads
+ * nothing, and one whose 4-byte writes fail. */
+static int counted_opens;
+
+static LRESULT WINAPI counting_proc(LPSTR p, UINT msg, LPARAM l1, LPARAM l2)
+{
+	if (msg == MMIOM_OPEN)
+		counted_opens++;
+	return 0;
+}
+
+static LRESULT WINAPI other_proc(LPSTR p, UINT msg, LPARAM l1, LPARAM l2)
+{
+	return 0;
+}
+
+static LRESULT WINAPI failing_proc(LPSTR p, UINT msg, LPARAM l1, LPARAM l2)
+{
+	MMIOINFO *mi = (MMIOINFO *)p;
+
+	switch (msg) {
+	case MMIOM_OPEN:
+	case MMIOM_CLOSE:
+		return 0;
+	case MMIOM_WRITE:
+	case MMIOM_WRITEFLUSH:
+		if (l2 == 4)
+			return -1;
+		mi->lDiskOffset += (LONG)l2;
+		return l2;
+	case MMIOM_SEEK:
+		mi->lDiskOffset = l2 == SEEK_SET ? (LONG)l1 :
+				  mi->lDiskOffset + (LONG)l1;
+		return mi->lDiskOffset;
+	}
+	return -1;
+}
+
+static void test_mmio_more(struct module *m, const char *root)
+{
+	FN(m, HMMIO, mmioOpenA, LPSTR, LPMMIOINFO, DWORD);
+	FN(m, HMMIO, mmioOpenW, LPWSTR, LPMMIOINFO, DWORD);
+	FN(m, MMRESULT, mmioClose, HMMIO, UINT);
+	FN(m, LONG, mmioRead, HMMIO, HPSTR, LONG);
+	FN(m, LONG, mmioWrite, HMMIO, const char *, LONG);
+	FN(m, LONG, mmioSeek, HMMIO, LONG, int);
+	FN(m, MMRESULT, mmioAscend, HMMIO, LPMMCKINFO, UINT);
+	FN(m, MMRESULT, mmioDescend, HMMIO, LPMMCKINFO, const MMCKINFO *, UINT);
+	FN(m, MMRESULT, mmioCreateChunk, HMMIO, LPMMCKINFO, UINT);
+	FN(m, MMRESULT, mmioGetInfo, HMMIO, LPMMIOINFO, UINT);
+	FN(m, MMRESULT, mmioSetInfo, HMMIO, const MMIOINFO *, UINT);
+	FN(m, MMRESULT, mmioAdvance, HMMIO, LPMMIOINFO, UINT);
+	FN(m, LPMMIOPROC, mmioInstallIOProcA, FOURCC, LPMMIOPROC, DWORD);
+	struct module *k = mod_load("kernel32.dll", NULL);
+	FN(k, HANDLE, CreateFileA, LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES,
+	   DWORD, DWORD, HANDLE);
+	FN(k, DWORD, SetFilePointer, HANDLE, LONG, PLONG, DWORD);
+	FN(k, BOOL, CloseHandle, HANDLE);
+	FN(k, BOOL, ReadFile, HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
+	char path[512], got[64];
+	BYTE disk[128];
+	MMIOINFO info;
+	FILE *f;
+	size_t len;
+
+	/* Through a 16-byte buffer: chunks and data across its edges. */
+	char bname[128] = "C:\\mmio-buf.riff";
+	memset(&info, 0, sizeof(info));
+	info.cchBuffer = 16;
+	HMMIO h = mmioOpenA(bname, &info, MMIO_CREATE | MMIO_READWRITE |
+						MMIO_ALLOCBUF);
+	CHECK(h != NULL);
+	if (h) {
+		MMCKINFO riff = { .fccType = mmioFOURCC('B', 'U', 'F', 'F') };
+		MMCKINFO ck = { .ckid = mmioFOURCC('d', 'a', 't', 'a') };
+		CHECK_EQ(mmioCreateChunk(h, &riff, MMIO_CREATERIFF), 0);
+		CHECK_EQ(mmioCreateChunk(h, &ck, 0), 0);
+		CHECK_EQ(mmioWrite(h, "abcdefghijklmnopqrstuvwxyz0123456789ABCD", 40), 40);
+		CHECK_EQ(mmioAscend(h, &ck, 0), 0);
+		CHECK_EQ(ck.cksize, 40);
+		CHECK_EQ(mmioAscend(h, &riff, 0), 0);
+		CHECK_EQ(riff.cksize, 52);
+		CHECK_EQ(mmioSeek(h, 0, SEEK_SET), 0);
+		MMCKINFO r2 = { .fccType = mmioFOURCC('B', 'U', 'F', 'F') };
+		MMCKINFO c2 = { .ckid = mmioFOURCC('d', 'a', 't', 'a') };
+		CHECK_EQ(mmioDescend(h, &r2, NULL, MMIO_FINDRIFF), 0);
+		CHECK_EQ(mmioDescend(h, &c2, &r2, MMIO_FINDCHUNK), 0);
+		CHECK_EQ(mmioRead(h, got, 40), 40);
+		CHECK(!memcmp(got, "abcdefghijklmnopqrstuvwxyz0123456789ABCD", 40));
+		CHECK_EQ(mmioSeek(h, 0, SEEK_END), 60);
+		CHECK_EQ(mmioClose(h, 0), 0);
+	}
+	snprintf(path, sizeof(path), "%s/drive_c/mmio-buf.riff", root);
+	len = (f = fopen(path, "rb")) ? fread(disk, 1, sizeof(disk), f) : 0;
+	if (f)
+		fclose(f);
+	CHECK_EQ(len, 60);
+	CHECK(!memcmp(disk, "RIFF\x34\0\0\0BUFFdata\x28\0\0\0abcd", 24));
+
+	/* Filling the buffer directly: mmioGetInfo, mmioAdvance, mmioSetInfo. */
+	char dname[128] = "C:\\mmio-direct.bin";
+	memset(&info, 0, sizeof(info));
+	info.cchBuffer = 8;
+	h = mmioOpenA(dname, &info, MMIO_CREATE | MMIO_WRITE | MMIO_ALLOCBUF);
+	CHECK(h != NULL);
+	if (h) {
+		MMIOINFO mi;
+		CHECK_EQ(mmioGetInfo(h, &mi, 0), 0);
+		CHECK(mi.pchBuffer && mi.cchBuffer == 8 &&
+		      mi.pchEndWrite == mi.pchBuffer + 8);
+		for (char c = 'a'; c < 'a' + 11; c++) {
+			if (mi.pchNext == mi.pchEndWrite) {
+				mi.dwFlags |= MMIO_DIRTY;
+				CHECK_EQ(mmioAdvance(h, &mi, MMIO_WRITE), 0);
+			}
+			*mi.pchNext++ = c;
+		}
+		mi.dwFlags |= MMIO_DIRTY;
+		CHECK_EQ(mmioSetInfo(h, &mi, 0), 0);
+		CHECK_EQ(mmioClose(h, 0), 0);
+	}
+	snprintf(path, sizeof(path), "%s/drive_c/mmio-direct.bin", root);
+	len = (f = fopen(path, "rb")) ? fread(disk, 1, sizeof(disk), f) : 0;
+	if (f)
+		fclose(f);
+	CHECK_EQ(len, 11);
+	CHECK(!memcmp(disk, "abcdefghijk", 11));
+	/* And draining it, four bytes at a time. */
+	memset(&info, 0, sizeof(info));
+	info.cchBuffer = 4;
+	h = mmioOpenA(dname, &info, MMIO_READ | MMIO_ALLOCBUF);
+	CHECK(h != NULL);
+	if (h) {
+		MMIOINFO mi;
+		size_t n = 0;
+		CHECK_EQ(mmioGetInfo(h, &mi, 0), 0);
+		while (n < sizeof(got)) {
+			if (mi.pchNext == mi.pchEndRead) {
+				CHECK_EQ(mmioAdvance(h, &mi, MMIO_READ), 0);
+				if (mi.pchNext == mi.pchEndRead)
+					break;
+			}
+			got[n++] = *mi.pchNext++;
+		}
+		CHECK_EQ(n, 11);
+		CHECK(!memcmp(got, "abcdefghijk", 11));
+		CHECK_EQ(mmioSetInfo(h, &mi, 0), 0);
+		CHECK_EQ(mmioSeek(h, 0, SEEK_CUR), 11);
+		mmioClose(h, 0);
+	}
+	/* Unbuffered, there is no buffer to advance. */
+	h = mmioOpenA(dname, NULL, MMIO_READ);
+	CHECK(h != NULL);
+	if (h) {
+		CHECK_EQ(mmioAdvance(h, NULL, MMIO_READ), MMIOERR_UNBUFFERED);
+		mmioClose(h, 0);
+	}
+
+	/* No name: the file handle in adwInfo[0], from where it is, kept
+	 * open with MMIO_FHOPEN. */
+	HANDLE fh = CreateFileA("C:\\mmio-direct.bin", GENERIC_READ, 0, NULL,
+				OPEN_EXISTING, 0, NULL);
+	CHECK(fh != INVALID_HANDLE_VALUE);
+	CHECK_EQ(SetFilePointer(fh, 4, NULL, FILE_BEGIN), 4);
+	memset(&info, 0, sizeof(info));
+	info.fccIOProc = FOURCC_DOS;
+	info.adwInfo[0] = (DWORD)(ULONG_PTR)fh;
+	h = mmioOpenA(NULL, &info, MMIO_READ);
+	CHECK(h != NULL);
+	if (h) {
+		CHECK_EQ(mmioSeek(h, 0, SEEK_CUR), 4);
+		CHECK_EQ(mmioRead(h, got, 3), 3);
+		CHECK(!memcmp(got, "efg", 3));
+		CHECK_EQ(mmioClose(h, MMIO_FHOPEN), 0);
+	}
+	DWORD rd = 0;
+	CHECK(ReadFile(fh, got, 2, &rd, NULL) && rd == 2 && !memcmp(got, "hi", 2));
+	CHECK(CloseHandle(fh));
+
+	/* An installed procedure comes first, DOS's too. */
+	counted_opens = 0;
+	CHECK(mmioInstallIOProcA(FOURCC_DOS, counting_proc, MMIO_INSTALLPROC) ==
+	      counting_proc);
+	char nowhere[128] = "C:\\not-there.bin";
+	h = mmioOpenA(nowhere, NULL, MMIO_READ);
+	CHECK(h != NULL && counted_opens == 1);
+	if (h)
+		mmioClose(h, 0);
+	CHECK(mmioInstallIOProcA(FOURCC_DOS, NULL, MMIO_REMOVEPROC) ==
+	      counting_proc);
+	CHECK(mmioOpenA(nowhere, NULL, MMIO_READ) == NULL);
+	/* The latest installed is found, and removed, first. */
+	FOURCC t1 = mmioFOURCC('T', 'S', 'T', '1');
+	mmioInstallIOProcA(t1, counting_proc, MMIO_INSTALLPROC);
+	mmioInstallIOProcA(t1, other_proc, MMIO_INSTALLPROC);
+	CHECK(mmioInstallIOProcA(t1, NULL, MMIO_FINDPROC) == other_proc);
+	CHECK(mmioInstallIOProcA(t1, NULL, MMIO_REMOVEPROC) == other_proc);
+	CHECK(mmioInstallIOProcA(t1, NULL, MMIO_FINDPROC) == counting_proc);
+	CHECK(mmioInstallIOProcA(t1, NULL, MMIO_REMOVEPROC) == counting_proc);
+	CHECK(mmioInstallIOProcA(t1, NULL, MMIO_FINDPROC) == NULL);
+
+	/* A failed size write leaves the chunk and the position as they were. */
+	memset(&info, 0, sizeof(info));
+	info.pIOProc = failing_proc;
+	h = mmioOpenA(NULL, &info, MMIO_WRITE);
+	CHECK(h != NULL);
+	if (h) {
+		MMCKINFO ck = { .ckid = mmioFOURCC('f', 'a', 'i', 'l') };
+		CHECK_EQ(mmioCreateChunk(h, &ck, 0), 0);
+		CHECK_EQ(mmioWrite(h, "abc", 3), 3);
+		CHECK_EQ(mmioAscend(h, &ck, 0), MMIOERR_CANNOTWRITE);
+		CHECK_EQ(ck.cksize, 0);
+		CHECK(ck.dwFlags & MMIO_DIRTY);
+		CHECK_EQ(mmioSeek(h, 0, SEEK_CUR), 11);
+		mmioClose(h, 0);
+	}
+
+	/* MMIO_GETTEMP makes a name, and opens nothing. */
+	char tmp[128] = "";
+	memset(&info, 0, sizeof(info));
+	CHECK(mmioOpenA(tmp, &info, MMIO_GETTEMP) == (HMMIO)MMSYSERR_NOERROR);
+	CHECK_EQ(info.wErrorRet, 0);
+	CHECK(tmp[0] && tmp[1] == ':' && strstr(tmp, "MMI"));
+	char drive_tmp[128] = "C:F";
+	CHECK(mmioOpenA(drive_tmp, NULL, MMIO_GETTEMP) == (HMMIO)MMSYSERR_NOERROR);
+	CHECK(!strncmp(drive_tmp, "C:\\F", 4));
+
+	/* MMIO_EXIST gives back the full name, A and W. */
+	char rel[128] = "mmio-direct.bin";
+	CHECK(mmioOpenA(rel, NULL, MMIO_EXIST) != NULL);
+	CHECK_STR(rel, "C:\\mmio-direct.bin");
+	WCHAR wrel[128] = { 'm', 'm', 'i', 'o', '-', 'd', 'i', 'r', 'e', 'c', 't',
+			    '.', 'b', 'i', 'n', 0 };
+	CHECK(mmioOpenW(wrel, NULL, MMIO_EXIST) != NULL);
+	CHECK(wrel[0] == 'C' && wrel[1] == ':' && wrel[2] == '\\' && wrel[3] == 'm');
+	mod_free(k);
+}
+
 static void test_mmio(const char *root)
 {
 	struct module *m = mod_load("winmm.dll", NULL);
@@ -1259,7 +1497,7 @@ static void test_mmio(const char *root)
 	CHECK_EQ(mmioStringToFOURCCA("RIFFX", 0), FOURCC_RIFF);
 
 	/* Writes a RIFF 'TEST' file with a 3-byte 'abcd' chunk in a LIST. */
-	char name[] = "C:\\mmio.riff";
+	char name[128] = "C:\\mmio.riff";
 	MMIOINFO info;
 	memset(&info, 0, sizeof(info));
 	HMMIO h = mmioOpenA(name, &info, MMIO_CREATE | MMIO_WRITE);
@@ -1341,6 +1579,7 @@ static void test_mmio(const char *root)
 	CHECK(h != NULL);
 	if (h)
 		mmioClose(h, 0);
+	test_mmio_more(m, root);
 out:
 	mod_free(m);
 }
