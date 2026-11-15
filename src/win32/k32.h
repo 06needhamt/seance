@@ -114,6 +114,9 @@ extern void (*thread_wake_hook)(void);
  */
 void thread_terminated_check(void);
 
+/* Whether TerminateThread has asked the calling thread to end. */
+int thread_terminate_pending(void);
+
 /* ExitThread. */
 void thread_exit(DWORD code) __attribute__((noreturn));
 

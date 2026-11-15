@@ -3,6 +3,7 @@
  * user32, called through the export table the way a DLL's imports reach
  * it: classes, windows and messages, timers, strings, and the rest.
  */
+#include <sched.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1095,6 +1096,24 @@ static DWORD WINAPI idle_loop(LPVOID arg)
 	return 1;
 }
 
+/* Busy in host code until told, then into GetMessage: a request made
+ * while it was busy, with no wake to follow, is seen before it sleeps. */
+static volatile int late_go;
+static DWORD WINAPI late_loop(LPVOID arg)
+{
+	FN(BOOL, GetMessageA, LPMSG, HWND, UINT, UINT);
+	FN(BOOL, PeekMessageA, LPMSG, HWND, UINT, UINT, UINT);
+	K32(BOOL, SetEvent, HANDLE);
+	MSG m;
+
+	PeekMessageA(&m, NULL, 0, 0, PM_NOREMOVE);
+	SetEvent(arg);
+	while (!__atomic_load_n(&late_go, __ATOMIC_ACQUIRE))
+		sched_yield();
+	GetMessageA(&m, NULL, 0, 0);
+	return 1;
+}
+
 /* Sends to a window whose owner never looks, and waits. */
 static HWND never_looks;
 static DWORD WINAPI blocked_sender(LPVOID arg)
@@ -1138,6 +1157,16 @@ static void test_send_endings(void)
 	CHECK(TerminateThread(t, 3));
 	CHECK_EQ(WaitForSingleObject(t, 5000), WAIT_OBJECT_0);
 	CHECK(GetExitCodeThread(t, &code) && code == 3);
+	CloseHandle(t);
+
+	/* Asked while busy; TerminateThread gives up waiting, then the
+	 * thread goes to sleep in GetMessage and must end there. */
+	t = CreateThread(NULL, 0, late_loop, ready, 0, NULL);
+	CHECK_EQ(WaitForSingleObject(ready, 5000), WAIT_OBJECT_0);
+	CHECK(TerminateThread(t, 6));
+	__atomic_store_n(&late_go, 1, __ATOMIC_RELEASE);
+	CHECK_EQ(WaitForSingleObject(t, 5000), WAIT_OBJECT_0);
+	CHECK(GetExitCodeThread(t, &code) && code == 6);
 	CloseHandle(t);
 
 	/* Waiting on a reply, likewise; the message still runs later. */

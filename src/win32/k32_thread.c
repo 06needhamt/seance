@@ -492,14 +492,20 @@ static void on_terminate(int sig, siginfo_t *info, void *ctx)
 
 void (*thread_wake_hook)(void);
 
-/* In a sleep, woken: ends the thread if TerminateThread asked. */
-void thread_terminated_check(void)
+int thread_terminate_pending(void)
 {
 	struct thread *t = self;
 
-	if (t && t->can_jump && __atomic_load_n(&t->in_routine, __ATOMIC_ACQUIRE) &&
-	    __atomic_load_n(&t->terminate, __ATOMIC_ACQUIRE))
-		end_terminated(t);
+	return t && t->can_jump &&
+	       __atomic_load_n(&t->in_routine, __ATOMIC_ACQUIRE) &&
+	       __atomic_load_n(&t->terminate, __ATOMIC_SEQ_CST);
+}
+
+/* In a sleep, woken: ends the thread if TerminateThread asked. */
+void thread_terminated_check(void)
+{
+	if (thread_terminate_pending())
+		end_terminated(self);
 }
 
 void thread_wake_check(void)

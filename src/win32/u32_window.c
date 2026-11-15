@@ -2161,6 +2161,14 @@ static void wake_all(void)
  */
 static void wait_ms(long ms)
 {
+	/* Checked under the lock first: a request made after this is
+	 * followed by a broadcast under the lock, which the wait sees. */
+	if (thread_terminate_pending()) {
+		leave();
+		thread_terminated_check();
+		enter();
+		return;
+	}
 	if (ms < 0) {
 		pthread_cond_wait(&cond, &lock);
 	} else {

@@ -254,6 +254,9 @@ void wait_release_held(void)
 
 int wait_block(const struct timespec *deadline)
 {
+	/* Before sleeping too: a request made while this thread was busy
+	 * elsewhere may have no wake left to follow it. */
+	thread_wake_check();
 	int r = deadline ?
 		pthread_cond_timedwait(&wait_cond, &wait_mutex, deadline) :
 		pthread_cond_wait(&wait_cond, &wait_mutex);
