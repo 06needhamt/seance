@@ -81,4 +81,10 @@ void thread_exit_cleanup(void);
 /* ExitThread. */
 void thread_exit(DWORD code) __attribute__((noreturn));
 
+/*
+ * Called with the wait lock held by a thread woken in a wait: if
+ * TerminateThread has asked it to end, unlocks and ends it.
+ */
+void thread_wake_check(void);
+
 #endif /* VFW_WIN32_K32_H */

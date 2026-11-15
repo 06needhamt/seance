@@ -613,6 +613,19 @@ to a cause; what was seance's is fixed, and the rest is recorded here.
 - `__dllonexit` now adds to the DLL's own exit table, as MinGW's DLL
   startup expects (it runs the table when it detaches). It used to add
   to the process's, which ran the functions at exit, after the DLL was gone.
+- **MPEG4V** (`MPEG4V.DLL`, 3RVC): locked to a DVR product, so it doesn't
+  work here. Its first `ICM_COMPRESS_QUERY` reads `Codec` under `[PRODUCT]`
+  from `C:\Dvr\Ini\Config.ini` and only works when the value is 333.
+  Without the file it goes on to use a NULL `FILE` and faults. This is
+  the vendor's lock, and it isn't worked around.
+- **dgcolorxvfw** (`dgcolorxvfw.dll`): not a codec. It is a colour-conversion
+  library that declares no FOURCC, and its driver entry opens and refuses
+  every format. Under the sweep it used to crash, until seance's
+  `TerminateThread`, which used to do nothing, was implemented.
+  `TerminateThread` now ends the thread:
+  - at once in guest code;
+  - when it wakes, if it is waiting or sleeping in seance;
+  - before it starts, if it hasn't run.
 
 ## In-repository baseline
 

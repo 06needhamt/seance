@@ -6,6 +6,7 @@
 #include <time.h>
 
 #include "win32/handle.h"
+#include "win32/k32.h"
 #include "win32/internal.h"
 
 #define MAX_HANDLES 65536
@@ -213,11 +214,32 @@ void wait_deadline(DWORD timeout_ms, struct timespec *deadline)
 	}
 }
 
+/* The objects this thread's current wait holds references to, so that a
+ * thread TerminateThread ends inside the wait still releases them. */
+static __thread struct kobject *const *held;
+static __thread DWORD nheld;
+
+void wait_hold(struct kobject *const *objs, DWORD n)
+{
+	held = objs;
+	nheld = n;
+}
+
+void wait_release_held(void)
+{
+	DWORD n = nheld;
+
+	nheld = 0;
+	for (DWORD i = 0; i < n; i++)
+		kobj_unref(held[i]);
+}
+
 int wait_block(const struct timespec *deadline)
 {
 	int r = deadline ?
 		pthread_cond_timedwait(&wait_cond, &wait_mutex, deadline) :
 		pthread_cond_wait(&wait_cond, &wait_mutex);
+	thread_wake_check();
 	return r == ETIMEDOUT ? -1 : 0;
 }
 

@@ -1318,6 +1318,10 @@ static void test_fixture(void)
 	CHECK(selftest != NULL);
 	if (selftest)
 		CHECK_EQ(selftest(), 0);
+	int (CDECL *terminate)(void) = mod_get_proc(m, "k32_terminate_test");
+	CHECK(terminate != NULL);
+	if (terminate)
+		CHECK_EQ(terminate(), 0);
 	mod_free(m);
 }
 

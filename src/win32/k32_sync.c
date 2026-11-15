@@ -546,7 +546,9 @@ WINFN(DWORD) k32_WaitForMultipleObjectsEx(DWORD n, const HANDLE *handles,
 			return WAIT_FAILED;
 		}
 	}
+	wait_hold(objs, n);
 	r = wait_objects(n, objs, all, ms);
+	wait_hold(NULL, 0);
 	for (DWORD i = 0; i < n; i++)
 		kobj_unref(objs[i]);
 	return r;
@@ -703,10 +705,13 @@ static ULONG iocp_take(HANDLE port, OVERLAPPED_ENTRY *out, ULONG max,
 		return 0;
 	if (timeout != INFINITE)
 		wait_deadline(timeout, &deadline);
+	struct kobject *hold = &p->obj;
+	wait_hold(&hold, 1);
 	wait_lock();
 	while (!p->head && timeout &&
 	       !wait_block(timeout == INFINITE ? NULL : &deadline))
 		;
+	wait_hold(NULL, 0);
 	while (p->head && n < max) {
 		struct iocp_packet *pk = p->head;
 		if (!(p->head = pk->next))

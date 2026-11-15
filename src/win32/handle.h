@@ -82,6 +82,8 @@ void wait_broadcast(void);
  */
 void wait_deadline(DWORD timeout_ms, struct timespec *deadline);
 int wait_block(const struct timespec *deadline);
+void wait_hold(struct kobject *const *objs, DWORD n);
+void wait_release_held(void);
 
 /*
  * Waits for one (all == FALSE) or all of objs, like WaitForMultipleObjects.
