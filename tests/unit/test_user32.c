@@ -284,6 +284,19 @@ static void test_classes_and_windows(void)
 		CHECK(SetCLPW(h, GCLP_WNDPROC, (LONG_PTR)cp) == cp);
 		CHECK(GetCLPA(h, GCLP_WNDPROC) == (ULONG_PTR)proc_a);
 		log_buf[0] = '\0';
+		/* Past 256 procedures read that way, each still keeps its
+		 * encoding (none of these is called). */
+		int kept = 1;
+		for (int i = 1; i <= 300; i++) {
+			LONG_PTR fake = (LONG_PTR)proc_a + i;
+			SetWindowLongPtrA(h, GWLP_WNDPROC, fake);
+			LONG_PTR hp = GetWLPW(h, GWLP_WNDPROC);
+			SetWLPW(h, GWLP_WNDPROC, hp);
+			kept &= hp != fake && GetWLPA(h, GWLP_WNDPROC) == fake &&
+				!IsWindowUnicode(h);
+		}
+		CHECK(kept);
+		SetWindowLongPtrA(h, GWLP_WNDPROC, (LONG_PTR)proc_a);
 	}
 	/* The Ptr forms keep the whole pointer. */
 	CHECK_EQ(SetWindowLongPtrA(h, GWLP_USERDATA, (LONG_PTR)&log_buf), 77);
@@ -534,8 +547,10 @@ static void test_strings(void)
 #define CF_BITMAP 2
 
 /* The clipboard: one thread at a time, delayed rendering, GDI data. */
-static int renders;
+static int renders, render_alls, destroys;
 static UINT render_format;
+#define CLIP_RENDERED 0xc322	/* rendered by WM_RENDERALLFORMATS */
+#define CLIP_LEFT 0xc323	/* left unrendered */
 
 static LRESULT WINAPI render_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -549,6 +564,24 @@ static LRESULT WINAPI render_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		set((UINT)wp, alloc(GMEM_MOVEABLE, 16));
 		return 0;
 	}
+	if (msg == 0x0306) {	/* WM_RENDERALLFORMATS */
+		BOOL (WINAPI *open)(HWND) =
+			(BOOL (WINAPI *)(HWND))get_from(u32, "OpenClipboard");
+		BOOL (WINAPI *close)(void) =
+			(BOOL (WINAPI *)(void))get_from(u32, "CloseClipboard");
+		HANDLE (WINAPI *set)(UINT, HANDLE) =
+			(HANDLE (WINAPI *)(UINT, HANDLE))get_from(u32, "SetClipboardData");
+		HGLOBAL (WINAPI *alloc)(UINT, SIZE_T) =
+			(HGLOBAL (WINAPI *)(UINT, SIZE_T))get_from(k32, "GlobalAlloc");
+		render_alls++;
+		if (open(hwnd)) {
+			set(CLIP_RENDERED, alloc(GMEM_MOVEABLE, 4));
+			close();
+		}
+		return 0;
+	}
+	if (msg == 0x0307)	/* WM_DESTROYCLIPBOARD */
+		destroys++;
 	return def_a(hwnd, msg, wp, lp);
 }
 
@@ -582,6 +615,8 @@ static void test_clipboard(void)
 	GDI(HBITMAP, CreateBitmap, int, int, UINT, UINT, const void *);
 	GDI(DWORD, GetObjectType, HGDIOBJ);
 	K32(HGLOBAL, GlobalAlloc, UINT, SIZE_T);
+	K32(SIZE_T, GlobalSize, HGLOBAL);
+	K32(HGLOBAL, GlobalFree, HGLOBAL);
 	K32(HANDLE, CreateThread, LPSECURITY_ATTRIBUTES, SIZE_T,
 	    LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD);
 	K32(DWORD, WaitForSingleObject, HANDLE, DWORD);
@@ -605,7 +640,8 @@ static void test_clipboard(void)
 	CHECK(bm && GetObjectType(bm) == OBJ_BITMAP);
 	CHECK(SetClipboardData(CF_BITMAP, bm) == bm);
 	CHECK(SetClipboardData(CF_TEXT, GlobalAlloc(GMEM_MOVEABLE, 8)) != NULL);
-	CHECK(SetClipboardData(delayed, NULL) != NULL);
+	/* Delayed rendering: NULL back, as there is no handle yet. */
+	CHECK(SetClipboardData(delayed, NULL) == NULL);
 	CHECK(IsClipboardFormatAvailable(delayed));
 
 	/* Another thread can't open it while this one has it. */
@@ -626,12 +662,35 @@ static void test_clipboard(void)
 	HANDLE got = GetClipboardData(delayed);
 	CHECK(got != NULL && renders == 1 && render_format == delayed);
 	CHECK(GetClipboardData(delayed) == got && renders == 1);
-	/* Emptying deletes the bitmap, as a GDI object. */
+	/* A private format's handle stays the application's. */
+	HGLOBAL mine = GlobalAlloc(GMEM_MOVEABLE, 8);
+	CHECK(SetClipboardData(0x0200, mine) == mine);
+	/* Emptying deletes the bitmap, as a GDI object, and tells the owner. */
+	destroys = 0;
 	CHECK(EmptyClipboard());
+	CHECK_EQ(destroys, 1);
 	CHECK_EQ(GetObjectType(bm), 0);
 	CHECK(!IsClipboardFormatAvailable(delayed));
+	CHECK(GlobalSize(mine) == 8);
+	CHECK(GlobalFree(mine) == NULL);
 	CHECK(CloseClipboard());
+
+	/* An owner destroyed renders what it can; the rest goes. */
+	CHECK(OpenClipboard(owner));
+	CHECK(EmptyClipboard());
+	CHECK(SetClipboardData(CLIP_RENDERED, NULL) == NULL);
+	CHECK(SetClipboardData(CLIP_LEFT, NULL) == NULL);
+	CHECK(CloseClipboard());
+	render_alls = renders = 0;
 	DestroyWindow(owner);
+	CHECK_EQ(render_alls, 1);
+	CHECK(GetClipboardOwner() == NULL);
+	CHECK(IsClipboardFormatAvailable(CLIP_RENDERED));
+	CHECK(!IsClipboardFormatAvailable(CLIP_LEFT));
+	CHECK(OpenClipboard(NULL));
+	CHECK(GetClipboardData(CLIP_RENDERED) != NULL && renders == 0);
+	CHECK(EmptyClipboard());
+	CHECK(CloseClipboard());
 }
 
 static void test_misc(void)

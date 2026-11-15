@@ -372,6 +372,10 @@ static void test_packer_fixture(void)
 	dword_fn step = mod_get_proc(m, "pk_single_step");
 	if (!VFW_SANITIZER_BUILD)
 		CHECK(step && step() == 1);
+	/* A handler that sets the trap flag: the step is the guest's. */
+	dword_fn break_step = mod_get_proc(m, "pk_break_step");
+	if (!VFW_SANITIZER_BUILD)
+		CHECK(break_step && break_step() == 1);
 	/* "int 1", icebp and hlt raise what Windows raises for them. */
 	dword_fn hw = mod_get_proc(m, "pk_hw_faults");
 	if (!VFW_SANITIZER_BUILD)

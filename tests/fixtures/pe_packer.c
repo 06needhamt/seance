@@ -171,6 +171,45 @@ EXPORT DWORD pk_single_step(void)
 	return steps;
 }
 
+static const BYTE *step_at;
+
+/*
+ * Steps over a breakpoint with the trap flag set, as anti-debugging code
+ * does; the single step that follows is reported after the instruction
+ * past the breakpoint, as on Windows, not inside the resume.
+ */
+static LONG WINAPI break_then_step(EXCEPTION_POINTERS *ep)
+{
+	CONTEXT *c = ep->ContextRecord;
+
+	switch (ep->ExceptionRecord->ExceptionCode) {
+	case EXCEPTION_BREAKPOINT:
+#ifdef _WIN64
+		c->Rip++;
+#else
+		c->Eip++;
+#endif
+		c->EFlags |= 0x100;
+		return EXCEPTION_CONTINUE_EXECUTION;
+	case EXCEPTION_SINGLE_STEP:
+		step_at = ep->ExceptionRecord->ExceptionAddress;
+		return EXCEPTION_CONTINUE_EXECUTION;
+	}
+	return EXCEPTION_CONTINUE_SEARCH;
+}
+
+/* 1 if the step came right after the nop that follows the int3. */
+EXPORT DWORD pk_break_step(void)
+{
+	LPTOP_LEVEL_EXCEPTION_FILTER old = SetUnhandledExceptionFilter(break_then_step);
+	step_at = NULL;
+	__asm__ volatile("int3\n nop\n movl %%eax, %%eax\n nop" ::: "memory");
+	SetUnhandledExceptionFilter(old);
+	/* int3 (CC), nop (90), then the step: at the mov (89 C0). */
+	return step_at && step_at[-2] == 0xcc && step_at[-1] == 0x90 &&
+	       step_at[0] == 0x89 && step_at[1] == 0xc0;
+}
+
 static DWORD hw_seen;
 
 /* Checks each hardware fault as Windows reports it, and steps over it. */

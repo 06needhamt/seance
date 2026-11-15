@@ -940,6 +940,7 @@ BOOL WINAPI user_DestroyWindow(HWND hwnd)
 	if (!ok || again)
 		return ok;
 
+	user_clipboard_owner_destroyed(hwnd);
 	send(hwnd, WM_DESTROY, 0, 0, 1);
 	for (size_t i = 0; i < n; i++)
 		user_DestroyWindow(kids[i]);
@@ -1059,17 +1060,17 @@ LRESULT WINAPI user_DefWindowProcA(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
  * Windows, which CallWindowProc recognises and calls with the messages
  * converted. Setting a handle back sets the procedure it stands for.
  */
-#define PROC_HANDLES 256
+#define PROC_HANDLES 0x10000	/* all of 0xffff0000-0xffffffff */
 #define PROC_HANDLE_BASE ((uintptr_t)0xffff0000u)
-static struct { WNDPROC proc; int unicode; } proc_handles[PROC_HANDLES];
-static int nproc_handles;
+static struct proc_handle { WNDPROC proc; int unicode; } *proc_handles;
+static int nproc_handles, proc_handles_cap;
 static pthread_mutex_t proc_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static int proc_handle_index(WNDPROC p)
 {
 	uintptr_t v = (uintptr_t)p;
 
-	if (v < PROC_HANDLE_BASE || v >= PROC_HANDLE_BASE + PROC_HANDLES)
+	if (v < PROC_HANDLE_BASE || v - PROC_HANDLE_BASE >= PROC_HANDLES)
 		return -1;
 	return (int)(v - PROC_HANDLE_BASE);
 }
@@ -1087,7 +1088,16 @@ static WNDPROC proc_for_caller(WNDPROC proc, int proc_unicode, int unicode)
 		if (proc_handles[i].proc == proc &&
 		    proc_handles[i].unicode == proc_unicode)
 			break;
-	if (i == nproc_handles && i < PROC_HANDLES) {
+	if (i == nproc_handles && i == proc_handles_cap && i < PROC_HANDLES) {
+		int cap = i ? i * 2 : 64;
+		struct proc_handle *grown =
+			realloc(proc_handles, cap * sizeof(*grown));
+		if (grown) {
+			proc_handles = grown;
+			proc_handles_cap = cap;
+		}
+	}
+	if (i == nproc_handles && i < proc_handles_cap) {
 		proc_handles[i].proc = proc;
 		proc_handles[i].unicode = proc_unicode;
 		nproc_handles++;

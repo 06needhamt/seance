@@ -14,6 +14,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -249,6 +250,62 @@ static int buffered(const struct mmio *m)
 	       !(m->info.fccIOProc == FOURCC_MEM && !m->info.pIOProc);
 }
 
+/* A FOURCC_MEM file served here: its block is pchBuffer, cchBuffer long,
+ * with mem_size bytes of data in it. */
+static int is_mem(const struct mmio *m)
+{
+	return m->info.fccIOProc == FOURCC_MEM && !m->info.pIOProc;
+}
+
+/* Grows a memory file's own block by adwInfo[0]; 0, or an MMIOERR. */
+static MMRESULT mem_expand(struct mmio *m)
+{
+	MMIOINFO *mi = &m->info;
+	LONG inc = (LONG)mi->adwInfo[0];
+
+	if (!m->mem_owned || inc <= 0 || mi->cchBuffer > LONG_MAX - inc)
+		return MMIOERR_CANNOTEXPAND;
+	char *b = realloc(mi->pchBuffer, (size_t)mi->cchBuffer + inc);
+	if (!b)
+		return MMIOERR_OUTOFMEMORY;
+	memset(b + mi->cchBuffer, 0, inc);
+	mi->pchBuffer = b;
+	mi->cchBuffer += inc;
+	return 0;
+}
+
+/*
+ * mmioSetBuffer on a memory file replaces its block: the caller's buf holds
+ * the file's data, as when mmioOpen is given one; with buf NULL the data so
+ * far moves to a new block of our own. The position stays, within size.
+ */
+static MMRESULT mem_set_block(struct mmio *m, LPSTR buf, LONG size)
+{
+	MMIOINFO *mi = &m->info;
+	int owned = !buf;
+	LONG data = size;
+
+	if (size <= 0)
+		return MMSYSERR_INVALPARAM;
+	if (owned) {
+		if (!(buf = calloc(1, size)))
+			return MMIOERR_OUTOFMEMORY;
+		data = m->mem_size < size ? m->mem_size : size;
+		memcpy(buf, mi->pchBuffer, data);
+	}
+	if (mi->pchBuffer == buf)
+		owned = m->mem_owned;	/* the same block again */
+	else if (m->mem_owned)
+		free(mi->pchBuffer);
+	mi->pchBuffer = buf;
+	mi->cchBuffer = size;
+	m->mem_owned = owned;
+	m->mem_size = data;
+	if (mi->lDiskOffset > size)
+		mi->lDiskOffset = size;
+	return 0;
+}
+
 static LONG io_tell(const struct mmio *m)
 {
 	return buffered(m) ? m->info.lBufOffset +
@@ -462,7 +519,13 @@ static int qualify(LPSTR name)
 	free(full);
 	if (!a)
 		return -1;
-	snprintf(name, 128, "%s", a);
+	/* A name that doesn't fit isn't qualified at all. */
+	size_t n = strlen(a);
+	if (n >= 128) {
+		free(a);
+		return -1;
+	}
+	memcpy(name, a, n + 1);
 	free(a);
 	return 0;
 }
@@ -704,7 +767,13 @@ WINFN(MMRESULT) mm_mmioGetInfo(HMMIO h, LPMMIOINFO info, UINT flags)
 	if (!m || !info)
 		return MMSYSERR_INVALHANDLE;
 	*info = m->info;
-	if (!buffered(m)) {
+	if (is_mem(m)) {
+		/* A memory file is its own buffer: all of it, from offset 0. */
+		info->lBufOffset = 0;
+		info->pchNext = m->info.pchBuffer + m->info.lDiskOffset;
+		info->pchEndRead = m->info.pchBuffer + m->mem_size;
+		info->pchEndWrite = m->info.pchBuffer + m->info.cchBuffer;
+	} else if (!buffered(m)) {
 		/* No buffer the caller may fill directly. */
 		info->cchBuffer = 0;
 		info->pchBuffer = info->pchNext = info->pchEndRead =
@@ -720,6 +789,20 @@ static void take_buffer_state(struct mmio *m, const MMIOINFO *info)
 {
 	MMIOINFO *mi = &m->info;
 
+	if (is_mem(m)) {
+		/* The position and the data written, as offsets in the block. */
+		if (info->pchBuffer != mi->pchBuffer)
+			return;
+		HPSTR end = mi->pchBuffer + mi->cchBuffer;
+		if (info->pchNext >= mi->pchBuffer && info->pchNext <= end)
+			mi->lDiskOffset = (LONG)(info->pchNext - mi->pchBuffer);
+		if (info->pchEndRead >= mi->pchBuffer && info->pchEndRead <= end &&
+		    info->pchEndRead - mi->pchBuffer > m->mem_size)
+			m->mem_size = (LONG)(info->pchEndRead - mi->pchBuffer);
+		if ((info->dwFlags & MMIO_DIRTY) && mi->lDiskOffset > m->mem_size)
+			m->mem_size = mi->lDiskOffset;
+		return;
+	}
 	if (!buffered(m) || info->pchBuffer != mi->pchBuffer)
 		return;
 	if (info->pchNext >= mi->pchBuffer && info->pchNext <= mi->pchEndWrite)
@@ -748,8 +831,8 @@ WINFN(MMRESULT) mm_mmioSetBuffer(HMMIO h, LPSTR buf, LONG size, UINT flags)
 
 	if (!m)
 		return MMSYSERR_INVALHANDLE;
-	if (m->info.fccIOProc == FOURCC_MEM && !m->info.pIOProc)
-		return 0;	/* a memory file is its block */
+	if (is_mem(m))
+		return mem_set_block(m, buf, size);
 	return set_buffer(m, buf, size);
 }
 
@@ -763,6 +846,20 @@ WINFN(MMRESULT) mm_mmioAdvance(HMMIO h, LPMMIOINFO info, UINT flags)
 
 	if (!m)
 		return MMSYSERR_INVALHANDLE;
+	if (is_mem(m)) {
+		MMRESULT r = 0;
+		if (info)
+			take_buffer_state(m, info);
+		if ((flags & MMIO_WRITE) && m->info.lDiskOffset > m->mem_size)
+			m->mem_size = m->info.lDiskOffset;
+		/* Writing past the end grows a block of our own by the
+		 * increment mmioOpen was given; reading has no more. */
+		if (flags & MMIO_WRITE)
+			r = mem_expand(m);
+		if (info)
+			mm_mmioGetInfo(h, info, 0);
+		return r;
+	}
 	if (!buffered(m))
 		return MMIOERR_UNBUFFERED;
 	if (info)

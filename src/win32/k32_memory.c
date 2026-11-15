@@ -1183,16 +1183,34 @@ static BOOL all_committed(const void *p, SIZE_T size)
 	return TRUE;
 }
 
+/* A destination region made writable for WriteProcessMemory. */
+struct lifted {
+	BYTE *base;
+	SIZE_T size;
+	DWORD old;
+};
+
+static void restore_lifted(const struct lifted *l, size_t n)
+{
+	DWORD ignored;
+
+	for (size_t i = 0; i < n; i++)
+		k32_VirtualProtect(l[i].base, l[i].size, l[i].old, &ignored);
+}
+
 /*
  * Windows makes read-only and code pages writable for the copy, too. The
- * whole destination is checked first, so a bad range writes nothing; then
- * each region is copied with its own protection lifted and put back.
+ * whole destination is checked and made writable first, region by region,
+ * so a range that is bad, or can't be made writable, writes nothing; then
+ * it is copied, and each region gets its own protection back.
  */
 WINFN(BOOL) k32_WriteProcessMemory(HANDLE process, LPVOID addr, LPCVOID buf,
 				   SIZE_T size, SIZE_T *written)
 {
 	BYTE *dst = addr;
 	const BYTE *src = buf;
+	struct lifted *lifted = NULL;
+	size_t nlifted = 0, cap = 0;
 	SIZE_T done = 0;
 
 	if (written)
@@ -1203,29 +1221,38 @@ WINFN(BOOL) k32_WriteProcessMemory(HANDLE process, LPVOID addr, LPCVOID buf,
 		win_set_error(ERROR_PARTIAL_COPY);
 		return FALSE;
 	}
-	while (done < size) {
+	for (SIZE_T at = 0; at < size;) {
 		MEMORY_BASIC_INFORMATION info;
-		if (!query(dst + done, &info))
-			break;
+		DWORD ignored;
+		if (!query(dst + at, &info))
+			goto refuse;
 		SIZE_T chunk = (BYTE *)info.BaseAddress + info.RegionSize -
-			       (dst + done);
-		if (chunk > size - done)
-			chunk = size - done;
-		BOOL lift = info.Protect != PAGE_READWRITE &&
-			    info.Protect != PAGE_EXECUTE_READWRITE;
-		DWORD old = info.Protect, ignored;
-		if (lift && !k32_VirtualProtect(dst + done, chunk,
+			       (dst + at);
+		if (chunk > size - at)
+			chunk = size - at;
+		if (info.Protect != PAGE_READWRITE &&
+		    info.Protect != PAGE_EXECUTE_READWRITE) {
+			if (nlifted == cap) {
+				size_t ncap = cap ? cap * 2 : 8;
+				struct lifted *g =
+					realloc(lifted, ncap * sizeof(*g));
+				if (!g)
+					goto refuse;
+				lifted = g;
+				cap = ncap;
+			}
+			if (!k32_VirtualProtect(dst + at, chunk,
 						PAGE_EXECUTE_READWRITE, &ignored))
-			break;
-		SIZE_T n = vm_copy((void *)(src + done), dst + done, chunk, 1);
-		if (lift)
-			k32_VirtualProtect(dst + done, chunk, old, &ignored);
-		__builtin___clear_cache((char *)dst + done,
-					(char *)dst + done + n);
-		done += n;
-		if (n < chunk)
-			break;
+				goto refuse;
+			lifted[nlifted++] = (struct lifted){ dst + at, chunk,
+							     info.Protect };
+		}
+		at += chunk;
 	}
+	done = vm_copy((void *)src, dst, size, 1);
+	__builtin___clear_cache((char *)dst, (char *)dst + done);
+	restore_lifted(lifted, nlifted);
+	free(lifted);
 	if (written)
 		*written = done;
 	if (done < size) {
@@ -1233,6 +1260,12 @@ WINFN(BOOL) k32_WriteProcessMemory(HANDLE process, LPVOID addr, LPCVOID buf,
 		return FALSE;
 	}
 	return TRUE;
+
+refuse:
+	restore_lifted(lifted, nlifted);
+	free(lifted);
+	win_set_error(ERROR_PARTIAL_COPY);
+	return FALSE;
 }
 
 const struct builtin_export k32_memory_exports[] = {

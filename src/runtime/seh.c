@@ -138,30 +138,37 @@ static void __attribute__((noinline)) capture_context(CONTEXT *c)
 }
 
 /*
- * Loads c's general registers and jumps to c->Eip with c->Esp, as if the
+ * Loads c's registers and flags and jumps to c->Eip with c->Esp, as if the
  * function that owned that context had just resumed there. Never returns.
- * %edi holds c throughout, read one field at a time so nothing it still
- * needs is clobbered before it is used; c->Edi itself, read through c, is
- * loaded last of all.
+ * It ends in iret, as NtContinue does, so the flags and the jump take
+ * effect together: a trap flag it sets traps after the first instruction
+ * at c->Eip, not inside this function. The iret frame goes just below
+ * c->Esp, in space the target stack has given up. %edi holds c throughout;
+ * c->Edi itself is loaded last of all.
  */
 static void __attribute__((noreturn, noinline)) resume_context(const CONTEXT *c)
 {
 	__asm__ __volatile__(
 		"movl %c[esp](%%edi), %%eax\n\t"
+		"subl $12, %%eax\n\t"
 		"movl %c[eip](%%edi), %%ecx\n\t"
-		"movl %c[ebp](%%edi), %%ebx\n\t"
-		"pushl %c[eflags](%%edi)\n\t"
-		"popfl\n\t"
+		"movl %%ecx, (%%eax)\n\t"
+		"movl %%cs, %%ecx\n\t"
+		"movl %%ecx, 4(%%eax)\n\t"
+		/* The flags user code may set (iret leaves IF and IOPL alone). */
+		"movl %c[eflags](%%edi), %%ecx\n\t"
+		"andl $0x00240fd5, %%ecx\n\t"
+		"orl $0x202, %%ecx\n\t"
+		"movl %%ecx, 8(%%eax)\n\t"
 		"movl %%eax, %%esp\n\t"
-		"pushl %%ecx\n\t"
-		"movl %%ebx, %%ebp\n\t"
+		"movl %c[ebp](%%edi), %%ebp\n\t"
 		"movl %c[esi](%%edi), %%esi\n\t"
 		"movl %c[ebx](%%edi), %%ebx\n\t"
 		"movl %c[edx](%%edi), %%edx\n\t"
 		"movl %c[ecx](%%edi), %%ecx\n\t"
 		"movl %c[eax](%%edi), %%eax\n\t"
 		"movl %c[edi](%%edi), %%edi\n\t"
-		"ret\n\t"
+		"iretl\n\t"
 		:
 		: "D"(c),
 		  [esp] "i"(offsetof(CONTEXT, Esp)), [eip] "i"(offsetof(CONTEXT, Eip)),
