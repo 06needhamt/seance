@@ -3,6 +3,7 @@
  * Module table: search, load with dependencies, resolve exports, unload.
  */
 #include <dirent.h>
+#include <stddef.h>
 #include <limits.h>
 #include <errno.h>
 #include <pthread.h>
@@ -83,9 +84,21 @@ struct module *mod_from_base(const void *base)
 	return found;
 }
 
+/* The whole image: a PE's mapping, or a built-in's generated image (its
+ * export stubs and kernel32's call gate lie past the first page). */
 static size_t module_size(const struct module *m)
 {
-	return m->img ? m->img->map_len : 0x1000;
+	if (m->img)
+		return m->img->map_len;
+	const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)m->base;
+	if (!m->base || dos->e_magic != IMAGE_DOS_SIGNATURE)
+		return 0x1000;
+	DWORD size;
+	/* At the same offset in both optional header layouts. */
+	memcpy(&size, m->base + dos->e_lfanew + 4 + sizeof(IMAGE_FILE_HEADER) +
+		      offsetof(IMAGE_OPTIONAL_HEADER32, SizeOfImage),
+	       sizeof(size));
+	return size;
 }
 
 struct module *mod_from_address(const void *addr)
@@ -751,6 +764,16 @@ size_t mod_list(HMODULE *out, size_t max)
 			out[n - 1] = (HMODULE)m->base;
 	UNLOCK();
 	return n;
+}
+
+void mod_lock(void)
+{
+	LOCK();
+}
+
+void mod_unlock(void)
+{
+	UNLOCK();
 }
 
 void mod_addref(struct module *mod)

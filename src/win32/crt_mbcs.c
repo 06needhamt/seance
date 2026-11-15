@@ -88,8 +88,8 @@ CRTFN(uchar *) crt__mbsnbcpy(uchar *d, const uchar *s, size_t n) { return (uchar
 CRTFN(uchar *) crt__mbsncpy(uchar *d, const uchar *s, size_t n) { return (uchar *)strncpy((char *)d, (const char *)s, n); }
 CRTFN(uchar *) crt__mbsnbcat(uchar *d, const uchar *s, size_t n) { return (uchar *)strncat((char *)d, (const char *)s, n); }
 CRTFN(uchar *) crt__mbsncat(uchar *d, const uchar *s, size_t n) { return (uchar *)strncat((char *)d, (const char *)s, n); }
-CRTFN(size_t) crt__mbsnbcnt(const uchar *s, size_t n) { size_t l = strlen((const char *)s); return l < n ? l : n; }
-CRTFN(size_t) crt__mbsnccnt(const uchar *s, size_t n) { size_t l = strlen((const char *)s); return l < n ? l : n; }
+CRTFN(size_t) crt__mbsnbcnt(const uchar *s, size_t n) { return strnlen((const char *)s, n); }
+CRTFN(size_t) crt__mbsnccnt(const uchar *s, size_t n) { return strnlen((const char *)s, n); }
 
 /* The first character of s not in set, or NULL if there is none. */
 CRTFN(uchar *) crt__mbsspnp(const uchar *s, const uchar *set)

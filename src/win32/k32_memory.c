@@ -1122,21 +1122,24 @@ static SIZE_T vm_copy(void *local, void *remote, SIZE_T size, int write)
 	SIZE_T done = 0;
 
 	while (done < size) {
-		struct iovec l = { (BYTE *)local + done, size - done };
-		struct iovec r = { (BYTE *)remote + done, size - done };
+		BYTE *lo = (BYTE *)local + done, *re = (BYTE *)remote + done;
+		SIZE_T left = size - done;
+		struct iovec l = { lo, left };
+		struct iovec r = { re, left };
 		ssize_t n = write ? process_vm_writev(getpid(), &l, 1, &r, 1, 0) :
 				    process_vm_readv(getpid(), &l, 1, &r, 1, 0);
 		if (n <= 0) {
 			if (n < 0 && errno == EINTR)
 				continue;
 			if (n < 0 && errno == ENOSYS) {
-				/* No process_vm_*: check first, then copy. */
-				if (bad_ptr(remote, size, write))
+				/* No process_vm_*: check both sides, then copy. */
+				if (bad_ptr(re, left, write) ||
+				    bad_ptr(lo, left, !write))
 					break;
 				if (write)
-					memcpy(remote, local, size);
+					memcpy(re, lo, left);
 				else
-					memcpy(local, remote, size);
+					memcpy(lo, re, left);
 				return size;
 			}
 			break;
@@ -1163,28 +1166,69 @@ WINFN(BOOL) k32_ReadProcessMemory(HANDLE process, LPCVOID addr, LPVOID buf,
 	return TRUE;
 }
 
-/* Windows makes read-only and code pages writable for the copy, too. */
+/* TRUE if [p, p + size) is all committed memory, of whatever protection. */
+static BOOL all_committed(const void *p, SIZE_T size)
+{
+	const BYTE *a = p, *end = a + size;
+	MEMORY_BASIC_INFORMATION info;
+
+	if (!p || end < a)
+		return FALSE;
+	while (a < end) {
+		if (!query(a, &info) || info.State != MEM_COMMIT ||
+		    info.Protect == PAGE_NOACCESS)
+			return FALSE;
+		a = (const BYTE *)info.BaseAddress + info.RegionSize;
+	}
+	return TRUE;
+}
+
+/*
+ * Windows makes read-only and code pages writable for the copy, too. The
+ * whole destination is checked first, so a bad range writes nothing; then
+ * each region is copied with its own protection lifted and put back.
+ */
 WINFN(BOOL) k32_WriteProcessMemory(HANDLE process, LPVOID addr, LPCVOID buf,
 				   SIZE_T size, SIZE_T *written)
 {
+	BYTE *dst = addr;
+	const BYTE *src = buf;
+	SIZE_T done = 0;
+
 	if (written)
 		*written = 0;
 	if (!self_process(process))
 		return FALSE;
-	SIZE_T n = vm_copy((void *)buf, addr, size, 1);
-	if (n < size && !bad_ptr((const BYTE *)addr + n, size - n, 0)) {
-		DWORD old;
-		BYTE *p = (BYTE *)addr + n;
-		if (k32_VirtualProtect(p, size - n, PAGE_EXECUTE_READWRITE, &old)) {
-			memcpy(p, (const BYTE *)buf + n, size - n);
-			k32_VirtualProtect(p, size - n, old, &old);
-			__builtin___clear_cache((char *)p, (char *)p + (size - n));
-			n = size;
-		}
+	if (size && (bad_ptr(buf, size, 0) || !all_committed(addr, size))) {
+		win_set_error(ERROR_PARTIAL_COPY);
+		return FALSE;
+	}
+	while (done < size) {
+		MEMORY_BASIC_INFORMATION info;
+		if (!query(dst + done, &info))
+			break;
+		SIZE_T chunk = (BYTE *)info.BaseAddress + info.RegionSize -
+			       (dst + done);
+		if (chunk > size - done)
+			chunk = size - done;
+		BOOL lift = info.Protect != PAGE_READWRITE &&
+			    info.Protect != PAGE_EXECUTE_READWRITE;
+		DWORD old = info.Protect, ignored;
+		if (lift && !k32_VirtualProtect(dst + done, chunk,
+						PAGE_EXECUTE_READWRITE, &ignored))
+			break;
+		SIZE_T n = vm_copy((void *)(src + done), dst + done, chunk, 1);
+		if (lift)
+			k32_VirtualProtect(dst + done, chunk, old, &ignored);
+		__builtin___clear_cache((char *)dst + done,
+					(char *)dst + done + n);
+		done += n;
+		if (n < chunk)
+			break;
 	}
 	if (written)
-		*written = n;
-	if (n < size) {
+		*written = done;
+	if (done < size) {
 		win_set_error(ERROR_PARTIAL_COPY);
 		return FALSE;
 	}

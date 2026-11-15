@@ -114,6 +114,15 @@ int main(void)
 			CHECK_EQ(counter(0, 1), 1);	/* the __finally ran */
 			CHECK_EQ(counter(1, 1), 1);	/* abnormally */
 
+			/* DebugBreak's int3 unwinds out of kernel32 to the
+			 * caller's __except. */
+			CHECK_EQ(((int_fn)get(m, "seh64_debugbreak"))(), 1);
+			/* A single step is reported once, with the trap flag
+			 * cleared, and the filter itself isn't traced. */
+			counter(2, 1);
+			CHECK_EQ(((int_fn)get(m, "seh64_step"))(), 1);
+			CHECK_EQ(counter(2, 1), 1);
+
 			/* Nothing handles it: the top-level filter resumes. */
 			((void (WINAPI *)(void))get(m, "seh64_install_top"))();
 			CHECK_EQ(((int_fn)get(m, "seh64_top"))(), 1);

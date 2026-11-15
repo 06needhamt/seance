@@ -32,4 +32,13 @@ const void *gate_code(void);
 void gate_set_copy(void *code);
 const void *gate_copy(void);
 
+/*
+ * kernel32's DebugBreak, "int3; ret" as on Windows, gate_break_offset()
+ * bytes after the start of the gate's copy, so a breakpoint is raised from
+ * inside kernel32's image as a leaf the x64 unwinder can step out of into
+ * the caller. NULL until the copy exists.
+ */
+size_t gate_break_offset(void);
+const void *gate_break(void);
+
 #endif

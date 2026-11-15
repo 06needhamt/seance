@@ -1139,6 +1139,7 @@ static void test_process_memory(void)
 	FN(k, BOOL, WriteProcessMemory, HANDLE, LPVOID, LPCVOID, SIZE_T, SIZE_T *);
 	FN(k, LPVOID, VirtualAlloc, LPVOID, SIZE_T, DWORD, DWORD);
 	FN(k, BOOL, VirtualFree, LPVOID, SIZE_T, DWORD);
+	FN(k, SIZE_T, VirtualQuery, LPCVOID, PMEMORY_BASIC_INFORMATION, SIZE_T);
 	FN(k, DWORD, GetLastError, void);
 	HANDLE self = (HANDLE)(LONG_PTR)-1;
 	char src[] = "seance", dst[8] = "";
@@ -1148,7 +1149,7 @@ static void test_process_memory(void)
 	CHECK_EQ(n, sizeof(src));
 	CHECK_STR(dst, "seance");
 	/* A read that runs off the end of a mapping copies what it can. */
-	BYTE *p = VirtualAlloc(NULL, 0x2000, MEM_RESERVE, PAGE_NOACCESS);
+	BYTE *p = VirtualAlloc(NULL, 0x3000, MEM_RESERVE, PAGE_NOACCESS);
 	CHECK(p != NULL);
 	VirtualAlloc(p, 0x1000, MEM_COMMIT, PAGE_READWRITE);
 	memset(p + 0xff0, 'x', 16);
@@ -1161,6 +1162,22 @@ static void test_process_memory(void)
 	VirtualAlloc(p + 0x1000, 0x1000, MEM_COMMIT, PAGE_READONLY);
 	CHECK(WriteProcessMemory(self, p + 0x1000, "abc", 4, &n) && n == 4);
 	CHECK_STR((const char *)p + 0x1000, "abc");
+	/* Across a read-write and a read-only page, each keeps its own. */
+	CHECK(WriteProcessMemory(self, p + 0xffe, "wxyz", 4, &n) && n == 4);
+	CHECK(!memcmp(p + 0xffe, "wxyz", 4));
+	MEMORY_BASIC_INFORMATION mbi;
+	CHECK(VirtualQuery(p, &mbi, sizeof(mbi)) && mbi.Protect == PAGE_READWRITE);
+	CHECK(VirtualQuery(p + 0x1000, &mbi, sizeof(mbi)) &&
+	      mbi.Protect == PAGE_READONLY);
+	/* A range that runs into reserved memory writes nothing. */
+	CHECK(!WriteProcessMemory(self, p + 0x1ffe, "1234", 4, &n) && n == 0);
+	CHECK_EQ(GetLastError(), ERROR_PARTIAL_COPY);
+	CHECK(p[0x1ffe] != '1');
+	/* So does one whose source is bad. */
+	memcpy(p, "qqqq", 4);
+	CHECK(!WriteProcessMemory(self, p, NULL, 4, &n) && n == 0);
+	CHECK(!WriteProcessMemory(self, p, p + 0x2000, 4, &n) && n == 0);
+	CHECK(!memcmp(p, "qqqq", 4));
 	CHECK(!WriteProcessMemory((HANDLE)0x1234, p, "a", 1, &n));
 	VirtualFree(p, 0, MEM_RELEASE);
 	mod_free(k);
@@ -1180,6 +1197,8 @@ static void test_iocp(void)
 	FN(k, DWORD, WaitForSingleObject, HANDLE, DWORD);
 	FN(k, BOOL, CloseHandle, HANDLE);
 	FN(k, DWORD, GetLastError, void);
+	FN(k, HANDLE, CreateFileA, LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES,
+	   DWORD, DWORD, HANDLE);
 
 	HANDLE port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1);
 	CHECK(port != NULL);
@@ -1201,8 +1220,18 @@ static void test_iocp(void)
 	CHECK(GetQueuedCompletionStatusEx(port, e, 4, &removed, 0, FALSE));
 	CHECK_EQ(removed, 2);
 	CHECK(e[0].lpCompletionKey == 2 && e[1].dwNumberOfBytesTransferred == 30);
-	/* Associating with an existing port gives the port back. */
-	CHECK(CreateIoCompletionPort((HANDLE)0x10, port, 5, 0) == port);
+	/* Associating an overlapped file with the port gives the port back. */
+	HANDLE f = CreateFileA("C:\\iocp.bin", GENERIC_READ | GENERIC_WRITE, 0,
+			       NULL, CREATE_ALWAYS,
+			       FILE_FLAG_OVERLAPPED | FILE_FLAG_DELETE_ON_CLOSE,
+			       NULL);
+	CHECK(f != INVALID_HANDLE_VALUE);
+	CHECK(CreateIoCompletionPort(f, port, 5, 0) == port);
+	CHECK(CloseHandle(f));
+	/* A handle that isn't a file is refused. */
+	CHECK(CreateIoCompletionPort((HANDLE)0x1230, port, 5, 0) == NULL);
+	CHECK_EQ(GetLastError(), ERROR_INVALID_HANDLE);
+	CHECK(CreateIoCompletionPort(port, port, 5, 0) == NULL);
 	CHECK(!PostQueuedCompletionStatus((HANDLE)0x1234, 0, 0, NULL));
 	CHECK(CloseHandle(port));
 	mod_free(k);
@@ -1481,6 +1510,19 @@ static void test_mbcs_searchpath(const char *root)
 		 strlen("C:\\sp\\codec.ini"));
 	CHECK_EQ(SearchPathA("C:\\sp", "codec.ini", NULL, 4, found, NULL),
 		 strlen("C:\\sp\\codec.ini") + 1);
+	/* A dot in a directory name isn't the name's extension, after either
+	 * separator. */
+	snprintf(path, sizeof(path), "%s/drive_c/sp/v1.d", root);
+	mkdir(path, 0755);
+	snprintf(path, sizeof(path), "%s/drive_c/sp/v1.d/codec.ini", root);
+	if ((f = fopen(path, "w")))
+		fclose(f);
+	CHECK(SearchPathA("C:\\sp", "v1.d\\codec", ".ini", sizeof(found), found,
+			  NULL) > 0);
+	CHECK(strstr(found, "codec.ini") != NULL);
+	CHECK(SearchPathA("C:\\sp", "v1.d/codec", ".ini", sizeof(found), found,
+			  NULL) > 0);
+	CHECK(strstr(found, "codec.ini") != NULL);
 	mod_free(k);
 	mod_free(m);
 }
@@ -1517,6 +1559,8 @@ static void test_more_imports(const char *root)
 	CFN(m, int, __CppXcptFilter, unsigned, void *);
 	CFN(m, BYTE *, _mbsnbcpy, BYTE *, const BYTE *, size_t);
 	CFN(m, BYTE *, _mbsspnp, const BYTE *, const BYTE *);
+	CFN(m, size_t, _mbsnbcnt, const BYTE *, size_t);
+	CFN(m, void, _ftime32, void *);
 	CFN(m, uintptr_t, _beginthread, void (CDECL *)(void *), unsigned, void *);
 	const double *huge = get(m, "_HUGE");
 	WCHAR num[] = { ' ', '-', '4', '2', 'x', 0 }, *end = NULL;
@@ -1527,6 +1571,26 @@ static void test_more_imports(const char *root)
 	CHECK_EQ(wcstol(big, NULL, 10), 0x7fffffff);
 	WCHAR hex[] = { '0', 'x', 'f', 'f', 0 };
 	CHECK_EQ(wcstoul(hex, NULL, 0), 255);
+	/* A negative value wraps; one whose magnitude doesn't fit saturates. */
+	WCHAR m1[] = { '-', '1', 0 };
+	CHECK_EQ(wcstoul(m1, NULL, 10), 0xffffffffu);
+	WCHAR mbig[] = { '-', '9', '9', '9', '9', '9', '9', '9', '9', '9', '9', 0 };
+	errno = 0;
+	CHECK_EQ(wcstoul(mbig, NULL, 10), 0xffffffffu);
+	CHECK_EQ(errno, ERANGE);
+	errno = 0;
+	CHECK_EQ(wcstoul(big, NULL, 10), 0xffffffffu);
+	CHECK_EQ(errno, ERANGE);
+	/* Any number of leading zeros, past the old 512-character limit. */
+	WCHAR zeros[700];
+	for (int i = 0; i < 698; i++)
+		zeros[i] = '0';
+	zeros[698] = '7';
+	zeros[699] = 0;
+	end = NULL;
+	CHECK_EQ(wcstol(zeros, &end, 10), 7);
+	CHECK(end == zeros + 699);
+	CHECK_EQ(wcstoul(zeros, NULL, 10), 7);
 	WCHAR flt[] = { '2', '.', '5', 'e', '1', 0 };
 	CHECK(wcstod(flt, NULL) == 25.0);
 	CHECK_EQ(_wtoi(num), -42);
@@ -1552,6 +1616,17 @@ static void test_more_imports(const char *root)
 	memset(nb, 'z', sizeof(nb));
 	_mbsnbcpy(nb, (const BYTE *)"ab", 4);
 	CHECK(!memcmp(nb, "ab\0\0zz", 6));
+	/* Counts stop at n even when the string isn't terminated within it. */
+	BYTE unterminated[4] = { 'a', 'b', 'c', 'd' };
+	CHECK_EQ(_mbsnbcnt(unterminated, 3), 3);
+	CHECK_EQ(_mbsnbcnt((const BYTE *)"ab", 5), 2);
+	/* _ftime32 fills a 32-bit time, and nothing past the struct. */
+	struct { int32_t time; unsigned short ms; short tz, dst; BYTE after[8]; }
+		tb32;
+	memset(&tb32, 0xa5, sizeof(tb32));
+	_ftime32(&tb32);
+	CHECK(tb32.time > 1600000000 && tb32.ms < 1000);
+	CHECK(tb32.after[0] == 0xa5 && tb32.after[7] == 0xa5);
 	const BYTE *sp = (const BYTE *)"  x";
 	CHECK(_mbsspnp(sp, (const BYTE *)" ") == sp + 2);
 	CHECK(_mbsspnp(sp, (const BYTE *)" x") == NULL);
@@ -1561,11 +1636,16 @@ static void test_more_imports(const char *root)
 	beginthread_ran = 0;
 	uintptr_t th = _beginthread(beginthread_routine, 0, (void *)7);
 	CHECK(th && th != (uintptr_t)-1);
-	if (th && th != (uintptr_t)-1) {
-		CHECK_EQ(WaitForSingleObject((HANDLE)th, 5000), WAIT_OBJECT_0);
-		CloseHandle((HANDLE)th);
+	/* Its handle closes itself when it ends, so it is never waited on. */
+	for (int i = 0; i < 500 && th && th != (uintptr_t)-1; i++) {
+		if (beginthread_ran &&
+		    WaitForSingleObject((HANDLE)th, 0) == WAIT_FAILED)
+			break;
+		usleep(10000);
 	}
 	CHECK_EQ(beginthread_ran, 7);
+	CHECK_EQ(WaitForSingleObject((HANDLE)th, 0), WAIT_FAILED);
+	CHECK(!CloseHandle((HANDLE)th));
 
 	FN(k, HANDLE, FindFirstChangeNotificationA, LPCSTR, BOOL, DWORD);
 	FN(k, BOOL, FindNextChangeNotification, HANDLE);

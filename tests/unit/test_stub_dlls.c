@@ -41,10 +41,10 @@ static void test_directx(void)
 	   IUnknown *);
 	void *obj = (void *)1;
 
-	CHECK_EQ(DirectDrawCreate(NULL, &obj, NULL), (HRESULT)0x88760208);
+	CHECK_EQ(DirectDrawCreate(NULL, &obj, NULL), (HRESULT)0x88760233);
 	CHECK(obj == NULL);
 	obj = (void *)1;
-	CHECK_EQ(DirectDrawCreateEx(NULL, &obj, &IID_IUnknown, NULL), (HRESULT)0x88760208);
+	CHECK_EQ(DirectDrawCreateEx(NULL, &obj, &IID_IUnknown, NULL), (HRESULT)0x88760233);
 	CHECK(obj == NULL);
 	CHECK_EQ(DirectDrawEnumerateA(NULL, NULL), S_OK);
 

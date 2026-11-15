@@ -372,6 +372,8 @@ int seh_take_fault(int sig, siginfo_t *si, void *ucontext)
 	g[REG_UESP] = (greg_t)stack;
 	g[REG_ESP] = (greg_t)stack;
 	g[REG_EIP] = (greg_t)(uintptr_t)seh_run_chain;
+	/* Not traced while the handlers run; the context keeps the guest's. */
+	g[REG_EFL] &= ~(greg_t)0x100;
 	return 1;
 }
 

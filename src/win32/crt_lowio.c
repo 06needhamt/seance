@@ -509,14 +509,14 @@ CRTFN(void) crt__endthreadex(unsigned code)
 
 /*
  * _beginthread: a cdecl routine returning nothing (the call gate keeps the
- * stack straight). Windows closes the handle when the thread ends; here it
- * stays open, which only costs a slot in the handle table. -1 on failure.
+ * stack straight). As on Windows, the handle closes itself when the thread
+ * ends, by returning or by _endthread. -1 on failure.
  */
 CRTFN(uintptr_t) crt__beginthread(void (STUB_CDECL *start)(void *),
 				  unsigned stack, void *arg)
 {
 	HANDLE h = thread_create_ex(stack, (LPTHREAD_START_ROUTINE)(void *)start,
-				    arg, 0, NULL);
+				    arg, THREAD_CLOSE_ON_EXIT, NULL);
 
 	if (!h) {
 		errno = EAGAIN;

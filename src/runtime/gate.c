@@ -105,14 +105,32 @@ const void *gate_code(void)
 	return vfw_gate_start;
 }
 
+/* gate_break(), for DebugBreak's assembly to load. */
+__attribute__((visibility("hidden"))) const void *vfw_gate_break_addr;
+
 void gate_set_copy(void *code)
 {
+	__atomic_store_n(&vfw_gate_break_addr,
+			 code ? (const char *)code + gate_break_offset() : NULL,
+			 __ATOMIC_RELEASE);
 	__atomic_store_n(&copy, code, __ATOMIC_RELEASE);
 }
 
 const void *gate_copy(void)
 {
 	return __atomic_load_n(&copy, __ATOMIC_ACQUIRE);
+}
+
+size_t gate_break_offset(void)
+{
+	return (gate_code_size() + 15) & ~(size_t)15;
+}
+
+const void *gate_break(void)
+{
+	const char *c = gate_copy();
+
+	return c ? c + gate_break_offset() : NULL;
 }
 
 uintptr_t gate_call(const void *fn, unsigned n, const uintptr_t *args)

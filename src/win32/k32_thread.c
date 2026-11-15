@@ -41,6 +41,7 @@ struct thread {
 
 	sigjmp_buf exit_jump;		/* ExitThread returns here */
 	int can_jump;
+	HANDLE close_on_exit;		/* _beginthread's handle */
 };
 
 /* The calling thread's object: one we created, or made on demand. */
@@ -144,6 +145,8 @@ static void *thread_main(void *arg)
 	self = t;
 	if (runtime_enter()) {
 		thread_finish(t, (DWORD)-1, 0);
+		if (t->close_on_exit)
+			handle_close(t->close_on_exit);
 		kobj_unref(&t->obj);
 		return NULL;
 	}
@@ -172,6 +175,8 @@ static void *thread_main(void *arg)
 	t->can_jump = 0;
 
 	thread_finish(t, code, 1);
+	if (t->close_on_exit)
+		handle_close(t->close_on_exit);
 	self = NULL;
 	teb_exit_thread();
 	kobj_unref(&t->obj);	/* the thread's own reference */
@@ -330,7 +335,20 @@ WINFN(DWORD) k32_SuspendThread(HANDLE h)
 HANDLE thread_create_ex(SIZE_T stack, LPTHREAD_START_ROUTINE start, LPVOID param,
 			DWORD flags, LPDWORD tid)
 {
-	return k32_CreateThread(NULL, stack, start, param, flags, tid);
+	if (!(flags & THREAD_CLOSE_ON_EXIT))
+		return k32_CreateThread(NULL, stack, start, param, flags, tid);
+	/* Suspended until the handle is recorded, so it can't end first. */
+	flags &= ~THREAD_CLOSE_ON_EXIT;
+	HANDLE h = k32_CreateThread(NULL, stack, start, param,
+				    flags | CREATE_SUSPENDED, tid);
+	struct thread *t = h ? thread_from(h) : NULL;
+	if (t) {
+		t->close_on_exit = h;
+		kobj_unref(&t->obj);
+		if (!(flags & CREATE_SUSPENDED))
+			k32_ResumeThread(h);
+	}
+	return h;
 }
 
 WINFN(BOOL) k32_TerminateThread(HANDLE h, DWORD code)

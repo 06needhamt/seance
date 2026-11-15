@@ -15,6 +15,7 @@
 #include "loader/modules.h"
 #include "runtime/builtin.h"
 #include "runtime/crash.h"
+#include "runtime/gate.h"
 #include "runtime/runtime.h"
 #include "runtime/teb.h"
 #include "test.h"
@@ -367,6 +368,10 @@ static void test_packer_fixture(void)
 	/* Sanitizer builds leave the fault signals to the sanitizer. */
 	if (!VFW_SANITIZER_BUILD)
 		CHECK(breakpoints && breakpoints() == 2);
+	/* The trap flag: one single step, and no more once it's handled. */
+	dword_fn step = mod_get_proc(m, "pk_single_step");
+	if (!VFW_SANITIZER_BUILD)
+		CHECK(step && step() == 1);
 	mod_free(m);
 }
 
@@ -377,6 +382,12 @@ static void test_builtin_modules(void)
 	if (!k32)
 		return;
 	CHECK(k32->builtin != NULL && k32->img == NULL);
+	/* The whole generated image is kernel32's, the gate and DebugBreak's
+	 * int3 included (they lie past its first page). */
+	CHECK(gate_copy() && mod_from_address(gate_copy()) == k32);
+	CHECK(gate_break() && mod_from_address(gate_break()) == k32);
+	CHECK(((const BYTE *)gate_break())[0] == 0xcc &&
+	      ((const BYTE *)gate_break())[1] == 0xc3);
 	CHECK(mod_load("kernel32.dll", NULL) == k32);
 	CHECK_EQ(k32->refcount, 2);
 	mod_free(k32);
