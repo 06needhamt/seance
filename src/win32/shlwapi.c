@@ -93,6 +93,29 @@ WINFN(BOOL) sl_PathRemoveFileSpecA(LPSTR p)
 WINFN(void) sl_PathStripPathA(LPSTR p) { LPSTR f=sl_PathFindFileNameA(p); memmove(p,f,strlen(f)+1); }
 WINFN(BOOL) sl_PathIsRootA(LPCSTR p) { char *r=root_end_a(p); return r && !*r; }
 WINFN(LPSTR) sl_PathSkipRootA(LPCSTR p) { return root_end_a(p); }
+/* "C:\\", "\\\\server\\share" or "\\": FALSE, unchanged, with no root. */
+static size_t root_len(const char *p)
+{
+	char *r = root_end_a(p);
+	if (!r) return (size_t)-1;
+	if (sep(p[0]) && sep(p[1]) && r - p > 2 && sep(r[-1])) r--;
+	return (size_t)(r - p);
+}
+WINFN(BOOL) sl_PathStripToRootA(LPSTR p)
+{ size_t n = p ? root_len(p) : (size_t)-1; if (n == (size_t)-1) return FALSE; p[n] = 0; return TRUE; }
+WINFN(BOOL) sl_PathStripToRootW(LPWSTR p)
+{
+	/* The root is ASCII: measured on a copy whose other characters are 'x'. */
+	char a[MAX_PATH];
+	size_t i = 0;
+	if (!p) return FALSE;
+	for (; p[i] && i < sizeof(a) - 1; i++) a[i] = p[i] < 0x80 ? (char)p[i] : 'x';
+	a[i] = 0;
+	size_t n = root_len(a);
+	if (n == (size_t)-1) return FALSE;
+	p[n] = 0;
+	return TRUE;
+}
 WINFN(BOOL) sl_PathIsRelativeA(LPCSTR p) { return !(p && ((p[0] && p[1]==':') || sep(p[0]))); }
 WINFN(BOOL) sl_PathIsURLA(LPCSTR p)
 {
@@ -110,6 +133,17 @@ WINFN(BOOL) sl_PathIsDirectoryA(LPCSTR p)
 { char *u=path_to_unix(p); struct stat st; BOOL ok=u && !stat(u,&st) && S_ISDIR(st.st_mode); free(u); return ok; }
 WINFN(BOOL) sl_PathAppendA(LPSTR p, LPCSTR more)
 { while (sep(*more)) more++; if (!sl_PathAddBackslashA(p)) return FALSE; if (strlen(p)+strlen(more)>=MAX_PATH) return FALSE; strcat(p,more); return TRUE; }
+WINFN(BOOL) sl_PathAppendW(LPWSTR p, LPCWSTR more)
+{
+	if (!p || !more) return FALSE;
+	while (*more == '\\' || *more == '/') more++;
+	size_t n = wstrlen(p), m = wstrlen(more);
+	int slash = n && p[n-1] != '\\' && p[n-1] != '/';
+	if (n + slash + m >= MAX_PATH) return FALSE;
+	if (slash) p[n++] = '\\';
+	memcpy(p + n, more, (m + 1) * sizeof(WCHAR));
+	return TRUE;
+}
 /* "\\x" after a directory is on its drive (or share): C:\\x. */
 WINFN(LPSTR) sl_PathCombineA(LPSTR out, LPCSTR dir, LPCSTR file)
 {
@@ -602,7 +636,7 @@ WINFN(HRESULT) sl_DllGetVersion(DLLVERSIONINFO *v)
 const struct builtin_export shlwapi_exports[] = {
 	E(DllGetVersion), E(PathCanonicalizeA), E(PathCanonicalizeW), E(PathCompactPathA),
 	E(PathCompactPathExA), E(SHDeleteKeyA), E(SHDeleteKeyW), E(SHDeleteValueA),
-	E(SHDeleteValueW), E(SHGetValueA), E(SHGetValueW), E(SHSetValueA), E(SHSetValueW), E(PathAddBackslashA), E(PathAddBackslashW), E(PathAppendA),
+	E(SHDeleteValueW), E(SHGetValueA), E(SHGetValueW), E(SHSetValueA), E(SHSetValueW), E(PathAddBackslashA), E(PathAddBackslashW), E(PathAppendA), E(PathAppendW), E(PathStripToRootA), E(PathStripToRootW),
 	E(PathCombineA), E(PathCombineW), E(PathFileExistsA), E(PathFileExistsW), E(PathFindExtensionA),
 	E(PathFindExtensionW), E(PathFindFileNameA), E(PathFindFileNameW),
 	E(PathIsDirectoryA), E(PathIsDirectoryW), E(PathIsFileSpecA), E(PathIsFileSpecW),

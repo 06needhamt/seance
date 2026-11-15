@@ -8,6 +8,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "win32/codepage.h"
 #include "win32/internal.h"
 #include "win32/k32.h"
 #include "win32/path.h"
@@ -103,6 +104,55 @@ WINFN(ATOM) k32_FindAtomA(LPCSTR n) { return find_atom(local_atoms, n); }
 WINFN(ATOM) k32_AddAtomA(LPCSTR n) { return add_atom(local_atoms, n); }
 WINFN(ATOM) k32_DeleteAtom(ATOM a) { return delete_atom(local_atoms, a); }
 WINFN(UINT) k32_GetAtomNameA(ATOM a, LPSTR o, int n) { return get_atom_name(local_atoms, a, o, n); }
+/*
+ * The W forms hold names as UTF-8 in the same tables, so an atom added
+ * through one form is found through the other. An integer atom passes
+ * through as it is.
+ */
+static int atom_name_a(LPCWSTR name, char out[256])
+{
+	if (!name || (ULONG_PTR)name <= 0xffff)
+		return 0;
+	if (cp_from_utf16(CP_UTF8, name, -1, out, 256, '?', NULL) < 0) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return -1;
+	}
+	return 1;
+}
+static ATOM atom_w(ATOM (*fn)(struct atom *, LPCSTR), struct atom *table,
+		   LPCWSTR name)
+{
+	char a[256];
+	int r = atom_name_a(name, a);
+	return r < 0 ? 0 : fn(table, r ? a : (LPCSTR)name);
+}
+static UINT atom_name_w(struct atom *table, ATOM atom, LPWSTR out, int size)
+{
+	char a[256];
+	if (!out || size <= 0 || !get_atom_name(table, atom, a, sizeof(a)))
+		return 0;
+	int n = cp_to_utf16(CP_UTF8, a, -1, NULL, 0, 0);
+	if (n <= 0)
+		return 0;
+	if (n > size) {
+		/* Truncated, as the A form does. */
+		WCHAR *w = utf8_to_utf16_dup(a);
+		if (!w)
+			return 0;
+		memcpy(out, w, (size_t)(size - 1) * sizeof(WCHAR));
+		out[size - 1] = 0;
+		free(w);
+		return (UINT)size - 1;
+	}
+	cp_to_utf16(CP_UTF8, a, -1, out, size, 0);
+	return (UINT)n - 1;
+}
+WINFN(ATOM) k32_GlobalFindAtomW(LPCWSTR n) { return atom_w(find_atom, atoms, n); }
+WINFN(ATOM) k32_GlobalAddAtomW(LPCWSTR n) { return atom_w(add_atom, atoms, n); }
+WINFN(UINT) k32_GlobalGetAtomNameW(ATOM a, LPWSTR o, int n) { return atom_name_w(atoms, a, o, n); }
+WINFN(ATOM) k32_FindAtomW(LPCWSTR n) { return atom_w(find_atom, local_atoms, n); }
+WINFN(ATOM) k32_AddAtomW(LPCWSTR n) { return atom_w(add_atom, local_atoms, n); }
+WINFN(UINT) k32_GetAtomNameW(ATOM a, LPWSTR o, int n) { return atom_name_w(local_atoms, a, o, n); }
 WINFN(void) k32_GlobalFix(HGLOBAL h) { (void)h; }
 WINFN(void) k32_GlobalUnfix(HGLOBAL h) { (void)h; }
 
@@ -143,9 +193,10 @@ WINFN(LONG) k32__llseek(int h, LONG off, int origin)
 
 #define E(n) { #n, 0, (void *)k32_##n }
 const struct builtin_export k32_legacy_exports[] = {
-	E(AddAtomA), E(CreateProcessA), E(DeleteAtom), E(DeviceIoControl), E(FindAtomA), E(GetAtomNameA), E(GetLogicalDriveStringsA),
-	E(GetProcessVersion), E(GlobalAddAtomA), E(GlobalDeleteAtom), E(GlobalFindAtomA),
-	E(GlobalFix), E(GlobalGetAtomNameA), E(GlobalUnfix), E(MulDiv), E(SetHandleCount),
+	E(AddAtomA), E(AddAtomW), E(CreateProcessA), E(DeleteAtom), E(DeviceIoControl), E(FindAtomA), E(FindAtomW),
+	E(GetAtomNameA), E(GetAtomNameW), E(GetLogicalDriveStringsA),
+	E(GetProcessVersion), E(GlobalAddAtomA), E(GlobalAddAtomW), E(GlobalDeleteAtom), E(GlobalFindAtomA), E(GlobalFindAtomW),
+	E(GlobalFix), E(GlobalGetAtomNameA), E(GlobalGetAtomNameW), E(GlobalUnfix), E(MulDiv), E(SetHandleCount),
 	E(_hread), E(_hwrite), E(_lclose), E(_lcreat), E(_llseek),
 	BUILTIN_END
 };

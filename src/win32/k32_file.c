@@ -1387,6 +1387,30 @@ WINFN(BOOL) k32_GetVolumeInformationA(LPCSTR root, LPSTR name, DWORD name_size,
 	return TRUE;
 }
 
+/* The same answers, as UTF-16 (scmpack.dll asks this form). */
+WINFN(BOOL) k32_GetVolumeInformationW(LPCWSTR root, LPWSTR name,
+				      DWORD name_size, LPDWORD serial,
+				      LPDWORD max_comp, LPDWORD flags,
+				      LPWSTR fs, DWORD fs_size)
+{
+	static const WCHAR vname[] = { 'V', 'F', 'W', 0 };
+	static const WCHAR ntfs[] = { 'N', 'T', 'F', 'S', 0 };
+
+	(void)root;
+	if (name && name_size) {
+		DWORD n = name_size < 4 ? name_size - 1 : 3;
+		memcpy(name, vname, n * sizeof(WCHAR));
+		name[n] = 0;
+	}
+	if (fs && fs_size) {
+		DWORD n = fs_size < 5 ? fs_size - 1 : 4;
+		memcpy(fs, ntfs, n * sizeof(WCHAR));
+		fs[n] = 0;
+	}
+	return k32_GetVolumeInformationA(NULL, NULL, 0, serial, max_comp,
+					 flags, NULL, 0);
+}
+
 WINFN(BOOL) k32_GetFileInformationByHandle(HANDLE h,
 					   LPBY_HANDLE_FILE_INFORMATION info)
 {
@@ -1846,6 +1870,7 @@ const struct builtin_export k32_file_exports[] = {
 	E(GetTempPathA),
 	E(GetTempPathW),
 	E(GetVolumeInformationA),
+	E(GetVolumeInformationW),
 	E(LockFile),
 	E(MapViewOfFile),
 	E(MapViewOfFileEx),

@@ -338,6 +338,28 @@ static void test_wrong_arch_skipped(void)
 }
 
 /*
+ * An unpacking stub that binds a missing import through GetProcAddress gets
+ * a trap, as the loader binds it; ordinary code probing for it gets NULL.
+ */
+static void test_unpacker_fixture(void)
+{
+	struct module *m = mod_load(fixture("pe_unpacker.dll"), NULL);
+	CHECK(m != NULL);
+	if (!m) {
+		fprintf(stderr, "  %s\n", vfw_error());
+		return;
+	}
+	int (CDECL *bound)(void) = mod_get_proc(m, "up_bound");
+	int (CDECL *probe)(void) = mod_get_proc(m, "up_probe");
+	CHECK(bound && probe);
+	if (bound && probe) {
+		CHECK_EQ(bound(), 1);
+		CHECK_EQ(probe(), 1);
+	}
+	mod_free(m);
+}
+
+/*
  * A packer's DllMain finds kernel32 from its return address and resolves
  * functions by walking kernel32's exports; a cdecl routine runs as a thread.
  */
@@ -498,5 +520,6 @@ int main(void)
 	test_fallback_builtins();
 	test_wrong_arch_skipped();
 	test_packer_fixture();
+	test_unpacker_fixture();
 	return test_summary("test_runtime");
 }

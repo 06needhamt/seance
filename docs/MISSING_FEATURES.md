@@ -795,6 +795,37 @@ to a cause; what was seance's is fixed, and the rest is recorded here.
     writes by default. Set it to 0 in the registry file for 16 or 32 bits
     (`--output-format BGR32`); with MMX it doesn't give 24.
   - It also takes its vendor's own MYUV and TXSY formats.
+- **UPX-packed DLLs** (`DivX520.dll`, `scmpack.dll`): they load now, and
+  DivX 5.2 round-trips (39.3 dB).
+  - UPX's stub binds the packed DLL's import table itself, through
+    `GetProcAddress`, and fails `DllMain` at the first NULL (gdi32's
+    `StartDocA`, kernel32's `GlobalAddAtomW`). The loader binds an
+    unimplemented import to a trap that reports it if it is called; these
+    are the same imports bound late.
+  - `GetProcAddress` called from such a stub, before its DLL's `DllMain`
+    has returned, now gives a trap for an unimplemented built-in function,
+    as the loader does. The stub is code in a writable and executable
+    section that holds the entry point. A probe from anywhere else still
+    gets NULL.
+  - Added for what scmpack calls from its `DllMain`: `GlobalAddAtomW` and
+    the other W atom functions, `EnumResourceLanguagesW`,
+    `GetVolumeInformationW`, `PathAppendW` and `PathStripToRootA/W`.
+  - scmpack (SMV Media Pack) is a set of DirectShow decoders for SMV, its
+    vendor's own container. The zip has no SMV files to try them on.
+- **CoreAVC** (`CoreAVCDecoder.ax`): wrapped in Licenturion's licence
+  protector, which checks for a kernel debugger (`SICE`, `NTICE`) and its
+  licence key under `Software\Licenturion GmbH`. Without the key `DllMain`
+  fails. seance doesn't get round that.
+- **Insignis MultiCodec** (`MultiCodec.dll`, INMC): it opens, but
+  `ICM_COMPRESS` gives `ICERR_UNSUPPORTED`. It needs LEADTOOLS 9
+  (`LTKRN90N.dll`, `LTDIS90N.dll`, `LTFIL90N.DLL`), `d3dx9_30.dll` and its
+  own software's `HKLM\Software\Insignis Technologies\REMOTEDG` keys,
+  none of which are in the zip. The error now names them.
+- **DivX Pro 5.1.1** (`DivX511.dll`, the adware-supported edition): its
+  first `ICM_COMPRESS` looks for the Gator (GAIN) adware's COM class and
+  `HKLM\SOFTWARE\Gator.com\CMEII`. Without them it opens a dialog and
+  refuses (`ICERR_ERROR`). That is the vendor's licence condition; seance
+  doesn't get round it. It decodes.
 
 ## In-repository baseline
 
