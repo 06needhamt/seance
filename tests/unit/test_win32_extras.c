@@ -1620,6 +1620,55 @@ static void test_more_imports(const char *root)
 	mod_free(m);
 }
 
+static int dllexit_calls;
+static void CDECL dllexit_fn(void) { dllexit_calls++; }
+
+/* __dllonexit appends to the DLL's own table, as MinGW's DLL startup
+ * expects, and free ignores a pointer that can't start a block (vfwbw.dll
+ * frees one a byte into its block), as a Windows heap does. */
+static void test_dllonexit_and_bad_free(void)
+{
+	struct module *m = mod_load("msvcrt.dll", NULL);
+	CHECK(m != NULL);
+	if (!m)
+		return;
+	typedef void (CDECL *pfv)(void);
+	CFN(m, void *, __dllonexit, void *, pfv **, pfv **);
+	CFN(m, void *, malloc, size_t);
+	CFN(m, void, free, void *);
+	CFN(m, size_t, _msize, void *);
+
+	pfv *begin = malloc(32 * sizeof(pfv)), *end = begin;
+	CHECK(begin != NULL);
+	if (!begin)
+		return;
+	for (int i = 0; i < 100; i++)
+		CHECK(__dllonexit((void *)dllexit_fn, &begin, &end) == (void *)dllexit_fn);
+	CHECK(end - begin == 100);
+	CHECK(_msize(begin) >= 100 * sizeof(pfv));
+	dllexit_calls = 0;
+	for (pfv *f = end - 1; f >= begin; f--)
+		(*f)();
+	CHECK_EQ(dllexit_calls, 100);
+	free(begin);
+
+	/* With no table yet, one is made. */
+	begin = end = NULL;
+	CHECK(__dllonexit((void *)dllexit_fn, &begin, &end) == (void *)dllexit_fn);
+	CHECK(begin && end == begin + 1 && begin[0] == dllexit_fn);
+	free(begin);
+	CHECK(__dllonexit(NULL, &begin, &end) == NULL);
+
+	char *block = malloc(64);
+	CHECK(block != NULL);
+	free(block + 1);	/* ignored, with a warning */
+	free(block + 13);
+	if (block)
+		block[63] = 1;	/* still the caller's */
+	free(block);
+	mod_free(m);
+}
+
 int main(void)
 {
 	char root[256];
@@ -1651,6 +1700,7 @@ int main(void)
 	test_splitpath();
 	test_mbcs_searchpath(root);
 	test_more_imports(root);
+	test_dllonexit_and_bad_free();
 	test_toolhelp();
 	test_process_memory();
 	test_iocp();

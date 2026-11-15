@@ -595,6 +595,24 @@ to a cause; what was seance's is fixed, and the rest is recorded here.
     expired"), fails to be created with `E_NOINTERFACE`. Why wasn't
     looked into past its trial code.
   - None of this is worked around.
+- **BergWave** (`vfwbw.dll`, BW00): faults of its own, so it doesn't work.
+  - It reads its quantisers from `HKCU\Software\GNU\BergWave` (`i_quant`,
+    `p_quant`, ...), which its configure dialog writes. With none, they
+    are 0 and `ICM_COMPRESS` divides by zero. Seed them in the registry
+    file (16 works) to get further.
+  - Its allocator rounds a pointer up with `& ~0x11` where `& ~0xf` was
+    meant, so for half of the blocks it is given its buffer starts 2
+    bytes before the block. It then frees one byte before its pointer,
+    not the block. On Windows those frees fail, which msvcrt's `free`
+    ignores, and the headers it overwrote are never looked at again.
+    libc's heap checks its neighbours' headers, and the run aborts
+    ("corrupted size vs. prev_size"). Given its own mapping per block, it
+    encodes 320x240 at 830 kbit/s.
+  - seance now ignores a `free` of a pointer that can't start a block (not
+    8-aligned), with a warning, as Windows does, instead of aborting.
+- `__dllonexit` now adds to the DLL's own exit table, as MinGW's DLL
+  startup expects (it runs the table when it detaches). It used to add
+  to the process's, which ran the functions at exit, after the DLL was gone.
 
 ## In-repository baseline
 
