@@ -12,6 +12,7 @@
  * against, to find codecs that got worse between builds.
  */
 #include <dirent.h>
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -46,13 +47,15 @@ enum status {
 	ST_NOT_CODEC,		/* loads as nothing seance can drive */
 	ST_FAILS,		/* refused or failed */
 	ST_DECODER,		/* decodes only: nothing here to give it */
+	ST_DECODES,		/* decodes only, and a sample checks out */
 	ST_ENCODES,		/* encodes, but doesn't decode its output */
 	ST_ROUND_TRIP,		/* encodes and decodes */
 	ST_COUNT
 };
 
 static const char *const status_names[ST_COUNT] = {
-	"hang", "crash", "not-codec", "fails", "decoder", "encodes",
+	"hang", "crash", "not-codec", "fails", "decoder", "decodes",
+	"encodes",
 	"round-trip",
 };
 
@@ -72,6 +75,18 @@ struct result {
 	char clsids[8][40];	/* its video encoders, when it has several */
 	int nclsids;
 	int decodes_own;	/* VfW: decompresses its own FOURCC */
+	char inputs[12][8];	/* what it decodes: "XVID", "0x0055" */
+	int ninputs;
+};
+
+/* A stream to give decoders, and what it should decode to. */
+struct sample {
+	char name[64];
+	int audio;
+	char tag[8];		/* FOURCC, or "0x0055" */
+	char file[PATH_MAX];
+	char ref[PATH_MAX];	/* Y4M or 16-bit PCM WAV */
+	int pooled;		/* made in this sweep (removed after) */
 };
 
 struct sweep {
@@ -86,6 +101,9 @@ struct sweep {
 	char made_video[PATH_MAX], made_audio[8][PATH_MAX];
 	struct result *results;
 	size_t count, cap;
+	struct sample *samples;	/* --samples, then the sweep's own */
+	size_t nsamples, samples_cap;
+	size_t npooled;
 };
 
 static int usage(void)
@@ -107,7 +125,13 @@ static int usage(void)
 		"  --tsv <file>         write them as tab-separated values\n"
 		"  --compare <old.tsv>  report what changed since an earlier\n"
 		"                       sweep's TSV; exit 1 if anything got worse\n"
-		"  --keep <dir>         keep the files made, in dir\n");
+		"  --samples <dir>      give decoders the streams in dir (made\n"
+		"                       by tests/gen_samples.sh) and compare\n"
+		"                       what they make with ffmpeg's decode\n"
+		"  --keep <dir>         keep the files made, in dir\n"
+		"\n"
+		"A decoder is also given what the sweep's own encoders made, by\n"
+		"FOURCC or format tag.\n");
 	return 2;
 }
 
@@ -545,11 +569,355 @@ static double wav_describe(const char *path, char *out, size_t size)
 	return r;
 }
 
+/* Samples: streams to give decoders */
+
+/* A sample's place in s->samples, made room for; NULL if out of memory. */
+static struct sample *new_sample(struct sweep *s)
+{
+	if (s->nsamples == s->samples_cap) {
+		size_t cap = s->samples_cap ? s->samples_cap * 2 : 64;
+		struct sample *t = realloc(s->samples, cap * sizeof(*t));
+		if (!t)
+			return NULL;
+		s->samples = t;
+		s->samples_cap = cap;
+	}
+	struct sample *x = &s->samples[s->nsamples];
+	memset(x, 0, sizeof(*x));
+	return x;
+}
+
+/* Reads dir/index.tsv, as tests/gen_samples.sh writes it. */
+static int load_samples(struct sweep *s, const char *dir)
+{
+	char path[PATH_MAX], *line = NULL;
+	size_t cap = 0;
+	FILE *f;
+
+	snprintf(path, sizeof(path), "%s/index.tsv", dir);
+	if (!(f = fopen(path, "r"))) {
+		fprintf(stderr, "seance: %s: %s (make it with "
+			"tests/gen_samples.sh)\n", path, strerror(errno));
+		return -1;
+	}
+	while (getline(&line, &cap, f) > 0) {
+		char *field[5], *p = line;
+		int k = 0;
+		line[strcspn(line, "\r\n")] = 0;
+		if (line[0] == '#')
+			continue;
+		while (k < 5) {
+			field[k++] = p;
+			if (!(p = strchr(p, '\t')))
+				break;
+			*p++ = 0;
+		}
+		if (k < 5 || strlen(field[2]) > 6)
+			continue;
+		struct sample *x = new_sample(s);
+		if (!x)
+			break;
+		snprintf(x->name, sizeof(x->name), "%s", field[0]);
+		x->audio = !strcmp(field[1], "audio");
+		snprintf(x->tag, sizeof(x->tag), "%s", field[2]);
+		snprintf(x->file, sizeof(x->file), "%s/%s", dir, field[3]);
+		snprintf(x->ref, sizeof(x->ref), "%s/%s", dir, field[4]);
+		s->nsamples++;
+	}
+	free(line);
+	fclose(f);
+	if (!s->nsamples) {
+		fprintf(stderr, "seance: %s: no samples listed\n", path);
+		return -1;
+	}
+	return 0;
+}
+
+/*
+ * Keeps what an encoder made, and its own decode of it, for decoders of
+ * the same FOURCC or tag to be given (the first of each).
+ */
+static void pool_add(struct sweep *s, const struct result *r, int audio,
+		     const char *tag, const char *file, const char *ref)
+{
+	struct sample *x;
+
+	for (size_t i = 0; i < s->nsamples; i++)
+		if (s->samples[i].pooled && s->samples[i].audio == audio &&
+		    !strcasecmp(s->samples[i].tag, tag))
+			return;
+	if (!(x = new_sample(s)))
+		return;
+	snprintf(x->name, sizeof(x->name), "%.63s", r->file);
+	x->audio = audio;
+	x->pooled = 1;
+	snprintf(x->tag, sizeof(x->tag), "%s", tag);
+	snprintf(x->file, sizeof(x->file), "%s/pool%03zu.%s", s->work,
+		 s->npooled, audio ? "wav" : "avi");
+	snprintf(x->ref, sizeof(x->ref), "%s/pool%03zu.%s", s->work,
+		 s->npooled, audio ? "ref.wav" : "y4m");
+	if (rename(file, x->file) || rename(ref, x->ref)) {
+		unlink(x->file);
+		return;
+	}
+	s->nsamples++;
+	s->npooled++;
+}
+
+/* The FOURCC of an AVI's video, as a key; 0 if none or not printable. */
+static int avi_fourcc(const char *path, char key[8])
+{
+	struct avi_file *avi = avi_open(path);
+	int ok = 0;
+
+	if (!avi)
+		return 0;
+	int v = avi_video_stream(avi);
+	const BITMAPINFOHEADER *b = v >= 0 ?
+		avi_stream_bih(&avi->streams[v]) : NULL;
+	if (b && b->biCompression > 3) {
+		DWORD c = b->biCompression;
+		ok = 1;
+		for (int i = 0; i < 4; i++) {
+			key[i] = (char)(c >> (8 * i) & 0xff);
+			if (!isprint((unsigned char)key[i]))
+				ok = 0;
+		}
+		key[4] = 0;
+	}
+	avi_close(avi);
+	return ok;
+}
+
+/* A WAV's format tag; 0 if unreadable. */
+static unsigned wav_tag(const char *path)
+{
+	struct wav_reader *w = wav_open(path);
+	unsigned tag = 0;
+	size_t n;
+
+	if (!w)
+		return 0;
+	const WAVEFORMATEX *f = wav_format(w, &n);
+	if (f)
+		tag = f->wFormatTag;
+	wav_close(w);
+	return tag;
+}
+
+/* A WAV as 16-bit samples (from 8- or 16-bit PCM, or float). */
+static short *read_pcm16(const char *path, size_t *frames, unsigned *rate,
+			 unsigned *ch, char *note, size_t size)
+{
+	struct wav_reader *w = wav_open(path);
+	short *out = NULL;
+	BYTE *raw = NULL;
+	size_t n;
+
+	if (!w) {
+		snprintf(note, size, "can't read %s", base_name(path));
+		return NULL;
+	}
+	const WAVEFORMATEX *f = wav_format(w, &n);
+	if (!f) {
+		snprintf(note, size, "%s has no format", base_name(path));
+		goto out;
+	}
+	unsigned tag = f->wFormatTag, bits = f->wBitsPerSample;
+	if (tag == 0xfffe && n >= 40)	/* WAVE_FORMAT_EXTENSIBLE: its GUID */
+		tag = *(const WORD *)((const BYTE *)f + 24);
+	*rate = f->nSamplesPerSec;
+	*ch = f->nChannels;
+	if (!*ch || !((tag == WAVE_FORMAT_PCM && (bits == 8 || bits == 16)) ||
+		      (tag == 3 && bits == 32))) {
+		snprintf(note, size, "decodes to tag 0x%04x, %u bits: not PCM "
+			 "to compare", tag, bits);
+		goto out;
+	}
+	uint64_t bytes = wav_data_size(w);
+	if (bytes > 64u << 20)
+		bytes = 64u << 20;
+	size_t bps = bits / 8;
+	if (!(raw = malloc(bytes + 1)))
+		goto out;
+	long got = wav_read(w, raw, bytes);
+	if (got < 0)
+		got = 0;
+	*frames = (size_t)got / bps / *ch;
+	if (!(out = malloc((*frames * *ch + 1) * sizeof(short))))
+		goto out;
+	for (size_t i = 0; i < *frames * *ch; i++) {
+		if (bits == 8) {
+			out[i] = (short)((raw[i] - 128) << 8);
+		} else if (bits == 16) {
+			short v;
+			memcpy(&v, raw + i * 2, 2);
+			out[i] = v;
+		} else {
+			float v;
+			memcpy(&v, raw + i * 4, 4);
+			v *= 32768.0f;
+			out[i] = (short)(v > 32767 ? 32767 : v < -32768 ? -32768 :
+					 v);
+		}
+	}
+out:
+	free(raw);
+	wav_close(w);
+	return out;
+}
+
+/*
+ * The SNR of dec (a WAV) against ref (ffmpeg's decode), dB, with dec moved
+ * by the lag that matches best (decoders differ in how much of their
+ * start-up delay they hand out). NAN with a note if they can't be compared.
+ */
+static double snr_of(const char *ref, const char *dec, char *note,
+		     size_t size)
+{
+	enum { MAX_LAG = 3000, WINDOW = 16384 };
+	size_t na = 0, nb = 0;
+	unsigned ra, rb, ca, cb;
+	char n2[128];
+	short *a = read_pcm16(ref, &na, &ra, &ca, note, size);
+	short *b = a ? read_pcm16(dec, &nb, &rb, &cb, n2, sizeof(n2)) : NULL;
+	double result = NAN;
+
+	if (a && !b)
+		snprintf(note, size, "%s", n2);
+	if (!a || !b)
+		goto out;
+	if (ra != rb || ca != cb) {
+		snprintf(note, size, "decodes to %u Hz, %u channel%s; ffmpeg "
+			 "to %u Hz, %u", rb, cb, cb == 1 ? "" : "s", ra, ca);
+		goto out;
+	}
+	/* The lag: b[i + lag] against a[i], on the first channel. */
+	int lag = 0;
+	double best = -1;
+	for (int l = -MAX_LAG; l <= MAX_LAG; l++) {
+		double sum = 0;
+		size_t count = 0;
+		for (size_t i = 0; i < WINDOW && i < na; i++) {
+			long j = (long)i + l;
+			if (j < 0 || (size_t)j >= nb)
+				continue;
+			double d = a[i * ca] - b[(size_t)j * cb];
+			sum += d * d;
+			count++;
+		}
+		if (count < WINDOW / 4 && count < na / 2)
+			continue;
+		if (best < 0 || sum / count < best) {
+			best = sum / count;
+			lag = l;
+		}
+	}
+	double sig = 0, err = 0;
+	size_t count = 0;
+	for (size_t i = 0; i < na; i++) {
+		long j = (long)i + lag;
+		if (j < 0 || (size_t)j >= nb)
+			continue;
+		for (unsigned c = 0; c < ca; c++) {
+			double x = a[i * ca + c], d = x - b[(size_t)j * cb + c];
+			sig += x * x;
+			err += d * d;
+		}
+		count++;
+	}
+	if (count < na / 2) {
+		snprintf(note, size, "decodes %zu frames of ffmpeg's %zu", nb,
+			 na);
+		goto out;
+	}
+	result = !err ? INFINITY : sig ? 10 * log10(sig / err) : -INFINITY;
+	if (lag)
+		snprintf(note, size, "%d samples %s", lag < 0 ? -lag : lag,
+			 lag > 0 ? "later" : "earlier");
+out:
+	free(a);
+	free(b);
+	return result;
+}
+
 /* One codec */
 
 static enum status status_of_rc(int rc)
 {
 	return rc == 124 ? ST_HANG : rc > 128 ? ST_CRASH : ST_FAILS;
+}
+
+/* Adds a FOURCC or "0x...." tag to what r decodes, once. */
+static void add_input(struct result *r, const char *key)
+{
+	for (int i = 0; i < r->ninputs; i++)
+		if (!strcasecmp(r->inputs[i], key))
+			return;
+	if (r->ninputs < (int)(sizeof(r->inputs) / sizeof(r->inputs[0])))
+		snprintf(r->inputs[r->ninputs++], sizeof(r->inputs[0]), "%s",
+			 key);
+}
+
+/*
+ * The input types in a filter's or DMO's probe lines: "MEDIATYPE_Video /
+ * 'DX50'", "MEDIATYPE_Audio / wave format 0x0007" or a named subtype.
+ */
+static void read_input_type(struct result *r, const char *t)
+{
+	static const struct {
+		const char *name;
+		const char *tag;
+	} named[] = {
+		{ "MEDIASUBTYPE_DOLBY_AC3", "0x2000" },
+		{ "MEDIASUBTYPE_MPEG1Audio", "0x0050" },
+		{ "MEDIASUBTYPE_RAW_AAC1", "0x00ff" },
+	};
+	char key[8];
+
+	if (!(t = strstr(t, " / ")))
+		return;
+	t += 3;
+	if (t[0] == '\'' && strlen(t) >= 6 && t[5] == '\'') {
+		snprintf(key, sizeof(key), "%.4s", t + 1);
+		add_input(r, key);
+	} else if (!strncmp(t, "wave format 0x", 14)) {
+		snprintf(key, sizeof(key), "0x%04lx", strtoul(t + 14, NULL, 16));
+		add_input(r, key);
+	} else {
+		for (size_t i = 0; i < sizeof(named) / sizeof(named[0]); i++)
+			if (!strncmp(t, named[i].name, strlen(named[i].name)) &&
+			    !isalnum((unsigned char)t[strlen(named[i].name)]))
+				add_input(r, named[i].tag);
+	}
+}
+
+/* What a decoder's probe says it takes: pin, DMO or ACM input types. */
+static void read_inputs(struct result *r, char *text)
+{
+	int in_pin = 0;
+	char *save = NULL;
+
+	for (char *l = strtok_r(text, "\n", &save); l;
+	     l = strtok_r(NULL, "\n", &save)) {
+		const char *t = l + strspn(l, " ");
+		unsigned tag;
+		if (!strncmp(l, "  {", 3) || !strncmp(t, "output", 6))
+			in_pin = 0;
+		else if (!strncmp(t, "input pin", 9))
+			in_pin = 1;
+		else if (!strncmp(t, "input MEDIATYPE_", 16))	/* a DMO's */
+			read_input_type(r, t);
+		else if (in_pin && strstr(t, "MEDIATYPE_"))
+			read_input_type(r, t);
+		else if (!strncmp(l, "    0x", 6) && strstr(l, "decodes") &&
+			 (tag = (unsigned)strtoul(l + 4, NULL, 16)) !=
+			 WAVE_FORMAT_PCM) {			/* ACM */
+			char key[8];
+			snprintf(key, sizeof(key), "0x%04x", tag);
+			add_input(r, key);
+		}
+	}
 }
 
 /* The fields of `seance probe`'s output that say what a DLL is. */
@@ -627,6 +995,7 @@ static void read_probe(struct result *r, const char *out, int *video_enc,
 	size_t n = strlen(r->id);
 	while (n && r->id[n - 1] == ' ')
 		r->id[--n] = 0;
+	read_inputs(r, text);	/* (last: it splits the text) */
 	free(text);
 }
 
@@ -702,6 +1071,8 @@ static int decode_to(struct sweep *s, const char *dll, const char *avi,
 
 /* A round trip this far from what went in has gone wrong somewhere. */
 #define PSNR_BROKEN 10.0
+/* A round trip good enough to test other decoders with. */
+#define POOL_PSNR 30.0
 
 static void sweep_video(struct sweep *s, size_t idx, const char *dll,
 			struct result *r)
@@ -817,6 +1188,7 @@ static void sweep_video(struct sweep *s, size_t idx, const char *dll,
 	}
 	r->status = ST_ROUND_TRIP;
 	r->psnr = psnr_of(s->video_in, &ro, y4m, r->note, sizeof(r->note));
+	const char *decoded = y4m;
 	/*
 	 * Nothing like what went in: a decoder whose YUV output is wrong
 	 * (mhuffyuv.dll writes nothing as YUY2) may do better as RGB.
@@ -831,6 +1203,7 @@ static void sweep_video(struct sweep *s, size_t idx, const char *dll,
 		if (p2 > r->psnr + 1 ||
 		    (p2 >= PSNR_BROKEN && p2 > r->psnr)) {
 			r->psnr = p2;
+			decoded = y4m2;
 			snprintf(r->note, sizeof(r->note), "decoded as BGR24: "
 				 "its own choice of output gives nothing like the "
 				 "input%s%s", note2[0] ? "; " : "", note2);
@@ -848,6 +1221,10 @@ static void sweep_video(struct sweep *s, size_t idx, const char *dll,
 	if (by_auto && !r->note[0])
 		snprintf(r->note, sizeof(r->note), "decoded by another codec "
 			 "here (decode auto): its own DLL doesn't decode it");
+	/* A good stream, for decoders of the same FOURCC, with its own decode. */
+	char key[8];
+	if (!by_auto && r->psnr >= POOL_PSNR && avi_fourcc(avi, key))
+		pool_add(s, r, 0, key, avi, decoded);
 }
 
 /*
@@ -915,6 +1292,11 @@ static void sweep_audio(struct sweep *s, size_t idx, const char *dll,
 	wav_describe(dec, fd, sizeof(fd));
 	r->status = ST_ROUND_TRIP;
 	snprintf(r->note, sizeof(r->note), "%s -> %s -> %s", from, fe, fd);
+	unsigned tag = wav_tag(enc);
+	char key[8];
+	snprintf(key, sizeof(key), "0x%04x", tag);
+	if (tag && tag != WAVE_FORMAT_PCM && wav_tag(dec) == WAVE_FORMAT_PCM)
+		pool_add(s, r, 1, key, enc, dec);
 }
 
 static void sweep_one(struct sweep *s, const char *dll, struct result *r)
@@ -971,6 +1353,147 @@ done:
 			unlink(out);
 		}
 	}
+}
+
+/* Decoders, given samples */
+
+/* Whether the DLL's bytes hold tag, as is or in upper or lower case. */
+static int dll_names(const BYTE *dll, size_t n, const char *tag)
+{
+	char up[5], low[5];
+
+	if (!dll || strlen(tag) != 4)
+		return 0;
+	for (int i = 0; i < 4; i++) {
+		up[i] = (char)toupper((unsigned char)tag[i]);
+		low[i] = (char)tolower((unsigned char)tag[i]);
+	}
+	return memmem(dll, n, tag, 4) || memmem(dll, n, up, 4) ||
+	       memmem(dll, n, low, 4);
+}
+
+/* A file's bytes (at most 64 MB); NULL if unreadable. */
+static BYTE *slurp(const char *path, size_t *n)
+{
+	FILE *f = fopen(path, "rb");
+	BYTE *buf = NULL;
+	long len;
+
+	*n = 0;
+	if (!f)
+		return NULL;
+	if (!fseek(f, 0, SEEK_END) && (len = ftell(f)) > 0 &&
+	    len < (64L << 20) && !fseek(f, 0, SEEK_SET) &&
+	    (buf = malloc((size_t)len)))
+		*n = fread(buf, 1, (size_t)len, f);
+	fclose(f);
+	return buf;
+}
+
+#define MAX_TRIES 4
+/* As close to ffmpeg's decode as a decoder of the same stream gets. */
+#define SAMPLE_PSNR 25.0
+#define SAMPLE_SNR 15.0
+
+/*
+ * Gives a decoder streams of what it takes: a sample of its VfW handler,
+ * of the types it registers or the tags it decodes, then (VfW) of
+ * FOURCCs its DLL names. The first that decodes close to the reference
+ * makes it "decodes"; otherwise the note says what the samples got.
+ */
+static void check_decoder(struct sweep *s, size_t idx, const char *dll,
+			  struct result *r)
+{
+	size_t pick[MAX_TRIES], npick = 0, nbytes = 0;
+	int vfw = !strcmp(r->kind, "VfW");
+	BYTE *bytes = NULL;
+
+	for (int pass = 0; pass < 3 && npick < MAX_TRIES; pass++) {
+		if (pass == 2 && vfw && !r->audio)
+			bytes = slurp(dll, &nbytes);
+		/* ffmpeg's samples before the sweep's own, in each pass */
+		for (int pooled = 0; pooled < 2; pooled++)
+			for (size_t i = 0; i < s->nsamples && npick < MAX_TRIES;
+			     i++) {
+				const struct sample *x = &s->samples[i];
+				int match = 0, dup = 0;
+				if (x->pooled != pooled || x->audio != r->audio)
+					continue;
+				for (size_t k = 0; k < npick; k++)
+					dup |= pick[k] == i;
+				if (pass == 0)
+					match = vfw && !strcasecmp(x->tag, r->id);
+				else if (pass == 1)
+					for (int k = 0; k < r->ninputs; k++)
+						match |= !strcasecmp(x->tag,
+								     r->inputs[k]);
+				else
+					match = dll_names(bytes, nbytes, x->tag);
+				if (match && !dup)
+					pick[npick++] = i;
+			}
+	}
+	free(bytes);
+	if (!npick)
+		return;
+
+	char out[PATH_MAX], err[PATH_MAX], dec[PATH_MAX], msg[300];
+	char tried[400] = "", note[160];
+	size_t len = 0;
+	work_path(s, idx, "out", out, sizeof(out));
+	work_path(s, idx, "err", err, sizeof(err));
+	for (size_t k = 0; k < npick; k++) {
+		const struct sample *x = &s->samples[pick[k]];
+		struct source_options ro = { .stream = -1 };
+		double q;
+
+		work_path(s, idx, x->audio ? "sample.wav" : "sample.y4m", dec,
+			  sizeof(dec));
+		const char *args[] = { "decode", dll, x->file, "-o", dec, NULL };
+		int rc = run(s, args, out, err);
+		note[0] = 0;
+		if (rc) {
+			message_of(err, rc > 128, msg, sizeof(msg));
+			q = NAN;
+			snprintf(note, sizeof(note), "%s%.140s", rc == 124 ?
+				 "hangs; " : rc > 128 ? "crashes; " : "", msg);
+		} else {
+			q = x->audio ? snr_of(x->ref, dec, note, sizeof(note)) :
+			    psnr_of(x->ref, &ro, dec, note, sizeof(note));
+		}
+		unlink(dec);
+		if (!isnan(q) && q >= (x->audio ? SAMPLE_SNR : SAMPLE_PSNR)) {
+			r->status = ST_DECODES;
+			r->psnr = q;
+			if (x->pooled)
+				snprintf(r->note, sizeof(r->note), "decodes what "
+					 "%s made ('%s') %s its own decoder "
+					 "does%s%s%s", x->name, x->tag,
+					 isinf(q) ? "exactly as" : "close to how",
+					 x->audio ? " (SNR)" : "",
+					 note[0] ? "; " : "", note);
+			else
+				snprintf(r->note, sizeof(r->note), "decodes the "
+					 "sample %s ('%s') %s its reference%s%s%s",
+					 x->name, x->tag, isinf(q) ? "exactly as" :
+					 "close to", x->audio ? " (SNR)" : "",
+					 note[0] ? "; " : "", note);
+			return;
+		}
+		if (!note[0] && !isnan(q))
+			snprintf(note, sizeof(note), "%.1f dB", q);
+		else if (!isnan(q))
+			snprintf(note + strlen(note), sizeof(note) - strlen(note),
+				 " (%.1f dB)", q);
+		len += (size_t)snprintf(tried + len, len < sizeof(tried) ?
+					sizeof(tried) - len : 0, "%s%s '%s': %s",
+					k ? "; " : "", x->name, x->tag, note);
+		if (len >= sizeof(tried))
+			len = sizeof(tried) - 1;
+	}
+	size_t nl = strlen(r->note);
+	snprintf(r->note + nl, sizeof(r->note) - nl, "%sgiven %s",
+		 nl ? "; " : "", tried);
 }
 
 /* Reporting */
@@ -1248,6 +1771,11 @@ static void remove_work(const struct sweep *s)
 {
 	char p[PATH_MAX];
 
+	for (size_t i = 0; i < s->nsamples; i++)
+		if (s->samples[i].pooled && !s->keep) {
+			unlink(s->samples[i].file);
+			unlink(s->samples[i].ref);
+		}
 	if (s->keep)
 		return;
 	snprintf(p, sizeof(p), "%s/clip.y4m", s->work);
@@ -1263,6 +1791,7 @@ int cmd_sweep(int argc, char **argv)
 	struct sweep s = { .timeout = 30, .frames = 10, .width = 320,
 			   .height = 240 };
 	const char *md = NULL, *tsv = NULL, *old_tsv = NULL, *keep = NULL;
+	const char *samples = NULL;
 	char **targets = NULL, self[PATH_MAX], what[PATH_MAX + 64];
 	size_t ntargets = 0, cap = 0;
 	int status = 0;
@@ -1282,6 +1811,8 @@ int cmd_sweep(int argc, char **argv)
 			old_tsv = argv[++i];
 		else if (!strcmp(a, "--keep") && v)
 			keep = argv[++i];
+		else if (!strcmp(a, "--samples") && v)
+			samples = argv[++i];
 		else if (!strcmp(a, "--timeout") && v) {
 			if (cli_parse_count(a, argv[++i], &s.timeout))
 				return 2;
@@ -1316,6 +1847,11 @@ int cmd_sweep(int argc, char **argv)
 	long nold = 0;
 	if (old_tsv && (nold = read_tsv(old_tsv, &old)) < 0)
 		return 2;
+	if (samples && load_samples(&s, samples)) {
+		free(old);
+		free(s.samples);
+		return 2;
+	}
 
 	ssize_t sl = readlink("/proc/self/exe", self, sizeof(self) - 1);
 	if (sl <= 0) {
@@ -1363,6 +1899,11 @@ int cmd_sweep(int argc, char **argv)
 	else
 		snprintf(what, sizeof(what), "%lu frames of %s and 16-bit "
 			 "PCM", s.frames, s.video_in);
+	if (samples) {
+		size_t n = strlen(what);
+		snprintf(what + n, sizeof(what) - n, ", and decoders the %zu "
+			 "samples in %s", s.nsamples, samples);
+	}
 
 	if (!(s.results = calloc(ntargets, sizeof(*s.results)))) {
 		remove_work(&s);
@@ -1374,8 +1915,34 @@ int cmd_sweep(int argc, char **argv)
 		s.count++;
 		print_line(stdout, &s.results[i]);
 		fflush(stdout);
-		free(targets[i]);
 	}
+
+	/* Decoders, given the samples and what the encoders here made. */
+	size_t ndec = 0;
+	for (size_t i = 0; i < s.count; i++)
+		ndec += s.results[i].status == ST_DECODER;
+	if (ndec && s.nsamples) {
+		printf("\nGiving %zu decoder%s %zu sample%s (%zu made here):\n\n",
+		       ndec, ndec == 1 ? "" : "s", s.nsamples,
+		       s.nsamples == 1 ? "" : "s", s.npooled);
+		for (size_t i = 0; i < s.count; i++) {
+			struct result *r = &s.results[i];
+			if (r->status != ST_DECODER)
+				continue;
+			check_decoder(&s, i, targets[i], r);
+			print_line(stdout, r);
+			fflush(stdout);
+			if (!s.keep) {
+				char p[PATH_MAX];
+				work_path(&s, i, "out", p, sizeof(p));
+				unlink(p);
+				work_path(&s, i, "err", p, sizeof(p));
+				unlink(p);
+			}
+		}
+	}
+	for (size_t i = 0; i < ntargets; i++)
+		free(targets[i]);
 	free(targets);
 
 	unsigned counts[ST_COUNT] = { 0 };
@@ -1397,5 +1964,6 @@ int cmd_sweep(int argc, char **argv)
 	free(s.results);
 	free(emu_copy);
 	remove_work(&s);
+	free(s.samples);
 	return status;
 }

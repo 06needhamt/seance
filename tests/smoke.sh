@@ -612,6 +612,41 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		--size 64x48 --frames 3 --tsv "$work/sweep4.tsv" >/dev/null
 	grep -q "	testdmo.dll	DMO	.*	round-trip	inf	.*	--clsid {5E6C9B4[25]-" \
 		"$work/sweep4.tsv"
+	# A decoder is given what an encoder in the same sweep made of the
+	# FOURCC it decodes (testdmo's TST0, for testcodec decoding only).
+	VFW_ENV_TESTCODEC_DECODE_ONLY=2 $emu "$harness" sweep \
+		"$work/sweep/testcodec.dll" "$work/sweep/testdmo.dll" \
+		--size 64x48 --frames 3 --tsv "$work/sweep5.tsv" >/dev/null
+	grep -q "^	testcodec.dll	VfW	TST0	decodes	inf	.*decodes what testdmo.dll made ('TST0') exactly as its own decoder does" \
+		"$work/sweep5.tsv"
+	# And the streams --samples lists, measured against their references:
+	# video, and audio (testacm decoding only).
+	mkdir "$work/samples"
+	$emu "$harness" encode "$fixtures/testcodec.dll" "$work/noise.y4m" \
+		-o "$work/samples/tst0.avi" 2>/dev/null
+	cp "$work/noise.y4m" "$work/samples/tst0.y4m"
+	cp "$work/acm.wav" "$work/samples/tsta.wav"
+	cp "$work/in.wav" "$work/samples/tsta.ref.wav"
+	printf '%s\t%s\t%s\t%s\t%s\n' tst0 video TST0 tst0.avi tst0.y4m \
+		tsta audio 0x7354 tsta.wav tsta.ref.wav >"$work/samples/index.tsv"
+	cp "$a" "$work/sweep/"
+	VFW_ENV_TESTCODEC_DECODE_ONLY=2 VFW_ENV_TESTACM_NOENCODE=1 $emu \
+		"$harness" sweep "$work/sweep/testcodec.dll" \
+		"$work/sweep/testacm.acm" --size 64x48 --frames 3 \
+		--samples "$work/samples" --tsv "$work/sweep5.tsv" >/dev/null
+	grep -q "^	testcodec.dll	VfW	TST0	decodes	inf	.*decodes the sample tst0 ('TST0') exactly as its reference" \
+		"$work/sweep5.tsv"
+	grep -q "^	testacm.acm	ACM	TSTA	decodes	inf	.*decodes the sample tsta ('0x7354') exactly as its reference" \
+		"$work/sweep5.tsv"
+	# One that decodes nothing like the reference stays a decoder, saying
+	# what it was given.
+	VFW_ENV_TESTCODEC_DECODE_ONLY=2 VFW_ENV_TESTCODEC_BLANK=2 $emu \
+		"$harness" sweep "$work/sweep/testcodec.dll" --size 64x48 \
+		--frames 3 --samples "$work/samples" --tsv "$work/sweep5.tsv" \
+		>/dev/null
+	grep -q "^	testcodec.dll	VfW	TST0	decoder		.*given tst0 'TST0': [0-9.]* dB" \
+		"$work/sweep5.tsv"
+	rm "$work/sweep/testacm.acm"
 	# A codec that crashes in ICM_*_END after the last frame still gives
 	# whole files (not under a sanitizer, which takes faults itself).
 	if [ "$crash" = 1 ]; then
