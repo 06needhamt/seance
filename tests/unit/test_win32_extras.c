@@ -378,15 +378,15 @@ static void test_msvcrt(void)
 	CHECK_EQ(_wcsicmp(path, (const WCHAR[]){ 'A', '\\', 'B', '\\', 'C', 0 }), 0);
 	CHECK(_wcsicmp(path, upper) > 0);
 	CHECK_EQ(_wcsnicmp(path, upper, 3), 0);
+	CFN(c, void, free, void *);
 	WCHAR *dup = _wcsdup(path);
 	CHECK(dup && !_wcsicmp(dup, path));
 	_wcsupr(dup);
 	CHECK(dup[0] == 'A' && dup[1] == '\\' && dup[4] == 'C');
 	_wcslwr(dup);
 	CHECK(dup[0] == 'a' && dup[4] == 'c');
-	free(dup);
+	free(dup);	/* the guest's free: _wcsdup's block is the heap's */
 	CFN(c, void *, malloc, size_t);
-	CFN(c, void, free, void *);
 	CFN(c, size_t, _msize, void *);
 	void *p = malloc(100);
 	CHECK(_msize(p) >= 100);
@@ -654,6 +654,7 @@ static void test_msvcrt_files(void)
 	CFN(c, intptr_t, _wfindfirst, const WCHAR *, void *);
 	CFN(c, int, _wfindnext, intptr_t, void *);
 	CFN(c, char *, _getcwd, char *, int);
+	CFN(c, void, free, void *);
 	CFN(c, void *, _wfopen, const WCHAR *, const WCHAR *);
 	CFN(c, int, fclose, void *);
 	CFN(c, WCHAR *, _wfullpath, WCHAR *, const WCHAR *, size_t);
@@ -2118,7 +2119,8 @@ static void CDECL dllexit_fn(void) { dllexit_calls++; }
 
 /* __dllonexit appends to the DLL's own table, as MinGW's DLL startup
  * expects, and free ignores a pointer that can't start a block (vfwbw.dll
- * frees one a byte into its block), as a Windows heap does. */
+ * frees one a byte into its block), or one just freed, as a Windows heap
+ * does. */
 static void test_dllonexit_and_bad_free(void)
 {
 	struct module *m = mod_load("msvcrt.dll", NULL);
@@ -2159,6 +2161,49 @@ static void test_dllonexit_and_bad_free(void)
 	if (block)
 		block[63] = 1;	/* still the caller's */
 	free(block);
+
+	/* A block freed twice (mhuffyuv.dll's ICM_DECOMPRESS_END): the
+	 * second is ignored. One handed out again at the same address is
+	 * the caller's, and freed for real. */
+	char *twice = malloc(48);
+	CHECK(twice != NULL);
+	free(twice);
+	free(twice);
+	char *again = malloc(48);
+	CHECK(again != NULL);
+	if (again)
+		memset(again, 1, 48);
+	free(again);
+	free(again);
+
+	/* _strdup's block is the heap's: one at an address just freed is
+	 * freed for real, and handed out again next. */
+	CFN(m, char *, _strdup, const char *);
+	char *d1 = _strdup("seance");
+	free(d1);
+	char *d2 = _strdup("seance");
+	CHECK(d2 != NULL);
+	free(d2);
+	char *d3 = malloc(7);
+	if (d2 == d1)	/* (not under a sanitizer, which holds freed blocks) */
+		CHECK(d3 == d2);
+	free(d3);
+
+	/* The CRT heap's own names: the same heap, either free for either. */
+	CFN(m, void *, _malloc_crt, size_t);
+	CFN(m, void *, _calloc_crt, size_t, size_t);
+	CFN(m, void *, _realloc_crt, void *, size_t);
+	CFN(m, void, _free_crt, void *);
+	char *c1 = _malloc_crt(40), *c2 = _calloc_crt(4, 10);
+	CHECK(c1 && c2 && !c2[39]);
+	c1 = _realloc_crt(c1, 4000);
+	CHECK(c1 != NULL);
+	if (c1)
+		c1[3999] = 1;
+	_free_crt(c1);
+	free(c2);
+	c2 = malloc(24);
+	_free_crt(c2);
 	mod_free(m);
 }
 

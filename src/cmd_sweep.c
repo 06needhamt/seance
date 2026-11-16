@@ -66,8 +66,12 @@ struct result {
 	enum status status;
 	double psnr;		/* video, dB; NAN if none, INFINITY if exact */
 	double kbits;		/* NAN if none */
-	char fix[32];		/* the option it needed: "--pad 16" */
+	char fix[96];		/* the options it needed: "--pad 16" */
 	char note[512];
+	/* From the probe: */
+	char clsids[8][40];	/* its video encoders, when it has several */
+	int nclsids;
+	int decodes_own;	/* VfW: decompresses its own FOURCC */
 };
 
 struct sweep {
@@ -402,6 +406,21 @@ static int frame_i420(struct source *src, struct image_conv *conv, BYTE *buf)
 	return image_to_i420(conv, frame, len, buf) ? -1 : 1;
 }
 
+/* The squared error of a w x h plane of a against b's top-left. */
+static double plane_sse(const BYTE *a, int astride, const BYTE *b,
+			int bstride, int w, int h)
+{
+	double sum = 0;
+
+	for (int y = 0; y < h; y++)
+		for (int x = 0; x < w; x++) {
+			int d = (int)a[(size_t)y * astride + x] -
+				(int)b[(size_t)y * bstride + x];
+			sum += (double)(d * d);
+		}
+	return sum;
+}
+
 /*
  * The PSNR of dec (a Y4M) against the clip as the codec was given it (ref
  * through the same --pad, --crop or --scale), over all three planes as
@@ -426,13 +445,17 @@ static double psnr_of(const char *ref, const struct source_options *ro,
 	const BITMAPINFOHEADER *hb = source_format(b, &nb);
 	int w = ha->biWidth, h = ha->biHeight < 0 ? -ha->biHeight : ha->biHeight;
 	int bw = hb->biWidth, bh = hb->biHeight < 0 ? -hb->biHeight : hb->biHeight;
-	if (w != bw || h != bh) {
+	/*
+	 * A decoder that pads to its block size (LEncMpg23: 352x240 for
+	 * 320x240) is measured on the top-left of what it gives.
+	 */
+	if (bw < w || bh < h) {
 		snprintf(note, size, "decodes at %dx%d, not %dx%d", bw, bh, w, h);
 		goto out;
 	}
-	size_t fs = image_i420_size(w, h);
+	size_t fs = image_i420_size(w, h), bs = image_i420_size(bw, bh);
 	if (!(ca = image_conv_new(ha, na)) || !(cb = image_conv_new(hb, nb)) ||
-	    !(fa = malloc(fs)) || !(fb = malloc(fs))) {
+	    !(fa = malloc(fs)) || !(fb = malloc(bs))) {
 		snprintf(note, size, "can't compare: %s", vfw_error());
 		goto out;
 	}
@@ -440,12 +463,20 @@ static double psnr_of(const char *ref, const struct source_options *ro,
 		int ra = frame_i420(a, ca, fa), rb = frame_i420(b, cb, fb);
 		if (ra != 1 || rb != 1)
 			break;
-		for (size_t i = 0; i < fs; i++) {
-			int d = (int)fa[i] - (int)fb[i];
-			sum += (double)(d * d);
-		}
+		sum += plane_sse(fa, w, fb, bw, w, h);
+		sum += plane_sse(fa + (size_t)w * h, (w + 1) / 2,
+				 fb + (size_t)bw * bh, (bw + 1) / 2,
+				 (w + 1) / 2, (h + 1) / 2);
+		sum += plane_sse(fa + (size_t)w * h + (size_t)((w + 1) / 2) *
+				 ((h + 1) / 2), (w + 1) / 2,
+				 fb + (size_t)bw * bh + (size_t)((bw + 1) / 2) *
+				 ((bh + 1) / 2), (bw + 1) / 2,
+				 (w + 1) / 2, (h + 1) / 2);
 		count += fs;
 	}
+	if (count && (bw != w || bh != h))
+		snprintf(note, size, "decodes at %dx%d; measured on its top-left "
+			 "%dx%d", bw, bh, w, h);
 	if (!count) {
 		snprintf(note, size, "no frames to compare");
 		goto out;
@@ -573,6 +604,22 @@ static void read_probe(struct result *r, const char *out, int *video_enc,
 	}
 	if (!strcmp(r->kind, "ACM"))
 		*audio_enc = r->ntags > 0;
+	/* "  {GUID} name", then lines saying what each class is */
+	for (char *c = strstr(text, "\n  {"); c && r->nclsids < 8;
+	     c = strstr(c + 1, "\n  {")) {
+		char *end = strstr(c + 1, "\n  {"), *enc = strstr(c, "video encoder");
+		size_t n = strcspn(c + 3, "}");
+		if (enc && (!end || enc < end) && n < sizeof(r->clsids[0]) - 1)
+			snprintf(r->clsids[r->nclsids++], sizeof(r->clsids[0]),
+				 "%.*s", (int)n + 1, c + 3);
+	}
+	/* VfW: "Decompression of 'XXXX' ...\n    decompress query: ICERR_OK" */
+	if ((p = strstr(text, "\nDecompression of '"))) {
+		char *q = strstr(p, "decompress query: ");
+		char *c = strstr(p, "\nCompression (");
+		r->decodes_own = q && (!c || q < c) &&
+				 !strncmp(q + 18, "ICERR_OK", 8);
+	}
 	if (!r->id[0] && (*video_enc || *video_dec || *audio_enc || *audio_dec))
 		snprintf(r->id, sizeof(r->id), "%s%s%s%s",
 			 *video_enc ? "venc " : "", *video_dec ? "vdec " : "",
@@ -583,56 +630,173 @@ static void read_probe(struct result *r, const char *out, int *video_enc,
 	free(text);
 }
 
+/* Appends the space-separated options in opts to args[*n]; buf holds them. */
+static void add_options(const char **args, int *n, int max, const char *opts,
+			char *buf, size_t size)
+{
+	char *save = NULL;
+
+	snprintf(buf, size, "%s", opts);
+	for (char *t = strtok_r(buf, " ", &save); t && *n < max;
+	     t = strtok_r(NULL, " ", &save))
+		args[(*n)++] = t;
+	args[*n] = NULL;
+}
+
+/*
+ * Encodes with the options in pre, and again with the size option the
+ * refusal names if it names one (not over a --scale of pre's). Returns
+ * the last exit status; r->fix gets the options of one that worked.
+ */
+static int encode_with(struct sweep *s, const char *dll, const char *avi,
+		       const char *out, const char *err, const char *pre,
+		       struct result *r, char *msg, size_t msize)
+{
+	char fix[sizeof(r->fix)], add[32], frames[32], buf[sizeof(r->fix)];
+	int rc = -1;
+
+	snprintf(fix, sizeof(fix), "%s", pre);
+	snprintf(frames, sizeof(frames), "%lu", s->frames);
+	for (int attempt = 0; attempt < 2; attempt++) {
+		const char *args[24] = { "encode", dll, s->video_in, "-o", avi,
+					 "--frames", frames };
+		int n = 7;
+		add_options(args, &n, 23, fix, buf, sizeof(buf));
+		rc = run(s, args, out, err);
+		if (!rc) {
+			snprintf(r->fix, sizeof(r->fix), "%s", fix);
+			return 0;
+		}
+		message_of(err, rc > 128, msg, msize);
+		if (attempt || rc >= 124 || strstr(pre, "--scale") ||
+		    !fix_from(msg, add, sizeof(add)))
+			break;
+		snprintf(fix, sizeof(fix), "%s%s%s", pre, pre[0] ? " " : "", add);
+	}
+	return rc;
+}
+
+/* Sizes to try a codec that takes nothing at the clip's size at. */
+static const int ladder[][2] = {
+	{ 352, 288 }, { 640, 480 }, { 720, 480 }, { 720, 576 },
+	{ 1280, 720 }, { 1920, 1080 },
+};
+
+/* Whether an encoder's refusal is of the input's format or size. */
+static int refused_input(const char *msg)
+{
+	return strstr(msg, "takes neither") || strstr(msg, "ICERR_BADFORMAT") ||
+	       strstr(msg, "standard input format");
+}
+
+/* Decodes avi with dll ("auto": any codec here) to y4m, as format if given. */
+static int decode_to(struct sweep *s, const char *dll, const char *avi,
+		     const char *y4m, const char *format, const char *out,
+		     const char *err)
+{
+	const char *args[] = { "decode", dll, avi, "-o", y4m,
+			       format ? "--output-format" : NULL, format, NULL };
+
+	return run(s, args, out, err);
+}
+
+/* A round trip this far from what went in has gone wrong somewhere. */
+#define PSNR_BROKEN 10.0
+
 static void sweep_video(struct sweep *s, size_t idx, const char *dll,
 			struct result *r)
 {
-	char avi[PATH_MAX], y4m[PATH_MAX], out[PATH_MAX], err[PATH_MAX];
-	char frames[32], msg[400], size_note[64] = "";
+	char avi[PATH_MAX], y4m[PATH_MAX], y4m2[PATH_MAX], out[PATH_MAX];
+	char err[PATH_MAX], msg[400], first[400], pre[sizeof(r->fix)];
+	char size_note[64] = "";
 	struct source_options ro = { .stream = -1 };
 
 	work_path(s, idx, "avi", avi, sizeof(avi));
 	work_path(s, idx, "y4m", y4m, sizeof(y4m));
+	work_path(s, idx, "rgb.y4m", y4m2, sizeof(y4m2));
 	work_path(s, idx, "out", out, sizeof(out));
 	work_path(s, idx, "err", err, sizeof(err));
-	snprintf(frames, sizeof(frames), "%lu", s->frames);
 
-	int rc = -1;
-	for (int attempt = 0; attempt < 2; attempt++) {
-		char opt[16] = "", val[16] = "";
-		if (r->fix[0])
-			sscanf(r->fix, "%15s %15s", opt, val);
-		const char *args[] = { "encode", dll, s->video_in, "-o", avi,
-				       "--frames", frames,
-				       opt[0] ? opt : NULL, val, NULL };
-		rc = run(s, args, out, err);
-		if (!rc)
-			break;
-		message_of(err, rc > 128, msg, sizeof(msg));
-		if (attempt || rc >= 124 || !fix_from(msg, r->fix, sizeof(r->fix)))
-			break;
+	int rc = encode_with(s, dll, avi, out, err, "", r, msg, sizeof(msg));
+	/* A DLL of several encoders (utv_dmo.dll): each in turn. */
+	int each = rc && rc < 124 && strstr(msg, "several video encoders") &&
+		   r->nclsids;
+	int size_refused = 0;	/* by any of them */
+	if (each) {
+		int first_rc = -1;
+		for (int k = 0; k < r->nclsids && rc; k++) {
+			snprintf(pre, sizeof(pre), "--clsid %s", r->clsids[k]);
+			rc = encode_with(s, dll, avi, out, err, pre, r, msg,
+					 sizeof(msg));
+			if (rc && rc < 124 && refused_input(msg))
+				size_refused = 1;
+			if (rc && first_rc < 0) {
+				first_rc = rc;
+				snprintf(first, sizeof(first), "with --clsid %.39s: "
+					 "%.320s", r->clsids[k], msg);
+			}
+		}
+		if (rc) {
+			rc = first_rc;
+			snprintf(msg, sizeof(msg), "none of its %d video encoders "
+				 "works; %.340s", r->nclsids, first);
+		}
+	}
+	/*
+	 * One that takes nothing at this size may at another (each encoder
+	 * of several). Encode itself asks a VfW codec these sizes, and names
+	 * one it takes.
+	 */
+	if (rc && rc < 124 && strcmp(r->kind, "VfW") &&
+	    (size_refused || refused_input(msg))) {
+		snprintf(first, sizeof(first), "%s", msg);
+		for (int k = 0; k < (each ? r->nclsids : 1) && rc; k++)
+			for (size_t z = 0;
+			     z < sizeof(ladder) / sizeof(ladder[0]) && rc; z++) {
+				if (ladder[z][0] == s->width &&
+				    ladder[z][1] == s->height)
+					continue;
+				snprintf(pre, sizeof(pre), "%s%.39s%s--scale %dx%d",
+					 each ? "--clsid " : "",
+					 each ? r->clsids[k] : "", each ? " " : "",
+					 ladder[z][0], ladder[z][1]);
+				/* (a crash at a size it was never asked for is no news) */
+				if (!encode_with(s, dll, avi, out, err, pre, r, msg,
+						 sizeof(msg)))
+					rc = 0;
+			}
+		if (rc)
+			snprintf(msg, sizeof(msg), "%.340s (nor at any size from "
+				 "352x288 to 1920x1080)", first);
 	}
 	if (rc) {
-		r->status = strstr(msg, "only decompresses") ? ST_DECODER :
-			    status_of_rc(rc);
+		/* AJPG.DLL: compresses to nothing, decompresses its FOURCC. */
+		if (strstr(msg, "only decompresses") ||
+		    (r->decodes_own && strstr(msg, "gives no output format"))) {
+			r->status = ST_DECODER;
+			snprintf(r->note, sizeof(r->note), "decodes only (encode: "
+				 "%s)", msg);
+			return;
+		}
+		r->status = status_of_rc(rc);
 		snprintf(r->note, sizeof(r->note), "encode: %s", msg);
 		return;
 	}
-	if (r->fix[0]) {
-		int w, h;
-		unsigned long n = strtoul(strchr(r->fix, ' ') + 1, NULL, 10);
-		if (!strncmp(r->fix, "--pad", 5))
-			ro.pad = (int)n;
-		else if (!strncmp(r->fix, "--crop", 6))
-			ro.crop = (int)n;
-		else if (sscanf(strchr(r->fix, ' ') + 1, "%dx%d", &w, &h) == 2) {
-			ro.scale_w = w;
-			ro.scale_h = h;
-		}
+	/* The options that change the picture, as the clip is read for PSNR. */
+	char *o;
+	int w, h;
+	if ((o = strstr(r->fix, "--pad ")))
+		ro.pad = atoi(o + 6);
+	else if ((o = strstr(r->fix, "--crop ")))
+		ro.crop = atoi(o + 7);
+	else if ((o = strstr(r->fix, "--scale ")) &&
+		 sscanf(o + 8, "%dx%d", &w, &h) == 2) {
+		ro.scale_w = w;
+		ro.scale_h = h;
 	}
 	r->kbits = avi_kbits(avi, size_note, sizeof(size_note));
 
-	const char *dargs[] = { "decode", dll, avi, "-o", y4m, NULL };
-	rc = run(s, dargs, out, err);
+	rc = decode_to(s, dll, avi, y4m, NULL, out, err);
 	int by_auto = 0;
 	if (rc && rc < 124) {
 		/*
@@ -640,8 +804,7 @@ static void sweep_video(struct sweep *s, size_t idx, const char *dll,
 		 * (aslcodec_dshow.dll): whatever codec here decodes it.
 		 */
 		message_of(err, 0, msg, sizeof(msg));
-		const char *aargs[] = { "decode", "auto", avi, "-o", y4m, NULL };
-		by_auto = !run(s, aargs, out, err);
+		by_auto = !decode_to(s, "auto", avi, y4m, NULL, out, err);
 		if (by_auto)
 			rc = 0;
 	}
@@ -654,6 +817,34 @@ static void sweep_video(struct sweep *s, size_t idx, const char *dll,
 	}
 	r->status = ST_ROUND_TRIP;
 	r->psnr = psnr_of(s->video_in, &ro, y4m, r->note, sizeof(r->note));
+	/*
+	 * Nothing like what went in: a decoder whose YUV output is wrong
+	 * (mhuffyuv.dll writes nothing as YUY2) may do better as RGB.
+	 */
+	if (r->psnr < PSNR_BROKEN &&
+	    !decode_to(s, by_auto ? "auto" : dll, avi, y4m2, "BGR24", out,
+		       err)) {
+		char note2[128] = "";
+		double p2 = psnr_of(s->video_in, &ro, y4m2, note2,
+				    sizeof(note2));
+		/* (better by more than a dB, or enough to be a round trip) */
+		if (p2 > r->psnr + 1 ||
+		    (p2 >= PSNR_BROKEN && p2 > r->psnr)) {
+			r->psnr = p2;
+			snprintf(r->note, sizeof(r->note), "decoded as BGR24: "
+				 "its own choice of output gives nothing like the "
+				 "input%s%s", note2[0] ? "; " : "", note2);
+		}
+	}
+	if (r->psnr < PSNR_BROKEN) {
+		r->status = ST_ENCODES;
+		snprintf(r->note, sizeof(r->note), by_auto ?
+			 "encodes, but no decoder here reads it back (decode "
+			 "auto gives %.1f dB)" :
+			 "encodes, but its own decoder gives nothing like the "
+			 "input back (%.1f dB)", r->psnr);
+		return;
+	}
 	if (by_auto && !r->note[0])
 		snprintf(r->note, sizeof(r->note), "decoded by another codec "
 			 "here (decode auto): its own DLL doesn't decode it");
@@ -771,7 +962,7 @@ done:
 	/* What every step made, however far it got. */
 	if (!s->keep) {
 		static const char *const made[] = {
-			"out", "avi", "y4m", "enc.wav", "dec.wav",
+			"out", "avi", "y4m", "rgb.y4m", "enc.wav", "dec.wav",
 		};
 		unlink(out);
 		unlink(err);

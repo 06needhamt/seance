@@ -827,6 +827,56 @@ to a cause; what was seance's is fixed, and the rest is recorded here.
   refuses (`ICERR_ERROR`). That is the vendor's licence condition; seance
   doesn't get round it. It decodes.
 
+### The codec zip, November 2026: what the sweep reports
+
+The sweep's own heuristics, rechecked against the 75 DLLs whose result
+was "needs an option", "decodes at another size", "no output format",
+"no frames to compare" or a round trip below 10 dB:
+
+- **Several encoders in one DLL** (`utv_dmo.dll`, `LEncH2644.dll` and its
+  `x` variant, `3ivxDSVideoEncoder.ax`): each encoder the probe lists is
+  tried with `--clsid` until one encodes, and the TSV's "fix" names it.
+  `decode` on a DLL of several decoders now takes the one that registers
+  the stream's FOURCC. That was the only cause of its "cannot open a
+  unique decoder" error.
+  - `utv_dmo.dll`'s encoders run. Its decoders refuse what they make
+    (`DMO_E_INVALIDTYPE`): the DMO encoder offers its output type
+    without the codec data its decoder wants, before streaming and after.
+  - None of `3ivxDSVideoEncoder.ax`'s seven encoders takes any standard
+    input, at any size.
+- **"Try --fourcc"** (`LCodcScr2`, `Mvicod32`, `digivcap`, `ff_vfw`):
+  `encode`, `decode` and `probe` already try every FOURCC found in the
+  DLL. These refuse `DRV_OPEN` under all of them:
+  - `digivcap` and `Mvicod32` want their vendors' drivers ("Device Driver
+    mviddnt is not started") or registry keys;
+  - `LCodcScr2` is LEAD's;
+  - `ff_vfw` wants ffdshow installed.
+- **Other sizes:** a DirectShow or DMO encoder that takes no standard
+  input at 320x240 is tried at 352x288, 640x480, 720x480, 720x576,
+  1280x720 and 1920x1080 (`--scale`). `encode` already asks a VfW codec
+  those sizes and names one it takes. None of the zip's took one.
+- **Decoders that pad** (`TxsH263.dll`, `LEncMpg23.dll`, 352x288 or 352x240
+  for 320x240) are measured on the top-left of their output.
+  - `qdv.dll` decodes DV at 720x480 whatever it was given, so its number
+    (15.6 dB) compares a corner of a rescaled picture.
+- **Round trips below 10 dB** are tried again decoding to BGR24, and
+  are "encodes" if that doesn't help. `decode auto` below 10 dB counts as
+  no decoder here.
+  - `mhuffyuv.dll` freed a buffer twice in `ICM_DECOMPRESS_END`, and
+    libc aborted. Windows' heap fails a second free (msvcrt ignores
+    that), and now seance's does too, for the 64 blocks freed last. It
+    decodes nothing as YUY2 (ICERR_OK, all zeros), and to BGR24 at
+    22 dB.
+  - The decoders of `SN4Codec.dll` (12 dB), `davcvfw.dll` (15 dB) and
+    `mmtvmj.dll` (12 dB) give noise, black or zeros in their own output
+    format, and do better as BGR24. `mmtvmj` is Morgan's M-JPEG, whose
+    trial puts its logo in the picture and decodes half the lines.
+  - `H264Vfw.dll` writes 230,400 zero bytes per frame, a raw frame's size
+    with nothing in it. It is "encodes".
+- **No output format** (`AJPG.DLL`, `KHCS.DLL`): they answer
+  `ICM_COMPRESS_GET_FORMAT` with nothing, and decompress their own FOURCC,
+  so they are decoders.
+
 ## In-repository baseline
 
 For comparison, the same command over `build/fixtures` examined 23 fixture

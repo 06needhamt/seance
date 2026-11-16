@@ -14,6 +14,7 @@
  * when the low 2 GB can't give more, libc does. VFW_LOWHEAP=0 turns it off.
  */
 #include <malloc.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,6 +44,53 @@ static int not_a_block(const void *p)
 	return 1;
 }
 
+/*
+ * The blocks freed last, to catch a second free of one. A Windows heap
+ * fails it (HeapFree returns FALSE, which msvcrt's free ignores); libc's
+ * aborts. mhuffyuv.dll deletes the same buffer twice in
+ * ICM_DECOMPRESS_END. A block handed out again is forgotten; one handed
+ * out again by plain malloc (seance's _strdup) isn't, so a guest free of
+ * it is taken for a second and the block leaks, as a warning says.
+ */
+#define NFREED 64
+static pthread_mutex_t freed_lock = PTHREAD_MUTEX_INITIALIZER;
+static const void *freed[NFREED];
+static unsigned freed_next;
+
+/* Whether p was freed last (and not handed out since); notes it if not. */
+static int freed_again(const void *p)
+{
+	static int warned;
+	int again = 0;
+
+	pthread_mutex_lock(&freed_lock);
+	for (unsigned i = 0; i < NFREED && !again; i++)
+		again = freed[i] == p;
+	if (!again)
+		freed[freed_next++ % NFREED] = p;
+	pthread_mutex_unlock(&freed_lock);
+	if (!again)
+		return 0;
+	if (!__atomic_exchange_n(&warned, 1, __ATOMIC_RELAXED))
+		vfw_warn("free(%p): freed already; ignored, as Windows does", p);
+	else
+		TRACE("free(%p): freed already; ignored", p);
+	return 1;
+}
+
+/* p is a block again: forget it was freed. Returns p. */
+static void *handed_out(void *p)
+{
+	if (!p)
+		return p;
+	pthread_mutex_lock(&freed_lock);
+	for (unsigned i = 0; i < NFREED; i++)
+		if (freed[i] == p)
+			freed[i] = NULL;
+	pthread_mutex_unlock(&freed_lock);
+	return p;
+}
+
 int win_zero_memory(void)
 {
 	static int zero = -1;
@@ -58,21 +106,20 @@ int win_zero_memory(void)
 
 void *win_alloc(size_t n, size_t size)
 {
-	return win_zero_memory() ? calloc(n, size) : malloc(n * size);
+	return handed_out(win_zero_memory() ? calloc(n, size) :
+			  size && n > SIZE_MAX / size ? NULL : malloc(n * size));
 }
 
-void *win_calloc(size_t n, size_t size) { return calloc(n, size); }
-void *win_realloc(void *p, size_t n) { return realloc(p, n); }
+void *win_calloc(size_t n, size_t size) { return handed_out(calloc(n, size)); }
+void *win_realloc(void *p, size_t n) { return handed_out(realloc(p, n)); }
 void win_free(void *p)
 {
-	if (!not_a_block(p))
+	if (p && !not_a_block(p) && !freed_again(p))
 		free(p);
 }
 size_t win_usable(void *p) { return malloc_usable_size(p); }
 
 #else
-
-#include <pthread.h>
 
 #define HEADER   16
 #define NCLASS   128
@@ -174,9 +221,9 @@ static void *alloc_n(size_t n, int zero)
 {
 	void *p = low_alloc(n, zero);
 
-	if (p)
-		return p;
-	return zero ? calloc(1, n) : malloc(n);
+	if (!p)
+		p = zero ? calloc(1, n) : malloc(n);
+	return handed_out(p);
 }
 
 void *win_alloc(size_t n, size_t size)
@@ -212,7 +259,7 @@ size_t win_usable(void *p)
 
 void win_free(void *p)
 {
-	if (!p || not_a_block(p))
+	if (!p || not_a_block(p) || freed_again(p))
 		return;
 	if (!is_low(p)) {
 		free(p);
@@ -240,7 +287,7 @@ void *win_realloc(void *p, size_t n)
 		return NULL;
 	}
 	if (!is_low(p))
-		return realloc(p, n);
+		return handed_out(realloc(p, n));
 	have = win_usable(p);
 	if (n <= have)
 		return p;

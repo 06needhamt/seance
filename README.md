@@ -865,8 +865,17 @@ the codec was given, its bit rate, and the message it stopped with:
 - An ACM driver is given 16-bit PCM, in each layout from 8 kHz mono to
   48 kHz stereo until it takes one, for each format tag it encodes to
   until one works.
+- A DLL of several video encoders is tried with each (`--clsid`) until one
+  works. A DirectShow or DMO encoder that takes nothing at the clip's size
+  is tried at 352x288, 640x480, 720x480, 720x576, 1280x720 and 1920x1080.
 - An encoder whose DLL can't decode its own output is decoded by
   whatever codec here does (`decode auto`).
+- A decoder that pads its output (352x288 for 320x240) is measured on the
+  top-left of it. A round trip below 10 dB is decoded again to BGR24,
+  as a decoder's own choice of output can be the broken one. If that
+  doesn't help, the codec "encodes" but doesn't round-trip.
+- A VfW codec that compresses to nothing but decompresses its own FOURCC
+  is a `decoder`.
 
 `--markdown` writes the results as a table and `--tsv` as tab-separated
 values; `--compare` with an earlier sweep's TSV lists what changed, and

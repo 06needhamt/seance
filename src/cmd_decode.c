@@ -584,7 +584,18 @@ static int decode_com(const char *target, const CLSID *selected,
 		if (avi_chunk_is_frame(&s->chunks[i]) && s->chunks[i].size > largest)
 			largest = s->chunks[i].size;
 	in->biSizeImage = largest;
-	HRESULT hr = xform_open(target, selected, 0, 0, &x, NULL);
+	/*
+	 * A DLL of several decoders (utv_dmo.dll: one per FOURCC): the one
+	 * that registers the stream's.
+	 */
+	struct xform_class found;
+	HRESULT hr = xform_find(target, selected, 0, 0, &found);
+	if (hr == VFW_E_DUPLICATE_NAME && !selected &&
+	    SUCCEEDED(xform_find_output(target, NULL, 0, 0, in->biCompression,
+					&found)))
+		hr = S_OK;
+	if (SUCCEEDED(hr))
+		hr = xform_create(target, &found, &x);
 	if (FAILED(hr)) {
 		fprintf(stderr, "seance: cannot open a unique decoder in %s "
 			"(%s)%s\n", target, dshow_hr_name(hr, name),

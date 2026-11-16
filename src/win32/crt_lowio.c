@@ -428,7 +428,7 @@ CRTFN(char *) crt__getcwd(char *buf, int size)
 			errno = ERANGE;
 			return NULL;
 		}
-		buf = malloc(room);
+		buf = win_alloc(1, room);	/* the guest frees it */
 		if (!buf) {
 			free(cwd);
 			errno = ENOMEM;
