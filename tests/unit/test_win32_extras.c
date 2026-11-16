@@ -2118,7 +2118,8 @@ static void CDECL dllexit_fn(void) { dllexit_calls++; }
 
 /* __dllonexit appends to the DLL's own table, as MinGW's DLL startup
  * expects, and free ignores a pointer that can't start a block (vfwbw.dll
- * frees one a byte into its block), as a Windows heap does. */
+ * frees one a byte into its block), or one just freed, as a Windows heap
+ * does. */
 static void test_dllonexit_and_bad_free(void)
 {
 	struct module *m = mod_load("msvcrt.dll", NULL);
@@ -2159,6 +2160,20 @@ static void test_dllonexit_and_bad_free(void)
 	if (block)
 		block[63] = 1;	/* still the caller's */
 	free(block);
+
+	/* A block freed twice (mhuffyuv.dll's ICM_DECOMPRESS_END): the
+	 * second is ignored. One handed out again at the same address is
+	 * the caller's, and freed for real. */
+	char *twice = malloc(48);
+	CHECK(twice != NULL);
+	free(twice);
+	free(twice);
+	char *again = malloc(48);
+	CHECK(again != NULL);
+	if (again)
+		memset(again, 1, 48);
+	free(again);
+	free(again);
 	mod_free(m);
 }
 
