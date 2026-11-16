@@ -167,7 +167,7 @@ CRTFN(char *) crt__fullpath(char *abs, const char *rel, size_t max)
 	if (!abs) {
 		if (max < need)
 			max = need;
-		if (!(abs = malloc(max))) {
+		if (!(abs = win_alloc(1, max))) {	/* the guest frees it */
 			free(a);
 			errno = ENOMEM;
 			return NULL;

@@ -55,7 +55,7 @@ CRTFN(int) crt__strnicmp(const char *a, const char *b, size_t n) { return strnca
 CRTFN(char *) crt__strdup(const char *s)
 {
 	size_t n = strlen(s) + 1;
-	char *p = malloc(n);
+	char *p = win_alloc(1, n);	/* the guest frees it */
 	if (p)
 		memcpy(p, s, n);
 	return p;
@@ -177,7 +177,7 @@ CRTFN(WCHAR *) crt_wcspbrk(const WCHAR *s, const WCHAR *set)
 CRTFN(WCHAR *) crt__wcsdup(const WCHAR *s)
 {
 	size_t n = (crt_wcslen(s) + 1) * sizeof(WCHAR);
-	WCHAR *p = malloc(n);
+	WCHAR *p = win_alloc(1, n);	/* the guest frees it */
 
 	if (p)
 		memcpy(p, s, n);

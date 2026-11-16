@@ -145,9 +145,10 @@ CRTFN(void *) crt__decode_pointer(void *p) { return p; }
 CRTFN(void *) crt__encoded_null(void) { return NULL; }
 
 /* The CRT heap, under the names its own startup/cleanup code uses. */
-CRTFN(void *) crt__malloc_crt(size_t n) { return malloc(n); }
-CRTFN(void *) crt__calloc_crt(size_t n, size_t size) { return calloc(n, size); }
-CRTFN(void *) crt__realloc_crt(void *p, size_t n) { return realloc(p, n); }
+/* (The guest frees these with free: they are win_free's blocks.) */
+CRTFN(void *) crt__malloc_crt(size_t n) { return win_alloc(1, n); }
+CRTFN(void *) crt__calloc_crt(size_t n, size_t size) { return win_calloc(n, size); }
+CRTFN(void *) crt__realloc_crt(void *p, size_t n) { return win_realloc(p, n); }
 CRTFN(void) crt__free_crt(void *p) { free(p); }
 
 /* _lock/_unlock: the CRT's own internal locks (heap, stdio, ...), by

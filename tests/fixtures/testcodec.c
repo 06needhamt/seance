@@ -581,8 +581,8 @@ static LRESULT decompress(struct instance *inst, ICDECOMPRESS *d)
 		for (DWORD i = 0; i < frame_bytes(out); i++)
 			dst[i] = 0x80;
 		for (int k = 0; k < 3; k++) {
-			LONG pw = k ? w / 2 : w, ph = k ? h / 2 : h;
-			LONG qw = k ? ow / 2 : ow;
+			LONG pw = k ? (w + 1) / 2 : w, ph = k ? (h + 1) / 2 : h;
+			LONG qw = k ? (ow + 1) / 2 : ow;
 			for (y = 0; y < ph; y++)
 				for (x = 0; x < pw; x++)
 					q[y * qw + x] = p[y * pw + x];

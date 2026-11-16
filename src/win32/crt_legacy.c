@@ -16,6 +16,7 @@
 #include "runtime/builtin.h"
 #include "win32/codepage.h"
 #include "win32/k32.h"
+#include "win32/internal.h"
 #include "win32/path.h"
 #include "win32/winva.h"
 
@@ -318,7 +319,7 @@ CRTFN(WCHAR *) crt__wfullpath(WCHAR *abs, const WCHAR *rel, size_t max)
 	if (!abs) {
 		if (!max || max < (size_t)need)
 			max = (size_t)need;
-		abs = malloc(max * sizeof(WCHAR));
+		abs = win_alloc(max, sizeof(WCHAR));	/* the guest frees it */
 		if (!abs) {
 			free(full);
 			errno = ENOMEM;

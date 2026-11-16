@@ -721,12 +721,15 @@ static void sweep_video(struct sweep *s, size_t idx, const char *dll,
 	/* A DLL of several encoders (utv_dmo.dll): each in turn. */
 	int each = rc && rc < 124 && strstr(msg, "several video encoders") &&
 		   r->nclsids;
+	int size_refused = 0;	/* by any of them */
 	if (each) {
 		int first_rc = -1;
 		for (int k = 0; k < r->nclsids && rc; k++) {
 			snprintf(pre, sizeof(pre), "--clsid %s", r->clsids[k]);
 			rc = encode_with(s, dll, avi, out, err, pre, r, msg,
 					 sizeof(msg));
+			if (rc && rc < 124 && refused_input(msg))
+				size_refused = 1;
 			if (rc && first_rc < 0) {
 				first_rc = rc;
 				snprintf(first, sizeof(first), "with --clsid %.39s: "
@@ -744,7 +747,8 @@ static void sweep_video(struct sweep *s, size_t idx, const char *dll,
 	 * of several). Encode itself asks a VfW codec these sizes, and names
 	 * one it takes.
 	 */
-	if (rc && rc < 124 && strcmp(r->kind, "VfW") && refused_input(msg)) {
+	if (rc && rc < 124 && strcmp(r->kind, "VfW") &&
+	    (size_refused || refused_input(msg))) {
 		snprintf(first, sizeof(first), "%s", msg);
 		for (int k = 0; k < (each ? r->nclsids : 1) && rc; k++)
 			for (size_t z = 0;
@@ -823,7 +827,9 @@ static void sweep_video(struct sweep *s, size_t idx, const char *dll,
 		char note2[128] = "";
 		double p2 = psnr_of(s->video_in, &ro, y4m2, note2,
 				    sizeof(note2));
-		if (p2 > r->psnr + 1) {
+		/* (better by more than a dB, or enough to be a round trip) */
+		if (p2 > r->psnr + 1 ||
+		    (p2 >= PSNR_BROKEN && p2 > r->psnr)) {
 			r->psnr = p2;
 			snprintf(r->note, sizeof(r->note), "decoded as BGR24: "
 				 "its own choice of output gives nothing like the "

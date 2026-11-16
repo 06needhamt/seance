@@ -378,15 +378,15 @@ static void test_msvcrt(void)
 	CHECK_EQ(_wcsicmp(path, (const WCHAR[]){ 'A', '\\', 'B', '\\', 'C', 0 }), 0);
 	CHECK(_wcsicmp(path, upper) > 0);
 	CHECK_EQ(_wcsnicmp(path, upper, 3), 0);
+	CFN(c, void, free, void *);
 	WCHAR *dup = _wcsdup(path);
 	CHECK(dup && !_wcsicmp(dup, path));
 	_wcsupr(dup);
 	CHECK(dup[0] == 'A' && dup[1] == '\\' && dup[4] == 'C');
 	_wcslwr(dup);
 	CHECK(dup[0] == 'a' && dup[4] == 'c');
-	free(dup);
+	free(dup);	/* the guest's free: _wcsdup's block is the heap's */
 	CFN(c, void *, malloc, size_t);
-	CFN(c, void, free, void *);
 	CFN(c, size_t, _msize, void *);
 	void *p = malloc(100);
 	CHECK(_msize(p) >= 100);
@@ -654,6 +654,7 @@ static void test_msvcrt_files(void)
 	CFN(c, intptr_t, _wfindfirst, const WCHAR *, void *);
 	CFN(c, int, _wfindnext, intptr_t, void *);
 	CFN(c, char *, _getcwd, char *, int);
+	CFN(c, void, free, void *);
 	CFN(c, void *, _wfopen, const WCHAR *, const WCHAR *);
 	CFN(c, int, fclose, void *);
 	CFN(c, WCHAR *, _wfullpath, WCHAR *, const WCHAR *, size_t);
@@ -2174,6 +2175,19 @@ static void test_dllonexit_and_bad_free(void)
 		memset(again, 1, 48);
 	free(again);
 	free(again);
+
+	/* _strdup's block is the heap's: one at an address just freed is
+	 * freed for real, and handed out again next. */
+	CFN(m, char *, _strdup, const char *);
+	char *d1 = _strdup("seance");
+	free(d1);
+	char *d2 = _strdup("seance");
+	CHECK(d2 != NULL);
+	free(d2);
+	char *d3 = malloc(7);
+	if (d2 == d1)	/* (not under a sanitizer, which holds freed blocks) */
+		CHECK(d3 == d2);
+	free(d3);
 	mod_free(m);
 }
 
