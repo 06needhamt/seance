@@ -7,6 +7,10 @@
  * categories, each with its HKCR\CLSID\{...}\InprocServer32 key;
  * DllUnregisterServer takes it all away again.
  *
+ * With TESTDMO_TWO=1 in its environment it registers a second video
+ * encoder, the same as the first, and a second video decoder, of 'TST1'
+ * only, as DLLs of several codecs (utv_dmo.dll) do.
+ *
  * The DMOs themselves live in testdmo_dmo.c (video) and testdmo_audio.c.
  */
 #include "fixture.h"
@@ -25,11 +29,19 @@ static const GUID clsid_audio_decoder = { 0x5e6c9b43, 0x3a7d, 0x4f0e,
 static const GUID clsid_audio_encoder = { 0x5e6c9b44, 0x3a7d, 0x4f0e,
 	{ 0x9c, 0x11, 0x0d, 0x2b, 0x7a, 0x6e, 0x4f, 0x80 } };
 
+/* {5E6C9B45-...}, {5E6C9B46-...}: TESTDMO_TWO's encoder and decoder */
+static const GUID clsid_encoder2 = { 0x5e6c9b45, 0x3a7d, 0x4f0e,
+	{ 0x9c, 0x11, 0x0d, 0x2b, 0x7a, 0x6e, 0x4f, 0x80 } };
+static const GUID clsid_decoder2 = { 0x5e6c9b46, 0x3a7d, 0x4f0e,
+	{ 0x9c, 0x11, 0x0d, 0x2b, 0x7a, 0x6e, 0x4f, 0x80 } };
+
 /* Windows' GUIDs, defined here: the fixture links no uuid library. */
 static const GUID video_decoder = { 0x4a69b442, 0x28be, 0x4991,
 	{ 0x96, 0x9c, 0xb5, 0x00, 0xad, 0xf5, 0xd8, 0xa8 } };
 static const WCHAR video_encoder[] =
 	L"{33D9A760-90C8-11D0-BD43-00A0C911CE86}";
+static const GUID video_encoder_guid = { 0x33d9a760, 0x90c8, 0x11d0,
+	{ 0xbd, 0x43, 0x00, 0xa0, 0xc9, 0x11, 0xce, 0x86 } };
 static const GUID audio_decoder = { 0x57f2db8b, 0xe6bb, 0x4513,
 	{ 0x9d, 0x43, 0xdc, 0xd2, 0xa6, 0x59, 0x31, 0x25 } };
 static const GUID audio_encoder = { 0x33d9a761, 0x90c8, 0x11d0,
@@ -47,6 +59,9 @@ static const GUID audio_encoder = { 0x33d9a761, 0x90c8, 0x11d0,
 
 static const DMO_PARTIAL_MEDIATYPE tst0[] = {
 	{ VIDS, FOURCC_GUID('T', 'S', 'T', '0') },
+};
+static const DMO_PARTIAL_MEDIATYPE tst1[] = {
+	{ VIDS, FOURCC_GUID('T', 'S', 'T', '1') },
 };
 /* The raw formats testdmo_dmo.c handles. */
 static const DMO_PARTIAL_MEDIATYPE raw[] = {
@@ -70,6 +85,15 @@ static const WCHAR audio_decoder_name[] = L"seance test DMO audio decoder";
 static const WCHAR audio_encoder_name[] = L"seance test DMO audio encoder";
 
 static HINSTANCE self;
+
+/* TESTDMO_TWO=1 */
+static int two(void)
+{
+	char v[4];
+
+	return GetEnvironmentVariableA("TESTDMO_TWO", v, sizeof(v)) == 1 &&
+	       v[0] == '1';
+}
 HRESULT testdmo_create(BOOL encoder, REFIID riid, void **out);
 LONG testdmo_objects(void);
 HRESULT testdmo_audio_create(BOOL encoder, REFIID riid, void **out);
@@ -217,6 +241,16 @@ HRESULT WINAPI DllRegisterServer(void)
 				       0, 1, tsta, 1, pcm)))
 		hr = DMORegister(audio_encoder_name, &clsid_audio_encoder,
 				 &audio_encoder, 0, 1, pcm, 1, tsta);
+	if (SUCCEEDED(hr) && two() &&
+	    SUCCEEDED(hr = register_class(&clsid_encoder2, L"encoder 2")) &&
+	    SUCCEEDED(hr = register_class(&clsid_decoder2, L"decoder 2")) &&
+	    SUCCEEDED(hr = DMORegister(L"seance test DMO encoder 2",
+				       &clsid_encoder2, &video_encoder_guid,
+				       0, sizeof(raw) / sizeof(*raw), raw, 1,
+				       tst0)))
+		hr = DMORegister(L"seance test DMO decoder 2", &clsid_decoder2,
+				 &video_decoder, 0, 1, tst1,
+				 sizeof(raw) / sizeof(*raw), raw);
 	return hr;
 }
 
@@ -225,6 +259,10 @@ HRESULT WINAPI DllUnregisterServer(void)
 	DMOUnregister(&clsid_decoder, &video_decoder);
 	DMOUnregister(&clsid_audio_decoder, &audio_decoder);
 	DMOUnregister(&clsid_audio_encoder, &audio_encoder);
+	DMOUnregister(&clsid_encoder2, &video_encoder_guid);
+	DMOUnregister(&clsid_decoder2, &video_decoder);
+	unregister_class(&clsid_encoder2);
+	unregister_class(&clsid_decoder2);
 	unregister_encoder();
 	unregister_class(&clsid_decoder);
 	unregister_class(&clsid_encoder);
@@ -281,8 +319,10 @@ HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void **ppv)
 {
 	if (guid_eq(clsid, &clsid_decoder))
 		return cf_qi(&decoder_factory.iface, riid, ppv);
-	if (guid_eq(clsid, &clsid_encoder))
+	if (guid_eq(clsid, &clsid_encoder) || guid_eq(clsid, &clsid_encoder2))
 		return cf_qi(&encoder_factory.iface, riid, ppv);
+	if (guid_eq(clsid, &clsid_decoder2))
+		return cf_qi(&decoder_factory.iface, riid, ppv);
 	if (guid_eq(clsid, &clsid_audio_decoder))
 		return cf_qi(&audio_decoder_factory.iface, riid, ppv);
 	if (guid_eq(clsid, &clsid_audio_encoder))

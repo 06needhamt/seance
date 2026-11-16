@@ -80,6 +80,11 @@
  *                         and opens without that key but fails every
  *                         ICM_COMPRESS with ICERR_INTERNAL (tm2x.dll,
  *                         without Duck's)
+ *   TESTCODEC_BLANK       it decodes to zeros, but says it decoded: as
+ *                         YUV (=1; mhuffyuv.dll as YUY2), or as
+ *                         anything (=2)
+ *   TESTCODEC_PAD_OUT     it decodes I420 16 pixels wider than it is, as
+ *                         decoders that round up to their block size do
  *   TESTCODEC_SIZED_OUT   ICM_COMPRESS_GET_FORMAT refuses an output buffer
  *                         whose biSize isn't set to at least a
  *                         BITMAPINFOHEADER's (TxsH263.dll)
@@ -162,6 +167,7 @@ static int end_crash;
 static int overrun;
 static int empty_format, no_keys, align16;
 static int begin_rgb, yuv_upside, needs_dll, key_missing, sized_out;
+static int blank, pad_out;
 static volatile int zero;
 #define EARLY_SIZE 16	/* what it says before ICM_COMPRESS_BEGIN */
 static DWORD last_quality = 0xffffffff;	/* of the last ICM_COMPRESS */
@@ -496,10 +502,15 @@ static LRESULT decompress_query(const BITMAPINFOHEADER *in,
 	if (!ok_tst0(in))
 		return ICERR_BADFORMAT;
 	if (out && (in->biBitCount == 12 ?
-		    !ok_yuv(out) && !(yuv_upside && ok_rgb(out) &&
-				      out->biBitCount == 24) :
+		    !ok_yuv(out) && !((yuv_upside || blank == 1) &&
+				      ok_rgb(out) && out->biBitCount == 24) :
 		    !ok_rgb(out)))
 		return ICERR_BADFORMAT;
+	/* TESTCODEC_PAD_OUT: YUV 16 pixels wider, and only that. */
+	if (out && pad_out && in->biBitCount == 12 && ok_yuv(out))
+		return out->biWidth == in->biWidth + 16 &&
+		       abs_height(out) == abs_height(in) ? ICERR_OK :
+		       ICERR_BADFORMAT;
 	if (out && !same_size(in, out))
 		return ICERR_BADFORMAT;
 	return ICERR_OK;
@@ -517,6 +528,8 @@ static LRESULT decompress_get_format(const BITMAPINFOHEADER *in,
 	out->biCompression = in->biBitCount == 12 ? I420 : BI_RGB;
 	out->biBitCount = in->biBitCount == 12 ? 12 : 24;
 	out->biHeight = abs_height(in);
+	if (pad_out && in->biBitCount == 12)
+		out->biWidth += 16;
 	out->biSizeImage = frame_bytes(out);
 	out->biClrUsed = out->biClrImportant = 0;
 	return ICERR_OK;
@@ -554,6 +567,30 @@ static LRESULT decompress(struct instance *inst, ICDECOMPRESS *d)
 		inst->dvalid = 1;
 	}
 
+	/* As mhuffyuv.dll: nothing written, but ICERR_OK. */
+	if (blank == 2 || (blank == 1 && out->biCompression != BI_RGB)) {
+		for (DWORD i = 0; i < frame_bytes(out); i++)
+			dst[i] = 0;
+		return ICERR_OK;
+	}
+	if (in->biBitCount == 12 && out->biWidth != w) {
+		/* TESTCODEC_PAD_OUT: each plane's rows in a wider one's. */
+		const BYTE *p = inst->dcur;
+		BYTE *q = dst;
+		LONG ow = out->biWidth;
+		for (DWORD i = 0; i < frame_bytes(out); i++)
+			dst[i] = 0x80;
+		for (int k = 0; k < 3; k++) {
+			LONG pw = k ? w / 2 : w, ph = k ? h / 2 : h;
+			LONG qw = k ? ow / 2 : ow;
+			for (y = 0; y < ph; y++)
+				for (x = 0; x < pw; x++)
+					q[y * qw + x] = p[y * pw + x];
+			p += pw * ph;
+			q += qw * ph;
+		}
+		return ICERR_OK;
+	}
 	if (in->biBitCount == 12 && out->biCompression == BI_RGB) {
 		/* Grey from luma, full range, rows as the output has them. */
 		LONG st = stride(w, 24);
@@ -729,6 +766,11 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 			    v[0] >= '1' && v[0] <= '5' ? v[0] - '0' : 0;
 		sized_out = GetEnvironmentVariableA("TESTCODEC_SIZED_OUT", v,
 						    sizeof(v)) == 1 && v[0] == '1';
+		blank = GetEnvironmentVariableA("TESTCODEC_BLANK", v,
+						sizeof(v)) == 1 &&
+			(v[0] == '1' || v[0] == '2') ? v[0] - '0' : 0;
+		pad_out = GetEnvironmentVariableA("TESTCODEC_PAD_OUT", v,
+						  sizeof(v)) == 1 && v[0] == '1';
 		if (GetEnvironmentVariableA("TESTCODEC_CHATTY", v, sizeof(v)) == 1 &&
 		    v[0] == '1') {
 			static const char hello[] = "testcodec: hello\n";

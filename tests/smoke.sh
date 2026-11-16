@@ -575,10 +575,36 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		echo "smoke: sweep --compare missed a codec that got worse" >&2
 		exit 1
 	fi
-	grep -q "WORSE   testcodec.dll: round-trip lossless -> fails" \
+	# (One that compresses to nothing but decompresses its own FOURCC
+	# decodes only, as AJPG.DLL does.)
+	grep -q "WORSE   testcodec.dll: round-trip lossless -> decoder: decodes only" \
 		"$work/sweep3.txt"
 	$emu "$harness" sweep "$work/sweep" --size 64x48 --frames 3 \
 		--compare "$work/sweep1.tsv" | grep -q "^  none$"
+	# A decoder that gives nothing (as YUV, mhuffyuv.dll; or as anything)
+	# is tried as BGR24, and is no round trip if that doesn't help either;
+	# one that pads its output is measured on the picture's part of it.
+	VFW_ENV_TESTCODEC_BLANK=1 $emu "$harness" sweep \
+		"$work/sweep/testcodec.dll" --size 64x48 --frames 3 \
+		--tsv "$work/sweep4.tsv" >/dev/null
+	grep -q "	round-trip	[0-9.]*	.*	decoded as BGR24: " "$work/sweep4.tsv"
+	VFW_ENV_TESTCODEC_BLANK=2 $emu "$harness" sweep \
+		"$work/sweep/testcodec.dll" --size 64x48 --frames 3 \
+		--tsv "$work/sweep4.tsv" >/dev/null
+	grep -q "	encodes	.*its own decoder gives nothing like the input" \
+		"$work/sweep4.tsv"
+	VFW_ENV_TESTCODEC_PAD_OUT=1 $emu "$harness" sweep \
+		"$work/sweep/testcodec.dll" --size 64x48 --frames 3 \
+		--tsv "$work/sweep4.tsv" >/dev/null
+	grep -q "	round-trip	inf	.*decodes at 80x48; measured on its top-left 64x48" \
+		"$work/sweep4.tsv"
+	# A DMO DLL of several video encoders: each is tried; its decoders
+	# are told apart by the FOURCC they take.
+	cp "$fixtures/testdmo.dll" "$work/sweep/"
+	VFW_ENV_TESTDMO_TWO=1 $emu "$harness" sweep "$work/sweep/testdmo.dll" \
+		--size 64x48 --frames 3 --tsv "$work/sweep4.tsv" >/dev/null
+	grep -q "	testdmo.dll	DMO	.*	round-trip	inf	.*	--clsid {5E6C9B4[25]-" \
+		"$work/sweep4.tsv"
 	# A codec that crashes in ICM_*_END after the last frame still gives
 	# whole files (not under a sanitizer, which takes faults itself).
 	if [ "$crash" = 1 ]; then

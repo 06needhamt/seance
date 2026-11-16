@@ -71,6 +71,47 @@ static DWORD filter_compression(const struct qz_filter *f, int audio)
 	return 0;
 }
 
+/* Whether a FOURCC is c's, its letters' case aside (YUY2/yuy2). */
+static int same_fourcc(DWORD a, DWORD c)
+{
+	for (int i = 0; i < 4; i++) {
+		BYTE x = (BYTE)(a >> 8 * i), y = (BYTE)(c >> 8 * i);
+		if (x >= 'a' && x <= 'z')
+			x -= 32;
+		if (y >= 'a' && y <= 'z')
+			y -= 32;
+		if (x != y)
+			return 0;
+	}
+	return 1;
+}
+
+/* Whether a decoder registers c among its inputs. */
+static int filter_takes(const struct qz_filter *f, int audio, DWORD c)
+{
+	for (size_t p = 0; p < f->npins; p++) {
+		if (f->pins[p].flags & REG_PINFLAG_B_OUTPUT)
+			continue;
+		for (size_t t = 0; t < f->pins[p].ntypes; t++) {
+			DWORD k = compression_of(&f->pins[p].types[t].minor,
+						 audio);
+			if (k && same_fourcc(k, c))
+				return 1;
+		}
+	}
+	return 0;
+}
+
+static int dmo_takes(const struct dmo_reg *d, int audio, DWORD c)
+{
+	for (size_t t = 0; t < d->nin; t++) {
+		DWORD k = compression_of(&d->in[t].subtype, audio);
+		if (k && same_fourcc(k, c))
+			return 1;
+	}
+	return 0;
+}
+
 static DWORD dmo_compression(const struct dmo_reg *d, int audio)
 {
 	for (size_t t = 0; t < d->nout; t++) {
@@ -157,6 +198,8 @@ HRESULT xform_find_output(const char *path, const CLSID *selected, int audio,
 		DWORD c = encoder ? filter_compression(q, audio) : 0;
 		if (encoder && c && output && c != output)
 			continue;
+		if (!encoder && output && !filter_takes(q, audio, output))
+			continue;
 		found->clsid = q->clsid;
 		found->dmo = 0;
 		found->compression = c;
@@ -173,6 +216,8 @@ HRESULT xform_find_output(const char *path, const CLSID *selected, int audio,
 			continue;
 		DWORD c = encoder ? dmo_compression(d, audio) : 0;
 		if (encoder && (!c || (output && c != output)))
+			continue;
+		if (!encoder && output && !dmo_takes(d, audio, output))
 			continue;
 		found->clsid = d->clsid;
 		found->dmo = 1;

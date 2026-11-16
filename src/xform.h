@@ -51,7 +51,7 @@ HRESULT xform_find(const char *path, const CLSID *selected, int audio,
 		   int encoder, struct xform_class *found);
 /*
  * The same, with an encoder's output tag (audio) or FOURCC (video) to
- * choose by when not 0. A DLL that exports DriverProc and no
+ * choose by when not 0; for a decoder, one it registers as an input. A DLL that exports DriverProc and no
  * DllGetClassObject is an ACM driver to this (audio only, no CLSIDs).
  */
 HRESULT xform_find_output(const char *path, const CLSID *selected, int audio,
