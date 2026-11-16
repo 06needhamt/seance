@@ -1833,6 +1833,7 @@ static void test_mbcs_searchpath(const char *root)
 	CFN(m, BYTE *, _mbsdec, const BYTE *, const BYTE *);
 	CFN(m, size_t, _mbclen, const BYTE *);
 	CFN(m, int, _ismbcspace, unsigned);
+	CFN(m, int, isleadbyte, int);
 	CFN(m, int *, __p___argc, void);
 	CFN(m, char ***, __p___argv, void);
 	CFN(m, char *, _fullpath, char *, const char *, size_t);
@@ -1853,6 +1854,7 @@ static void test_mbcs_searchpath(const char *root)
 	CHECK(_mbsinc(s) == s + 1 && _mbsdec(s, s + 2) == s + 1 && !_mbsdec(s, s));
 	CHECK_EQ(_mbclen(s), 1);
 	CHECK(_ismbcspace(' ') && !_ismbcspace('x'));
+	CHECK(!isleadbyte(0x81) && !isleadbyte('a'));
 	CHECK(mbctype['A' + 1] == 0x10 && mbctype['a' + 1] == 0x20 && !mbctype[0x81 + 1]);
 	CHECK(*__p___argc() == 1 && !strcmp((*__p___argv())[0], "seance.exe"));
 	char full[300];
