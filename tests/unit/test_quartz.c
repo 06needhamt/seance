@@ -536,6 +536,31 @@ static void test_devenum(void)
 	CHECK_EQ(de->lpVtbl->Release(de), 0);
 }
 
+/* CLSID_MemoryAllocator, which strmbase's CreateMemoryAllocator makes. */
+static void test_memory_allocator(void)
+{
+	FN(ole, HRESULT, CoCreateInstance, REFCLSID, LPUNKNOWN, DWORD, REFIID,
+	   LPVOID *);
+	IMemAllocator *a = NULL;
+	ALLOCATOR_PROPERTIES want = { 1, 4096, 1, 0 }, got;
+	IMediaSample *s = NULL;
+
+	CHECK_EQ(CoCreateInstance(&CLSID_MemoryAllocator, NULL,
+				  CLSCTX_INPROC_SERVER, &IID_IMemAllocator,
+				  (void **)&a), S_OK);
+	if (!a)
+		return;
+	CHECK_EQ(a->lpVtbl->SetProperties(a, &want, &got), S_OK);
+	CHECK_EQ(a->lpVtbl->Commit(a), S_OK);
+	CHECK_EQ(a->lpVtbl->GetBuffer(a, &s, NULL, NULL, 0), S_OK);
+	if (s) {
+		CHECK_EQ(s->lpVtbl->GetSize(s), 4096);
+		s->lpVtbl->Release(s);
+	}
+	CHECK_EQ(a->lpVtbl->Decommit(a), S_OK);
+	CHECK_EQ(a->lpVtbl->Release(a), 0);
+}
+
 static void test_class_objects(void)
 {
 	FN(qz, HRESULT, DllGetClassObject, REFCLSID, REFIID, LPVOID *);
@@ -613,6 +638,7 @@ int main(void)
 	test_register1();
 	test_capture();
 	test_devenum();
+	test_memory_allocator();
 	test_class_objects();
 	test_error_text();
 

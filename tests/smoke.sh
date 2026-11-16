@@ -201,6 +201,13 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		--bitrate 128 2>/dev/null
 	$emu "$harness" decode "$f" "$work/t.wav" -o - --format pcm 2>/dev/null |
 		cmp - "$work/in.pcm"
+	# A decoder that sizes its work by the input buffer is given buffers
+	# the size of a packet, as a parser's are.
+	for t in t.avi t.wav; do
+		VFW_ENV_TESTFILTER_AUDIO_INSIZE=1 $emu "$harness" decode "$f" \
+			"$work/$t" -o - --format pcm 2>/dev/null |
+			cmp - "$work/in.pcm"
+	done
 	$emu "$harness" encode "$f" --audio - -o "$work/p.avi" \
 		<"$work/in.wav" 2>/dev/null
 	cmp -s "$work/t.avi" "$work/p.avi"

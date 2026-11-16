@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "common/padding.h"
 #include "dshow/dshow.h"
 #include "win32/ole.h"
 
@@ -201,7 +202,7 @@ static HRESULT WINAPI alloc_commit(IMemAllocator*p)
 {
 	struct allocator*a=allocator_from(p);if(a->committed)return S_OK;if(a->props.cBuffers<=0||a->props.cbBuffer<=0)return VFW_E_SIZENOTSET;
 	a->samples=calloc(a->props.cBuffers,sizeof(*a->samples));if(!a->samples)return E_OUTOFMEMORY;
-	for(LONG i=0;i<a->props.cBuffers;i++){struct sample*s=&a->samples[i];s->iface.lpVtbl=&sample_vtbl;s->allocator=a;s->size=a->props.cbBuffer;s->actual=s->size;/* a new CMediaSample is full */size_t n=(size_t)s->size+a->props.cbPrefix+a->props.cbAlign-1;s->allocation=malloc(n);if(!s->allocation){allocator_clear(a);return E_OUTOFMEMORY;}uintptr_t q=(uintptr_t)(s->allocation+a->props.cbPrefix);q=(q+a->props.cbAlign-1)&~(uintptr_t)(a->props.cbAlign-1);s->data=(BYTE*)q;}
+	for(LONG i=0;i<a->props.cBuffers;i++){struct sample*s=&a->samples[i];s->iface.lpVtbl=&sample_vtbl;s->allocator=a;s->size=a->props.cbBuffer;s->actual=s->size;/* a new CMediaSample is full *//* and zeroed padding past the end, which GetSize doesn't count */size_t n=(size_t)s->size+a->props.cbPrefix+a->props.cbAlign-1+VFW_INPUT_PADDING;s->allocation=calloc(1,n);if(!s->allocation){allocator_clear(a);return E_OUTOFMEMORY;}uintptr_t q=(uintptr_t)(s->allocation+a->props.cbPrefix);q=(q+a->props.cbAlign-1)&~(uintptr_t)(a->props.cbAlign-1);s->data=(BYTE*)q;}
 	a->committed=1;return S_OK;
 }
 static HRESULT WINAPI alloc_decommit(IMemAllocator*p){struct allocator*a=allocator_from(p);pthread_mutex_lock(&a->lock);a->committed=0;int busy=0;for(LONG i=0;a->samples&&i<a->props.cBuffers;i++)busy|=a->samples[i].busy;if(!busy)allocator_clear(a);pthread_cond_broadcast(&a->available);pthread_mutex_unlock(&a->lock);return S_OK;}
@@ -209,6 +210,11 @@ static HRESULT WINAPI alloc_buffer(IMemAllocator*p,IMediaSample**out,REFERENCE_T
 {struct allocator*x=allocator_from(p);if(!out)return E_POINTER;*out=NULL;pthread_mutex_lock(&x->lock);for(;;){if(!x->committed){pthread_mutex_unlock(&x->lock);return VFW_E_NOT_COMMITTED;}for(LONG i=0;i<x->props.cBuffers;i++){struct sample*s=&x->samples[i];if(!s->busy){s->busy=1;s->refs=1;__atomic_add_fetch(&x->refs,1,__ATOMIC_RELAXED);sample_set_time(&s->iface,a,b);*out=(IMediaSample*)&s->iface;pthread_mutex_unlock(&x->lock);return S_OK;}}if(flags&AM_GBF_NOWAIT){pthread_mutex_unlock(&x->lock);return VFW_E_TIMEOUT;}pthread_cond_wait(&x->available,&x->lock);}}
 static HRESULT WINAPI alloc_release_buffer(IMemAllocator*p,IMediaSample*s){if(!s)return E_POINTER;s->lpVtbl->Release(s);return S_OK;}
 static const IMemAllocatorVtbl alloc_vtbl={alloc_qi,alloc_addref,alloc_release,alloc_set,alloc_get,alloc_commit,alloc_decommit,alloc_buffer,alloc_release_buffer};
+
+int dshow_allocator_is_ours(IMemAllocator *a)
+{
+	return a && a->lpVtbl == &alloc_vtbl;
+}
 
 HRESULT dshow_allocator_create(IMemAllocator **out)
 {if(!out)return E_POINTER;struct allocator*a=calloc(1,sizeof(*a));if(!a)return E_OUTOFMEMORY;a->iface.lpVtbl=&alloc_vtbl;a->refs=1;a->props=(ALLOCATOR_PROPERTIES){1,1,1,0};pthread_mutex_init(&a->lock,NULL);pthread_cond_init(&a->available,NULL);*out=&a->iface;return S_OK;}

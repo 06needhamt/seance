@@ -25,6 +25,11 @@ HRESULT dshow_mt_to_bih(const AM_MEDIA_TYPE *mt, BITMAPINFOHEADER **bih,
 
 /* A small allocator suitable for either side of a transform connection. */
 HRESULT dshow_allocator_create(IMemAllocator **out);
+/*
+ * Whether a is one of dshow_allocator_create's, whose samples have
+ * VFW_INPUT_PADDING bytes after GetSize's that may be written.
+ */
+int dshow_allocator_is_ours(IMemAllocator *a);
 
 /* Encoder controls.  Negative members are left at the filter's defaults. */
 struct dshow_encoder_options {

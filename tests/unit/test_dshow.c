@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include <unistd.h>
 
+#include "common/padding.h"
 #include "dshow/dshow.h"
 #include "loader/modules.h"
 #include "runtime/runtime.h"
@@ -461,6 +462,15 @@ static void allocator(void)
 	CHECK(astart == start && astop == stop);
 	CHECK(s[0]->lpVtbl->SetActualDataLength(s[0], 101) ==
 	      VFW_E_BUFFER_OVERFLOW);
+	/*
+	 * GetSize is what was asked for, with the zeroed input padding after
+	 * it besides (written here: a sanitizer build checks the room).
+	 */
+	CHECK(s[0]->lpVtbl->GetSize(s[0]) == 100);
+	CHECK(dshow_allocator_is_ours(a));
+	for (int i = 0; i < VFW_INPUT_PADDING; i++)
+		CHECK(p[100 + i] == 0);
+	memset(p + 100, 0xab, VFW_INPUT_PADDING);
 
 	/*
 	 * A media type on a sample stays through GetProperties and
