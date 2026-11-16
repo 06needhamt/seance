@@ -2188,6 +2188,22 @@ static void test_dllonexit_and_bad_free(void)
 	if (d2 == d1)	/* (not under a sanitizer, which holds freed blocks) */
 		CHECK(d3 == d2);
 	free(d3);
+
+	/* The CRT heap's own names: the same heap, either free for either. */
+	CFN(m, void *, _malloc_crt, size_t);
+	CFN(m, void *, _calloc_crt, size_t, size_t);
+	CFN(m, void *, _realloc_crt, void *, size_t);
+	CFN(m, void, _free_crt, void *);
+	char *c1 = _malloc_crt(40), *c2 = _calloc_crt(4, 10);
+	CHECK(c1 && c2 && !c2[39]);
+	c1 = _realloc_crt(c1, 4000);
+	CHECK(c1 != NULL);
+	if (c1)
+		c1[3999] = 1;
+	_free_crt(c1);
+	free(c2);
+	c2 = malloc(24);
+	_free_crt(c2);
 	mod_free(m);
 }
 

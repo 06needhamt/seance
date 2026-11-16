@@ -145,11 +145,11 @@ CRTFN(void *) crt__decode_pointer(void *p) { return p; }
 CRTFN(void *) crt__encoded_null(void) { return NULL; }
 
 /* The CRT heap, under the names its own startup/cleanup code uses. */
-/* (The guest frees these with free: they are win_free's blocks.) */
+/* (win_free's blocks: the guest frees them with free or _free_crt.) */
 CRTFN(void *) crt__malloc_crt(size_t n) { return win_alloc(1, n); }
 CRTFN(void *) crt__calloc_crt(size_t n, size_t size) { return win_calloc(n, size); }
 CRTFN(void *) crt__realloc_crt(void *p, size_t n) { return win_realloc(p, n); }
-CRTFN(void) crt__free_crt(void *p) { free(p); }
+CRTFN(void) crt__free_crt(void *p) { win_free(p); }
 
 /* _lock/_unlock: the CRT's own internal locks (heap, stdio, ...), by
  * number; a fixed table lazily initialised covers every locknum a codec's
