@@ -926,6 +926,9 @@ static void read_inputs(struct result *r, char *text)
 			in_pin = 0;
 		else if (!strncmp(t, "input pin", 9))
 			in_pin = 1;
+		else if (!strncmp(t, "takes '", 7) &&
+			 strlen(t) == 12 && t[11] == '\'')	/* Real */
+			add_input(r, (char[5]){ t[7], t[8], t[9], t[10], 0 });
 		else if (!strncmp(t, "input MEDIATYPE_", 16))	/* a DMO's */
 			read_input_type(r, t);
 		else if (in_pin && strstr(t, "MEDIATYPE_"))
@@ -957,6 +960,8 @@ static void read_probe(struct result *r, const char *out, int *video_enc,
 		snprintf(r->kind, sizeof(r->kind), "DirectShow");
 	} else if (!strncmp(text, "DMO server:", 11)) {
 		snprintf(r->kind, sizeof(r->kind), "DMO");
+	} else if (!strncmp(text, "RealPlayer codec:", 17)) {
+		snprintf(r->kind, sizeof(r->kind), "Real");
 	} else if (!strncmp(text, "ACM driver:", 11)) {
 		snprintf(r->kind, sizeof(r->kind), "ACM");
 		*audio_dec = 1;

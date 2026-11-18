@@ -14,7 +14,9 @@
 #include "avi/avi.h"
 #include "common/padding.h"
 #include "cmd_audio.h"
+#include "cmd_real.h"
 #include "cmd_util.h"
+#include "in/rm.h"
 #include "commands.h"
 #include "common/error.h"
 #include "common/log.h"
@@ -1046,6 +1048,25 @@ int cmd_decode(int argc, char **argv)
 	}
 	if (!target || !path || !out_path)
 		return usage();
+
+	/* RealMedia: through RealPlayer's own codecs */
+	if (strcmp(path, "-") && rm_sniff(path)) {
+		if (fourcc || clsid_arg || forced || native || state_path ||
+		    job.sample != AUDIO_NONE || job.has_start ||
+		    job.has_duration) {
+			fprintf(stderr, "seance: a RealMedia file takes -o, "
+				"--format, --stream, --frames and "
+				"--keep-going\n");
+			return 2;
+		}
+		struct real_decode_options ro = {
+			.out = out_path, .format = format,
+			.stream = stream == (unsigned long)-1 ? -1 :
+				  stream > 99 ? 99 : (int)stream,
+			.frames = count, .keep_going = keep_going,
+		};
+		return real_decode(target, path, &ro);
+	}
 
 	/* Audio: a WAV, an AVI's audio stream, or a .wav or .pcm output. */
 	if (job.sample != AUDIO_NONE || !strcmp(path, "-") ||

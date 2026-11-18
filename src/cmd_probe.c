@@ -7,10 +7,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "acm/acm.h"
 #include "avi/avi.h"
 #include "cmd_util.h"
+#include "real/real.h"
 #include "commands.h"
 #include "common/error.h"
 #include "common/fourcc.h"
@@ -636,6 +638,61 @@ static int probe_fourccs(const char *path, LONG w, LONG h)
 	return 0;
 }
 
+/*
+ * The FOURCC a RealAudio DLL decodes, by its name: they are named for it
+ * (cook.dll, sipr3260.dll), but for 14.4's ('lpcJ').
+ */
+static const char *real_audio_fourcc(const char *dll)
+{
+	static const char *const names[][2] = {
+		{ "14_4", "lpcJ" }, { "28_8", "28_8" }, { "atrc", "atrc" },
+		{ "cook", "cook" }, { "dnet", "dnet" }, { "sipr", "sipr" },
+	};
+	const char *b = strrchr(dll, '/');
+	b = b ? b + 1 : dll;
+	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+		if (!strncasecmp(b, names[i][0], 4))
+			return names[i][1];
+	return NULL;
+}
+
+/*
+ * A RealPlayer codec (see real/real.h): what it is and takes. The exit
+ * status, or -1 if dll isn't one.
+ */
+static int probe_real(const char *dll)
+{
+	const char *entry, *b = strrchr(dll, '/');
+	enum real_kind k = real_kind(dll, &entry);
+
+	b = b ? b + 1 : dll;
+	if (k == REAL_NONE)
+		return -1;
+	if (k == REAL_PNCODEC || k == REAL_HELIX) {
+		fprintf(stderr, "seance: %s: a %s, which seance doesn't host; "
+			"it hosts RealPlayer's RV20toYUV420, RV40toYUV420 and "
+			"RADecode codecs\n", b, real_kind_name(k));
+		return 1;
+	}
+	printf("RealPlayer codec: %s\n", b);
+	if (k == REAL_VIDEO) {
+		printf("  %s (%s)\n  video decoder\n", real_kind_name(k), entry);
+		/* RV20's entry points take RV20 (RV10 is rv10.dll's) */
+		if (!strcmp(entry, "RV20toYUV420"))
+			printf("  takes 'RV20'\n");
+		else
+			printf("  takes 'RV30'\n  takes 'RV40'\n");
+	} else {
+		const char *f = real_audio_fourcc(dll);
+		printf("  %s\n  audio decoder\n", real_kind_name(k));
+		if (f)
+			printf("  takes '%s'\n", f);
+	}
+	printf("  decodes RealMedia files (seance decode %s FILE.rm -o ...)\n",
+	       b);
+	return 0;
+}
+
 int cmd_probe(int argc, char **argv)
 {
 	static const UINT modes[] = { ICMODE_QUERY, ICMODE_DECOMPRESS,
@@ -694,6 +751,11 @@ int cmd_probe(int argc, char **argv)
 		if (driver && !fourcc && !clsid && !runtime_enter() &&
 		    !probe_acm(target, avi_path))
 			return 0;
+		if (!directshow && !driver && !fourcc && !clsid) {
+			int rc = probe_real(target);
+			if (rc >= 0)
+				return rc;
+		}
 		if (directshow) {
 			if (fourcc) {
 				fprintf(stderr, "seance: --fourcc is for VfW codecs; "
