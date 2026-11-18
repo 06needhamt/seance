@@ -10,7 +10,8 @@ struct real_decode_options {
 	const char *out;		/* the output path */
 	const char *format;		/* its kind, or NULL for its extension */
 	int stream;			/* the stream, or -1 for the codec's */
-	unsigned long frames;		/* video: at most this many */
+	unsigned long frames;		/* video: at most this many (audio:
+					   (unsigned long)-1, all of it) */
 	int keep_going;			/* past frames the decoder refuses */
 };
 

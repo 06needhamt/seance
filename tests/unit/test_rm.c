@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "common/error.h"
 #include "in/rm.h"
 #include "real/real.h"
 #include "test.h"
@@ -250,6 +251,16 @@ static void test_headers(void)
 	rm_close(rm);
 }
 
+/* A read gave rc 1 and want bytes, so what it gave can be looked at. */
+static int read_ok(int rc, size_t len, size_t want)
+{
+	CHECK_EQ(rc, 1);
+	if (rc != 1)
+		return 0;
+	CHECK_EQ(len, want);
+	return len == want;
+}
+
 static void test_video(void)
 {
 	struct rm_file *rm = rm_open(file);
@@ -257,29 +268,34 @@ static void test_video(void)
 
 	if (!rm)
 		return;
-	CHECK_EQ(rm_read_frame(rm, 0, &f), 1);
-	CHECK_EQ(f.len, (size_t)4);
-	CHECK_EQ(f.nslices, 1u);
-	CHECK_EQ(f.time, 0u);
-	CHECK(f.key);
-	CHECK(!memcmp(f.data, "\x50\x01\x02\x03", 4));
+	int rc = rm_read_frame(rm, 0, &f);
+	if (read_ok(rc, f.len, 4)) {
+		CHECK_EQ(f.nslices, 1u);
+		CHECK_EQ(f.time, 0u);
+		CHECK(f.key);
+		CHECK(!memcmp(f.data, "\x50\x01\x02\x03", 4));
+	}
 
-	CHECK_EQ(rm_read_frame(rm, 0, &f), 1);
-	CHECK_EQ(f.len, (size_t)6);
-	CHECK_EQ(f.nslices, 2u);
-	CHECK_EQ(f.offsets[0], 0u);
-	CHECK_EQ(f.offsets[1], 3u);
-	CHECK_EQ(f.time, 40u);
-	CHECK(!f.key);
-	CHECK(!memcmp(f.data, "\x60\x09\x09\x70\x08\x08", 6));
+	rc = rm_read_frame(rm, 0, &f);
+	if (read_ok(rc, f.len, 6)) {
+		CHECK_EQ(f.nslices, 2u);
+		CHECK_EQ(f.offsets[0], 0u);
+		CHECK_EQ(f.offsets[1], 3u);
+		CHECK_EQ(f.time, 40u);
+		CHECK(!f.key);
+		CHECK(!memcmp(f.data, "\x60\x09\x09\x70\x08\x08", 6));
+	}
 
-	CHECK_EQ(rm_read_frame(rm, 0, &f), 1);
-	CHECK_EQ(f.len, (size_t)2);
-	CHECK_EQ(f.time, 80u);
-	CHECK_EQ(f.data[0], 0x80);
-	CHECK_EQ(rm_read_frame(rm, 0, &f), 1);
-	CHECK_EQ(f.time, 120u);
-	CHECK_EQ(f.data[0], 0x90);
+	rc = rm_read_frame(rm, 0, &f);
+	if (read_ok(rc, f.len, 2)) {
+		CHECK_EQ(f.time, 80u);
+		CHECK_EQ(f.data[0], 0x80);
+	}
+	CHECK_EQ(rc = rm_read_frame(rm, 0, &f), 1);
+	if (rc == 1 && f.len) {
+		CHECK_EQ(f.time, 120u);
+		CHECK_EQ(f.data[0], 0x90);
+	}
 
 	CHECK_EQ(rm_read_frame(rm, 0, &f), 1);
 	CHECK_EQ(f.time, 160u);
@@ -298,12 +314,12 @@ static void test_audio(void)
 	if (!rm)
 		return;
 	/* Int0: packets as they are */
-	CHECK_EQ(rm_read_audio(rm, 1, &d, &len, &time), 1);
-	CHECK_EQ(len, (size_t)4);
-	CHECK(!memcmp(d, "\x80\x81\x7f\xff", 4));
-	CHECK_EQ(rm_read_audio(rm, 1, &d, &len, &time), 1);
-	CHECK_EQ(len, (size_t)2);
-	CHECK_EQ(time, 40u);
+	int rc = rm_read_audio(rm, 1, &d, &len, &time);
+	if (read_ok(rc, len, 4))
+		CHECK(!memcmp(d, "\x80\x81\x7f\xff", 4));
+	rc = rm_read_audio(rm, 1, &d, &len, &time);
+	if (read_ok(rc, len, 2))
+		CHECK_EQ(time, 40u);
 	CHECK_EQ(rm_read_audio(rm, 1, &d, &len, &time), 0);
 	rm_close(rm);
 
@@ -319,9 +335,9 @@ static void test_audio(void)
 	if (!(rm = rm_open(file)))
 		return;
 	for (int k = 0; k < 4; k++) {
-		CHECK_EQ(rm_read_audio(rm, 2, &d, &len, &time), 1);
-		CHECK_EQ(len, (size_t)8);
-		CHECK(!memcmp(d, want + 8 * k, 8));
+		rc = rm_read_audio(rm, 2, &d, &len, &time);
+		if (read_ok(rc, len, 8))
+			CHECK(!memcmp(d, want + 8 * k, 8));
 	}
 	CHECK_EQ(rm_read_audio(rm, 2, &d, &len, &time), 0);
 	rm_close(rm);
@@ -346,14 +362,103 @@ static void test_sipr(void)
 		CHECK_EQ(b[i], i);
 }
 
+/*
+ * Damage the reader turns away: a last part longer than what's left of
+ * its packet, a frame cut off at the end, Int4 of one row, genr rows of
+ * part sub-packets.
+ */
+static void test_malformed(void)
+{
+	struct buf b = { 0 }, t = { 0 }, p = { 0 };
+	struct rm_frame f;
+	const BYTE *d;
+	size_t len;
+	uint32_t time;
+
+	size_t c = chunk(&b, ".RMF");
+	put32(&b, 0);
+	put32(&b, 4);
+	end_chunk(&b, c);
+	put32(&t, 34);
+	put(&t, "VIDORV20", 8);
+	put16(&t, 16);
+	put16(&t, 8);
+	put16(&t, 12);
+	put32(&t, 0);
+	put32(&t, 25 << 16);
+	put32(&t, 8);
+	put32(&t, 0x20103001);
+	mdpr(&b, 0, "video/x-pn-realvideo", &t);
+	t.len = 0;
+	ra4(&t, 1, 4, 1, 8, 0, 8000, 1, "Int4", "TEST");
+	mdpr(&b, 1, "audio/x-pn-realaudio", &t);
+	t.len = 0;
+	ra4(&t, 1, 8, 4, 8, 3, 8000, 1, "genr", "TEST");
+	mdpr(&b, 2, "audio/x-pn-realaudio", &t);
+	size_t data = chunk(&b, "DATA");
+	put32(&b, 0);
+	put32(&b, 0);
+	/* Frame 2: part 1 of 6 bytes, then a last part claiming 9 */
+	put(&p, "\x00\x01\x40\x06\x40\x00\x02\x60\x09\x09", 10);
+	packet(&b, 0, 0, 1, &p);
+	p.len = 0;
+	put(&p, "\x80\x02\x40\x06\x40\x09\x02\x70\x08\x08", 10);
+	packet(&b, 0, 0, 1, &p);
+	/* Frame 3: the first half, then the file ends */
+	p.len = 0;
+	put(&p, "\x00\x01\x40\x06\x40\x00\x03\x60\x09\x09", 10);
+	packet(&b, 0, 40, 0, &p);
+	p.len = 0;
+	for (unsigned i = 0; i < 8; i++)
+		put8(&p, i);
+	packet(&b, 1, 0, 1, &p);
+	packet(&b, 2, 0, 1, &p);
+	end_chunk(&b, data);
+	write_file(&b);
+
+	struct rm_file *rm = rm_open(file);
+	CHECK(rm != NULL);
+	if (rm) {
+		/* Neither frame is whole: none comes out */
+		CHECK_EQ(rm_read_frame(rm, 0, &f), 0);
+		rm_close(rm);
+	}
+	if ((rm = rm_open(file))) {
+		CHECK_EQ(rm_read_audio(rm, 1, &d, &len, &time), -1);
+		CHECK(strstr(vfw_error(), "'Int4' interleaving") != NULL);
+		CHECK_EQ(rm_read_audio(rm, 2, &d, &len, &time), -1);
+		CHECK(strstr(vfw_error(), "'genr' interleaving") != NULL);
+		rm_close(rm);
+	}
+	free(b.p);
+	free(t.p);
+	free(p.p);
+}
+
 static void test_garbage(void)
 {
 	struct buf b = { 0 };
 
+	/* A whole head, but a size smaller than one */
 	put(&b, ".RMF", 4);
-	put32(&b, 4);		/* a chunk smaller than its head */
+	put32(&b, 4);
+	put16(&b, 0);
 	write_file(&b);
 	CHECK(rm_open(file) == NULL);
+	CHECK(strstr(vfw_error(), "a .RMF chunk of 4 bytes") != NULL);
+	/* The same in a later chunk, after a good .RMF */
+	b.len = 0;
+	put(&b, ".RMF", 4);
+	put32(&b, 18);
+	put16(&b, 0);
+	put32(&b, 0);
+	put32(&b, 0);
+	put(&b, "PROP", 4);
+	put32(&b, 4);
+	put16(&b, 0);
+	write_file(&b);
+	CHECK(rm_open(file) == NULL);
+	CHECK(strstr(vfw_error(), "a chunk of 4 bytes") != NULL);
 	b.len = 0;
 	put(&b, "RIFF....WAVE", 12);
 	write_file(&b);
@@ -362,12 +467,22 @@ static void test_garbage(void)
 	free(b.p);
 }
 
-/* The host, with the fixtures: last, as it skips without them */
-static void test_host(void)
+/*
+ * The host, with the fixtures (dir/name; dir is $VFW_FIXTURES): skipped
+ * without them, but the parser's checks above still count.
+ */
+static void test_host(const char *dir)
 {
-	const char *vdll = fixture("pe_realcodec.dll");
-	const char *adll = fixture("pe_realaudio.dll");
+	char vdll[4096], adll[4096];
 	const char *entry;
+
+	snprintf(vdll, sizeof(vdll), "%s/pe_realcodec.dll", dir);
+	snprintf(adll, sizeof(adll), "%s/pe_realaudio.dll", dir);
+	if (access(vdll, R_OK) || access(adll, R_OK)) {
+		printf("fixtures not available in %s: host checks skipped\n",
+		       dir);
+		return;
+	}
 
 	CHECK_EQ(real_kind(vdll, &entry), REAL_VIDEO);
 	CHECK_STR(entry, "RV20toYUV420");
@@ -421,15 +536,23 @@ static void test_host(void)
 		uint32_t time;
 		CHECK_EQ(wf->nSamplesPerSec, 8000u);
 		CHECK_EQ(wf->nChannels, 1);
-		CHECK_EQ(rm_read_audio(rm, 1, &in, &len, &time), 1);
-		CHECK_EQ(real_audio_decode(a, in, len, &pcm, &plen), 0);
-		CHECK_EQ(plen, (size_t)8);
-		short s[4];
-		memcpy(s, pcm, sizeof(s));
-		CHECK_EQ(s[0], 0);
-		CHECK_EQ(s[1], 256);
-		CHECK_EQ(s[2], -256);
-		CHECK_EQ(s[3], 127 * 256);
+		int rc = rm_read_audio(rm, 1, &in, &len, &time);
+		CHECK_EQ(rc, 1);
+		if (rc == 1) {
+			rc = real_audio_decode(a, in, len, &pcm, &plen);
+			CHECK_EQ(rc, 0);
+		}
+		if (rc == 0) {
+			CHECK_EQ(plen, (size_t)8);
+		}
+		if (rc == 0 && plen == 8) {
+			short s[4];
+			memcpy(s, pcm, sizeof(s));
+			CHECK_EQ(s[0], 0);
+			CHECK_EQ(s[1], 256);
+			CHECK_EQ(s[2], -256);
+			CHECK_EQ(s[3], 127 * 256);
+		}
 		real_audio_close(a);
 	}
 	/* Each DLL refuses the other kind of stream */
@@ -453,13 +576,14 @@ int main(void)
 	test_video();
 	test_audio();
 	test_sipr();
+	test_malformed();
 	test_garbage();
+	const char *fx = getenv("VFW_FIXTURES");
+	if (fx && *fx)
+		test_host(fx);
+	else
+		printf("VFW_FIXTURES not set: host checks skipped\n");
 	int status = test_summary("test_rm");
-	if (status)
-		goto out;
-	test_host();
-	status = test_summary("test_rm");
-out:
 	unlink(file);
 	rmdir(dir);
 	return status;

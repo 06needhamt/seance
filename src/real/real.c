@@ -349,7 +349,7 @@ static void module_dir(struct module *m, char *dir, size_t size)
 	if (k32)
 		mod_free(k32);
 	char *slash = strrchr(dir, '\\'), *fwd = strrchr(dir, '/');
-	if (fwd > slash)
+	if (fwd && (!slash || fwd > slash))
 		slash = fwd;
 	if (slash)
 		slash[1] = 0;
@@ -472,6 +472,12 @@ int real_audio_decode(struct real_audio *a, const BYTE *in, size_t len,
 {
 	uint32_t got = 0;
 
+	if (!len) {
+		/* Nothing to decode: no call, no PCM */
+		*pcm = a->pcm;
+		*pcm_len = 0;
+		return 0;
+	}
 	if (len > a->in_cap) {
 		BYTE *b = realloc(a->in, len);
 		if (!b) {
@@ -482,6 +488,13 @@ int real_audio_decode(struct real_audio *a, const BYTE *in, size_t len,
 		a->in_cap = len;
 	}
 	memcpy(a->in, in, len);
+	/*
+	 * RADecode takes no size for the PCM buffer, and how much a block
+	 * gives is the codec's business. The buffer is guard_alloc()ed: a
+	 * DLL that writes past PCM_MAX (and the slack) hits the guard page
+	 * inside the call, which the crash handler reports, and never the
+	 * heap. The check after the call catches one that says it gave more.
+	 */
 	uintptr_t r = CALL("RADecode", a->decode, P(a->context), P(a->in),
 			   (uintptr_t)len, P(a->pcm), P(&got),
 			   (uintptr_t)-1);

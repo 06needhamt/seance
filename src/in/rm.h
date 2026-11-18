@@ -58,7 +58,11 @@ struct rm_file;
 struct rm_file *rm_open(const char *path);
 void rm_close(struct rm_file *rm);
 
-/* Whether a file starts like a RealMedia one (".RMF" or ".ra\xfd"). */
+/*
+ * Whether a file starts like a RealMedia one: ".RMF". A bare RealAudio
+ * file (".ra\xfd", with no RealMedia chunks around it) isn't taken; the
+ * same audio in a .RMF file is.
+ */
 int rm_sniff(const char *path);
 
 unsigned rm_nstreams(const struct rm_file *rm);

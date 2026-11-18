@@ -22,6 +22,10 @@
 			 (uint32_t)(c) << 8 | (uint32_t)(d))
 /* The largest packet taken: their length is a 16-bit field. */
 #define MAX_PACKET 65536
+/* The largest stream header (MDPR) taken. */
+#define MAX_MDPR (1u << 20)
+/* The largest interleaving group taken (sipr's are some KB, cook's tens). */
+#define MAX_GROUP (16u << 20)
 
 struct video_state {
 	BYTE *buf;		/* the frame being put together */
@@ -292,7 +296,11 @@ struct rm_file *rm_open(const char *path)
 		goto fail;
 	}
 	uint32_t size = be32(head + 4);
-	if (size < 10 || skip(rm, size - 10))
+	if (size < 10) {
+		vfw_set_error("%s: a .RMF chunk of %u bytes", path, size);
+		goto fail;
+	}
+	if (skip(rm, size - 10))
 		goto fail;
 	for (;;) {
 		if (read_exact(rm, head, 10))
@@ -314,6 +322,12 @@ struct rm_file *rm_open(const char *path)
 			if (skip(rm, size - 10))
 				goto fail;
 			continue;
+		}
+		/* A stream's header: its type data is some bytes, never MBs */
+		if (size - 10 > MAX_MDPR) {
+			vfw_set_error("%s: an MDPR chunk of %u bytes", path,
+				      size);
+			goto fail;
 		}
 		BYTE *body = malloc(size - 10);
 		if (!body) {
@@ -389,7 +403,13 @@ static int next_packet(struct rm_file *rm)
 			BYTE c[18];
 			if (rm->data_left && skip(rm, rm->data_left))
 				return -1;
-			if (fread(c, 1, 18, rm->f) != 18 ||
+			size_t got = fread(c, 1, 18, rm->f);
+			if (got != 18 && ferror(rm->f)) {
+				vfw_set_error("%s: %s", rm->path,
+					      strerror(errno));
+				return -1;
+			}
+			if (got != 18 ||
 			    be32(c) != BE4('D', 'A', 'T', 'A') ||
 			    be32(c + 4) < 18) {
 				rm->ended = 1;
@@ -399,6 +419,10 @@ static int next_packet(struct rm_file *rm)
 			continue;
 		}
 		size_t got = fread(h, 1, 12, rm->f);
+		if (got < 12 && ferror(rm->f)) {
+			vfw_set_error("%s: %s", rm->path, strerror(errno));
+			return -1;
+		}
 		if (got < 12) {
 			rm->ended = 1;
 			return 0;
@@ -530,7 +554,12 @@ static int video_part(struct rm_file *rm, struct video_state *v,
 		return 1;
 	}
 	/* A part of a frame: a new frame at part 1, or a new frame number */
-	size_t n = type == 2 && (size_t)at < left ? (size_t)at : left;
+	if (type == 2 && (size_t)at > left) {
+		/* The last part, cut short: the frame can't be whole */
+		v->active = 0;
+		return -1;
+	}
+	size_t n = type == 2 ? (size_t)at : left;
 	if ((seq & 0x7f) == 1 || !v->active || (int)pic != v->pic) {
 		if (v->active)
 			TRACE("rm: frame %d dropped, %zu of %zu bytes", v->pic,
@@ -579,11 +608,11 @@ int rm_read_frame(struct rm_file *rm, unsigned i, struct rm_frame *f)
 		if (rc < 0)
 			return -1;
 		if (!rc) {
-			/* What's left of a frame cut off at the end */
-			if (v->active && v->len) {
-				assembled(v, f);
-				return 1;
-			}
+			/* A frame cut off at the end isn't given */
+			if (v->active)
+				TRACE("rm: frame %d cut off at the end, %zu of "
+				      "%zu bytes", v->pic, v->len, v->total);
+			v->active = 0;
 			return 0;
 		}
 	}
@@ -634,29 +663,31 @@ void rm_sipr_reorder(BYTE *buf, unsigned sub_packet_h, unsigned frame_size)
 static int deinterleave(const struct rm_stream *st, struct audio_state *a,
 			const BYTE *p, size_t len)
 {
-	size_t h = st->sub_packet_h, w = st->frame_size;
-	size_t y = a->filled, cfs = st->coded_frame_size;
-	size_t sps = st->sub_packet_size;
+	/* All 16-bit but cfs, checked by interleaved(): no product wraps */
+	uint64_t h = st->sub_packet_h, w = st->frame_size;
+	uint64_t y = a->filled, cfs = st->coded_frame_size;
+	uint64_t sps = st->sub_packet_size;
 
 	switch (st->interleaver) {
 	case mmioFOURCC('I', 'n', 't', '4'):
 		/* h / 2 frames of cfs bytes, every other row */
-		if (!cfs || len < h / 2 * cfs || (h / 2 - 1) * 2 * w +
-		    y * cfs + cfs > a->group_len)
+		if (len < h / 2 * cfs ||
+		    (h / 2 - 1) * 2 * w + y * cfs + cfs > a->group_len)
 			return -1;
-		for (size_t x = 0; x < h / 2; x++)
-			memcpy(a->group + x * 2 * w + y * cfs, p + x * cfs, cfs);
+		for (uint64_t x = 0; x < h / 2; x++)
+			memcpy(a->group + x * 2 * w + y * cfs, p + x * cfs,
+			       (size_t)cfs);
 		return 0;
 	case mmioFOURCC('g', 'e', 'n', 'r'):
 		/* w / sps sub-packets, even packets' to the first half */
-		if (!sps || len < w / sps * sps)
+		if (len < w)
 			return -1;
-		for (size_t x = 0; x < w / sps; x++) {
-			size_t at = sps * (h * x + (h + 1) / 2 * (y & 1) +
-					   (y >> 1));
+		for (uint64_t x = 0; x < w / sps; x++) {
+			uint64_t at = sps * (h * x + (h + 1) / 2 * (y & 1) +
+					     (y >> 1));
 			if (at + sps > a->group_len)
 				return -1;
-			memcpy(a->group + at, p + x * sps, sps);
+			memcpy(a->group + at, p + x * sps, (size_t)sps);
 		}
 		return 0;
 	case mmioFOURCC('s', 'i', 'p', 'r'):
@@ -674,9 +705,37 @@ static int interleaved(const struct rm_stream *st)
 	case mmioFOURCC('I', 'n', 't', '4'):
 	case mmioFOURCC('g', 'e', 'n', 'r'):
 	case mmioFOURCC('s', 'i', 'p', 'r'):
-		return st->sub_packet_h > 0 && st->frame_size > 0;
+		return 1;
 	}
 	return 0;
+}
+
+/*
+ * Whether an interleaved stream's geometry makes sense: a group that
+ * fits in memory, Int4 rows of whole frames, genr rows of whole
+ * sub-packets. 0, or -1 with vfw_error().
+ */
+static int check_geometry(const struct rm_file *rm, const struct rm_stream *st)
+{
+	uint64_t h = st->sub_packet_h, w = st->frame_size;
+	uint64_t cfs = st->coded_frame_size, sps = st->sub_packet_size;
+	int ok = h && w && h * w <= MAX_GROUP;
+
+	switch (st->interleaver) {
+	case mmioFOURCC('I', 'n', 't', '4'):
+		ok = ok && h >= 2 && cfs && cfs <= w;
+		break;
+	case mmioFOURCC('g', 'e', 'n', 'r'):
+		ok = ok && sps && w % sps == 0;
+		break;
+	}
+	if (!ok)
+		vfw_set_error("%s: '%.4s' interleaving of %u x %u bytes "
+			      "(frames %u, sub-packets %u) makes no sense",
+			      rm->path, (const char *)&st->interleaver,
+			      st->sub_packet_h, st->frame_size,
+			      st->coded_frame_size, st->sub_packet_size);
+	return ok ? 0 : -1;
 }
 
 int rm_read_audio(struct rm_file *rm, unsigned i, const BYTE **data,
@@ -702,6 +761,8 @@ int rm_read_audio(struct rm_file *rm, unsigned i, const BYTE **data,
 		return 1;
 	}
 	if (!a->group) {
+		if (check_geometry(rm, st))
+			return -1;
 		a->group_len = (size_t)st->sub_packet_h * st->frame_size;
 		if (!(a->group = calloc(1, a->group_len))) {
 			vfw_set_error("out of memory");

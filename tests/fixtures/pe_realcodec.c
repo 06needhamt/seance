@@ -72,7 +72,8 @@ EXPORT int RV20toYUV420Transform(const unsigned char *data, unsigned char *out,
 		for (unsigned y = h * k / n; y < h * (k + 1) / n; y++)
 			fill(out + y * w, data[at], w);
 	}
-	fill(out + w * h, 128, w * h / 2);
+	/* Both chroma planes, (w + 1) / 2 x (h + 1) / 2 each */
+	fill(out + w * h, 128, 2 * ((w + 1) / 2) * ((h + 1) / 2));
 	o->frames = 1;
 	o->width = w;
 	o->height = h;

@@ -75,12 +75,14 @@ static int decode_video(const char *dll, struct rm_file *rm, unsigned sn,
 		struct rm_frame f;
 		const BYTE *pic;
 		int w, h;
+		if (n >= o->frames)
+			break;
 		int rc = rm_read_frame(rm, sn, &f);
 		if (rc < 0) {
 			fprintf(stderr, "seance: %s\n", vfw_error());
 			goto done;
 		}
-		if (!rc || n >= o->frames)
+		if (!rc)
 			break;
 		rc = real_video_decode(v, &f, &pic, &w, &h);
 		if (rc < 0) {
@@ -94,7 +96,8 @@ static int decode_video(const char *dll, struct rm_file *rm, unsigned sn,
 			continue;
 		if (!out) {
 			if (!(out = output_open(o->out, kind, w, h, rate, scale,
-						0)) || !(conv = i420_conv(w, h))) {
+						o->frames == 1)) ||
+			    !(conv = i420_conv(w, h))) {
 				fprintf(stderr, "seance: %s\n", vfw_error());
 				goto done;
 			}
@@ -143,6 +146,12 @@ static int decode_sound(const char *dll, struct rm_file *rm, unsigned sn,
 	if (!a) {
 		fprintf(stderr, "seance: %s\n", vfw_error());
 		return 1;
+	}
+	if (o->frames != (unsigned long)-1) {
+		fprintf(stderr, "seance: --frames is for a video stream; "
+			"a RealAudio one is decoded whole\n");
+		status = 2;
+		goto done;
 	}
 	if (o->format ? audio_output_kind_from_name(o->format, &kind) :
 			audio_output_kind_from_path(o->out, &kind)) {
