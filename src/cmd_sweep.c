@@ -448,17 +448,19 @@ static double plane_sse(const BYTE *a, int astride, const BYTE *b,
 /*
  * The PSNR of dec (a Y4M) against the clip as the codec was given it (ref
  * through the same --pad, --crop or --scale), over all three planes as
- * FFmpeg's average is. NAN with a note if they can't be compared.
+ * FFmpeg's average is. NAN with a note if they can't be compared, or,
+ * with whole set, if dec has fewer frames than ref.
  */
 static double psnr_of(const char *ref, const struct source_options *ro,
-		      const char *dec, char *note, size_t size)
+		      const char *dec, int whole, char *note, size_t size)
 {
 	struct source_options dopt = { .stream = -1 };
 	struct source *a = source_open(ref, ro), *b = NULL;
 	struct image_conv *ca = NULL, *cb = NULL;
 	BYTE *fa = NULL, *fb = NULL;
 	double result = NAN, sum = 0;
-	uint64_t count = 0;
+	uint64_t count = 0, frames = 0;
+	int ra = 0;
 
 	if (!a || !(b = source_open(dec, &dopt))) {
 		snprintf(note, size, "can't compare: %s", vfw_error());
@@ -484,9 +486,11 @@ static double psnr_of(const char *ref, const struct source_options *ro,
 		goto out;
 	}
 	for (;;) {
-		int ra = frame_i420(a, ca, fa), rb = frame_i420(b, cb, fb);
-		if (ra != 1 || rb != 1)
+		int rb;
+		if ((ra = frame_i420(a, ca, fa)) != 1 ||
+		    (rb = frame_i420(b, cb, fb)) != 1)
 			break;
+		frames++;
 		sum += plane_sse(fa, w, fb, bw, w, h);
 		sum += plane_sse(fa + (size_t)w * h, (w + 1) / 2,
 				 fb + (size_t)bw * bh, (bw + 1) / 2,
@@ -503,6 +507,16 @@ static double psnr_of(const char *ref, const struct source_options *ro,
 			 "%dx%d", bw, bh, w, h);
 	if (!count) {
 		snprintf(note, size, "no frames to compare");
+		goto out;
+	}
+	if (whole && ra == 1) {
+		/* The frame just read from ref, and the rest */
+		uint64_t all = frames + 1;
+		while (frame_i420(a, ca, fa) == 1)
+			all++;
+		snprintf(note, size, "decodes %llu frames of the reference's "
+			 "%llu", (unsigned long long)frames,
+			 (unsigned long long)all);
 		goto out;
 	}
 	result = sum ? 10 * log10(255.0 * 255.0 * (double)count / sum) :
@@ -738,17 +752,23 @@ static short *read_pcm16(const char *path, size_t *frames, unsigned *rate,
 	if (bytes > 64u << 20)
 		bytes = 64u << 20;
 	size_t bps = bits / 8;
-	if (!(raw = malloc(bytes + 1)))
+	if (!(raw = malloc(bytes + 1))) {
+		snprintf(note, size, "can't read %s: out of memory",
+			 base_name(path));
 		goto out;
+	}
 	long got = wav_read(w, raw, bytes);
 	if (got < 0)
 		got = 0;
 	*frames = (size_t)got / bps / *ch;
-	if (!(out = malloc((*frames * *ch + 1) * sizeof(short))))
+	if (!(out = malloc((*frames * *ch + 1) * sizeof(short)))) {
+		snprintf(note, size, "can't read %s: out of memory",
+			 base_name(path));
 		goto out;
+	}
 	for (size_t i = 0; i < *frames * *ch; i++) {
 		if (bits == 8) {
-			out[i] = (short)((raw[i] - 128) << 8);
+			out[i] = (short)((raw[i] - 128) * 256);
 		} else if (bits == 16) {
 			short v;
 			memcpy(&v, raw + i * 2, 2);
@@ -778,7 +798,7 @@ static double snr_of(const char *ref, const char *dec, char *note,
 	enum { MAX_LAG = 3000, WINDOW = 16384 };
 	size_t na = 0, nb = 0;
 	unsigned ra, rb, ca, cb;
-	char n2[128];
+	char n2[128] = "";
 	short *a = read_pcm16(ref, &na, &ra, &ca, note, size);
 	short *b = a ? read_pcm16(dec, &nb, &rb, &cb, n2, sizeof(n2)) : NULL;
 	double result = NAN;
@@ -826,7 +846,7 @@ static double snr_of(const char *ref, const char *dec, char *note,
 		}
 		count++;
 	}
-	if (count < na / 2) {
+	if (!count || count < na / 2) {
 		snprintf(note, size, "decodes %zu frames of ffmpeg's %zu", nb,
 			 na);
 		goto out;
@@ -1073,6 +1093,8 @@ static int decode_to(struct sweep *s, const char *dll, const char *avi,
 #define PSNR_BROKEN 10.0
 /* A round trip good enough to test other decoders with. */
 #define POOL_PSNR 30.0
+/* Audio: the SNR a decode needs, of a sample or of the test signal. */
+#define SAMPLE_SNR 15.0
 
 static void sweep_video(struct sweep *s, size_t idx, const char *dll,
 			struct result *r)
@@ -1187,7 +1209,7 @@ static void sweep_video(struct sweep *s, size_t idx, const char *dll,
 		return;
 	}
 	r->status = ST_ROUND_TRIP;
-	r->psnr = psnr_of(s->video_in, &ro, y4m, r->note, sizeof(r->note));
+	r->psnr = psnr_of(s->video_in, &ro, y4m, 0, r->note, sizeof(r->note));
 	const char *decoded = y4m;
 	/*
 	 * Nothing like what went in: a decoder whose YUV output is wrong
@@ -1197,7 +1219,7 @@ static void sweep_video(struct sweep *s, size_t idx, const char *dll,
 	    !decode_to(s, by_auto ? "auto" : dll, avi, y4m2, "BGR24", out,
 		       err)) {
 		char note2[128] = "";
-		double p2 = psnr_of(s->video_in, &ro, y4m2, note2,
+		double p2 = psnr_of(s->video_in, &ro, y4m2, 0, note2,
 				    sizeof(note2));
 		/* (better by more than a dB, or enough to be a round trip) */
 		if (p2 > r->psnr + 1 ||
@@ -1295,7 +1317,15 @@ static void sweep_audio(struct sweep *s, size_t idx, const char *dll,
 	unsigned tag = wav_tag(enc);
 	char key[8];
 	snprintf(key, sizeof(key), "0x%04x", tag);
-	if (tag && tag != WAVE_FORMAT_PCM && wav_tag(dec) == WAVE_FORMAT_PCM)
+	/*
+	 * Pooled only if what came back is the test signal: a decoder that
+	 * gives silence mustn't become the reference others are held to.
+	 */
+	char gate[160] = "";
+	const char *in = test_audio(s, layout);
+	double q = in ? snr_of(in, dec, gate, sizeof(gate)) : NAN;
+	if (tag && tag != WAVE_FORMAT_PCM && wav_tag(dec) == WAVE_FORMAT_PCM &&
+	    !isnan(q) && q >= SAMPLE_SNR)
 		pool_add(s, r, 1, key, enc, dec);
 }
 
@@ -1393,7 +1423,6 @@ static BYTE *slurp(const char *path, size_t *n)
 #define MAX_TRIES 4
 /* As close to ffmpeg's decode as a decoder of the same stream gets. */
 #define SAMPLE_PSNR 25.0
-#define SAMPLE_SNR 15.0
 
 /*
  * Gives a decoder streams of what it takes: a sample of its VfW handler,
@@ -1447,8 +1476,10 @@ static void check_decoder(struct sweep *s, size_t idx, const char *dll,
 		struct source_options ro = { .stream = -1 };
 		double q;
 
-		work_path(s, idx, x->audio ? "sample.wav" : "sample.y4m", dec,
-			  sizeof(dec));
+		char name[32];
+		snprintf(name, sizeof(name), "sample%zu.%s", k + 1,
+			 x->audio ? "wav" : "y4m");
+		work_path(s, idx, name, dec, sizeof(dec));
 		const char *args[] = { "decode", dll, x->file, "-o", dec, NULL };
 		int rc = run(s, args, out, err);
 		note[0] = 0;
@@ -1459,9 +1490,10 @@ static void check_decoder(struct sweep *s, size_t idx, const char *dll,
 				 "hangs; " : rc > 128 ? "crashes; " : "", msg);
 		} else {
 			q = x->audio ? snr_of(x->ref, dec, note, sizeof(note)) :
-			    psnr_of(x->ref, &ro, dec, note, sizeof(note));
+			    psnr_of(x->ref, &ro, dec, 1, note, sizeof(note));
 		}
-		unlink(dec);
+		if (!s->keep)
+			unlink(dec);
 		if (!isnan(q) && q >= (x->audio ? SAMPLE_SNR : SAMPLE_PSNR)) {
 			r->status = ST_DECODES;
 			r->psnr = q;

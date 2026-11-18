@@ -937,6 +937,9 @@ What they found that isn't seance's:
   no sample at all: their formats (Indeo, VP6, Fraps,
   AMR, Vorbis, Theora, DV variants, vendor FOURCCs) are ones ffmpeg can't
   encode, or the DLL names none.
+- `kdvyuv8.dll` is the 160th: it now "fails", as it doesn't answer
+  `ICM_GETINFO`, so it never got as far as a sample. It does the same on
+  main.
 
 The 137 DLLs that round-tripped or encoded, swept again with these
 changes against the catalogue's results:

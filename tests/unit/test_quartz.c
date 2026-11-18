@@ -558,6 +558,38 @@ static void test_memory_allocator(void)
 		s->lpVtbl->Release(s);
 	}
 	CHECK_EQ(a->lpVtbl->Decommit(a), S_OK);
+
+	/*
+	 * Decommitted with a sample out: no new size until it's back, a
+	 * recommit reuses the pool, and the last sample back frees it.
+	 */
+	ALLOCATOR_PROPERTIES two = { 2, 4096, 1, 0 }, more = { 2, 8192, 1, 0 };
+	IMediaSample *held = NULL;
+	CHECK_EQ(a->lpVtbl->SetProperties(a, &two, &got), S_OK);
+	CHECK_EQ(a->lpVtbl->Commit(a), S_OK);
+	CHECK_EQ(a->lpVtbl->GetBuffer(a, &held, NULL, NULL, 0), S_OK);
+	CHECK_EQ(a->lpVtbl->Decommit(a), S_OK);
+	CHECK_EQ(a->lpVtbl->SetProperties(a, &more, &got),
+		 VFW_E_BUFFERS_OUTSTANDING);
+	CHECK_EQ(a->lpVtbl->Commit(a), S_OK);
+	s = NULL;
+	CHECK_EQ(a->lpVtbl->GetBuffer(a, &s, NULL, NULL, 0), S_OK);
+	if (s) {
+		CHECK_EQ(s->lpVtbl->GetSize(s), 4096);
+		s->lpVtbl->Release(s);
+	}
+	CHECK_EQ(a->lpVtbl->Decommit(a), S_OK);
+	if (held)
+		held->lpVtbl->Release(held);
+	CHECK_EQ(a->lpVtbl->SetProperties(a, &more, &got), S_OK);
+	CHECK_EQ(a->lpVtbl->Commit(a), S_OK);
+	s = NULL;
+	CHECK_EQ(a->lpVtbl->GetBuffer(a, &s, NULL, NULL, 0), S_OK);
+	if (s) {
+		CHECK_EQ(s->lpVtbl->GetSize(s), 8192);
+		s->lpVtbl->Release(s);
+	}
+	CHECK_EQ(a->lpVtbl->Decommit(a), S_OK);
 	CHECK_EQ(a->lpVtbl->Release(a), 0);
 }
 
