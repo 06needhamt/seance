@@ -595,20 +595,28 @@ static const IMediaEventSinkVtbl event_vtbl = {event_qi, event_addref,
 
 /*
  * The buffer each input sample needs. Video says it in lSampleSize (the
- * largest frame); audio packets vary, so they get room for the larger of
- * that, two seconds and a megabyte.
+ * largest frame). Audio packets vary. In our allocator, a WAVEFORMATEX
+ * format starts with room for a packet as a file gives one (a block, or
+ * 4 KB of a format with small blocks), as a parser's buffers would be: a
+ * filter that sizes its output by the input buffer's GetSize (QNAP's
+ * G711.ax) needs that. A larger packet grows them (dshow_host_push), and
+ * the zeroed padding after the data is kept out of GetSize. Other formats
+ * (VORBISFORMAT2, say), and an allocator the filter gave, which seance
+ * doesn't resize, get the larger of a megabyte and two seconds, with the
+ * padding in.
  */
-static ULONG input_buffer(const AM_MEDIA_TYPE *in) {
+static ULONG input_buffer(const AM_MEDIA_TYPE *in, int ours) {
   ULONG bytes = in->lSampleSize;
   if (guid_eq(&in->majortype, &MEDIATYPE_Audio)) {
-    /* Other format types (VORBISFORMAT2, say) get the megabyte. */
     uint64_t want = 1u << 20;
     if (guid_eq(&in->formattype, &FORMAT_WaveFormatEx) && in->pbFormat &&
         in->cbFormat >= 16) {
       const WAVEFORMATEX *wf = (const WAVEFORMATEX *)in->pbFormat;
-      if (want < (uint64_t)wf->nAvgBytesPerSec * 2)
+      if (ours)
+        want = wf->nBlockAlign >= 64 ? wf->nBlockAlign : 4096;
+      if (want < (uint64_t)wf->nAvgBytesPerSec * 2 && !ours)
         want = (uint64_t)wf->nAvgBytesPerSec * 2;
-      if (want < 4ull * wf->nBlockAlign)
+      if (want < 4ull * wf->nBlockAlign && !ours)
         want = 4ull * wf->nBlockAlign;
     }
     if (want > (64u << 20))
@@ -616,18 +624,21 @@ static ULONG input_buffer(const AM_MEDIA_TYPE *in) {
     if (want > bytes)
       bytes = (ULONG)want;
   }
-  /* And the zeroed padding after a sample's data. */
+  if (ours)
+    return bytes;
   return bytes <= UINT32_MAX - VFW_INPUT_PADDING ? bytes + VFW_INPUT_PADDING
                                                  : bytes;
 }
 
-static HRESULT negotiate_allocator(struct dshow_host *h, ULONG bytes) {
+static HRESULT negotiate_allocator(struct dshow_host *h,
+                                   const AM_MEDIA_TYPE *in) {
   HRESULT hr = dshow_call_mem_get_allocator(h->mem, &h->allocator);
   if (FAILED(hr)) {
     hr = dshow_allocator_create(&h->allocator);
     if (FAILED(hr))
       return hr;
   }
+  ULONG bytes = input_buffer(in, dshow_allocator_is_ours(h->allocator));
   ALLOCATOR_PROPERTIES want = {1, (LONG)(bytes ? bytes : 1), 1, 0}, req, actual;
   if (SUCCEEDED(dshow_call_mem_allocator_requirements(h->mem, &req))) {
     if (req.cBuffers > want.cBuffers)
@@ -654,13 +665,32 @@ static int is_partial(const AM_MEDIA_TYPE *mt) {
   return guid_eq(&mt->formattype, &null_guid) && !mt->cbFormat;
 }
 
-/* Whether full is one of the types partial stands for (CMediaType::MatchesPartial). */
+/*
+ * Whether two subtypes name the same layout: I420 and IYUV are one (Xvid's
+ * filter offers only IYUV, and given I420 regardless, makes nothing).
+ */
+static int same_subtype(const GUID *a, const GUID *b) {
+  static const DWORD i420 = 0x30323449, iyuv = 0x56555949;
+  if (guid_eq(a, b))
+    return 1;
+  GUID x = *a, y = *b;
+  if (x.Data1 == iyuv)
+    x.Data1 = i420;
+  if (y.Data1 == iyuv)
+    y.Data1 = i420;
+  return x.Data1 == i420 && guid_eq(&x, &y);
+}
+
+/*
+ * Whether full is one of the types partial stands for
+ * (CMediaType::MatchesPartial; with I420 and IYUV the same).
+ */
 static int matches_partial(const AM_MEDIA_TYPE *full,
                            const AM_MEDIA_TYPE *partial) {
   return (guid_eq(&partial->majortype, &null_guid) ||
           guid_eq(&partial->majortype, &full->majortype)) &&
          (guid_eq(&partial->subtype, &null_guid) ||
-          guid_eq(&partial->subtype, &full->subtype)) &&
+          same_subtype(&partial->subtype, &full->subtype)) &&
          !guid_eq(&full->formattype, &null_guid) && full->cbFormat &&
          full->pbFormat;
 }
@@ -756,7 +786,7 @@ HRESULT dshow_host_create(IBaseFilter *f, const AM_MEDIA_TYPE *in,
   if (SUCCEEDED(hr))
     hr = connect_output(h, out);
   if (SUCCEEDED(hr))
-    hr = negotiate_allocator(h, input_buffer(in));
+    hr = negotiate_allocator(h, in);
   if (SUCCEEDED(hr))
     hr = dshow_call_filter_pause(f);
   if (SUCCEEDED(hr))
@@ -789,17 +819,39 @@ HRESULT dshow_host_push(struct dshow_host *h, const void *data, size_t size,
   HRESULT hr = host_error(h);
   if (FAILED(hr))
     return hr;
-  hr = h->allocator->lpVtbl->GetBuffer(h->allocator, &s, &start, &stop, 0);
+  IMemAllocator *a = h->allocator;
+  int ours = dshow_allocator_is_ours(a);
+  hr = a->lpVtbl->GetBuffer(a, &s, &start, &stop, 0);
   if (FAILED(hr))
     return hr;
+  size_t pad = ours ? 0 : VFW_INPUT_PADDING;
+  if ((size_t)s->lpVtbl->GetSize(s) < size + pad && ours) {
+    /* A larger packet than any before: larger buffers, if they're free. */
+    ALLOCATOR_PROPERTIES now, got;
+    s->lpVtbl->Release(s);
+    s = NULL;
+    hr = a->lpVtbl->GetProperties(a, &now);
+    if (SUCCEEDED(hr)) {
+      now.cbBuffer = (LONG)((size + pad + 4095) / 4096 * 4096);
+      hr = a->lpVtbl->Decommit(a);
+    }
+    if (SUCCEEDED(hr))
+      hr = a->lpVtbl->SetProperties(a, &now, &got);
+    HRESULT committed = a->lpVtbl->Commit(a);
+    if (SUCCEEDED(hr))
+      hr = committed;
+    if (SUCCEEDED(hr))
+      hr = a->lpVtbl->GetBuffer(a, &s, &start, &stop, 0);
+    if (FAILED(hr))
+      return VFW_E_BUFFER_OVERFLOW;
+  }
   BYTE *p = NULL;
-  if ((size_t)s->lpVtbl->GetSize(s) < size)
+  if ((size_t)s->lpVtbl->GetSize(s) < size + pad)
     hr = VFW_E_BUFFER_OVERFLOW;
   else if (SUCCEEDED(hr = s->lpVtbl->GetPointer(s, &p))) {
     memcpy(p, data, size);
-    /* Zeroed padding after the data, as far as the sample has room. */
-    size_t room = (size_t)s->lpVtbl->GetSize(s) - size;
-    memset(p + size, 0, room < VFW_INPUT_PADDING ? room : VFW_INPUT_PADDING);
+    /* Zeroed padding after the data: past GetSize's room, in ours. */
+    memset(p + size, 0, VFW_INPUT_PADDING);
     s->lpVtbl->SetActualDataLength(s, size);
     s->lpVtbl->SetSyncPoint(s, !!(flags & AM_SAMPLE_SPLICEPOINT));
     s->lpVtbl->SetPreroll(s, !!(flags & AM_SAMPLE_PREROLL));

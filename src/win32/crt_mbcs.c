@@ -113,6 +113,9 @@ CRTFN(uchar *) crt__mbsdec(const uchar *start, const uchar *cur)
 
 CRTFN(size_t) crt__mbclen(const uchar *c) { return 1; }
 CRTFN(int) crt__ismbblead(unsigned c) { return 0; }
+/* The ctype view of the same (wmvsdecd.dll): no lead bytes either. */
+CRTFN(int) crt_isleadbyte(int c) { return 0; }
+CRTFN(int) crt__isleadbyte_l(int c, void *locale) { return 0; }
 CRTFN(int) crt__ismbbtrail(unsigned c) { return 0; }
 CRTFN(int) crt__ismbcspace(unsigned c) { return c < 0x80 && isspace((int)c); }
 CRTFN(int) crt__ismbcdigit(unsigned c) { return c >= '0' && c <= '9'; }
@@ -220,6 +223,7 @@ const struct builtin_export crt_mbcs_exports[] = {
 	E(__p___argv),
 	E(_expand),
 	E(_fullpath),
+	E(_isleadbyte_l),
 	E(_ismbblead),
 	E(_ismbbtrail),
 	E(_ismbcalpha),
@@ -228,6 +232,7 @@ const struct builtin_export crt_mbcs_exports[] = {
 	E(_mbclen),
 	E(_mbctolower),
 	E(_mbctoupper),
+	E(isleadbyte),
 	{ "_mbctype", 0, (void *)mbctype },
 	E(_mbscat),
 	E(_mbschr),

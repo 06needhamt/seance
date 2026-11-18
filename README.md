@@ -857,7 +857,8 @@ only that step with it. The clip is a 320x240 test pattern (`--size`,
 `--frames`) drawn in RGB, so RGB codecs can hold its colours too, or a
 video given with `-i`. It reports for each DLL what it is (VfW, DirectShow,
 DMO or ACM, and its FOURCC or roles), how far it got (`round-trip`,
-`encodes`, `decoder` for a decoder with nothing here to decode, `fails`,
+`encodes`, `decodes` for a decoder a sample checks out, `decoder` for one
+nothing here verifies, `fails`,
 `not-codec`, `crash` or `hang`), the PSNR of the round trip against what
 the codec was given, its bit rate, and the message it stopped with:
 - A codec that names a size it takes (`add --pad 16`, `add --scale
@@ -876,6 +877,31 @@ the codec was given, its bit rate, and the message it stopped with:
   doesn't help, the codec "encodes" but doesn't round-trip.
 - A VfW codec that compresses to nothing but decompresses its own FOURCC
   is a `decoder`.
+- A decoder is then given streams of what it takes, and what it makes is
+  measured against what they should decode to: those `--samples <dir>`
+  lists, and what the sweep's own encoders made (each FOURCC or format
+  tag's first round trip of 30 dB or more, against that encoder's own
+  decode). Up to four are tried: its VfW handler's, the types its pins or
+  DMO register or the tags its ACM driver decodes, then for a VfW codec
+  the FOURCCs its DLL holds. One within 25 dB PSNR (video) or 15 dB SNR
+  (audio, at the lag that fits best) makes it `decodes`; otherwise the
+  note says what each gave.
+
+`tests/gen_samples.sh <dir>` makes those samples with the system's
+ffmpeg, about 60 of them in ten seconds: short AVIs under the FOURCCs
+decoders register (MJPG, HFYU, XVID, DIVX, DX50, DIV3, MP42, MP43, WMV1,
+WMV2, H263, H264, dvsd, cvid, CRAM, ASV1, CFHD, YUY2, ...) with ffmpeg's
+decode of each as a Y4M, and WAVs under the format tags (mu-law, A-law,
+MS and IMA ADPCM, GSM 6.10, G.726, G.723.1, G.722, MP2, MP3, AC-3, WMA
+1 and 2, FLAC, float) with ffmpeg's decode as 16-bit PCM, listed in
+`<dir>/index.tsv` (name, `video` or `audio`, FOURCC or `0x` tag, file,
+reference). An encoder that ffmpeg lacks is left out; without ffmpeg it
+exits 77. The samples aren't committed: make them when they're wanted.
+
+```sh
+tests/gen_samples.sh /tmp/samples
+build/seance sweep ~/codecs --samples /tmp/samples --tsv today.tsv
+```
 
 `--markdown` writes the results as a table and `--tsv` as tab-separated
 values; `--compare` with an earlier sweep's TSV lists what changed, and
@@ -992,6 +1018,7 @@ decodes below 40 dB.
 | `tests/validate_media.sh` | Cross-check of the AVI and image code against FFmpeg |
 | `tests/smoke.sh` | A quick run of every CLI command |
 | `tests/samples.sh` | `info` and `probe` over a directory of codec DLLs (`seance sweep` also encodes and decodes) |
+| `tests/gen_samples.sh` | short AVI and WAV streams per FOURCC and format tag, with ffmpeg's decode of each, for `seance sweep --samples` |
 | `cmake/` | The mingw-w64 toolchain file for the fixtures, and build helpers |
 | `docs/` | Implementation plan |
 

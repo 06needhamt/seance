@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "common/padding.h"
 #include "dshow/dshow.h"
 #include "win32/ole.h"
 
@@ -36,6 +37,7 @@ static int guid_eq(REFIID a, REFIID b) { return !memcmp(a, b, sizeof(*a)); }
 static struct sample *sample_from(IMediaSample2 *p) { return (void *)p; }
 static struct allocator *allocator_from(IMemAllocator *p) { return (void *)p; }
 static ULONG WINAPI alloc_release(IMemAllocator *p);
+static void allocator_clear(struct allocator *a);
 
 static HRESULT WINAPI sample_qi(IMediaSample2 *p, REFIID iid, void **out)
 {
@@ -63,6 +65,14 @@ static ULONG WINAPI sample_release(IMediaSample2 *p)
 		s->have_time = s->have_media_time = 0;
 		pthread_mutex_lock(&a->lock);
 		s->busy = 0;
+		/* The last sample back from a decommitted pool frees it (s too). */
+		if (!a->committed) {
+			int busy = 0;
+			for (LONG i = 0; a->samples && i < a->props.cBuffers; i++)
+				busy |= a->samples[i].busy;
+			if (!busy)
+				allocator_clear(a);
+		}
 		pthread_cond_signal(&a->available);
 		pthread_mutex_unlock(&a->lock);
 		alloc_release(&a->iface);
@@ -195,13 +205,17 @@ static HRESULT WINAPI alloc_qi(IMemAllocator*p,REFIID iid,void**out){if(!out)ret
 static ULONG WINAPI alloc_addref(IMemAllocator*p){return __atomic_add_fetch(&allocator_from(p)->refs,1,__ATOMIC_RELAXED);}
 static ULONG WINAPI alloc_release(IMemAllocator*p){struct allocator*a=allocator_from(p);ULONG n=__atomic_sub_fetch(&a->refs,1,__ATOMIC_ACQ_REL);if(!n){allocator_clear(a);pthread_cond_destroy(&a->available);pthread_mutex_destroy(&a->lock);free(a);}return n;}
 static HRESULT WINAPI alloc_set(IMemAllocator*p,ALLOCATOR_PROPERTIES*r,ALLOCATOR_PROPERTIES*actual)
-{struct allocator*a=allocator_from(p);if(!r||!actual)return E_POINTER;if(a->committed)return VFW_E_ALREADY_COMMITTED;if(r->cBuffers<=0||r->cbBuffer<=0)return E_INVALIDARG;a->props=*r;if(a->props.cbAlign<=0)a->props.cbAlign=1;if((a->props.cbAlign&(a->props.cbAlign-1)))return VFW_E_BADALIGN;*actual=a->props;return S_OK;}
+{struct allocator*a=allocator_from(p);if(!r||!actual)return E_POINTER;if(a->committed)return VFW_E_ALREADY_COMMITTED;
+	/* Decommitted, but samples of the pool are still out: as CMemAllocator */
+	pthread_mutex_lock(&a->lock);int out=!!a->samples;pthread_mutex_unlock(&a->lock);if(out)return VFW_E_BUFFERS_OUTSTANDING;if(r->cBuffers<=0||r->cbBuffer<=0)return E_INVALIDARG;a->props=*r;if(a->props.cbAlign<=0)a->props.cbAlign=1;if((a->props.cbAlign&(a->props.cbAlign-1)))return VFW_E_BADALIGN;*actual=a->props;return S_OK;}
 static HRESULT WINAPI alloc_get(IMemAllocator*p,ALLOCATOR_PROPERTIES*out){if(!out)return E_POINTER;*out=allocator_from(p)->props;return S_OK;}
 static HRESULT WINAPI alloc_commit(IMemAllocator*p)
 {
 	struct allocator*a=allocator_from(p);if(a->committed)return S_OK;if(a->props.cBuffers<=0||a->props.cbBuffer<=0)return VFW_E_SIZENOTSET;
+	/* Recommitted before its samples came back: the same pool again */
+	pthread_mutex_lock(&a->lock);if(a->samples){a->committed=1;pthread_mutex_unlock(&a->lock);return S_OK;}pthread_mutex_unlock(&a->lock);
 	a->samples=calloc(a->props.cBuffers,sizeof(*a->samples));if(!a->samples)return E_OUTOFMEMORY;
-	for(LONG i=0;i<a->props.cBuffers;i++){struct sample*s=&a->samples[i];s->iface.lpVtbl=&sample_vtbl;s->allocator=a;s->size=a->props.cbBuffer;s->actual=s->size;/* a new CMediaSample is full */size_t n=(size_t)s->size+a->props.cbPrefix+a->props.cbAlign-1;s->allocation=malloc(n);if(!s->allocation){allocator_clear(a);return E_OUTOFMEMORY;}uintptr_t q=(uintptr_t)(s->allocation+a->props.cbPrefix);q=(q+a->props.cbAlign-1)&~(uintptr_t)(a->props.cbAlign-1);s->data=(BYTE*)q;}
+	for(LONG i=0;i<a->props.cBuffers;i++){struct sample*s=&a->samples[i];s->iface.lpVtbl=&sample_vtbl;s->allocator=a;s->size=a->props.cbBuffer;s->actual=s->size;/* a new CMediaSample is full *//* and zeroed padding past the end, which GetSize doesn't count */size_t n=(size_t)s->size+a->props.cbPrefix+a->props.cbAlign-1+VFW_INPUT_PADDING;s->allocation=calloc(1,n);if(!s->allocation){allocator_clear(a);return E_OUTOFMEMORY;}uintptr_t q=(uintptr_t)(s->allocation+a->props.cbPrefix);q=(q+a->props.cbAlign-1)&~(uintptr_t)(a->props.cbAlign-1);s->data=(BYTE*)q;}
 	a->committed=1;return S_OK;
 }
 static HRESULT WINAPI alloc_decommit(IMemAllocator*p){struct allocator*a=allocator_from(p);pthread_mutex_lock(&a->lock);a->committed=0;int busy=0;for(LONG i=0;a->samples&&i<a->props.cBuffers;i++)busy|=a->samples[i].busy;if(!busy)allocator_clear(a);pthread_cond_broadcast(&a->available);pthread_mutex_unlock(&a->lock);return S_OK;}
@@ -209,6 +223,11 @@ static HRESULT WINAPI alloc_buffer(IMemAllocator*p,IMediaSample**out,REFERENCE_T
 {struct allocator*x=allocator_from(p);if(!out)return E_POINTER;*out=NULL;pthread_mutex_lock(&x->lock);for(;;){if(!x->committed){pthread_mutex_unlock(&x->lock);return VFW_E_NOT_COMMITTED;}for(LONG i=0;i<x->props.cBuffers;i++){struct sample*s=&x->samples[i];if(!s->busy){s->busy=1;s->refs=1;__atomic_add_fetch(&x->refs,1,__ATOMIC_RELAXED);sample_set_time(&s->iface,a,b);*out=(IMediaSample*)&s->iface;pthread_mutex_unlock(&x->lock);return S_OK;}}if(flags&AM_GBF_NOWAIT){pthread_mutex_unlock(&x->lock);return VFW_E_TIMEOUT;}pthread_cond_wait(&x->available,&x->lock);}}
 static HRESULT WINAPI alloc_release_buffer(IMemAllocator*p,IMediaSample*s){if(!s)return E_POINTER;s->lpVtbl->Release(s);return S_OK;}
 static const IMemAllocatorVtbl alloc_vtbl={alloc_qi,alloc_addref,alloc_release,alloc_set,alloc_get,alloc_commit,alloc_decommit,alloc_buffer,alloc_release_buffer};
+
+int dshow_allocator_is_ours(IMemAllocator *a)
+{
+	return a && a->lpVtbl == &alloc_vtbl;
+}
 
 HRESULT dshow_allocator_create(IMemAllocator **out)
 {if(!out)return E_POINTER;struct allocator*a=calloc(1,sizeof(*a));if(!a)return E_OUTOFMEMORY;a->iface.lpVtbl=&alloc_vtbl;a->refs=1;a->props=(ALLOCATOR_PROPERTIES){1,1,1,0};pthread_mutex_init(&a->lock,NULL);pthread_cond_init(&a->available,NULL);*out=&a->iface;return S_OK;}

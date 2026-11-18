@@ -877,6 +877,84 @@ was "needs an option", "decodes at another size", "no output format",
   `ICM_COMPRESS_GET_FORMAT` with nothing, and decompress their own FOURCC,
   so they are decoders.
 
+### The codec zip, November 2026: decoders given samples
+
+`sweep --samples` gave the 160 decode-only DLLs the 64 streams
+`tests/gen_samples.sh` makes with ffmpeg, matched by the FOURCC or tag
+each registers (and, for VfW, FOURCCs its DLL holds). 19 decode a
+sample to within 25 dB of ffmpeg's own decode (most 45-70 dB), and are
+now "decodes":
+
+- video: `AxMJPGDec`, `GXJPG` (MJPG); `AxMP4Dec` (DX50); `khvc.ax`
+  (XVID); `divxdec.ax`, `windivx.ax` (DIV3); `mp43decd`, `mpg4ds32.ax`
+  (MP43); `mpg4decd` (MP42); `wmvdmod`, `wmv10dmod` (WMV1); `ilvc20.ax`
+  (H263); `asusasv1`, `asusasvd`, `asusasv2` (ASV1, ASV2); `CFDecode2.ax`
+  (CFHD); `msyuv.dll` (UYVY, exactly); `CtWbJpg` (YUY2);
+- audio: `wmadmod.dll` (WMA 1, 104 dB once 2048 samples of start-up
+  delay are allowed for).
+
+What the samples found in seance, fixed:
+
+- **`CLSID_MemoryAllocator`.** A filter built on Microsoft's base classes
+  makes its input pin's allocator with `CoCreateInstance` of quartz's
+  memory allocator, which seance's quartz didn't have. Its input pin
+  then had none (QNAP's `G711.ax` and `G726.ax`). Now seance's own
+  allocator is that class.
+- **Input buffers the size of a packet.** Audio input samples were a
+  megabyte (or two seconds), whatever the packet. `G711.ax` works out how
+  much it will decode from the input buffer's `GetSize`, not the data in
+  it, and overran its 8 KB output buffer. A parser's buffers are packet-
+  sized, so seance's are now too: a WAVEFORMATEX format's block, or 4 KB
+  for formats with small blocks, grown when a larger packet comes. The
+  zeroed padding after the data is now kept past `GetSize` in seance's
+  allocator.
+- **I420 is IYUV.** Asked for I420, a DirectShow decoder that offers the
+  same layout only as IYUV (`xvid.ax`, `khvc.ax`) was handed a bare I420
+  type it accepted and then wrote nothing into (all-zero frames, 5.2 dB).
+  The host now takes the offered IYUV type.
+- **`msvcrt!isleadbyte`** (`wmvsdecd.dll`, the WMV screen decoder): no
+  lead bytes, as `_ismbblead` says.
+
+What they found that isn't seance's:
+
+- `xvid.ax` decodes XVID with its luma shifted throughout (21.9 dB: luma
+  20 dB, chroma 65 dB). The picture is right; its brightness isn't
+  ffmpeg's.
+- `mp4sdecd.dll` (MP4S, M4S2) and `m3jpegdec.ax` (MJPG) report success
+  and give all-zero frames for ffmpeg's streams.
+- LEAD's decoders (`LDecMpg42`, `LDecH2643`, ...) decode at about 20 dB,
+  the level of their trial's overlay.
+- `3ivxDSDecoder.ax` writes through an object it never made (3ivx's
+  trial), `G726.ax` through codec state that `Receive` never set up,
+  `dsrmp4.dll` and `mlcom.ax` divide by zero.
+- `l3codecx.ax` (MP3) and `iviaudio.ax` (MP2) take every packet and give
+  no PCM. `G711.ax` gives half the samples. `ac3filter.ax` decodes AC-3
+  at 6 dB SNR against ffmpeg, with its own gain and mixing. Same before
+  these changes.
+- Many VfW decoders that register no FOURCC of ffmpeg's were given YUY2,
+  UYVY or MSVC because their DLLs hold those bytes, and refused them.
+  In all, 63 were given samples that didn't check out. The other 77 had
+  no sample at all: their formats (Indeo, VP6, Fraps,
+  AMR, Vorbis, Theora, DV variants, vendor FOURCCs) are ones ffmpeg can't
+  encode, or the DLL names none.
+- `kdvyuv8.dll` is the 160th: it now "fails", as it doesn't answer
+  `ICM_GETINFO`, so it never got as far as a sample. It does the same on
+  main.
+
+The 137 DLLs that round-tripped or encoded, swept again with these
+changes against the catalogue's results:
+
+- `divxg400.ax` had stopped at `msvcrt!_fsopen` since seance's msvcrt
+  became a KnownDLL. `_fsopen` and `_wfsopen` are there now, and it
+  round-trips as it did.
+- `direccional.dll` crashes in `ICM_COMPRESS`, where it was lossless. It
+  takes I420 but reads it as RGB24, 230,400 bytes from a 115,200-byte
+  frame. Its "lossless" round trip was the first half of each frame
+  copied through, and the rest read from whatever memory followed.
+- The rest that changed are Phase 5's: round trips below 10 dB are now
+  "encodes", and `mhuffyuv`, `SN4Codec`, `davcvfw`, `mmtvmj` and `qdv`
+  measure better.
+
 ## In-repository baseline
 
 For comparison, the same command over `build/fixtures` examined 23 fixture

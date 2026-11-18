@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include "common/log.h"
+#include "dshow/dshow.h"
 #include "win32/codepage.h"
 #include "win32/internal.h"
 #include "win32/k32.h"
@@ -1019,6 +1020,22 @@ static HRESULT devenum_create(REFIID riid, void **ppv)
 	return hr;
 }
 
+/*
+ * CLSID_MemoryAllocator: what strmbase's CreateMemoryAllocator asks
+ * quartz for, when a filter's own input pin is asked for an allocator.
+ */
+static HRESULT allocator_create(REFIID riid, void **ppv)
+{
+	IMemAllocator *a;
+	HRESULT hr = dshow_allocator_create(&a);
+
+	if (FAILED(hr))
+		return hr;
+	hr = a->lpVtbl->QueryInterface(a, riid, ppv);
+	a->lpVtbl->Release(a);
+	return hr;
+}
+
 /* Class factories, one static object per class. */
 
 struct factory {
@@ -1069,6 +1086,7 @@ static struct factory factories[] = {
 	{ { &factory_vtbl }, &CLSID_FilterMapper2, mapper_create },
 	{ { &factory_vtbl }, &CLSID_FilterMapper, mapper_create },
 	{ { &factory_vtbl }, &CLSID_SystemDeviceEnum, devenum_create },
+	{ { &factory_vtbl }, &CLSID_MemoryAllocator, allocator_create },
 };
 
 WINFN(HRESULT) qz_DllGetClassObject(REFCLSID clsid, REFIID riid, LPVOID *ppv)

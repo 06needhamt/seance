@@ -603,6 +603,7 @@ static const struct {
 	{ &CLSID_FilterMapper, "quartz.dll" },
 	{ &CLSID_FilterMapper2, "quartz.dll" },
 	{ &CLSID_SystemDeviceEnum, "quartz.dll" },
+	{ &CLSID_MemoryAllocator, "quartz.dll" },
 };
 
 static char *system_class_dll(REFCLSID clsid)

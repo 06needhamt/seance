@@ -133,6 +133,24 @@ CRTFN(crt_FILE *) crt__wfopen(const WCHAR *path, const WCHAR *mode)
 	return f;
 }
 
+/* With a share mode, which nothing else here contends for (divxg400.ax). */
+CRTFN(crt_FILE *) crt__fsopen(const char *path, const char *mode, int share)
+{
+	(void)share;
+	if (!path || !mode) {
+		errno = EINVAL;
+		return NULL;
+	}
+	return crt_fopen(path, mode);
+}
+
+CRTFN(crt_FILE *) crt__wfsopen(const WCHAR *path, const WCHAR *mode,
+			       int share)
+{
+	(void)share;
+	return crt__wfopen(path, mode);
+}
+
 CRTFN(int) crt_fclose(crt_FILE *f)
 {
 	if (!f || f == &crt_iob[0] || f == &crt_iob[1] || f == &crt_iob[2])
@@ -474,7 +492,7 @@ const struct builtin_export crt_stdio_exports[] = {
 	{ "_pctype", 0, (void *)&crt_pctype_ptr },
 	{ "__mb_cur_max", 0, &crt_mb_cur_max },
 	{ "__lc_codepage", 0, &lc_codepage },
-	E(fopen), E(_wfopen), E(fclose), E(fread), E(fwrite), E(fputc), E(fgetc),
+	E(fopen), E(_wfopen), E(_fsopen), E(_wfsopen), E(fclose), E(fread), E(fwrite), E(fputc), E(fgetc),
 	E(_fdopen), E(_filbuf), E(_flsbuf), E(ungetc), E(fgetpos), E(fsetpos),
 	E(fputs), E(fgets), E(fflush), E(feof), E(ferror), E(clearerr),
 	E(ftell), E(fseek), E(rewind), E(setvbuf), E(remove),

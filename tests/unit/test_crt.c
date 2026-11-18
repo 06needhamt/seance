@@ -422,6 +422,18 @@ static void test_msvcrt_semantics(void)
 		CHECK_EQ(last, 34);
 		fclose_(f);
 	}
+	/* _fsopen: fopen with a share mode (_SH_DENYWR, 0x20). */
+	void *(CDECL *fsopen_)(const char *, const char *, int) = get("_fsopen");
+	CHECK(fsopen_ != NULL);
+	f = fsopen_ ? fsopen_("C:\\WINDOWS\\TEMP\\test_crt.tmp", "rb", 0x20) :
+	    NULL;
+	CHECK(f != NULL);
+	if (f) {
+		char head[4] = "";
+		CHECK_EQ(fread_(head, 1, 3, f), 3);
+		CHECK(!memcmp(head, "-12", 3));
+		fclose_(f);
+	}
 
 	/* isprint and isgraph as MSVC's table has them. */
 	CHECK(isprint_('a') && isprint_(' ') && isprint_('~'));

@@ -389,6 +389,14 @@ if(BUILD_TESTING)
 		ENVIRONMENT "VFW_EMULATOR=${vfw_emulator}")
 	skippable(validate_media ${VFW_REQUIRE_FFMPEG})
 
+	# The samples `sweep --samples` gives decoders, made with FFmpeg.
+	add_test(NAME gen_samples
+		COMMAND sh ${PROJECT_SOURCE_DIR}/tests/check_samples.sh
+			$<TARGET_FILE:seance> ${CMAKE_BINARY_DIR}/samples)
+	set_tests_properties(gen_samples PROPERTIES LABELS media
+		ENVIRONMENT "VFW_EMULATOR=${vfw_emulator}")
+	skippable(gen_samples ${VFW_REQUIRE_FFMPEG})
+
 	# seance64's own tests, run in its build directory: one test here,
 	# whose output lists those that failed.
 	if(VFW_BUILD_X86_64)
