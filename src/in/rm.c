@@ -712,8 +712,8 @@ static int interleaved(const struct rm_stream *st)
 
 /*
  * Whether an interleaved stream's geometry makes sense: a group that
- * fits in memory, Int4 rows of whole frames, genr rows of whole
- * sub-packets. 0, or -1 with vfw_error().
+ * fits in memory, Int4 frames that fill its rows exactly, genr rows of
+ * whole sub-packets. 0, or -1 with vfw_error().
  */
 static int check_geometry(const struct rm_file *rm, const struct rm_stream *st)
 {
@@ -723,7 +723,8 @@ static int check_geometry(const struct rm_file *rm, const struct rm_stream *st)
 
 	switch (st->interleaver) {
 	case mmioFOURCC('I', 'n', 't', '4'):
-		ok = ok && h >= 2 && cfs && cfs <= w;
+		/* Rows of frames that fill the group, as FFmpeg's reader wants */
+		ok = ok && h >= 2 && cfs && cfs <= w && cfs * h == 2 * w;
 		break;
 	case mmioFOURCC('g', 'e', 'n', 'r'):
 		ok = ok && sps && w % sps == 0;

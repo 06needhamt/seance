@@ -399,6 +399,10 @@ static void test_malformed(void)
 	t.len = 0;
 	ra4(&t, 1, 8, 4, 8, 3, 8000, 1, "genr", "TEST");
 	mdpr(&b, 2, "audio/x-pn-realaudio", &t);
+	/* Int4 of two rows of 8, but frames of 4: half the group unfilled */
+	t.len = 0;
+	ra4(&t, 1, 4, 2, 8, 0, 8000, 1, "Int4", "TEST");
+	mdpr(&b, 3, "audio/x-pn-realaudio", &t);
 	size_t data = chunk(&b, "DATA");
 	put32(&b, 0);
 	put32(&b, 0);
@@ -432,6 +436,8 @@ static void test_malformed(void)
 		CHECK(strstr(vfw_error(), "'Int4' interleaving") != NULL);
 		CHECK_EQ(rm_read_audio(rm, 2, &d, &len, &time), -1);
 		CHECK(strstr(vfw_error(), "'genr' interleaving") != NULL);
+		CHECK_EQ(rm_read_audio(rm, 3, &d, &len, &time), -1);
+		CHECK(strstr(vfw_error(), "'Int4' interleaving") != NULL);
 		rm_close(rm);
 	}
 	free(b.p);
