@@ -251,14 +251,17 @@ static void test_headers(void)
 	rm_close(rm);
 }
 
-/* A read gave rc 1 and want bytes, so what it gave can be looked at. */
-static int read_ok(int rc, size_t len, size_t want)
+/*
+ * A read gave rc 1 and *len is want bytes, so what it gave can be looked
+ * at. *len is only read once rc says the read filled it.
+ */
+static int read_ok(int rc, const size_t *len, size_t want)
 {
 	CHECK_EQ(rc, 1);
 	if (rc != 1)
 		return 0;
-	CHECK_EQ(len, want);
-	return len == want;
+	CHECK_EQ(*len, want);
+	return *len == want;
 }
 
 static void test_video(void)
@@ -269,7 +272,7 @@ static void test_video(void)
 	if (!rm)
 		return;
 	int rc = rm_read_frame(rm, 0, &f);
-	if (read_ok(rc, f.len, 4)) {
+	if (read_ok(rc, &f.len, 4)) {
 		CHECK_EQ(f.nslices, 1u);
 		CHECK_EQ(f.time, 0u);
 		CHECK(f.key);
@@ -277,7 +280,7 @@ static void test_video(void)
 	}
 
 	rc = rm_read_frame(rm, 0, &f);
-	if (read_ok(rc, f.len, 6)) {
+	if (read_ok(rc, &f.len, 6)) {
 		CHECK_EQ(f.nslices, 2u);
 		CHECK_EQ(f.offsets[0], 0u);
 		CHECK_EQ(f.offsets[1], 3u);
@@ -287,7 +290,7 @@ static void test_video(void)
 	}
 
 	rc = rm_read_frame(rm, 0, &f);
-	if (read_ok(rc, f.len, 2)) {
+	if (read_ok(rc, &f.len, 2)) {
 		CHECK_EQ(f.time, 80u);
 		CHECK_EQ(f.data[0], 0x80);
 	}
@@ -297,8 +300,9 @@ static void test_video(void)
 		CHECK_EQ(f.data[0], 0x90);
 	}
 
-	CHECK_EQ(rm_read_frame(rm, 0, &f), 1);
-	CHECK_EQ(f.time, 160u);
+	CHECK_EQ(rc = rm_read_frame(rm, 0, &f), 1);
+	if (rc == 1)
+		CHECK_EQ(f.time, 160u);
 	CHECK_EQ(rm_read_frame(rm, 0, &f), 0);
 	CHECK_EQ(rm_read_frame(rm, 1, &f), -1);	/* audio */
 	rm_close(rm);
@@ -315,10 +319,10 @@ static void test_audio(void)
 		return;
 	/* Int0: packets as they are */
 	int rc = rm_read_audio(rm, 1, &d, &len, &time);
-	if (read_ok(rc, len, 4))
+	if (read_ok(rc, &len, 4))
 		CHECK(!memcmp(d, "\x80\x81\x7f\xff", 4));
 	rc = rm_read_audio(rm, 1, &d, &len, &time);
-	if (read_ok(rc, len, 2))
+	if (read_ok(rc, &len, 2))
 		CHECK_EQ(time, 40u);
 	CHECK_EQ(rm_read_audio(rm, 1, &d, &len, &time), 0);
 	rm_close(rm);
@@ -336,7 +340,7 @@ static void test_audio(void)
 		return;
 	for (int k = 0; k < 4; k++) {
 		rc = rm_read_audio(rm, 2, &d, &len, &time);
-		if (read_ok(rc, len, 8))
+		if (read_ok(rc, &len, 8))
 			CHECK(!memcmp(d, want + 8 * k, 8));
 	}
 	CHECK_EQ(rm_read_audio(rm, 2, &d, &len, &time), 0);
@@ -538,20 +542,20 @@ static void test_host(const char *dir)
 		CHECK_EQ(wf->nChannels, 1);
 		int rc = rm_read_audio(rm, 1, &in, &len, &time);
 		CHECK_EQ(rc, 1);
-		if (rc == 1) {
-			rc = real_audio_decode(a, in, len, &pcm, &plen);
-			CHECK_EQ(rc, 0);
-		}
-		if (rc == 0) {
+		int dec = rc == 1 ?
+			  real_audio_decode(a, in, len, &pcm, &plen) : -1;
+		if (rc == 1)
+			CHECK_EQ(dec, 0);
+		if (rc == 1 && dec == 0) {
 			CHECK_EQ(plen, (size_t)8);
-		}
-		if (rc == 0 && plen == 8) {
-			short s[4];
-			memcpy(s, pcm, sizeof(s));
-			CHECK_EQ(s[0], 0);
-			CHECK_EQ(s[1], 256);
-			CHECK_EQ(s[2], -256);
-			CHECK_EQ(s[3], 127 * 256);
+			if (plen == 8) {
+				short s[4];
+				memcpy(s, pcm, sizeof(s));
+				CHECK_EQ(s[0], 0);
+				CHECK_EQ(s[1], 256);
+				CHECK_EQ(s[2], -256);
+				CHECK_EQ(s[3], 127 * 256);
+			}
 		}
 		real_audio_close(a);
 	}
