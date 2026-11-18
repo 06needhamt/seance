@@ -40,7 +40,7 @@ static uintptr_t call(const char *what, const void *fn, unsigned n,
 #define P(x) ((uintptr_t)(x))
 
 struct find {
-	int video20, video40, audio, pncodec, helix;
+	int video20, video40, audio, pncodec, helix, renderer;
 };
 
 static int note_export(void *ctx, const struct pe_export *e)
@@ -60,6 +60,8 @@ static int note_export(void *ctx, const struct pe_export *e)
 		f->pncodec = 1;
 	else if (!strcmp(n, "RACreateDecoderInstance"))
 		f->helix = 1;
+	else if (!strcmp(n, "RMACreateInstance"))
+		f->renderer = 1;
 	return 0;
 }
 
@@ -83,6 +85,8 @@ static enum real_kind kind_of(const struct module *m, const char **entry)
 		return REAL_PNCODEC;
 	if (f.helix)
 		return REAL_HELIX;
+	if (f.renderer)
+		return REAL_RENDERER;
 	return REAL_NONE;
 }
 
@@ -105,6 +109,7 @@ const char *real_kind_name(enum real_kind kind)
 	case REAL_AUDIO: return "RealAudio decoder";
 	case REAL_PNCODEC: return "RealPlayer plug-in (PNCodec)";
 	case REAL_HELIX: return "Helix audio decoder";
+	case REAL_RENDERER: return "RealPlayer renderer plug-in";
 	default: return "not a RealPlayer codec";
 	}
 }

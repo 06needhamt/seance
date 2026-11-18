@@ -12,8 +12,9 @@
  *
  * Not handled: the older PNCodec_ interface (rv10.dll, the RealVideo 1
  * and ClearVideo plug-ins) and RACreateDecoderInstance, which gives a
- * Helix object (raac.dll, amrn.dll, ...); real_kind() tells them apart so
- * callers can say so.
+ * Helix object (amrn.dll, qclp.dll, ...); real_kind() tells them apart so
+ * callers can say so, and from RealPlayer's renderer plug-ins
+ * (rvrender.dll, rarender.dll), which aren't codecs.
  *
  * The structures are as RealNetworks' Helix DNA sources and MPlayer's
  * notes on these DLLs describe them, re-implemented here.
@@ -33,6 +34,7 @@ enum real_kind {
 	REAL_AUDIO,		/* RAOpenCodec2 / RAInitDecoder / RADecode */
 	REAL_PNCODEC,		/* PNCodec_ only */
 	REAL_HELIX,		/* RACreateDecoderInstance only */
+	REAL_RENDERER,		/* RMACreateInstance: a player plug-in */
 };
 
 /*

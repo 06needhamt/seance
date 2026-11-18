@@ -1354,6 +1354,7 @@ static void sweep_one(struct sweep *s, const char *dll, struct result *r)
 		r->status = rc >= 124 ? status_of_rc(rc) :
 			    strstr(msg, "not a driver") ||
 			    strstr(msg, "RealPlayer") ||
+			    strstr(msg, "Helix") ||
 			    strstr(msg, "not a PE") ? ST_NOT_CODEC : ST_FAILS;
 		snprintf(r->note, sizeof(r->note), "%s", msg[0] ? msg :
 			 "probe found no codec in it");

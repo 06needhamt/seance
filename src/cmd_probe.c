@@ -668,6 +668,12 @@ static int probe_real(const char *dll)
 	b = b ? b + 1 : dll;
 	if (k == REAL_NONE)
 		return -1;
+	if (k == REAL_RENDERER) {
+		fprintf(stderr, "seance: %s: a %s (it exports RMACreateInstance), "
+			"part of the player, not a codec\n", b,
+			real_kind_name(k));
+		return 1;
+	}
 	if (k == REAL_PNCODEC || k == REAL_HELIX) {
 		fprintf(stderr, "seance: %s: a %s, which seance doesn't host; "
 			"it hosts RealPlayer's RV20toYUV420, RV40toYUV420 and "
@@ -677,8 +683,13 @@ static int probe_real(const char *dll)
 	printf("RealPlayer codec: %s\n", b);
 	if (k == REAL_VIDEO) {
 		printf("  %s (%s)\n  video decoder\n", real_kind_name(k), entry);
-		/* RV20's entry points take RV20 (RV10 is rv10.dll's) */
-		if (!strcmp(entry, "RV20toYUV420"))
+		/*
+		 * drvN.dll decodes RVN0, whichever set of entry points it
+		 * has (drv33260.dll's are RV20toYUV420's); RV10 is rv10.dll's
+		 */
+		if (!strncasecmp(b, "drv", 3) && b[3] >= '2' && b[3] <= '4')
+			printf("  takes 'RV%c0'\n", b[3]);
+		else if (!strcmp(entry, "RV20toYUV420"))
 			printf("  takes 'RV20'\n");
 		else
 			printf("  takes 'RV30'\n  takes 'RV40'\n");

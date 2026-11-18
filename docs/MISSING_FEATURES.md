@@ -507,7 +507,8 @@ what keeps the others from working.
   FFmpeg's (experimental) encoder output, which only its own decoder is known to take; `VFW_LOWHEAP=0`, `VFW_ZERO_MEMORY=0`
   and `VFW_FORCE_RELOC=1` change nothing. No genuine CineForm stream is
   available to confirm.
-- **RealPlayer codecs:** `*3260.dll`.
+- **RealPlayer codecs:** `*3260.dll`. These are now run through their
+  own entry points; see "RealPlayer codecs" below.
 - **Locked, or needs setup:**
   - `wmvdmoe2.dll` is a keyed DMO and needs an unlock key.
   - `tsccvid.dll` and `tsc2_codec32.dll` (Camtasia) need a licence.
@@ -954,6 +955,47 @@ changes against the catalogue's results:
 - The rest that changed are Phase 5's: round trips below 10 dB are now
   "encodes", and `mhuffyuv`, `SN4Codec`, `davcvfw`, `mmtvmj` and `qdv`
   measure better.
+
+### The codec zip, November 2026: RealPlayer codecs
+
+seance now hosts RealPlayer's codecs (`src/real/`) and reads RealMedia
+files (`src/in/rm.c`). The zip's 34 RealPlayer DLLs, swept with the
+RealMedia samples `tests/gen_samples.sh` makes (RV10, RV20, AC-3 as
+`dnet`, 14.4 as `lpcJ`: all ffmpeg can write to RealMedia):
+
+- **Verified:**
+  - `drv2.dll` and `drv23260.dll` decode RV20 at 53 dB PSNR against
+    ffmpeg's decode.
+  - `14_43260.dll` decodes 14.4 identically to ffmpeg.
+- **`dnet3260.dll` decodes AC-3 correctly, but at a different level.**
+  Its output is 1.5 times ffmpeg's (with or without ffmpeg's dynamic
+  range compression). Scaled by 2/3 it matches to 84 dB SNR, but the
+  sweep compares without scaling, so it reports 6 dB. `ac3filter.ax`
+  shows the same.
+- **No sample to give them:**
+  - video: `drv33260.dll` (RV30), `drv43260.dll` (RV40) and `drvc.dll`
+    (RV30 and RV40);
+  - audio: `28_83260.dll`, `cook.dll`, `cook3260.dll`, `atrc.dll`,
+    `atrc3260.dll`, `sipr.dll`, `sipr3260.dll` and `raac.dll`.
+
+  ffmpeg encodes none of these. They open and are listed as decoders.
+  The interleaving their streams use (`genr`, `Int4`, `sipr`) is undone
+  as RealNetworks' format describes. The unit tests check that with
+  made-up streams, but no real file has been tried.
+- **RV10:** RealPlayer decodes it with `rv10.dll`, through the older
+  `PNCodec_` interface. The RV20 entry points refuse it (`0x80040005`).
+- **Not hosted:**
+  - `PNCodec_` plug-ins: `rv10.dll`, `rv103260.dll`, `rv20.dll`,
+    `rv203260.dll`, `rv30.dll`, `rv303260.dll`, `rv40.dll`,
+    `rv403260.dll` and `ra32clv1.dll`. The `rv*` ones front the `drv*`
+    decoders above, which are run directly.
+  - Helix decoders (`RACreateDecoderInstance`): `amrn.dll`, `amrw.dll`,
+    `qclp.dll` and `ralf.dll`.
+- **Not codecs:** RealPlayer's renderer plug-ins (`RMACreateInstance`):
+  `h263render.dll`, `mp4arender.dll`, `rare3260.dll`, `rarender.dll`,
+  `rvre3260.dll` and `rvrender.dll`.
+- **`RealMediaSplitter.ax`** has both sets of entry points as well, but
+  is a DirectShow server and is run as one.
 
 ## In-repository baseline
 

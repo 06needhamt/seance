@@ -59,6 +59,17 @@ ADPCM, A-law, mu-law and GSM 6.10 decode, MS ADPCM, G.711 and GSM
 identically to FFmpeg, and IMA ADPCM and G.711 encode (results in
 [MISSING_FEATURES.md](MISSING_FEATURES.md)).
 
+RealPlayer's codecs decode RealMedia files (`.rm`, `.ra`) through their
+own entry points: RealVideo's `RV20toYUV420`/`RV40toYUV420` sets
+(`drv2.dll`, `drvc.dll`, the `drv*3260.dll`) and RealAudio's
+`RAOpenCodec2`/`RAInitDecoder`/`RADecode` (`cook.dll`, `sipr.dll`,
+`14_43260.dll`, ...). seance reads the file itself: it puts video frames
+back together from their slices and undoes the audio interleaving
+(`genr`, `Int4`, `sipr`). RealPlayer's older `PNCodec_` plug-ins
+(`rv10.dll`), its Helix decoders (`RACreateDecoderInstance`) and its
+renderer plug-ins are named for what they are and not run. The results
+are in [MISSING_FEATURES.md](MISSING_FEATURES.md).
+
 The real-world check is the LAV Filters 0.83 package (32-bit): LAV Video
 loads, registers, connects and decodes 18 codecs identically to FFmpeg; LAV
 Audio decodes MP3, FLAC, MS ADPCM and A-law identically and AC-3, E-AC-3,
@@ -612,6 +623,8 @@ build/seance decode dmo.dll clip.avi -o clip.y4m
 build/seance decode auto clip.avi -o 'frame%05d.bmp' --start 250 --frames 10
 build/seance decode XVID clip.avi -o clip.yuv --output-format YV12
 build/seance decode LAVVideo.ax hevc10.avi -o hevc10.y4m --native
+build/seance decode drvc.dll clip.rm -o clip.y4m
+build/seance decode cook.dll clip.rm -o clip.wav
 
 build/seance encode codec.dll in.y4m -o out.avi --keyint 30 --quality 8000
 build/seance encode filter.ax in.y4m -o out.avi --clsid '{GUID}'
@@ -619,6 +632,11 @@ build/seance encode TST0 'shot%04d.bmp' -o out.avi --rate 30000/1001
 build/seance encode codec.dll in.yuv -o out.avi --input-format I420 --size 720x576
 ffmpeg -i any.mkv -f yuv4mpegpipe - | build/seance encode codec.dll - -o out.avi
 ```
+
+A RealMedia file goes to one of RealPlayer's codecs: its first video
+stream to a RealVideo decoder, its first audio stream to a RealAudio one
+(or the stream `--stream` names), with `-o`, `--format`, `--frames` and
+`--keep-going`.
 
 `decode` runs an AVI's video stream through a codec's decompressor
 (`ICM_DECOMPRESS_BEGIN`, then `ICDecompress` per frame) and writes the

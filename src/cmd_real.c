@@ -213,7 +213,7 @@ int real_decode(const char *dll, const char *path,
 			"with one");
 		return 1;
 	}
-	if (k == REAL_PNCODEC || k == REAL_HELIX) {
+	if (k == REAL_PNCODEC || k == REAL_HELIX || k == REAL_RENDERER) {
 		fprintf(stderr, "seance: %s: a %s, which seance doesn't host "
 			"yet\n", dll, real_kind_name(k));
 		return 1;
