@@ -285,6 +285,41 @@ static void test_intrinsics(void)
 /* MSVCRT behaviour that differs from glibc's, called directly. */
 #endif
 
+/* The bounds-checked copies, _strset/_strnset and mbtowc. */
+static void test_secure(void)
+{
+	int (CDECL *memcpy_s_)(void *, size_t, const void *, size_t) =
+		get("memcpy_s");
+	int (CDECL *memmove_s_)(void *, size_t, const void *, size_t) =
+		get("memmove_s");
+	char *(CDECL *strnset_)(char *, int, size_t) = get("_strnset");
+	char *(CDECL *strset_)(char *, int) = get("_strset");
+	int (CDECL *mbtowc_)(WCHAR *, const char *, size_t) = get("mbtowc");
+	char d[8] = "xxxxxxx", s[] = "abcdef";
+	WCHAR w = 0xffff;
+
+	CHECK_EQ(memcpy_s_(d, sizeof(d), s, 4), 0);
+	CHECK(!memcmp(d, "abcdxxx", 7));
+	CHECK_EQ(memcpy_s_(d, 3, s, 4), ERANGE);
+	CHECK(!memcmp(d, "\0\0\0dxxx", 7));	/* cleared, as far as it said */
+	CHECK_EQ(memcpy_s_(d, sizeof(d), NULL, 1), EINVAL);
+	CHECK_EQ(memcpy_s_(NULL, 0, NULL, 0), 0);
+	memcpy(d, "1234567", 8);
+	CHECK_EQ(memmove_s_(d + 1, 7, d, 3), 0);
+	CHECK_STR(d, "1123567");
+	CHECK_EQ(memmove_s_(d, 2, s, 3), ERANGE);
+	CHECK_STR(d, "1123567");			/* left alone */
+	CHECK_STR(strnset_(d, '*', 3), "***3567");
+	CHECK_STR(strnset_(s, '-', 99), "------");
+	CHECK_STR(strset_(d, '.'), ".......");
+	CHECK_EQ(mbtowc_(&w, "A", 1), 1);
+	CHECK_EQ(w, 'A');
+	CHECK_EQ(mbtowc_(&w, "", 1), 0);
+	CHECK_EQ(w, 0);
+	CHECK_EQ(mbtowc_(NULL, NULL, 0), 0);
+	CHECK_EQ(mbtowc_(&w, "B", 0), -1);
+}
+
 /* A Windows long is 32 bits on both architectures. */
 static void test_long(void)
 {
@@ -318,6 +353,15 @@ static void test_long(void)
 	CHECK_STR(ltoa_(-42, b, 10), "-42");
 	CHECK_STR(ultoa_(0xfffffffeu, b, 10), "4294967294");
 	CHECK_STR(ltoa_(-1, b, 2), "11111111111111111111111111111111");
+	char *(CDECL *i64toa_)(long long, char *, int) = get("_i64toa");
+	char *(CDECL *ui64toa_)(unsigned long long, char *, int) =
+		get("_ui64toa");
+	CHECK_STR(i64toa_(-1234567890123ll, b, 10), "-1234567890123");
+	CHECK_STR(i64toa_(-1, b, 16), "ffffffffffffffff");
+	CHECK_STR(i64toa_(INT64_MIN, b, 10), "-9223372036854775808");
+	CHECK_STR(ui64toa_(18446744073709551615ull, b, 10),
+		  "18446744073709551615");
+	CHECK_STR(ui64toa_(0, b, 2), "0");
 #ifdef __x86_64__
 	/* A Win64 caller may leave the upper half of a 32-bit argument as
 	 * anything: only the low 32 bits count. */
@@ -706,6 +750,7 @@ int main(void)
 	if (crt) {
 		test_msvcrt_semantics();
 		test_long();
+		test_secure();
 		test_printf();
 #if !defined(__x86_64__)
 		test_intrinsics();

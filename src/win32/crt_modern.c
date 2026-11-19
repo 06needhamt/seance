@@ -2,7 +2,9 @@
 /*
  * msvcrt: the functions of the 64-bit time_t era that FFmpeg-based filters
  * (LAV Filters) import: _time64 and friends, _stat64, _strtoi64,
- * _aligned_malloc, and the locale accessors of the CRT's headers.
+ * _aligned_malloc, and the locale accessors of the CRT's headers. Also a
+ * few others that DLLs in the codec zip import: _i64toa and _ui64toa,
+ * memcpy_s and memmove_s (mfc90), _strset and _strnset, and mbtowc.
  */
 #include <errno.h>
 #include <malloc.h>
@@ -232,12 +234,127 @@ CRTFN(unsigned) crt____lc_codepage_func(void) { return 0; }
  */
 CRTFN(int) crt__resetstkoflw(void) { return 1; }
 
+/*
+ * 64-bit integers as text: base 10 signed for _i64toa, else the bits
+ * unsigned, as msvcrt gives them (_i64toa(-1, b, 16) is 16 f's).
+ */
+static char *u64toa(uint64_t u, int neg, char *buf, int radix)
+{
+	char tmp[66];
+	int i = 0, j = 0;
+
+	if (radix < 2 || radix > 36) {
+		buf[0] = 0;
+		return buf;
+	}
+	do {
+		int d = (int)(u % (unsigned)radix);
+		tmp[i++] = (char)(d < 10 ? '0' + d : 'a' + d - 10);
+		u /= (unsigned)radix;
+	} while (u);
+	if (neg)
+		buf[j++] = '-';
+	while (i)
+		buf[j++] = tmp[--i];
+	buf[j] = 0;
+	return buf;
+}
+
+CRTFN(char *) crt__i64toa(int64_t v, char *buf, int radix)
+{
+	int neg = radix == 10 && v < 0;
+
+	return u64toa(neg ? 0 - (uint64_t)v : (uint64_t)v, neg, buf, radix);
+}
+
+CRTFN(char *) crt__ui64toa(uint64_t v, char *buf, int radix)
+{
+	return u64toa(v, 0, buf, radix);
+}
+
+/*
+ * The bounds-checked copies of msvcr80 on: a copy that wouldn't fit, or
+ * from NULL, copies nothing (memcpy_s clears the destination) and fails.
+ */
+CRTFN(int) crt_memcpy_s(void *dst, size_t size, const void *src, size_t n)
+{
+	if (!n)
+		return 0;
+	if (!dst)
+		return errno = EINVAL;
+	if (!src || size < n) {
+		memset(dst, 0, size);
+		return errno = src ? ERANGE : EINVAL;
+	}
+	memcpy(dst, src, n);
+	return 0;
+}
+
+CRTFN(int) crt_memmove_s(void *dst, size_t size, const void *src, size_t n)
+{
+	if (!n)
+		return 0;
+	if (!dst || !src)
+		return errno = EINVAL;
+	if (size < n)
+		return errno = ERANGE;
+	memmove(dst, src, n);
+	return 0;
+}
+
+/* Sets each character (up to n of them) to c, and stops at the end. */
+CRTFN(char *) crt__strnset(char *s, int c, size_t n)
+{
+	for (size_t i = 0; i < n && s[i]; i++)
+		s[i] = (char)c;
+	return s;
+}
+
+CRTFN(char *) crt__strset(char *s, int c)
+{
+	for (char *p = s; *p; p++)
+		*p = (char)c;
+	return s;
+}
+
+/*
+ * One character of the ANSI code page to UTF-16: the bytes it took (a
+ * DBCS lead byte takes two), 0 for the terminator, -1 for an invalid one.
+ */
+CRTFN(int) crt_mbtowc(WCHAR *dst, const char *s, size_t n)
+{
+	WCHAR w;
+
+	if (!s || !n)
+		return s ? -1 : 0;
+	if (!*s) {
+		if (dst)
+			*dst = 0;
+		return 0;
+	}
+	for (int len = 1; len <= 2 && (size_t)len <= n; len++)
+		if (cp_to_utf16(CP_ACP, s, len, &w, 1, 1) == 1) {
+			if (dst)
+				*dst = w;
+			return len;
+		}
+	errno = EILSEQ;
+	return -1;
+}
+
 #define E(n) { #n + 0, 0, (void *)crt_##n }
 #define M(name, fn) { name, 0, (void *)fn }
 
 const struct builtin_export crt_modern_exports[] = {
 	M("_time64", crt__time64),
 	M("_resetstkoflw", crt__resetstkoflw),
+	M("_i64toa", crt__i64toa),
+	M("_ui64toa", crt__ui64toa),
+	M("memcpy_s", crt_memcpy_s),
+	M("memmove_s", crt_memmove_s),
+	M("_strnset", crt__strnset),
+	M("_strset", crt__strset),
+	M("mbtowc", crt_mbtowc),
 	M("_time32", crt__time32),
 	M("_gmtime64", crt__gmtime64),
 	M("_localtime64", crt__localtime64),
