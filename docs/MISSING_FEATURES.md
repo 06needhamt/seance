@@ -997,6 +997,65 @@ RealMedia samples `tests/gen_samples.sh` makes (RV10, RV20, AC-3 as
 - **`RealMediaSplitter.ax`** has both sets of entry points as well, but
   is a DirectShow server and is run as one.
 
+### The codec zip, November 2026: 3DNow!
+
+No CPU made in the last fifteen years or so has AMD's 3DNow!, so its
+instructions fault with SIGILL. seance now emulates them
+(`src/runtime/amd3dnow.c`):
+- the 3DNow! and Extended 3DNow! operations (`0F 0F` and a suffix);
+- FEMMS;
+- PREFETCH and PREFETCHW, should the CPU lack those too.
+
+They work on the MMX registers in the signal context, on i386 and
+x86-64. Where AMD defines the edge cases, the emulator follows them:
+- PI2FD rounds toward zero;
+- an overflow gives the largest number of its sign, as 3DNow! has no
+  infinities;
+- PFMIN and PFMAX give +0 for a zero;
+- denormals read and write as zeros.
+
+The unit test `test_3dnow` checks:
+- each operation, against results worked out by hand;
+- these addressing forms: `[eax]`, `ds:[eax+disp8]` and
+  `[eax+ecx*8+disp32]`, plus on x86-64 `[r9]`, RIP-relative and the
+  address-size override;
+- a nonzero x87 stack top;
+- FEMMS;
+- that what it can't emulate still raises SIGILL.
+
+It runs PREFETCHW too, but this CPU has PREFETCHW, so that runs natively
+and doesn't test the emulator's prefetch path. On a CPU that has 3DNow!,
+the test checks only what the hardware and the emulator agree on.
+
+- **Limits:**
+  - PFRCP and PFRSQRT give full-precision results, not the hardware's
+    14- and 15-bit estimates. The steps that refine those estimates
+    (PFRCPIT1, PFRSQIT1, PFRCPIT2) pass the estimate through, so AMD's
+    documented sequences still end at the right answer.
+  - These aren't emulated, and are reported as the illegal instruction
+    they are:
+    - an operand behind an `fs:` or `gs:` override;
+    - one at an address that can't be read;
+    - on i386, one with the address-size override (16-bit addressing,
+      which flat code doesn't use).
+  - Each instruction costs a signal. `_arvic.dll` takes about 2.5 s to
+    encode or decode ten 320x240 frames.
+- **`IsProcessorFeaturePresent(PF_3DNOW_INSTRUCTIONS_AVAILABLE)` still
+  reports the CPU's own answer** (FALSE here). Codecs that check use
+  their MMX or SSE code instead.
+- **Result:**
+  - `_arvic.dll` (ARVI) crashed with SIGILL in ICM_COMPRESS (at
+    `+0x76e9`) and ICM_DECOMPRESS (at `+0x7894`). Both are `pavgusb`,
+    which it uses without a CPU check.
+  - It now round-trips at 30 dB PSNR (11.4 Mbit/s). `VFW_TRACE=1`
+    reports the first emulated instruction.
+  - 33 other DLLs in the zip contain 3DNow! code, among them
+    libavcodec, xvidcore, ffdshow, the IMM5/IMM6 decoders, `kdm4.dll`
+    and `blox.dll`.
+    - 20 of them are codecs. They check the CPU first, and they get
+      the same sweep results with and without the emulator.
+    - The rest are libraries, not codecs.
+
 ## In-repository baseline
 
 For comparison, the same command over `build/fixtures` examined 23 fixture

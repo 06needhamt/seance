@@ -70,6 +70,13 @@ back together from their slices and undoes the audio interleaving
 renderer plug-ins are named for what they are and not run. The results
 are in [MISSING_FEATURES.md](MISSING_FEATURES.md).
 
+Codecs that use AMD's 3DNow! without asking the CPU whether it has it
+(ARVI's `_arvic.dll`, for one) still run: no current CPU has 3DNow!, so
+each such instruction faults, and seance carries it out in software and
+carries on (`src/runtime/amd3dnow.c`). That is a signal per instruction,
+so slow, but `IsProcessorFeaturePresent` keeps saying what the CPU says,
+so codecs that do ask take their MMX or SSE code instead.
+
 The real-world check is the LAV Filters 0.83 package (32-bit): LAV Video
 loads, registers, connects and decodes 18 codecs identically to FFmpeg; LAV
 Audio decodes MP3, FLAC, MS ADPCM and A-law identically and AC-3, E-AC-3,

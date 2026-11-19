@@ -34,6 +34,7 @@
 #include "common/log.h"
 #include "common/sanitizer.h"
 #include "loader/modules.h"
+#include "runtime/amd3dnow.h"
 #include "runtime/crash.h"
 #include "runtime/guard.h"
 #include "runtime/seh.h"
@@ -301,6 +302,9 @@ static void on_fault(int sig, siginfo_t *si, void *ctx)
 	ucontext_t *uc = ctx;
 	const void *pc = (const void *)uc->uc_mcontext.gregs[REG_PC];
 
+	/* 3DNow!, which no current CPU has, carried out in software. */
+	if (sig == SIGILL && si->si_code > 0 && amd3dnow_emulate(uc))
+		return;
 	if (run_data(sig, si, uc))
 		return;
 
@@ -328,6 +332,34 @@ static void on_fault(int sig, siginfo_t *si, void *ctx)
 	/* Die of the signal, as without the handler. */
 	signal(sig, SIG_DFL);
 	if (si->si_code <= 0)		/* sent, not a fault: send it again */
+		raise(sig);
+}
+
+/* The SIGILL handler sanitizer builds had before on_sigill. */
+static struct sigaction old_sigill;
+
+/*
+ * Sanitizer builds' SIGILL handler: 3DNow! as above. Anything else goes
+ * to the handler that was there (the sanitizer's, with handle_sigill=1),
+ * or else dies of the signal when the instruction runs again.
+ */
+static void on_sigill(int sig, siginfo_t *si, void *ctx)
+{
+	if (si->si_code > 0 && amd3dnow_emulate(ctx))
+		return;
+	/*
+	 * SIG_DFL and SIG_IGN first, whatever the flags: sigaction keeps
+	 * SA_SIGINFO with SIG_IGN, and the union then holds 1, not a function.
+	 */
+	if (old_sigill.sa_handler != SIG_DFL && old_sigill.sa_handler != SIG_IGN) {
+		if (old_sigill.sa_flags & SA_SIGINFO)
+			old_sigill.sa_sigaction(sig, si, ctx);
+		else
+			old_sigill.sa_handler(sig);
+		return;
+	}
+	signal(sig, SIG_DFL);
+	if (si->si_code <= 0)
 		raise(sig);
 }
 
@@ -386,6 +418,15 @@ int crash_install(void)
 	for (size_t i = 0; !VFW_SANITIZER_BUILD && i < sizeof(sigs) / sizeof(sigs[0]);
 	     i++)
 		sigaction(sigs[i], &sa, NULL);
+	/* They don't take SIGILL, though, and 3DNow! needs it. */
+	if (VFW_SANITIZER_BUILD) {
+		struct sigaction was;
+		sa.sa_sigaction = on_sigill;
+		/* Installed again, it must not keep itself as the old one. */
+		if (!sigaction(SIGILL, &sa, &was) &&
+		    !((was.sa_flags & SA_SIGINFO) && was.sa_sigaction == on_sigill))
+			old_sigill = was;
+	}
 
 	if (timeout_secs) {
 		pthread_t w;
