@@ -41,6 +41,12 @@ HRESULT STUB_WINAPI oa_SafeArrayCopy(SAFEARRAY *psa, SAFEARRAY **out);
 HRESULT STUB_WINAPI oa_VectorFromBstr(BSTR b, SAFEARRAY **out);
 HRESULT STUB_WINAPI oa_BstrFromVector(SAFEARRAY *psa, BSTR *out);
 
+/* Type libraries (oleaut_typelib.c). */
+HRESULT STUB_WINAPI oa_LoadTypeLibEx(LPCOLESTR file, REGKIND kind,
+				     ITypeLib **out);
+HRESULT STUB_WINAPI oa_LoadRegTypeLib(REFGUID guid, WORD major, WORD minor,
+				      LCID lcid, ITypeLib **out);
+
 /* Error information. */
 HRESULT STUB_WINAPI oa_CreateErrorInfo(ICreateErrorInfo **out);
 HRESULT STUB_WINAPI oa_SetErrorInfo(ULONG reserved, IErrorInfo *info);
@@ -49,6 +55,7 @@ HRESULT STUB_WINAPI oa_GetErrorInfo(ULONG reserved, IErrorInfo **out);
 /* The export tables, merged into oleaut32's (and errinfo's into ole32's). */
 extern const struct builtin_export oa_conv_exports[];
 extern const struct builtin_export oa_array_exports[];
+extern const struct builtin_export oa_typelib_exports[];
 extern const struct builtin_export oa_errinfo_ole32_exports[];
 
 #endif /* VFW_WIN32_OLEAUT_H */

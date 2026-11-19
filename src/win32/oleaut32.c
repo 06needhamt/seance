@@ -9,8 +9,8 @@
  * - Error information (errinfo.c), DispGetParam, VarBstrCat/Cmp.
  * - Headless: OleCreatePropertyFrame(Indirect) prints its caption and
  *   answers as if the frame were closed with Cancel, as MessageBox answers
- *   with its default button. There are no type libraries (LoadTypeLib
- *   fails with TYPE_E_CANTLOADLIBRARY) and no OLE pictures or fonts.
+ *   with its default button. There are no OLE pictures or fonts.
+ * - Type libraries are in oleaut_typelib.c.
  *
  * Most of oleaut32 is imported by ordinal, so the exports carry Windows'
  * ordinals, as Wine's oleaut32.spec lists them.
@@ -499,69 +499,6 @@ WINFN(HRESULT) oa_OleLoadPicturePath(LPOLESTR path, IUnknown *outer,
 	return no_picture(out, "OleLoadPicturePath");
 }
 
-/* Type libraries: none can be loaded or registered. */
-
-WINFN(HRESULT) oa_LoadTypeLibEx(LPCOLESTR file, int kind, void **out)
-{
-	char *f = caption_utf8(file);
-
-	if (out)
-		*out = NULL;
-	TRACE("LoadTypeLib(%s): no type libraries", f ? f : "");
-	free(f);
-	return TYPE_E_CANTLOADLIBRARY;
-}
-
-WINFN(HRESULT) oa_LoadTypeLib(LPCOLESTR file, void **out)
-{
-	return oa_LoadTypeLibEx(file, 0, out);
-}
-
-WINFN(HRESULT) oa_LoadRegTypeLib(REFGUID guid, WORD major, WORD minor,
-				 LCID lcid, void **out)
-{
-	if (out)
-		*out = NULL;
-	return TYPE_E_LIBNOTREGISTERED;
-}
-
-WINFN(HRESULT) oa_QueryPathOfRegTypeLib(REFGUID guid, WORD major, WORD minor,
-					LCID lcid, BSTR *path)
-{
-	return TYPE_E_LIBNOTREGISTERED;
-}
-
-/* A type library can only come from LoadTypeLib, which gives none. */
-WINFN(HRESULT) oa_RegisterTypeLib(void *lib, LPCOLESTR path, LPCOLESTR help)
-{
-	return lib ? E_NOTIMPL : E_INVALIDARG;
-}
-
-WINFN(HRESULT) oa_RegisterTypeLibForUser(void *lib, LPCOLESTR path,
-					 LPCOLESTR help)
-{
-	return oa_RegisterTypeLib(lib, path, help);
-}
-
-WINFN(HRESULT) oa_UnRegisterTypeLib(REFGUID guid, WORD major, WORD minor,
-				    LCID lcid, int kind)
-{
-	return TYPE_E_LIBNOTREGISTERED;
-}
-
-WINFN(HRESULT) oa_UnRegisterTypeLibForUser(REFGUID guid, WORD major,
-					   WORD minor, LCID lcid, int kind)
-{
-	return TYPE_E_LIBNOTREGISTERED;
-}
-
-WINFN(HRESULT) oa_CreateTypeLib2(int kind, LPCOLESTR file, void **out)
-{
-	if (out)
-		*out = NULL;
-	return E_NOTIMPL;
-}
-
 /* oleaut32 as a COM server: none of its classes are here. */
 
 WINFN(HRESULT) oa_DllGetClassObject(REFCLSID clsid, REFIID riid, void **out)
@@ -605,13 +542,6 @@ static const struct builtin_export exports[] = {
 	E(VariantChangeTypeEx, 147),
 	E(SysStringByteLen, 149),
 	E(SysAllocStringByteLen, 150),
-	E(CreateTypeLib2, 180),
-	E(LoadTypeLib, 161),
-	E(LoadRegTypeLib, 162),
-	E(RegisterTypeLib, 163),
-	E(QueryPathOfRegTypeLib, 164),
-	E(LoadTypeLibEx, 183),
-	E(UnRegisterTypeLib, 186),
 	E(GetErrorInfo, 200),
 	E(SetErrorInfo, 201),
 	E(CreateErrorInfo, 202),
@@ -626,8 +556,6 @@ static const struct builtin_export exports[] = {
 	E(OleCreateFontIndirect, 420),
 	E(OleTranslateColor, 421),
 	E(OleLoadPicturePath, 424),
-	E(RegisterTypeLibForUser, 442),
-	E(UnRegisterTypeLibForUser, 443),
 	E(DllCanUnloadNow, 0),
 	E(DllGetClassObject, 0),
 	E(DllRegisterServer, 0),
@@ -636,7 +564,7 @@ static const struct builtin_export exports[] = {
 };
 
 static const struct builtin_export *const tables[] = {
-	exports, oa_conv_exports, oa_array_exports, NULL
+	exports, oa_conv_exports, oa_array_exports, oa_typelib_exports, NULL
 };
 
 const struct builtin_dll builtin_oleaut32 = { "oleaut32.dll", NULL, tables, 0 };

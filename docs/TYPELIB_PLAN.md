@@ -28,7 +28,26 @@ on their property interfaces. What needs real type libraries:
 - Delphi's COM objects, which look up their class's type information at
   start-up and answer `IDispatch` from it (abcAVI).
 
-## Phase A: reading type libraries
+## Phase A: reading type libraries (done)
+
+Status: `src/win32/oleaut_typelib.c`, `seance info --typelib` and
+`test_typelib`. Of the zip's 225 files with a type library, 221 load with
+every reference resolved, on both architectures and under ASan. The
+others are the three `SLTG` libraries (`ILog`, `OLEPRO32`, `ir41_32.ax`)
+and `QTOControl.dll`, which imports `QTOLibrary.tlb`, not in the zip.
+Changes from the plan below:
+
+- The built-in stdole2 has `GUID`, `IUnknown`, `IDispatch`,
+  `IEnumVARIANT`, `OLE_COLOR`, `OLE_HANDLE`, and `Font` and `Picture` with
+  their aliases `IFontDisp` and `IPictureDisp`: what the zip's libraries
+  refer to. References by index into stdole2 are known for `GUID` (0),
+  `IFontDisp` (32, ATL's) and `IPictureDisp` (36, LEAD's).
+- `test_typelib` writes its library itself (an `MSFT` writer in C, for
+  Win32 and Win64 layouts) rather than through `gen_tlb.py`, and runs the
+  fuzz pass in the same program: every truncation and 1,500 mutated
+  copies must fail cleanly or load into something every call can walk.
+  The PE fixture with a `TYPELIB` resource comes with Phase C, which
+  needs a DLL anyway.
 
 New `src/win32/oleaut_typelib.c`, with declarations in `oleaut.h`.
 
