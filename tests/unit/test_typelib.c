@@ -1065,6 +1065,8 @@ static void test_library(int ptr)
  * through this library, and outlive the other library.
  */
 static const char *narrow(const WCHAR *w);
+static int patch_words(unsigned char *d, size_t len, uint32_t from,
+		       uint32_t to);
 
 static void test_derived(int ptr)
 {
@@ -1112,9 +1114,50 @@ static void test_derived(int ptr)
 	CHECK_EQ(f->cParams, 1);
 	CHECK_EQ(f->lprgelemdescParam[0].tdesc.vt, VT_PTR);
 	CHECK_EQ(f->lprgelemdescParam[0].tdesc.lptdesc->vt, VT_USERDEFINED);
-	CHECK_STR(ref_name(ti, f->lprgelemdescParam[0].tdesc.lptdesc->hreftype),
-		  "GUID");
+	HREFTYPE guid_href = f->lprgelemdescParam[0].tdesc.lptdesc->hreftype;
+	CHECK_STR(ref_name(ti, guid_href), "GUID");
 	ti->lpVtbl->ReleaseFuncDesc(ti, f);
+
+	/*
+	 * Version 1.3 of the base library loaded meanwhile, in which that
+	 * reference names stdole2's IFontDisp: the reference still means the
+	 * 1.2 library's GUID.
+	 */
+	b = build_library(ptr);
+	CHECK_EQ(patch_words(b.d, b.len, 1 | 2 << 16, 1 | 3 << 16), 1);
+	int patched = 0;
+	for (size_t i = 0; i + 12 <= b.len; i += 4) {
+		uint32_t w[3];
+
+		memcpy(w, b.d + i, 12);
+		if (w[0] == (uint32_t)TKIND_RECORD << 24 && !w[1] && !w[2]) {
+			w[2] = 32;		/* stdole2's IFontDisp */
+			memcpy(b.d + i, w, 12);
+			patched++;
+		}
+	}
+	CHECK_EQ(patched, 1);
+	WCHAR *p13 = write_lib(ptr == 8 ? "base64_13.tlb" : "base32_13.tlb",
+			       b.d, b.len);
+	ITypeLib *lib13 = NULL;
+
+	free(b.d);
+	CHECK_EQ(pLoadTypeLibEx(p13, REGKIND_NONE, &lib13), S_OK);
+	free(p13);
+	CHECK_STR(ref_name(ti, guid_href), "GUID");
+	if (lib13) {
+		ITypeInfo *thing13 = type_at(lib13, 0);
+		FUNCDESC *f13;
+
+		/* ... and in 1.3 itself it is IFontDisp. */
+		CHECK_EQ(thing13->lpVtbl->GetFuncDesc(thing13, 10, &f13), S_OK);
+		CHECK_STR(ref_name(thing13,
+				   f13->lprgelemdescParam[0].tdesc.lptdesc->hreftype),
+			  "IFontDisp");
+		thing13->lpVtbl->ReleaseFuncDesc(thing13, f13);
+		thing13->lpVtbl->Release(thing13);
+		CHECK_EQ(lib13->lpVtbl->Release(lib13), 0);
+	}
 
 	/* IThing's Name, through the interface it is a view of. */
 	CHECK_EQ(ti->lpVtbl->GetFuncDesc(ti, 8, &f), S_OK);

@@ -142,6 +142,7 @@ struct tl_import {
 	LCID lcid;
 	char *file;			/* in the library's arena */
 	int off;			/* its offset in IMPFILES, plus 1 */
+	int exact;			/* that minor version, not a later one */
 };
 
 /*
@@ -1562,7 +1563,7 @@ static ITypeLib *tl_iface(struct typelib *lib)
  * minor version (the newest), with a reference; stdole2 for stdole.
  */
 static struct typelib *find_loaded(const GUID *libid, WORD major,
-				   WORD minor)
+				   WORD minor, int exact)
 {
 	struct typelib *best = NULL, *std = stdole2_lib();
 
@@ -1574,6 +1575,7 @@ static struct typelib *find_loaded(const GUID *libid, WORD major,
 		if (guid_eq(&l->attr.guid, libid) &&
 		    l->attr.wMajorVerNum == major &&
 		    l->attr.wMinorVerNum >= minor &&
+		    (!exact || l->attr.wMinorVerNum == minor) &&
 		    (!best || l->attr.wMinorVerNum > best->attr.wMinorVerNum))
 			best = l;
 	if (best)
@@ -1649,15 +1651,18 @@ static int import_matches(const struct tl_import *imp,
 {
 	if (!guid_eq(&lib->attr.guid, &imp->libid))
 		return 0;
-	return lib->builtin || (lib->attr.wMajorVerNum == imp->major &&
-				lib->attr.wMinorVerNum >= imp->minor);
+	return lib->builtin ||
+	       (lib->attr.wMajorVerNum == imp->major &&
+		(imp->exact ? lib->attr.wMinorVerNum == imp->minor
+			    : lib->attr.wMinorVerNum >= imp->minor));
 }
 
 /* The library an import names, with a reference, or NULL. */
 static struct typelib *import_load(struct typelib *lib,
 				   const struct tl_import *imp)
 {
-	struct typelib *l = find_loaded(&imp->libid, imp->major, imp->minor);
+	struct typelib *l = find_loaded(&imp->libid, imp->major, imp->minor,
+					imp->exact);
 	ITypeLib *tl = NULL;
 
 	if (l)
@@ -2018,6 +2023,8 @@ static HREFTYPE foreign_href(struct typelib *lib, struct typelib *other,
 		n[i].lib.major = other->attr.wMajorVerNum;
 		n[i].lib.minor = other->attr.wMinorVerNum;
 		n[i].lib.lcid = other->attr.lcid;
+		/* The href is that version's: a later one may number differently. */
+		n[i].lib.exact = 1;
 		if (copy)
 			n[i].lib.file = strcpy(copy, file);
 		n[i].href = href;
