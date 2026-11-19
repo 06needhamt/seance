@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # Makes the samples tests/gen_samples.sh makes, and checks that each is
 # listed with its reference and that seance's AVI reader takes every video
-# one. Skipped (77) without ffmpeg.
+# one (a RealMedia one only needs to be one). Skipped (77) without ffmpeg.
 #
 # usage: tests/check_samples.sh <seance> <dir>
 set -u
@@ -29,6 +29,14 @@ while IFS='	' read -r name kind tag file ref; do
 	case $kind in
 	video)
 		video=$((video + 1))
+		case $file in
+		*.rm)
+			if [ "$(head -c 4 "$dir/$file")" != .RMF ]; then
+				echo "check_samples: $name: $file isn't RealMedia" >&2
+				failures=$((failures + 1))
+			fi
+			continue ;;
+		esac
 		if ! $emu "$harness" avi "$dir/$file" >/dev/null 2>&1; then
 			echo "check_samples: $name: seance can't read $file" >&2
 			failures=$((failures + 1))

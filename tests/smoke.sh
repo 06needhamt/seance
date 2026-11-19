@@ -461,6 +461,29 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 	# RealPlayer's codecs (rv203260.dll) are said to be what they are.
 	$emu "$harness" encode "$fixtures/pe_realcodec.dll" "$work/v.y4m" \
 		-o "$work/x.avi" 2>&1 | grep -q "a RealPlayer codec (it exports RV20"
+	# ... and decoded through their own entry points: a RealMedia file
+	# of two whole RV20 frames (16x8), one byte of luma each.
+	{
+		printf '\056\122\115\106\000\000\000\022\000\000\000\000\000\000\000\000'
+		printf '\000\003\115\104\120\122\000\000\000\145\000\000\000\000\000\000'
+		printf '\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000'
+		printf '\000\000\000\000\000\000\000\000\000\000\001\166\024\166\151\144'
+		printf '\145\157\057\170\055\160\156\055\162\145\141\154\166\151\144\145'
+		printf '\157\000\000\000\042\000\000\000\042\126\111\104\117\122\126\062'
+		printf '\060\000\020\000\010\000\014\000\000\000\000\000\031\000\000\000'
+		printf '\000\000\010\040\020\060\001\104\101\124\101\000\000\000\062\000'
+		printf '\000\000\000\000\002\000\000\000\000\000\000\000\020\000\000\000'
+		printf '\000\000\000\000\002\100\001\120\001\000\000\000\020\000\000\000'
+		printf '\000\000\050\000\002\100\002\140\002'
+	} >"$work/v.rm"
+	$emu "$harness" probe "$fixtures/pe_realcodec.dll" | grep -q "takes 'RV20'"
+	$emu "$harness" probe "$fixtures/pe_realaudio.dll" | grep -q "audio decoder"
+	$emu "$harness" decode "$fixtures/pe_realcodec.dll" "$work/v.rm" \
+		-o "$work/r.y4m" 2>&1 | grep -q "decoded 2 frames, 16x8 'RV20'"
+	[ "$(head -c 1 "$work/r.y4m")" = Y ]
+	# The wrong kind of codec for the stream is said to be
+	$emu "$harness" decode "$fixtures/pe_realaudio.dll" "$work/v.rm" \
+		-o "$work/r.wav" 2>&1 | grep -q "no audio stream for a RealAudio decoder"
 	# One that won't open to compress is probed as encode would use it.
 	VFW_ENV_TESTCODEC_DECODE_ONLY=1 $emu "$harness" encode \
 		"$fixtures/testcodec.dll" "$work/v.y4m" -o "$work/x.avi" 2>&1 |

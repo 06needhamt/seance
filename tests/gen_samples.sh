@@ -3,13 +3,14 @@
 # Makes short test streams with the system's ffmpeg, for `seance sweep
 # --samples DIR` to give the decoders that nothing in a sweep encodes for:
 # AVI clips under the FOURCCs decoders register (MJPG, XVID, DIV3, WMV2,
-# H264, dvsd, CVID, ...) and WAV files under the format tags (mu-law,
-# MS ADPCM, GSM 6.10, MP3, AC3, WMA, ...). Each comes with ffmpeg's own
+# H264, dvsd, CVID, ...), WAV files under the format tags (mu-law,
+# MS ADPCM, GSM 6.10, MP3, AC3, WMA, ...), and RealMedia files of what
+# ffmpeg can put in one (RV10, RV20, AC-3 as 'dnet', 14.4 as 'lpcJ'). Each comes with ffmpeg's own
 # decode of it, which is what a decoder's output is measured against:
 # NAME.y4m (I420) for video, NAME.ref.wav (16-bit PCM) for audio.
 #
 # DIR/index.tsv lists them, a line each:
-#   name  video|audio  FOURCC or 0xTAG  file  reference
+#   name  video|audio  FOURCC, 0xTAG or RealMedia FOURCC  file  reference
 #
 # An encoder this ffmpeg lacks is left out. Exits 77 (skipped) without
 # ffmpeg. Nothing it makes is committed: generate it when it's wanted.
@@ -39,7 +40,7 @@ run_ff() {
 video() {
 	name=$1 tag=$2 size=$3 pix=$4 enc=$5
 	shift 5
-	file="$dir/$name.avi"
+	file="$dir/$name.$vext"
 	if ! run_ff -f lavfi -i "testsrc2=size=$size:rate=25" -frames:v $frames \
 		-pix_fmt "$pix" -c:v "$enc" "$@" -vtag "$tag" "$file" \
 		2>"$dir/$name.log"; then
@@ -56,7 +57,7 @@ video() {
 		return
 	fi
 	rm -f "$dir/$name.log"
-	printf '%s\tvideo\t%s\t%s\t%s\n' "$name" "$tag" "$name.avi" \
+	printf '%s\tvideo\t%s\t%s\t%s\n' "$name" "$tag" "$name.$vext" \
 		"$name.y4m" >>"$index"
 	made=$((made + 1))
 }
@@ -65,7 +66,7 @@ video() {
 audio() {
 	name=$1 tag=$2 rate=$3 ch=$4 enc=$5
 	shift 5
-	file="$dir/$name.wav"
+	file="$dir/$name.$aext"
 	if ! run_ff -f lavfi -i \
 		"aevalsrc=0.4*sin(2*PI*440*t)+0.2*sin(2*PI*(200+600*t)*t):s=$rate:d=2" \
 		-ac "$ch" -c:a "$enc" "$@" "$file" 2>"$dir/$name.log"; then
@@ -82,12 +83,13 @@ audio() {
 		return
 	fi
 	rm -f "$dir/$name.log"
-	printf '%s\taudio\t%s\t%s\t%s\n' "$name" "$tag" "$name.wav" \
+	printf '%s\taudio\t%s\t%s\t%s\n' "$name" "$tag" "$name.$aext" \
 		"$name.ref.wav" >>"$index"
 	made=$((made + 1))
 }
 
 q=320x240 cif=352x288
+vext=avi aext=wav
 
 # Lossless and intra
 video mjpg MJPG $q yuvj420p mjpeg -q:v 3
@@ -153,6 +155,13 @@ audio wma1 0x0160 44100 2 wmav1 -b:a 128k
 audio wma2 0x0161 44100 2 wmav2 -b:a 128k
 audio flac 0xf1ac 44100 2 flac
 audio float 0x0003 44100 2 pcm_f32le
+
+# RealMedia, for RealPlayer's own codecs
+vext=rm aext=ra
+video rv10 RV10 $q yuv420p rv10 -q:v 3
+video rv20 RV20 $q yuv420p rv20 -q:v 3
+audio dnet dnet 44100 2 ac3 -b:a 192k
+audio lpcj lpcJ 8000 1 real_144
 
 echo "gen_samples: $made samples in $dir ($skipped left out)"
 [ $made -gt 0 ]
