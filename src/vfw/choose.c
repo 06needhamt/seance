@@ -14,12 +14,18 @@
  * of the same compressor restored, and dropped for any other. Where the
  * dialog's quality slider and keyframe box would start from the codec's
  * defaults, so do lQ and lKey when pc left them unset.
+ *
+ * A codec that won't take the answer and asks again, whatever it is
+ * (ravi32.dll wants another codec to wrap, and asks until it gets one),
+ * would ask for ever: a person would see the dialog come back and give up.
+ * Asked CHOOSE_LIMIT times, this ends the process with an error instead.
  */
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 
 #include "common/error.h"
 #include "vfw/icm.h"
@@ -72,6 +78,23 @@ static HIC open_listed(DWORD type, FOURCC *handler, UINT flags, void *in)
 	return hic;
 }
 
+#define CHOOSE_LIMIT 100
+
+/* Counts the calls, and ends the process on the one past the limit. */
+static void count_asks(const char *title)
+{
+	static int asked;
+
+	if (__atomic_add_fetch(&asked, 1, __ATOMIC_RELAXED) <= CHOOSE_LIMIT)
+		return;
+	fprintf(stderr, "seance: the codec asked ICCompressorChoose [%s] %d "
+		"times without taking the answer: it may want a compressor of "
+		"its own choosing; set VFW_COMPRESSOR to a FOURCC it takes\n",
+		title ? title : "", CHOOSE_LIMIT);
+	fflush(NULL);
+	_exit(1);
+}
+
 BOOL STUB_WINAPI ic_compressor_choose(HWND hwnd, UINT flags, LPVOID in,
 				      LPVOID data, COMPVARS *pc, LPSTR title)
 {
@@ -82,6 +105,7 @@ BOOL STUB_WINAPI ic_compressor_choose(HWND hwnd, UINT flags, LPVOID in,
 
 	if (!pc || pc->cbSize != (LONG)sizeof(COMPVARS))
 		return FALSE;
+	count_asks(title);
 
 	COMPVARS cv = *pc;
 	if (!(cv.dwFlags & ICMF_COMPVARS_VALID)) {
