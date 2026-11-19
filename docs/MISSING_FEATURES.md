@@ -997,6 +997,45 @@ RealMedia samples `tests/gen_samples.sh` makes (RV10, RV20, AC-3 as
 - **`RealMediaSplitter.ax`** has both sets of entry points as well, but
   is a DirectShow server and is run as one.
 
+### The codec zip, November 2026: 3DNow!
+
+No CPU made in the last fifteen years or so has AMD's 3DNow!, so its
+instructions fault with SIGILL. seance now emulates them
+(`src/runtime/amd3dnow.c`):
+- the 3DNow! and Extended 3DNow! operations (`0F 0F` and a suffix);
+- FEMMS;
+- PREFETCH and PREFETCHW, should the CPU lack those too.
+
+They work on the MMX registers in the signal context, on i386 and
+x86-64. The unit test `test_3dnow` checks each operation, each
+addressing form and the x87 stack top.
+
+- **Limits:**
+  - PFRCP and PFRSQRT give full-precision results, not the hardware's
+    14- and 15-bit estimates. The steps that refine those estimates
+    (PFRCPIT1, PFRSQIT1, PFRCPIT2) pass the estimate through, so AMD's
+    documented sequences still end at the right answer.
+  - An operand behind an `fs:` or `gs:` override isn't emulated, nor is
+    one at an address that can't be read. Either is reported as the
+    illegal instruction it is.
+  - Each instruction costs a signal. `_arvic.dll` takes about 2.5 s to
+    encode or decode ten 320x240 frames.
+- **`IsProcessorFeaturePresent(PF_3DNOW_INSTRUCTIONS_AVAILABLE)` still
+  reports the CPU's own answer** (FALSE here). Codecs that check use
+  their MMX or SSE code instead.
+- **Result:**
+  - `_arvic.dll` (ARVI) crashed with SIGILL in ICM_COMPRESS (at
+    `+0x76e9`) and ICM_DECOMPRESS (at `+0x7894`). Both are `pavgusb`,
+    which it uses without a CPU check.
+  - It now round-trips at 30 dB PSNR (11.4 Mbit/s). `VFW_TRACE=1`
+    reports the first emulated instruction.
+  - 33 other DLLs in the zip contain 3DNow! code, among them
+    libavcodec, xvidcore, ffdshow, the IMM5/IMM6 decoders, `kdm4.dll`
+    and `blox.dll`.
+    - 20 of them are codecs. They check the CPU first, and they get
+      the same sweep results with and without the emulator.
+    - The rest are libraries, not codecs.
+
 ## In-repository baseline
 
 For comparison, the same command over `build/fixtures` examined 23 fixture
