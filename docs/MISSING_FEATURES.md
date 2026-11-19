@@ -551,6 +551,136 @@ the above:
   (`aslcodec_vfw.dll` decodes it).
 - `nsrt2432.acm` (Voxware RT24) takes none of the PCM layouts offered.
 
+### The codec zip, November 2026: before and after
+
+The codec zip (1,668 files) was swept twice with `seance sweep`. The
+first sweep found 504 codecs. The second ran after the fixes in the
+sections below, with `--samples` and a clean `HOME`, so that no registry
+or `vfw.ini` state was left over from earlier runs. The 504 codecs, plus
+three that only show up as codecs now:
+
+| Result | Before | After |
+|---|---|---|
+| Round trip works | 108 | 130 |
+| Decoder checked against a sample | (no samples) | 28 |
+| Decoder loads (no sample to check it with) | 160 | 162 |
+| Encoder works, nothing here decodes it | 20 | 30 |
+| Partial | 9 | 0 |
+| Doesn't work | 207 | 157 |
+
+81 codecs moved up and none moved down. The "Partial" rows were re-tested
+under the sweep's new rule: a round trip below 10 dB counts as "encodes".
+
+**What fixed them:**
+- seance's own bugs: a thread start that left a cdecl routine's argument
+  on the stack; a loader that stopped at a DLL of the wrong architecture,
+  or at an app-local msvcrt, instead of the built-in KnownDLL; packers
+  that couldn't find kernel32's image;
+- missing Win32 and CRT functions;
+- stub DirectDraw, DirectSound, DirectInput, WinINet, URLMon, GDI+, IP
+  Helper and MSIMG32;
+- sweep heuristics that gave up too early or mislabelled results;
+- decoders checked against generated streams (`--samples`);
+- a RealPlayer codec host;
+- 3DNow! emulation.
+
+**The full sweep, with non-codecs:**
+
+| Status | Before | After |
+|---|---|---|
+| round-trip | 133 | 130 |
+| encodes | 4 | 30 |
+| decodes (checked) | - | 28 |
+| decoder | 160 | 162 |
+| fails | 429 | 331 |
+| not-codec | 833 | 893 |
+| crash | 106 | 92 |
+| hang | 2 | 0 |
+
+`--compare` lists 103 changes as WORSE. Every one was checked, and none
+is a codec that worked before:
+- **Reclassifications:**
+  - 60 or so DLLs move from "fails" to "not-codec". They used to fail to
+    load at all; now they load, and the probe finds no codec in them.
+  - 19 "round trips" of 5.7 to 9.7 dB are now "encodes" (H264Vfw, the
+    LEAD encoders, mcmjpg32, rmp4, wmvxencd and others): nothing here
+    decodes what they make.
+- **Non-codecs that load further now and stop at an unimplemented
+  function or crash:**
+  - mfc90 and its variants (`memcpy_s`, then `_mbsnbcpy_s` and about
+    240 more);
+  - portabledevice* (`SHLWAPI #437`, `NdrDllRegisterProxy`);
+  - VSFilter (a C++ exception);
+  - scmpack (in `IPin::ReceiveConnection`);
+  - abcAVI and abcAVIIT. These are Delphi COM DLLs, not codecs; see the
+    next list.
+
+Four regressions the first comparison turned up were real, and are fixed
+here:
+- **`direccional.dll` (DIRC)** was lossless, then crashed. It takes YUY2
+  but reads it as 24-bit RGB, a third past the frame, and its input
+  buffer had come to end at an unmapped page. Converted input frames now
+  have room for a 32-bit frame after them, as a Windows heap block
+  would. It is lossless again. Test: `TESTCODEC_OVERREAD` in
+  `tests/smoke.sh`.
+- **`abcAVI.dll`, `abcAVIIT.dll`** went from "DllMain failed" to a hang.
+  - They get further into Delphi's start-up now. There `LoadTypeLib`
+    fails, since seance has no type libraries.
+  - Delphi's finalization frees its heap, then runs code in it. Its
+    exception handler answers each fault with "continue", unchanged, so
+    the fault repeats for ever.
+  - The SEH dispatcher now treats a handler that resumes the same fault
+    10,000 times in a row as not handling it. Test: `seh_fault_storm`
+    in `test_seh`.
+- **`ravi32.dll`, `ravi_32.dll`** went from a crash (missing
+  `mmioOpenA`) to a hang.
+  - They wrap another codec, which they ask for with
+    `ICCompressorChoose`.
+  - Every answer sends them back to ask again: Full Frames, Cancel, and
+    any other codec here.
+  - The 101st call now ends the process with an error naming
+    `VFW_COMPRESSOR`. Test: in `test_vfw`.
+- **`swscale-2.dll`, `avcodec-53.dll`, `avformat-53.dll`** went from a
+  missing CRT export to a crash in DllMain.
+  - MinGW's pseudo-relocation pass makes .text writable, queries the
+    region again, and restores it.
+  - These DLLs aren't NX-compatible, so their data is mapped executable.
+    `VirtualQuery` then ran the .text region on into .data, and the
+    restore made .data read-only.
+  - An image's region now ends with its section. Test: in
+    `test_kernel32`. They load now; they are libraries, not codecs.
+
+Two more came from the environment, not from seance:
+- `kdvyuv8.dll` had been left registered as `SING` in the `vfw.ini` the
+  first comparison ran with.
+- `vp31vfw.exe.dll` crashes as before. It now corrupts its own heap
+  blocks, and libc aborts with "free(): invalid next size" instead of
+  the SIGSEGV it gave. That abort has no "seance:" line, so the sweep
+  now reports a crashed step's last line.
+
+New msvcrt functions for DLLs that load now: `_i64toa`, `_ui64toa`,
+`memcpy_s`, `memmove_s`, `_strset`, `_strnset` and `mbtowc`.
+
+**What is left, and why** (the 157):
+
+| Count | Reason |
+|---|---|
+| 32 | The encoder takes no standard input at any size tried, or makes a format seance can't write (Ogg-family audio, LAME's) |
+| 31 | Needs a vendor or runtime DLL that isn't in the zip (MFC80 for the Matrox mvcVfw set, PAVEDIUS/PAVAPI for Canopus, H264VDEC/G722ADEC for Hikvision, vssh264enc, ATL90, ...). Put it on `VFW_PATH` |
+| 29 | The encoder returns an error: per-codec details in the sections below |
+| 15 | The encoder object won't open: LEAD's encoders want LEAD's unlock (not worked around), and 3ivx's audio encoder asks for an interface it doesn't name |
+| 13 | RealPlayer's older PNCodec plug-ins (rv10-rv40, ra32clv1) and Helix decoders (amrn, amrw, qclp, ralf): another plug-in API, not hosted |
+| 10 | 16-bit (NE) Windows 3.x drivers: out of scope |
+| 8 | The driver won't open: it wants its vendor's driver, service or registry keys (Matrox, Miro, ffdshow) |
+| 6 | Crashes in the codec's own code (the 3ivx VfW core, diavc, vfwbw, MPEG4V, BHA_XVDVEnc, scmpack) |
+| 5 | DllMain refuses to load: CineForm's and CoreAVC's licence checks and VSS's trial, not worked around |
+| 3 | Not a codec after all |
+| 3 | `swc*` register plain COM classes, not filters |
+| 2 | `ravi32`/`ravi_32`, which want another codec picked in a dialog |
+
+The refreshed catalogue, with each codec's result before and after, is
+the "Codec zip catalogue" page.
+
 ### The codec zip, November 2026: per-codec investigations
 
 The sweep over the zip (504 codecs, catalogued separately) left codecs

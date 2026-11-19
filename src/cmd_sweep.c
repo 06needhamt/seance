@@ -246,21 +246,26 @@ static char *slurp_text(const char *path)
 
 /*
  * The message a step ended with: its crash report if it crashed, else the
- * last "seance: " line; without the prefix or the codec's path.
+ * last "seance: " line; without the prefix or the codec's path. A step
+ * that died with no report of its own (libc's "free(): invalid next size"
+ * abort, when a codec has overrun a heap block) gives its last line.
  */
 static void message_of(const char *err_path, int crashed, char *out,
 		       size_t size)
 {
 	char *text = slurp_text(err_path), *line, *save = NULL;
-	const char *pick = NULL;
+	const char *pick = NULL, *last = NULL;
 
 	out[0] = 0;
 	if (!text)
 		return;
 	for (line = strtok_r(text, "\n", &save); line;
 	     line = strtok_r(NULL, "\n", &save)) {
-		if (strncmp(line, "seance: ", 8))
+		if (strncmp(line, "seance: ", 8)) {
+			if (line[strspn(line, " \t")])
+				last = line;
 			continue;
+		}
 		if (crashed && !strncmp(line, "seance: crash", 13)) {
 			pick = line;
 			/* and the line after it, saying where */
@@ -278,6 +283,8 @@ static void message_of(const char *err_path, int crashed, char *out,
 	}
 	if (pick)
 		snprintf(out, size, "%s", pick + 8);
+	else if (crashed && last)
+		snprintf(out, size, "%s", last);
 	free(text);
 }
 

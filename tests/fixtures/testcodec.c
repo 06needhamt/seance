@@ -50,6 +50,9 @@
  *   TESTCODEC_OVERRUN     it writes 8 KB on past the end of its largest
  *                         frame when compressing (SN4Codec.dll); set to
  *                         2, 1 MB
+ *   TESTCODEC_OVERREAD    it reads a 32-bit frame's worth of input,
+ *                         whatever the format it was given
+ *                         (direccional.dll reads its YUY2 as 24-bit RGB)
  *   TESTCODEC_END_CRASH   it divides by zero in ICM_COMPRESS_END and
  *                         ICM_DECOMPRESS_END (WavCWAIP.dll, by a byte count
  *                         it never kept)
@@ -165,6 +168,7 @@ static int pair_named(DWORD h)
 }
 static int end_crash;
 static int overrun;
+static int overread;
 static int empty_format, no_keys, align16;
 static int begin_rgb, yuv_upside, needs_dll, key_missing, sized_out;
 static int blank, pad_out;
@@ -749,6 +753,8 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 		overrun = GetEnvironmentVariableA("TESTCODEC_OVERRUN", v,
 						  sizeof(v)) == 1 &&
 			  (v[0] == '1' || v[0] == '2') ? v[0] - '0' : 0;
+		overread = GetEnvironmentVariableA("TESTCODEC_OVERREAD", v,
+						   sizeof(v)) == 1 && v[0] == '1';
 		empty_format = GetEnvironmentVariableA("TESTCODEC_EMPTY_FORMAT", v,
 						       sizeof(v)) == 1 && v[0] == '1';
 		no_keys = GetEnvironmentVariableA("TESTCODEC_NO_KEYS", v,
@@ -979,6 +985,16 @@ LRESULT WINAPI DriverProc(DWORD_PTR id, HDRVR hdrvr, UINT msg, LPARAM l1,
 			DWORD n = overrun == 2 ? (1u << 20) + 64 : 2 * 4096 + 64;
 			for (DWORD i = 0; i < n; i++)
 				end[i] = 0;
+		}
+		if (overread) {
+			ICCOMPRESS *c = (ICCOMPRESS *)l1;
+			const volatile BYTE *p = c->lpInput;
+			DWORD n = (DWORD)c->lpbiInput->biWidth *
+				  (DWORD)abs_height(c->lpbiInput) * 4;
+			BYTE sum = 0;
+			for (DWORD i = 0; i < n; i++)
+				sum += p[i];
+			(void)sum;
 		}
 		return compress(inst, (ICCOMPRESS *)l1);
 	case ICM_COMPRESS_END:

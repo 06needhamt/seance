@@ -5,6 +5,7 @@
  */
 #include <limits.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 
 #include <fcntl.h>
 
@@ -1153,8 +1154,40 @@ static void test_choose(void)
 	CHECK(choose(NULL, 0, &in, NULL, &cv, title));
 	CHECK(cv.hic && !cv.lpState && !cv.cbState);
 	unsetenv("VFW_COMPRESSOR");
-
 	cfree(&cv);
+
+	/*
+	 * A codec that asks again whatever the answer (ravi32.dll) is
+	 * stopped, with an error, rather than asking for ever: in a child,
+	 * as it ends the process. Up to 100 calls in all are answered.
+	 */
+	int fds[2];
+	CHECK(!pipe(fds));
+	fflush(NULL);
+	pid_t pid = fork();
+	if (!pid) {
+		dup2(fds[1], STDERR_FILENO);
+		close(fds[0]);
+		close(fds[1]);
+		setenv("VFW_COMPRESSOR", "cancel", 1);
+		for (int i = 0; i < 1000; i++)
+			choose(NULL, 0, &in, NULL, &cv, title);
+		_exit(0);
+	}
+	close(fds[1]);
+	char err[16384];
+	size_t n = 0;
+	ssize_t r;
+	while (n + 1 < sizeof(err) &&
+	       (r = read(fds[0], err + n, sizeof(err) - 1 - n)) > 0)
+		n += (size_t)r;
+	err[n] = 0;
+	close(fds[0]);
+	int status = 0;
+	CHECK(pid > 0 && waitpid(pid, &status, 0) == pid);
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 1);
+	CHECK(strstr(err, "without taking the answer") != NULL);
+
 	mod_free(vfw);
 }
 

@@ -172,8 +172,9 @@ static int_fn get(struct module *m, const char *name)
 	return (int_fn)p;
 }
 
-/* Runs seh_unhandled_crash in a child; returns the wait status and stderr. */
-static int run_unhandled(const char *dll, char *err, size_t size)
+/* Runs fn from the DLL in a child; returns the wait status and stderr. */
+static int run_unhandled(const char *dll, const char *fn, char *err,
+			 size_t size)
 {
 	int fds[2];
 	if (pipe(fds))
@@ -190,7 +191,7 @@ static int run_unhandled(const char *dll, char *err, size_t size)
 		struct module *m = mod_load(dll, NULL);
 		if (!m)
 			_exit(91);
-		get(m, "seh_unhandled_crash")();
+		get(m, fn)();
 		_exit(92);	/* it should not come back */
 	}
 	close(fds[1]);
@@ -251,11 +252,20 @@ int main(void)
 		printf("sanitizer build: skipping the unhandled-fault check\n");
 	} else {
 		char err[4096];
-		int st = run_unhandled(dll, err, sizeof(err));
+		int st = run_unhandled(dll, "seh_unhandled_crash", err,
+				       sizeof(err));
 		CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 128 + SIGSEGV);
 		CHECK(strstr(err, "seance: crash: SIGSEGV at pe_seh.dll+0x"));
 		CHECK(strstr(err, "accessing (nil)") || strstr(err, "accessing 0x0"));
 		if (test_failures)
+			fprintf(stderr, "child said:\n%s", err);
+		/* A handler that resumes the same fault for ever: reported as
+		 * unhandled once it has done so many times, not a hang. */
+		int before = test_failures;
+		st = run_unhandled(dll, "seh_fault_storm", err, sizeof(err));
+		CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 128 + SIGSEGV);
+		CHECK(strstr(err, "seance: crash: SIGSEGV at pe_seh.dll+0x"));
+		if (test_failures > before)
 			fprintf(stderr, "child said:\n%s", err);
 	}
 

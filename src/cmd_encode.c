@@ -171,6 +171,21 @@ struct feed {
 	unsigned tried;
 };
 
+/*
+ * A frame buffer for the codec's input: zeroed, and as long as a 32-bit
+ * frame of the size whatever the format, with VFW_INPUT_PADDING after it.
+ * A Windows heap block has more heap after it, so a codec that reads past
+ * the frame it was given goes unnoticed there. direccional.dll takes YUY2
+ * and reads it as 24-bit RGB, a third more than the frame; with no room
+ * after the buffer, it reads into an unmapped page.
+ */
+static BYTE *frame_alloc(size_t size, LONG w, LONG h)
+{
+	size_t room = w > 0 && h > 0 ? (size_t)w * (size_t)h * 4 : 0;
+
+	return calloc(1, (size > room ? size : room) + VFW_INPUT_PADDING);
+}
+
 static void feed_free(struct feed *f)
 {
 	image_conv_free(f->from);
@@ -495,7 +510,7 @@ static int choose_input(HIC hic, const struct source *src, const char *forced,
 		size_t mid = image_pack_wants_i420(f->to) ? image_i420_size(w, h) :
 			     image_bgr24_size(w, h);
 		if (!(f->tmp = malloc(mid)) ||
-		    !(f->packed = calloc(1, image_frame_size(f->to)))) {
+		    !(f->packed = frame_alloc(image_frame_size(f->to), w, h))) {
 			vfw_set_error("out of memory");
 			return -1;
 		}
@@ -803,7 +818,8 @@ static int encode_com(const char *target, const CLSID *selected,
 				image_i420_size(width, height) :
 				image_bgr24_size(width, height);
 			feed.tmp = malloc(mid);
-			feed.packed = calloc(1, image_frame_size(feed.to));
+			feed.packed = frame_alloc(image_frame_size(feed.to),
+						  width, height);
 			if (!feed.tmp || !feed.packed) {
 				vfw_set_error("out of memory");
 				goto conversion_error;

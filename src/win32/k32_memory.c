@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include "loader/modules.h"
+#include "loader/pe.h"
 #include "win32/internal.h"
 #include "win32/k32.h"
 
@@ -855,6 +856,40 @@ WINFN(BOOL) k32_VirtualFree(LPVOID addr, SIZE_T size, DWORD type)
 	return FALSE;
 }
 
+/*
+ * Where the image's region holding a ends: the end of its section, or of
+ * the headers. Windows gives each section its own protection, so a region
+ * never runs from one into the next with another; here a DLL that isn't
+ * NX-compatible has its data sections mapped executable too, and after a
+ * VirtualProtect of .text to PAGE_EXECUTE_READWRITE the host's mappings
+ * would run on into .data. MinGW's pseudo-relocation pass queries .text
+ * again and restores PAGE_EXECUTE_READ over what it is told, which would
+ * take .data's write access with it (swscale-2.dll, avcodec-53.dll).
+ * UINTPTR_MAX when the sections share pages and so the image is one region.
+ */
+static uintptr_t image_region_end(const struct module *m, uintptr_t a)
+{
+	const struct pe_image *img = m->img;
+	uintptr_t base = (uintptr_t)m->base, first = UINTPTR_MAX;
+
+	if (!img || !img->sections || !img->nsections ||
+	    img->nt.OptionalHeader.SectionAlignment < PAGE)
+		return UINTPTR_MAX;
+	for (unsigned i = 0; i < img->nsections; i++) {
+		const IMAGE_SECTION_HEADER *sh = &img->sections[i];
+		uintptr_t lo = base + (sh->VirtualAddress & ~(uintptr_t)(PAGE - 1));
+		uintptr_t len = sh->Misc.VirtualSize ? sh->Misc.VirtualSize :
+			       sh->SizeOfRawData;
+		uintptr_t hi = (base + sh->VirtualAddress + len + PAGE - 1) &
+			       ~(uintptr_t)(PAGE - 1);
+		if (lo < first)
+			first = lo;
+		if (a >= lo && a < hi)
+			return hi;
+	}
+	return a < first ? first : UINTPTR_MAX;
+}
+
 /* Describes addr from /proc/self/maps, like VirtualQuery. */
 static SIZE_T query(LPCVOID addr, PMEMORY_BASIC_INFORMATION mbi)
 {
@@ -884,6 +919,9 @@ static SIZE_T query(LPCVOID addr, PMEMORY_BASIC_INFORMATION mbi)
 			mbi->State = none ? MEM_RESERVE : MEM_COMMIT;
 			mbi->Protect = none ? 0 : win_protect(perms);
 			if (m) {
+				uintptr_t end = image_region_end(m, a);
+				if (end > a && end < hi)
+					mbi->RegionSize = end - a;
 				mbi->AllocationBase = m->base;
 				mbi->AllocationProtect = PAGE_EXECUTE_WRITECOPY;
 				mbi->Type = MEM_IMAGE;

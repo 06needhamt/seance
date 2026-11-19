@@ -20,7 +20,7 @@ Work is split into phases; see [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION
 |---|---|---|
 | 0 | Build skeleton, Win32 headers, ABI cross-check, CLI skeleton | done |
 | 1 | PE loader and `info` | done |
-| 2 | Win32 runtime (TEB, SEH, threads, stub DLLs) | done: TEB, built-in DLLs, kernel32 (including SRW locks, condition variables, `InitOnce`, interlocked lists and thread-pool timers, waits and work), ntdll, SEH dispatch, delay-load binding, the msvcrt-family CRT (math, string, stdio, low-level I/O, `_findfirst`, `_stat`, startup, 64-bit helpers, `__try`/`__except`, setjmp/longjmp, C++ exceptions and RTTI, printf dialect), headless user32, gdi32 and advapi32 (registry, security), version, ole32, oleaut32, shell32, comctl32, comdlg32, and offline ws2_32, crtdll, psapi, bcrypt, ncrypt, crypt32, d3d9, dxva2, d3d11 and dxgi |
+| 2 | Win32 runtime (TEB, SEH, threads, stub DLLs) | done: TEB, built-in DLLs, kernel32 (including SRW locks, condition variables, `InitOnce`, interlocked lists and thread-pool timers, waits and work), ntdll, SEH dispatch, delay-load binding, the msvcrt-family CRT (math, string, stdio, low-level I/O, `_findfirst`, `_stat`, startup, 64-bit helpers, `__try`/`__except`, setjmp/longjmp, C++ exceptions and RTTI, printf dialect), headless user32, gdi32 and advapi32 (registry, security), version, ole32, oleaut32, shell32, comctl32, comdlg32, and offline ws2_32, crtdll, psapi, bcrypt, ncrypt, crypt32, d3d9, dxva2, d3d11 and dxgi; ddraw, dsound, dinput and dinput8 with no hardware behind them, an offline wininet (which still parses URLs) and urlmon, gdiplus without drawing, iphlpapi with no network adapters and msimg32; 3DNow! emulated for codecs that use it without asking the CPU |
 | 3 | VfW layer and `probe` | done: driver lifecycle, ICM API (including ICSeqCompressFrame*, ICImageCompress/ICImageDecompress and DrawDib*), winmm/msvfw32 built-ins, `probe`, `list` |
 | 4 | AVI / Y4M I/O, `decode` and `encode` | done: AVI reader and writer, Y4M/BMP/raw input and output, `avi`, `convert`, `decode`, `encode` |
 | 5 | Hardening and CI | done: DLL memory below 2 GB, crash and hang reports, SSE/FPU fixture, fuzzing, samples run, CI |
@@ -76,6 +76,14 @@ each such instruction faults, and seance carries it out in software and
 carries on (`src/runtime/amd3dnow.c`). That is a signal per instruction,
 so slow, but `IsProcessorFeaturePresent` keeps saying what the CPU says,
 so codecs that do ask take their MMX or SSE code instead.
+
+A zip of 1,668 old codec DLLs is the widest check. `seance sweep` finds
+507 codecs in it. 130 do a full round trip, 28 decode a test stream
+correctly, 162 more load as decoders with no stream to check them on, and
+30 encode but have nothing here to decode their output. 157 don't work.
+Their reasons are in [MISSING_FEATURES.md](MISSING_FEATURES.md): mostly
+vendor DLLs not in the zip, 16-bit drivers and licence checks, which
+seance doesn't work around.
 
 The real-world check is the LAV Filters 0.83 package (32-bit): LAV Video
 loads, registers, connects and decodes 18 codecs identically to FFmpeg; LAV

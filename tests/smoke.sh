@@ -521,6 +521,18 @@ if [ -n "$fixtures" ] && [ -f "$fixtures/testcodec.dll" ]; then
 		$emu "$harness" decode "$fixtures/testcodec.dll" "$work/fussy.avi" \
 		-o "$work/fussy.y4m" --output-format I420 2>/dev/null
 	cmp "$work/noise.y4m" "$work/fussy.y4m"
+	# One that reads more input than the format it took holds has room
+	# after the frame, as the Windows heap would give (direccional.dll).
+	{
+		printf 'YUV4MPEG2 W320 H240 F25:1 Ip A1:1 C420jpeg\n'
+		for i in 1 2; do
+			printf 'FRAME\n'
+			head -c 115200 /dev/zero
+		done
+	} >"$work/big.y4m"
+	VFW_ENV_TESTCODEC_OVERREAD=1 $emu "$harness" encode \
+		"$fixtures/testcodec.dll" "$work/big.y4m" -o "$work/x.avi" \
+		--codec-input I420 >/dev/null
 	# One that reads its YUV input upside down (as RGB) gets it turned
 	# over, and the round trip comes back as it went in.
 	VFW_ENV_TESTCODEC_YUV_UPSIDE=2 $emu "$harness" encode \
