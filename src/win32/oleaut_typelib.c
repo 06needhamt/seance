@@ -17,8 +17,9 @@
  *   use refer to: IUnknown, IDispatch, IEnumVARIANT, GUID, OLE_COLOR,
  *   OLE_HANDLE, and Font and Picture with their aliases IFontDisp and
  *   IPictureDisp. A reference into another library is resolved when it is
- *   first followed: to stdole2, or a library found by LoadRegTypeLib, or
- *   one of that file name searched for as LoadLibrary would.
+ *   first followed: to stdole2, a library already loaded, one registered
+ *   (LoadRegTypeLib), or one of that file name searched for as
+ *   LoadLibrary would.
  * - A dual interface is stored as one TKIND_DISPATCH type info. That is
  *   the view a library hands out: its functions are all the interface's,
  *   inherited ones included, as IDispatch calls them. GetRefTypeInfo of
@@ -28,7 +29,7 @@
  *   type info count on the library, which is freed (and leaves the cache
  *   of loaded libraries) when the last goes.
  * - Not here yet: ITypeComp, ITypeInfo::Invoke, CreateInstance,
- *   AddressOfMember and registration. A dual interface's functions
+ *   AddressOfMember. Registration is in oleaut_typereg.c. A dual interface's functions
  *   inherited from a dual interface in a third library (rather than
  *   stdole2's IDispatch) keep that library's hrefs, which this one's
  *   GetRefTypeInfo doesn't know; no library in use has one.
@@ -2756,6 +2757,31 @@ static const ITypeLib2Vtbl typelib_vtbl = {
  * The exports.
  */
 
+/* The Windows path of a library's file, "\\N" after it for resource N. */
+static WCHAR *lib_win_path(const struct typelib *lib)
+{
+	char *unix_path, *slash, *win, buf[1100];
+	WCHAR *w = NULL;
+	long res;
+
+	if (!lib->key || !(unix_path = strdup(lib->key)))
+		return NULL;
+	slash = strrchr(unix_path, '\\');
+	res = slash ? strtol(slash + 1, NULL, 10) : 1;
+	if (slash)
+		*slash = 0;
+	if ((win = path_to_windows(unix_path))) {
+		if (res != 1)
+			snprintf(buf, sizeof(buf), "%s\\%ld", win, res);
+		else
+			snprintf(buf, sizeof(buf), "%s", win);
+		w = utf8_to_utf16_dup(buf);
+		free(win);
+	}
+	free(unix_path);
+	return w;
+}
+
 HRESULT STUB_WINAPI oa_LoadTypeLibEx(LPCOLESTR file, REGKIND kind,
 				     ITypeLib **out)
 {
@@ -2770,9 +2796,22 @@ HRESULT STUB_WINAPI oa_LoadTypeLibEx(LPCOLESTR file, REGKIND kind,
 		return E_OUTOFMEMORY;
 	hr = tl_load(f, &lib);
 	free(f);
-	if (SUCCEEDED(hr))
-		*out = tl_iface(lib);
-	return hr;
+	if (FAILED(hr))
+		return hr;
+	/* REGKIND_REGISTER: as RegisterTypeLib, with the file found. */
+	if (kind == REGKIND_REGISTER && !lib->builtin) {
+		WCHAR *path = lib_win_path(lib);
+
+		hr = path ? oa_register_typelib(tl_iface(lib), path, NULL, 0)
+			  : E_OUTOFMEMORY;
+		free(path);
+		if (FAILED(hr)) {
+			lib_release(lib);
+			return hr;
+		}
+	}
+	*out = tl_iface(lib);
+	return S_OK;
 }
 
 WINFN(HRESULT) oa_LoadTypeLib(LPCOLESTR file, ITypeLib **out)
@@ -2780,53 +2819,31 @@ WINFN(HRESULT) oa_LoadTypeLib(LPCOLESTR file, ITypeLib **out)
 	return oa_LoadTypeLibEx(file, REGKIND_DEFAULT, out);
 }
 
-/* Loaded already (stdole2, or loaded by file); registration comes later. */
+/*
+ * stdole2 is always there; other libraries load from the path the
+ * registry gives (oleaut_typereg.c).
+ */
 HRESULT STUB_WINAPI oa_LoadRegTypeLib(REFGUID guid, WORD major, WORD minor,
 				      LCID lcid, ITypeLib **out)
 {
-	struct typelib *lib;
+	struct typelib *std = stdole2_lib();
+	BSTR path = NULL;
+	HRESULT hr;
 
 	if (!guid || !out)
 		return E_INVALIDARG;
 	*out = NULL;
-	if (!(lib = find_loaded(guid, major)))
-		return TYPE_E_LIBNOTREGISTERED;
-	*out = tl_iface(lib);
-	return S_OK;
-}
-
-WINFN(HRESULT) oa_QueryPathOfRegTypeLib(REFGUID guid, WORD major,
-					WORD minor, LCID lcid, BSTR *path)
-{
-	return TYPE_E_LIBNOTREGISTERED;
-}
-
-WINFN(HRESULT) oa_RegisterTypeLib(ITypeLib *lib, LPCOLESTR path,
-				  LPCOLESTR help)
-{
-	if (!lib || !path)
-		return E_INVALIDARG;
-	TRACE("RegisterTypeLib: not implemented");
-	return E_NOTIMPL;
-}
-
-WINFN(HRESULT) oa_RegisterTypeLibForUser(ITypeLib *lib, LPCOLESTR path,
-					 LPCOLESTR help)
-{
-	return oa_RegisterTypeLib(lib, path, help);
-}
-
-WINFN(HRESULT) oa_UnRegisterTypeLib(REFGUID guid, WORD major, WORD minor,
-				    LCID lcid, SYSKIND kind)
-{
-	return TYPE_E_LIBNOTREGISTERED;
-}
-
-WINFN(HRESULT) oa_UnRegisterTypeLibForUser(REFGUID guid, WORD major,
-					   WORD minor, LCID lcid,
-					   SYSKIND kind)
-{
-	return TYPE_E_LIBNOTREGISTERED;
+	if (std && guid_eq(guid, &std->attr.guid) &&
+	    major == std->attr.wMajorVerNum) {
+		*out = tl_iface(std);
+		return S_OK;
+	}
+	if (FAILED(hr = oa_QueryPathOfRegTypeLib(guid, major, minor, lcid,
+						 &path)))
+		return hr;
+	hr = oa_LoadTypeLibEx(path, REGKIND_NONE, out);
+	oa_SysFreeString(path);
+	return hr;
 }
 
 WINFN(HRESULT) oa_CreateTypeLib2(SYSKIND kind, LPCOLESTR file, void **out)
@@ -2853,13 +2870,8 @@ WINFN(void) oa_ClearCustData(CUSTDATA *data)
 const struct builtin_export oa_typelib_exports[] = {
 	E(LoadTypeLib, 161),
 	E(LoadRegTypeLib, 162),
-	E(RegisterTypeLib, 163),
-	E(QueryPathOfRegTypeLib, 164),
 	E(ClearCustData, 171),
 	E(CreateTypeLib2, 180),
 	E(LoadTypeLibEx, 183),
-	E(UnRegisterTypeLib, 186),
-	E(RegisterTypeLibForUser, 442),
-	E(UnRegisterTypeLibForUser, 443),
 	BUILTIN_END
 };

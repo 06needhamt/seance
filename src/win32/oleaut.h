@@ -47,6 +47,18 @@ HRESULT STUB_WINAPI oa_LoadTypeLibEx(LPCOLESTR file, REGKIND kind,
 HRESULT STUB_WINAPI oa_LoadRegTypeLib(REFGUID guid, WORD major, WORD minor,
 				      LCID lcid, ITypeLib **out);
 
+/* Type library registration (oleaut_typereg.c). */
+HRESULT STUB_WINAPI oa_QueryPathOfRegTypeLib(REFGUID guid, WORD major,
+					     WORD minor, LCID lcid,
+					     BSTR *path);
+/*
+ * RegisterTypeLib, for the machine (HKLM's classes) or with for_user the
+ * user (HKCU's): the library's key, with path for its own syskind and
+ * help_dir (else path's directory), and its interfaces'.
+ */
+HRESULT oa_register_typelib(ITypeLib *lib, const WCHAR *path,
+			    const WCHAR *help_dir, int for_user);
+
 /* Error information. */
 HRESULT STUB_WINAPI oa_CreateErrorInfo(ICreateErrorInfo **out);
 HRESULT STUB_WINAPI oa_SetErrorInfo(ULONG reserved, IErrorInfo *info);
@@ -56,6 +68,7 @@ HRESULT STUB_WINAPI oa_GetErrorInfo(ULONG reserved, IErrorInfo **out);
 extern const struct builtin_export oa_conv_exports[];
 extern const struct builtin_export oa_array_exports[];
 extern const struct builtin_export oa_typelib_exports[];
+extern const struct builtin_export oa_typereg_exports[];
 extern const struct builtin_export oa_errinfo_ole32_exports[];
 
 #endif /* VFW_WIN32_OLEAUT_H */

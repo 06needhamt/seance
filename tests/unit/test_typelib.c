@@ -4,7 +4,10 @@
  * gives, over a library this test writes (there is no midl here), for
  * Win32 and for Win64; the built-in stdole2; and the reader against
  * truncated and mutated copies of the library, which must fail cleanly or
- * load into something every call can walk.
+ * load into something every call can walk. Then registration: the keys
+ * RegisterTypeLib(ForUser) writes, QueryPathOfRegTypeLib and
+ * LoadRegTypeLib finding the library by them, and UnRegisterTypeLib
+ * taking them away again.
  *
  * The library, in IDL:
  *
@@ -42,6 +45,7 @@
 #include "test.h"
 #include "win32/codepage.h"
 #include "win32/path.h"
+#include "win32/reg.h"
 
 static struct module *oa;
 
@@ -61,6 +65,17 @@ static HRESULT (WINAPI *pLoadTypeLibEx)(LPCOLESTR, REGKIND, ITypeLib **);
 static void (WINAPI *pSysFreeString)(BSTR);
 static HRESULT (WINAPI *pVariantClear)(VARIANT *);
 static void (WINAPI *pClearCustData)(CUSTDATA *);
+static HRESULT (WINAPI *pRegisterTypeLib)(ITypeLib *, LPCOLESTR, LPCOLESTR);
+static HRESULT (WINAPI *pRegisterTypeLibForUser)(ITypeLib *, LPCOLESTR,
+						 LPCOLESTR);
+static HRESULT (WINAPI *pUnRegisterTypeLib)(REFGUID, WORD, WORD, LCID,
+					    SYSKIND);
+static HRESULT (WINAPI *pUnRegisterTypeLibForUser)(REFGUID, WORD, WORD, LCID,
+						   SYSKIND);
+static HRESULT (WINAPI *pQueryPathOfRegTypeLib)(REFGUID, WORD, WORD, LCID,
+						BSTR *);
+static HRESULT (WINAPI *pLoadRegTypeLib)(REFGUID, WORD, WORD, LCID,
+					 ITypeLib **);
 
 static const GUID libid = { 0x5eace001, 0x1111, 0x2222,
 			    { 1, 2, 3, 4, 5, 6, 7, 8 } };
@@ -1204,11 +1219,197 @@ static void test_bad_libraries(void)
 	free(b.d);
 }
 
+
+/* ----------------------------------------------------------------------
+ * Registration.
+ */
+
+#define LIBKEY "TypeLib\\{5EACE001-1111-2222-0102-030405060708}"
+#define IFACE(n) "Interface\\{5EACE00" #n "-1111-2222-0102-030405060708}"
+#define MACHINE "HKEY_LOCAL_MACHINE\\Software\\Classes\\"
+#define USER "HKEY_CURRENT_USER\\Software\\Classes\\"
+
+/* A registry string value as UTF-8 (static buffer), or NULL if none. */
+static const char *reg_str(const char *path, const char *name)
+{
+	static char buf[4][512];
+	static int next;
+	char *out = NULL;
+
+	reg_lock();
+	struct reg_key *k = reg_open(path);
+	struct reg_value *v = k ? reg_get(k, name) : NULL;
+	if (v && v->type == REG_SZ) {
+		WCHAR w[256] = { 0 };
+		char *s;
+
+		memcpy(w, v->data, v->size < 510 ? v->size : 510);
+		if ((s = utf16_to_utf8_dup(w))) {
+			out = buf[next++ % 4];
+			snprintf(out, 512, "%s", s);
+			free(s);
+		}
+	}
+	reg_unlock();
+	return out;
+}
+
+static int reg_exists(const char *path)
+{
+	int r;
+
+	reg_lock();
+	r = reg_open(path) != NULL;
+	reg_unlock();
+	return r;
+}
+
+/* path as UTF-8, for comparing with the registry. */
+static const char *narrow(const WCHAR *w)
+{
+	static char buf[512];
+	char *s = utf16_to_utf8_dup(w);
+
+	snprintf(buf, sizeof(buf), "%s", s ? s : "");
+	free(s);
+	return buf;
+}
+
+static void test_registration(void)
+{
+	struct buf b = build_library(4);
+	WCHAR *path = write_lib("reg32.tlb", b.d, b.len);
+	ITypeLib *lib = NULL, *again = NULL;
+	BSTR found = NULL;
+	char dirw[256];
+
+	free(b.d);
+	if (!path || FAILED(pLoadTypeLib(path, &lib)) || !lib) {
+		CHECK(0);
+		free(path);
+		return;
+	}
+	snprintf(dirw, sizeof(dirw), "%s", narrow(path));
+	*strrchr(dirw, '\\') = 0;
+
+	CHECK_EQ(pRegisterTypeLib(lib, path, NULL), S_OK);
+	CHECK_STR(reg_str(MACHINE LIBKEY "\\1.2", ""), "Test library");
+	CHECK_STR(reg_str(MACHINE LIBKEY "\\1.2\\FLAGS", ""), "0");
+	CHECK_STR(reg_str(MACHINE LIBKEY "\\1.2\\HELPDIR", ""), dirw);
+	CHECK_STR(reg_str(MACHINE LIBKEY "\\1.2\\409\\win32", ""),
+		  narrow(path));
+	CHECK_STR(reg_str(MACHINE IFACE(2), ""), "IThing");
+	CHECK_STR(reg_str(MACHINE IFACE(2) "\\ProxyStubClsid32", ""),
+		  "{00020424-0000-0000-C000-000000000046}");
+	CHECK_STR(reg_str(MACHINE IFACE(2) "\\ProxyStubClsid", ""),
+		  "{00020424-0000-0000-C000-000000000046}");
+	CHECK_STR(reg_str(MACHINE IFACE(2) "\\TypeLib", ""),
+		  "{5EACE001-1111-2222-0102-030405060708}");
+	CHECK_STR(reg_str(MACHINE IFACE(2) "\\TypeLib", "Version"), "1.2");
+	CHECK_STR(reg_str(MACHINE IFACE(4) "\\ProxyStubClsid32", ""),
+		  "{00020420-0000-0000-C000-000000000046}");
+	CHECK(!reg_exists(MACHINE IFACE(3)));	/* not [oleautomation] */
+	CHECK(!reg_exists(USER LIBKEY));
+
+	/* Found again by GUID and version. */
+	CHECK_EQ(pQueryPathOfRegTypeLib(&libid, 1, 0, 0x409, &found), S_OK);
+	CHECK_STR(narrow(found), narrow(path));
+	pSysFreeString(found);
+	CHECK_EQ(pQueryPathOfRegTypeLib(&libid, 0xffff, 0xffff, 0x409,
+					&found), S_OK);
+	pSysFreeString(found);
+	CHECK_EQ(pQueryPathOfRegTypeLib(&libid, 1, 3, 0x409, &found),
+		 TYPE_E_LIBNOTREGISTERED);
+	CHECK_EQ(pQueryPathOfRegTypeLib(&libid, 2, 0, 0x409, &found),
+		 TYPE_E_LIBNOTREGISTERED);
+	CHECK_EQ(pQueryPathOfRegTypeLib(&libid, 1, 2, 0x407, &found),
+		 TYPE_E_LIBNOTREGISTERED);
+	CHECK_EQ(pLoadRegTypeLib(&libid, 1, 2, 0x409, &again), S_OK);
+	CHECK(again == lib);
+	if (again)
+		again->lpVtbl->Release(again);
+	CHECK_EQ(pLoadRegTypeLib(&stdole2, 2, 0, 0, &again), S_OK);
+	if (again)
+		again->lpVtbl->Release(again);
+
+	/* An interface another library has taken over since stays. */
+	reg_lock();
+	struct reg_key *k = reg_open(MACHINE IFACE(4) "\\TypeLib");
+	if (k)
+		reg_set(k, "", REG_SZ, wide("{00000000-0000-0000-0000-000000000001}"),
+			39 * sizeof(WCHAR));
+	reg_unlock();
+	CHECK_EQ(pUnRegisterTypeLib(&libid, 1, 2, 0x409, SYS_WIN32), S_OK);
+	CHECK(!reg_exists(MACHINE LIBKEY));
+	CHECK(!reg_exists(MACHINE IFACE(2)));
+	CHECK(reg_exists(MACHINE IFACE(4)));
+	CHECK_EQ(pUnRegisterTypeLib(&libid, 1, 2, 0x409, SYS_WIN32),
+		 TYPE_E_REGISTRYACCESS);
+	CHECK_EQ(pQueryPathOfRegTypeLib(&libid, 1, 2, 0x409, &found),
+		 TYPE_E_LIBNOTREGISTERED);
+	CHECK_EQ(pLoadRegTypeLib(&libid, 1, 2, 0x409, &again),
+		 TYPE_E_LIBNOTREGISTERED);
+
+	/* For the user: HKCU's classes, and a help directory given. */
+	CHECK_EQ(pRegisterTypeLibForUser(lib, path, wide("C:\\help")), S_OK);
+	CHECK(!reg_exists(MACHINE LIBKEY));
+	CHECK_STR(reg_str(USER LIBKEY "\\1.2\\HELPDIR", ""), "C:\\help");
+	CHECK_STR(reg_str(USER IFACE(2), ""), "IThing");
+	CHECK_EQ(pQueryPathOfRegTypeLib(&libid, 1, 2, 0x409, &found), S_OK);
+	pSysFreeString(found);
+	CHECK_EQ(pUnRegisterTypeLib(&libid, 1, 2, 0x409, SYS_WIN32),
+		 TYPE_E_REGISTRYACCESS);
+	CHECK_EQ(pUnRegisterTypeLibForUser(&libid, 1, 2, 0x409, SYS_WIN32),
+		 S_OK);
+	CHECK(!reg_exists(USER LIBKEY));
+	CHECK(!reg_exists(USER IFACE(2)));
+
+	/* A resource's path: the help directory is the file's. */
+	CHECK_EQ(pRegisterTypeLib(lib, wide("C:\\codecs\\x.dll\\2"), NULL),
+		 S_OK);
+	CHECK_STR(reg_str(MACHINE LIBKEY "\\1.2\\HELPDIR", ""), "C:\\codecs");
+	CHECK_STR(reg_str(MACHINE LIBKEY "\\1.2\\409\\win32", ""),
+		  "C:\\codecs\\x.dll\\2");
+	CHECK_EQ(pUnRegisterTypeLib(&libid, 1, 2, 0x409, SYS_WIN32), S_OK);
+	CHECK(!reg_exists(MACHINE LIBKEY));
+	CHECK_EQ(pUnRegisterTypeLib(&libid, 1, 2, 0x409, SYS_WIN16),
+		 TYPE_E_REGISTRYACCESS);
+	CHECK_EQ(lib->lpVtbl->Release(lib), 0);
+
+	/* LoadTypeLibEx(REGKIND_REGISTER) registers the file it found. */
+	CHECK_EQ(pLoadTypeLibEx(path, REGKIND_REGISTER, &lib), S_OK);
+	CHECK_STR(reg_str(MACHINE LIBKEY "\\1.2\\409\\win32", ""),
+		  narrow(path));
+	if (lib)
+		CHECK_EQ(lib->lpVtbl->Release(lib), 0);
+	CHECK_EQ(pUnRegisterTypeLib(&libid, 1, 2, 0x409, SYS_WIN32), S_OK);
+	free(path);
+
+	/* A Win64 library is found by either build. */
+	b = build_library(8);
+	path = write_lib("reg64.tlb", b.d, b.len);
+	free(b.d);
+	CHECK_EQ(pLoadTypeLibEx(path, REGKIND_REGISTER, &lib), S_OK);
+	CHECK_STR(reg_str(MACHINE LIBKEY "\\1.2\\409\\win64", ""),
+		  narrow(path));
+	CHECK_EQ(pLoadRegTypeLib(&libid, 1, 2, 0x409, &again), S_OK);
+	CHECK(again == lib);
+	if (again)
+		again->lpVtbl->Release(again);
+	if (lib)
+		CHECK_EQ(lib->lpVtbl->Release(lib), 0);
+	CHECK_EQ(pUnRegisterTypeLib(&libid, 1, 2, 0x409, SYS_WIN64), S_OK);
+	CHECK(!reg_exists(MACHINE LIBKEY));
+	free(path);
+}
+
 int main(void)
 {
 	char cleanup[64];
 
+	setenv("VFW_REGISTRY", "", 1);	/* in memory only */
 	CHECK_EQ(runtime_enter(), 0);
+	reg_reload();
 	oa = mod_load("oleaut32.dll", NULL);
 	CHECK(oa != NULL);
 	if (!oa || !mkdtemp(dir))
@@ -1218,12 +1419,19 @@ int main(void)
 	pSysFreeString = get("SysFreeString");
 	pVariantClear = get("VariantClear");
 	pClearCustData = get("ClearCustData");
+	pRegisterTypeLib = get("RegisterTypeLib");
+	pRegisterTypeLibForUser = get("RegisterTypeLibForUser");
+	pUnRegisterTypeLib = get("UnRegisterTypeLib");
+	pUnRegisterTypeLibForUser = get("UnRegisterTypeLibForUser");
+	pQueryPathOfRegTypeLib = get("QueryPathOfRegTypeLib");
+	pLoadRegTypeLib = get("LoadRegTypeLib");
 
 	test_library(4);
 	test_library(8);
 	test_stdole2();
 	test_errors();
 	test_bad_libraries();
+	test_registration();
 
 	snprintf(cleanup, sizeof(cleanup), "rm -rf -- '%s'", dir);
 	if (system(cleanup))

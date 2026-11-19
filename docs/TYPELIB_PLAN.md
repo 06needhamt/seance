@@ -81,7 +81,17 @@ New `src/win32/oleaut_typelib.c`, with declarations in `oleaut.h`.
 6. `seance info --typelib FILE` lists a library's types, with their
    GUIDs, kinds, functions, parameters and flags.
 
-## Phase B: registration
+## Phase B: registration (done)
+
+Status: `src/win32/oleaut_typereg.c`, tested in `test_typelib` (the keys
+written for the machine and for the user, lookups by version and LCID,
+`LoadTypeLibEx(REGKIND_REGISTER)`, Win64 libraries, and unregistering,
+which leaves an interface key another library has since taken). With it,
+`seance register --dry-run` succeeds for `LEncAAC`, `ltmm175` (134
+interfaces) and `abcAVI` (no 0x0EEDFADE now); `DSKernel2` registers its
+library and then stops at `BuildTrusteeWithSidA`, for Phase E.
+`LoadRegTypeLib` answers for stdole2 itself, and otherwise only for
+registered libraries.
 
 1. `RegisterTypeLib(ForUser)` writes what Windows does:
    `HKCR\TypeLib\{lib}\{maj.min}` (name), `\0\win32` or `\win64`
