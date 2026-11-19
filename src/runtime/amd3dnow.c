@@ -43,30 +43,22 @@ typedef union {
 
 /*
  * Copies n bytes from addr in this process, without faulting: the
- * kernel checks the address. Returns how many it copied. code says addr
- * is the faulting instruction's, whose page is known to be mapped.
+ * kernel checks the address. Returns how many it copied.
  */
-static size_t peek(void *to, uintptr_t addr, size_t n, int code)
+static size_t peek(void *to, uintptr_t addr, size_t n)
 {
 	struct iovec l = { to, n }, r = { (void *)addr, n };
 	ssize_t got;
 
+	/*
+	 * Only through the kernel, which fails rather than faults. Without
+	 * process_vm_readv (ENOSYS), nothing is read, not even the
+	 * instruction: its page may be execute-only, or gone by now. The
+	 * instruction is then declined and reported as the SIGILL it is.
+	 */
 	do
 		got = process_vm_readv(getpid(), &l, 1, &r, 1, 0);
 	while (got < 0 && errno == EINTR);
-	if (got < 0 && errno == ENOSYS) {
-		/*
-		 * No process_vm_readv. The instruction's own page is mapped
-		 * (it was fetched from), so that much can be read directly;
-		 * an operand can't be checked, so it isn't read at all.
-		 */
-		if (!code)
-			return 0;
-		size_t page = (size_t)sysconf(_SC_PAGESIZE);
-		size_t left = page - (addr & (page - 1));
-		got = (ssize_t)(n < left ? n : left);
-		memcpy(to, (void *)addr, (size_t)got);
-	}
 	return got < 0 ? 0 : (size_t)got;
 }
 
@@ -556,7 +548,7 @@ int amd3dnow_emulate(void *ucontext)
 	struct x87 x;
 	int saved = errno;	/* the code resumed sees its own errno */
 
-	size_t n = peek(code, pc, sizeof(code), 1);
+	size_t n = peek(code, pc, sizeof(code));
 	if (n < 2 || decode(code, n, pc, g, &in) || frame_x87(uc, &x))
 		goto decline;
 
@@ -570,7 +562,7 @@ int amd3dnow_emulate(void *ucontext)
 		read_regs(&x, r);
 		memcpy(&dst, r[in.reg], 8);
 		if (in.mem) {
-			if (peek(&src, in.addr, 8, 0) != 8)
+			if (peek(&src, in.addr, 8) != 8)
 				goto decline;
 		} else {
 			memcpy(&src, r[in.rm], 8);

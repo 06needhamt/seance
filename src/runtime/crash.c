@@ -347,13 +347,15 @@ static void on_sigill(int sig, siginfo_t *si, void *ctx)
 {
 	if (si->si_code > 0 && amd3dnow_emulate(ctx))
 		return;
-	if ((old_sigill.sa_flags & SA_SIGINFO) && old_sigill.sa_sigaction) {
-		old_sigill.sa_sigaction(sig, si, ctx);
-		return;
-	}
-	if (!(old_sigill.sa_flags & SA_SIGINFO) &&
-	    old_sigill.sa_handler != SIG_DFL && old_sigill.sa_handler != SIG_IGN) {
-		old_sigill.sa_handler(sig);
+	/*
+	 * SIG_DFL and SIG_IGN first, whatever the flags: sigaction keeps
+	 * SA_SIGINFO with SIG_IGN, and the union then holds 1, not a function.
+	 */
+	if (old_sigill.sa_handler != SIG_DFL && old_sigill.sa_handler != SIG_IGN) {
+		if (old_sigill.sa_flags & SA_SIGINFO)
+			old_sigill.sa_sigaction(sig, si, ctx);
+		else
+			old_sigill.sa_handler(sig);
 		return;
 	}
 	signal(sig, SIG_DFL);

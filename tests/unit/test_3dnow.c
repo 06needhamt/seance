@@ -357,6 +357,21 @@ static void bad_suffix(void)
 	__asm__ volatile(".byte 0x0f, 0x0f, 0xc0, 0x00" : : : "mm0", X87);
 }
 
+/*
+ * SIGILL ignored, with SA_SIGINFO, before seance's handler went in: a
+ * sanitizer build's handler hands what it declines to the one it
+ * replaced, and SIG_IGN is no function to call, flags or not.
+ */
+static void ignored_before(void)
+{
+	struct sigaction sa = { .sa_handler = SIG_IGN, .sa_flags = SA_SIGINFO };
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGILL, &sa, NULL);
+	if (crash_install())
+		_exit(90);
+	bad_suffix();
+}
+
 static int died_of_sigill(int status)
 {
 	return (WIFEXITED(status) && WEXITSTATUS(status) == 128 + SIGILL) ||
@@ -395,5 +410,6 @@ int main(void)
 	/* What it can't do is still the illegal instruction it was. */
 	CHECK(died_of_sigill(in_child(bad_operand)));
 	CHECK(died_of_sigill(in_child(bad_suffix)));
+	CHECK(died_of_sigill(in_child(ignored_before)));
 	return test_summary("test_3dnow");
 }
