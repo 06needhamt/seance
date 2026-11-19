@@ -77,6 +77,14 @@ carries on (`src/runtime/amd3dnow.c`). That is a signal per instruction,
 so slow, but `IsProcessorFeaturePresent` keeps saying what the CPU says,
 so codecs that do ask take their MMX or SSE code instead.
 
+A zip of 1,668 old codec DLLs is the widest check. `seance sweep` finds
+507 codecs in it. 130 do a full round trip, 28 decode a test stream
+correctly, 162 more load as decoders with no stream to check them on, and
+30 encode but have nothing here to decode their output. 157 don't work.
+Their reasons are in [MISSING_FEATURES.md](MISSING_FEATURES.md): mostly
+vendor DLLs not in the zip, 16-bit drivers and licence checks, which
+seance doesn't work around.
+
 The real-world check is the LAV Filters 0.83 package (32-bit): LAV Video
 loads, registers, connects and decodes 18 codecs identically to FFmpeg; LAV
 Audio decodes MP3, FLAC, MS ADPCM and A-law identically and AC-3, E-AC-3,
