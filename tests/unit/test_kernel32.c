@@ -1407,6 +1407,29 @@ static void test_fixture(void)
 	CHECK(terminate != NULL);
 	if (terminate)
 		CHECK_EQ(terminate(), 0);
+
+	/*
+	 * MinGW's pseudo-relocation pass: .text made writable, then queried
+	 * again and given back its protection over the region it is told.
+	 * That region ends with .text even when .data next to it has the same
+	 * host protection, as a DLL's that isn't NX-compatible does here (made
+	 * so by hand: the fixtures are NX-compatible), or restoring .text's
+	 * protection takes .data's write access too (swscale-2.dll).
+	 */
+	FN(SIZE_T, VirtualQuery, LPCVOID, PMEMORY_BASIC_INFORMATION, SIZE_T);
+	FN(BOOL, VirtualProtect, LPVOID, SIZE_T, DWORD, PDWORD);
+	MEMORY_BASIC_INFORMATION mbi;
+	BYTE *text = m->base + 0x1000, *data = m->base + 0x2000;
+	DWORD old_text = 0, old_data = 0, was;
+	CHECK(VirtualProtect(data, 4, PAGE_EXECUTE_READWRITE, &old_data));
+	CHECK(VirtualProtect(text, 1, PAGE_EXECUTE_READWRITE, &old_text));
+	CHECK_EQ(old_text, PAGE_EXECUTE_READ);
+	CHECK_EQ(VirtualQuery(text, &mbi, sizeof(mbi)), sizeof(mbi));
+	CHECK(mbi.BaseAddress == text);
+	CHECK_EQ(mbi.RegionSize, 0x1000);
+	CHECK(VirtualProtect(mbi.BaseAddress, mbi.RegionSize, old_text, &was));
+	*(volatile DWORD *)data = 1;	/* still writable */
+	CHECK(VirtualProtect(data, 4, old_data, &was));
 	mod_free(m);
 }
 
