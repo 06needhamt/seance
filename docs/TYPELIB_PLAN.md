@@ -94,14 +94,15 @@ library and then stops at `BuildTrusteeWithSidA`, for Phase E.
 registered libraries.
 
 1. `RegisterTypeLib(ForUser)` writes what Windows does:
-   `HKCR\TypeLib\{lib}\{maj.min}` (name), `\0\win32` or `\win64`
-   (path), `FLAGS`, `HELPDIR`; and for each dual or `oleautomation`
+   `HKCR\TypeLib\{lib}\{maj.min}` (name), `{maj.min}\{lcid}\{platform}`
+   (`win32` or `win64`: the path), `FLAGS`, `HELPDIR`; and for each dual or `oleautomation`
    interface `HKCR\Interface\{iid}` with its name, `ProxyStubClsid32`
    (`{00020424-0000-0000-C000-000000000046}`) and `TypeLib`.
 2. `UnRegisterTypeLib(ForUser)` removes them; an interface key only if
-   it still names this library.
+   it still names this library and version.
 3. `LoadRegTypeLib` and `QueryPathOfRegTypeLib` find a library by GUID
-   and version (the highest minor version), and load it from its path.
+   and version (the version asked for if it is registered, else the
+   highest minor version above it), and load it from its path.
 
 ## Phase C: calling through a type library
 

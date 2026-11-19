@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "commands.h"
 #include "common/log.h"
@@ -286,8 +287,12 @@ static void put_typeinfo(ITypeInfo *ti, UINT index)
 	/* A dual interface's other half: its vtable. */
 	HREFTYPE h;
 	ITypeInfo *iface;
-	if (SUCCEEDED(ti->lpVtbl->GetRefTypeOfImplType(ti, (UINT)-1, &h)) &&
-	    SUCCEEDED(ti->lpVtbl->GetRefTypeInfo(ti, h, &iface))) {
+	if (FAILED(ti->lpVtbl->GetRefTypeOfImplType(ti, (UINT)-1, &h))) {
+		/* not a dual interface */
+	} else if (FAILED(ti->lpVtbl->GetRefTypeInfo(ti, h, &iface))) {
+		puts("  dual: the interface half doesn't resolve");
+		unresolved++;
+	} else {
 		TYPEATTR *b;
 
 		if (SUCCEEDED(iface->lpVtbl->GetTypeAttr(iface, &b))) {
@@ -306,19 +311,51 @@ static void put_typeinfo(ITypeInfo *ti, UINT index)
 	ti->lpVtbl->ReleaseTypeAttr(ti, a);
 }
 
+/*
+ * path as a Windows path; "file\N" (resource N of a module) keeps its
+ * suffix, which realpath() would take for part of the name.
+ */
+static WCHAR *windows_name(const char *path)
+{
+	char *copy = strdup(path), *slash, *abs = NULL, *win = NULL;
+	const char *suffix = "";
+	WCHAR *w = NULL;
+
+	if (!copy)
+		return NULL;
+	slash = strrchr(copy, '\\');
+	if (slash && slash[1] && strspn(slash + 1, "0123456789") ==
+					 strlen(slash + 1) &&
+	    access(copy, F_OK)) {
+		*slash = 0;
+		suffix = path + (slash - copy);
+	}
+	if ((abs = realpath(copy, NULL)) && (win = path_to_windows(abs))) {
+		size_t n = strlen(win) + strlen(suffix) + 1;
+		char *full = malloc(n);
+
+		if (full) {
+			snprintf(full, n, "%s%s", win, suffix);
+			w = utf8_to_utf16_dup(full);
+			free(full);
+		}
+	}
+	free(win);
+	free(abs);
+	free(copy);
+	return w;
+}
+
 int cmd_typelib(const char *path)
 {
-	char *abs = realpath(path, NULL);
-	char *win = abs ? path_to_windows(abs) : NULL;
-	WCHAR *w = win ? utf8_to_utf16_dup(win) : NULL;
+	WCHAR *w;
 	ITypeLib *lib = NULL;
 	TLIBATTR *la;
 	BSTR name = NULL, doc = NULL;
 	HRESULT hr;
 
 	vfw_log_init();
-	free(win);
-	free(abs);
+	w = windows_name(path);
 	if (!w) {
 		fprintf(stderr, "seance: %s: not a path seance can name\n",
 			path);
@@ -332,7 +369,12 @@ int cmd_typelib(const char *path)
 		return 1;
 	}
 	unresolved = 0;
-	lib->lpVtbl->GetLibAttr(lib, &la);
+	if (FAILED(hr = lib->lpVtbl->GetLibAttr(lib, &la))) {
+		fprintf(stderr, "seance: %s: no library attributes (%#x)\n",
+			path, (unsigned)hr);
+		lib->lpVtbl->Release(lib);
+		return 1;
+	}
 	lib->lpVtbl->GetDocumentation(lib, -1, &name, &doc, NULL, NULL);
 	fputs("library ", stdout);
 	put_bstr(name);

@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "common/log.h"
 #include "win32/codepage.h"
@@ -115,22 +116,25 @@ struct reg_iface {
  * registry is locked (reading a type can load an imported library, which
  * reads the registry).
  */
-static struct reg_iface *lib_interfaces(ITypeLib *lib, UINT *count)
+static HRESULT lib_interfaces(ITypeLib *lib, struct reg_iface **ifaces,
+			      UINT *count)
 {
 	UINT n = lib->lpVtbl->GetTypeInfoCount(lib), k = 0;
 	struct reg_iface *out = calloc(n ? n : 1, sizeof(*out));
+	HRESULT hr = S_OK;
 
+	*ifaces = NULL;
 	*count = 0;
 	if (!out)
-		return NULL;
-	for (UINT i = 0; i < n; i++) {
+		return E_OUTOFMEMORY;
+	for (UINT i = 0; i < n && SUCCEEDED(hr); i++) {
 		ITypeInfo *ti;
 		TYPEATTR *a;
 		BSTR name = NULL;
 
-		if (FAILED(lib->lpVtbl->GetTypeInfo(lib, i, &ti)))
-			continue;
-		if (SUCCEEDED(ti->lpVtbl->GetTypeAttr(ti, &a))) {
+		if (FAILED(hr = lib->lpVtbl->GetTypeInfo(lib, i, &ti)))
+			break;
+		if (SUCCEEDED(hr = ti->lpVtbl->GetTypeAttr(ti, &a))) {
 			int dispatch = a->typekind == TKIND_DISPATCH;
 			int dual = a->wTypeFlags & TYPEFLAG_FDUAL;
 
@@ -154,8 +158,16 @@ static struct reg_iface *lib_interfaces(ITypeLib *lib, UINT *count)
 		}
 		ti->lpVtbl->Release(ti);
 	}
+	if (FAILED(hr)) {
+		/* Not some of them: the registry would be left half done. */
+		for (UINT i = 0; i < k; i++)
+			free(out[i].name);
+		free(out);
+		return hr;
+	}
+	*ifaces = out;
 	*count = k;
-	return out;
+	return S_OK;
 }
 
 static void free_interfaces(struct reg_iface *r, UINT n)
@@ -220,11 +232,12 @@ HRESULT oa_register_typelib(ITypeLib *lib, const WCHAR *path,
 			 : path8 ? dir_of(path8) : NULL;
 	desc = doc && *doc ? utf16_to_utf8_dup(doc)
 			   : name ? utf16_to_utf8_dup(name) : strdup("");
-	ifaces = lib_interfaces(lib, &nifaces);
-	if (!path8 || !help8 || !desc || !ifaces) {
+	if (!path8 || !help8 || !desc) {
 		hr = E_OUTOFMEMORY;
 		goto out;
 	}
+	if (FAILED(hr = lib_interfaces(lib, &ifaces, &nifaces)))
+		goto out;
 
 	reg_lock();
 	err = put_key(root, base, "", desc);
@@ -263,9 +276,14 @@ HRESULT oa_register_typelib(ITypeLib *lib, const WCHAR *path,
 		if (!err)
 			err = put_key(root, path_ps, "Version", buf);
 	}
+	int saving = !err;
+
 	if (!err)
 		err = reg_save();
 	reg_unlock();
+	/* The file wasn't written: back to what it holds. */
+	if (err && saving)
+		reg_reload();
 	TRACE("RegisterTypeLib%s(%s %s, %s): %u interfaces, error %ld",
 	      for_user ? "ForUser" : "", g, base + 8 + OLE_GUID_CHARS, path8,
 	      nifaces, (long)err);
@@ -295,7 +313,7 @@ WINFN(HRESULT) oa_RegisterTypeLibForUser(ITypeLib *lib, LPCOLESTR path,
 
 /*
  * The version key under a library's GUID key for major.minor: that one,
- * or the highest minor version above it, or for 0xffff.0xffff the
+ * else the highest minor version above it, or for 0xffff.0xffff the
  * highest of all.
  */
 static struct reg_key *find_version(struct reg_key *lib, WORD major,
@@ -304,7 +322,13 @@ static struct reg_key *find_version(struct reg_key *lib, WORD major,
 	struct reg_key *best = NULL;
 	unsigned long best_major = 0, best_minor = 0;
 	int latest = major == 0xffff && minor == 0xffff;
+	char exact[16];
 
+	/* The version asked for, as it is written, first. */
+	snprintf(exact, sizeof(exact), "%x.%x", major, minor);
+	for (size_t i = 0; !latest && i < lib->nsub; i++)
+		if (!strcasecmp(lib->sub[i]->name, exact))
+			return lib->sub[i];
 	for (size_t i = 0; i < lib->nsub; i++) {
 		char *end;
 		unsigned long maj = strtoul(lib->sub[i]->name, &end, 16), min;
@@ -437,7 +461,7 @@ static HRESULT unregister(const GUID *guid, WORD major, WORD minor,
 	static const char *const ver_keep[] = { "FLAGS", "HELPDIR", NULL };
 	const char *root = for_user ? USER_ROOT : MACHINE_ROOT;
 	const char *sys = syskind_name(kind);
-	char g[OLE_GUID_CHARS], ver[320], key[384], *path;
+	char g[OLE_GUID_CHARS], ver[320], key[384], vnum[16], *path;
 	struct reg_iface *ifaces = NULL;
 	UINT nifaces = 0;
 	ITypeLib *lib = NULL;
@@ -448,6 +472,7 @@ static HRESULT unregister(const GUID *guid, WORD major, WORD minor,
 		return TYPE_E_BADMODULEKIND;
 	ole_guid_format(guid, g);
 	snprintf(ver, sizeof(ver), "TypeLib\\%s\\%x.%x", g, major, minor);
+	snprintf(vnum, sizeof(vnum), "%x.%x", major, minor);
 	snprintf(key, sizeof(key), "%s\\%s\\%lx\\%s", root, ver,
 		 (unsigned long)lcid, sys);
 	reg_lock();
@@ -461,26 +486,37 @@ static HRESULT unregister(const GUID *guid, WORD major, WORD minor,
 
 	/* Its interfaces, from the library itself, if it still loads. */
 	WCHAR *w = utf8_to_utf16_dup(path);
+	HRESULT hr = S_OK;
+
 	if (w && SUCCEEDED(oa_LoadTypeLibEx(w, REGKIND_NONE, &lib))) {
-		ifaces = lib_interfaces(lib, &nifaces);
+		hr = lib_interfaces(lib, &ifaces, &nifaces);
 		lib->lpVtbl->Release(lib);
 	}
 	free(w);
+	if (FAILED(hr)) {
+		free(path);
+		return hr;
+	}
 
 	reg_lock();
 	for (UINT i = 0; i < nifaces; i++) {
-		char iid[OLE_GUID_CHARS], sub[160], *owner;
+		char iid[OLE_GUID_CHARS], sub[160], *owner, *version;
+		struct reg_key *tk;
 
 		ole_guid_format(&ifaces[i].iid, iid);
 		snprintf(sub, sizeof(sub), "%s\\Interface\\%s\\TypeLib", root,
 			 iid);
-		owner = get_str(reg_open(sub), "");
-		/* Only if it is still this library's. */
-		if (owner && !strcasecmp(owner, g)) {
+		tk = reg_open(sub);
+		owner = get_str(tk, "");
+		version = get_str(tk, "Version");
+		/* Only if it is still this version of this library's. */
+		if (owner && !strcasecmp(owner, g) &&
+		    (!version || !strcasecmp(version, vnum))) {
 			snprintf(sub, sizeof(sub), "Interface\\%s", iid);
 			drop_tree(root, sub);
 		}
 		free(owner);
+		free(version);
 	}
 	snprintf(key, sizeof(key), "%s\\%lx\\%s", ver, (unsigned long)lcid,
 		 sys);
@@ -492,6 +528,8 @@ static HRESULT unregister(const GUID *guid, WORD major, WORD minor,
 	drop_if_empty(root, key, NULL);
 	LONG err = reg_save();
 	reg_unlock();
+	if (err)
+		reg_reload();	/* the file wasn't written: back to it */
 	TRACE("UnRegisterTypeLib%s(%s %x.%x): %u interfaces, error %ld",
 	      for_user ? "ForUser" : "", g, major, minor, nifaces, (long)err);
 	free_interfaces(ifaces, nifaces);

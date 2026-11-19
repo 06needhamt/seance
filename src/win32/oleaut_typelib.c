@@ -140,9 +140,17 @@ struct tl_import {
 	GUID libid;
 	WORD major, minor;
 	LCID lcid;
-	char *file;
-	struct typelib *lib;		/* holds a reference once loaded */
-	int tried;
+	char *file;			/* in the library's arena */
+	int off;			/* its offset in IMPFILES, plus 1 */
+};
+
+/*
+ * A type reference of another library, shown by a view in this one (a dual
+ * interface's inherited functions): the library and the href there.
+ */
+struct tl_foreign {
+	struct tl_import lib;
+	HREFTYPE href;
 };
 
 struct arena_block {
@@ -174,7 +182,10 @@ struct typelib {
 	size_t len;
 	struct tl_import *imports;
 	size_t nimports;
-	pthread_mutex_t lock;		/* imports[] */
+	/* hrefs of other libraries' types that this one's views show */
+	struct tl_foreign *foreign;
+	size_t nforeign;
+	pthread_mutex_t lock;		/* imports[], foreign[] */
 
 	struct arena_block *arena;
 	BSTR *bstrs;			/* to free with the library */
@@ -262,10 +273,6 @@ static BSTR lib_bstr(struct typelib *lib, const WCHAR *s, UINT len)
 
 static void lib_free(struct typelib *lib)
 {
-	for (size_t i = 0; i < lib->nimports; i++)
-		if (lib->imports[i].lib)
-			lib->imports[i].lib->iface.lpVtbl->Release(
-				&lib->imports[i].lib->iface);
 	for (size_t i = 0; i < lib->nbstrs; i++)
 		oa_SysFreeString(lib->bstrs[i]);
 	while (lib->arena) {
@@ -277,6 +284,7 @@ static void lib_free(struct typelib *lib)
 	pthread_mutex_destroy(&lib->lock);
 	free(lib->bstrs);
 	free(lib->imports);
+	free(lib->foreign);
 	free(lib->data);
 	free(lib->key);
 	free(lib);
@@ -350,6 +358,7 @@ struct msft {
 	TYPEDESC **tdesc_cache;		/* by type description offset / 8 */
 	BYTE *tdesc_busy;
 	size_t ntdesc;
+	int depth;			/* of msft_tdesc calls */
 };
 
 static INT rd32(const BYTE *p)
@@ -433,6 +442,17 @@ static int msft_value(const struct msft *m, INT off, VARIANT *v)
 
 	memset(v, 0, sizeof(*v));
 	if (off < 0) {
+		/* Only a scalar fits; anything else would point nowhere. */
+		switch ((off & 0x7c000000) >> 26) {
+		case VT_EMPTY: case VT_NULL: case VT_I2: case VT_I4:
+		case VT_R4: case VT_R8: case VT_CY: case VT_DATE:
+		case VT_ERROR: case VT_BOOL: case VT_I1: case VT_UI1:
+		case VT_UI2: case VT_UI4: case VT_I8: case VT_UI8:
+		case VT_INT: case VT_UINT: case VT_HRESULT:
+			break;
+		default:
+			return -1;
+		}
 		v->vt = (off & 0x7c000000) >> 26;
 		v->lVal = off & 0x03ffffff;
 		return 0;
@@ -525,16 +545,28 @@ static int msft_cust(const struct msft *m, INT off, struct tl_cust **out)
 static int msft_tdesc(struct msft *m, INT x, TYPEDESC *td);
 static HRESULT tl_load(const char *win, struct typelib **out);
 
+/*
+ * A type encoded in the reference itself can't be one that needs another
+ * description (what it points to, its elements, the type it names).
+ */
+static int inline_vt_ok(VARTYPE vt)
+{
+	return vt != VT_PTR && vt != VT_SAFEARRAY && vt != VT_CARRAY &&
+	       vt != VT_USERDEFINED;
+}
+
 /* The description at offset x, shared: each is decoded once. */
 static TYPEDESC *msft_tdesc_at(struct msft *m, INT x)
 {
 	size_t i = (size_t)x / 8;
 
 	if (x < 0) {
-		TYPEDESC *td = ar_alloc(m->lib, sizeof(*td));
+		TYPEDESC *td;
 
-		if (td)
-			td->vt = x & VT_TYPEMASK;
+		if (!inline_vt_ok(x & VT_TYPEMASK) ||
+		    !(td = ar_alloc(m->lib, sizeof(*td))))
+			return NULL;
+		td->vt = x & VT_TYPEMASK;
 		return td;
 	}
 	if (x % 8 || i >= m->ntdesc || m->tdesc_busy[i])
@@ -561,15 +593,32 @@ static TYPEDESC *msft_tdesc_at(struct msft *m, INT x)
  * VT_SAFEARRAY, an href for VT_USERDEFINED, an array description's
  * offset for VT_CARRAY).
  */
+#define MSFT_TDESC_DEPTH 64
+
+static int msft_tdesc_body(struct msft *m, INT x, TYPEDESC *td);
+
 static int msft_tdesc(struct msft *m, INT x, TYPEDESC *td)
+{
+	int r;
+
+	if (x < 0) {
+		td->vt = x & VT_TYPEMASK;
+		return inline_vt_ok(td->vt) ? 0 : -1;
+	}
+	/* Nested descriptions (arrays of arrays aren't cached): a limit. */
+	if (m->depth >= MSFT_TDESC_DEPTH)
+		return -1;
+	m->depth++;
+	r = msft_tdesc_body(m, x, td);
+	m->depth--;
+	return r;
+}
+
+static int msft_tdesc_body(struct msft *m, INT x, TYPEDESC *td)
 {
 	const BYTE *p;
 	INT v;
 
-	if (x < 0) {
-		td->vt = x & VT_TYPEMASK;
-		return 0;
-	}
 	if (!(p = seg_at(m, SEG_TYPEDESC, x, 8)))
 		return -1;
 	td->vt = (USHORT)rd16(p) & VT_TYPEMASK;
@@ -662,6 +711,12 @@ static int msft_members(struct msft *m, struct tl_type *t, INT memoffset)
 				defaults = params - 4 * nargs;
 			nopt = (reclen - 24 - tail) / 4;
 			f->name = wname;
+			/*
+			 * A property's other accessors may leave the name out:
+			 * it is the one before's, with the same memid.
+			 */
+			if (!wname && k && t->funcs[k - 1].desc.memid == memid)
+				f->name = t->funcs[k - 1].name;
 			d->memid = memid;
 			d->funckind = fkccic & 7;
 			d->invkind = (fkccic >> 3) & 0xf;
@@ -1000,6 +1055,9 @@ static const struct s_func ienumvariant_funcs[] = {
  * shows IDispatch's functions, whose parameters refer to stdole2's GUID.
  */
 #define STD_HREF_BASE 0x7f000002u
+/* Below them, other libraries' hrefs a view shows (struct tl_foreign). */
+#define FOREIGN_HREF_BASE 0x7d000002u
+#define FOREIGN_MAX ((STD_HREF_BASE - FOREIGN_HREF_BASE) / 4)
 
 static HREFTYPE std_href(int index)
 {
@@ -1449,6 +1507,15 @@ static HRESULT tl_load(const char *win, struct typelib **out)
 		TRACE("LoadTypeLib(%s): no such file", win);
 		return TYPE_E_CANTLOADLIBRARY;
 	}
+	/* An absolute path: the cache's key, and the path registered. */
+	{
+		char *abs = realpath(path, NULL);
+
+		if (abs) {
+			snprintf(path, sizeof(path), "%s", abs);
+			free(abs);
+		}
+	}
 	snprintf(key, sizeof(key), "%s\\%d", path, res);
 	pthread_mutex_lock(&cache_lock);
 	for (lib = cache; lib; lib = lib->next)
@@ -1468,6 +1535,15 @@ static HRESULT tl_load(const char *win, struct typelib **out)
 		return E_OUTOFMEMORY;
 	}
 	pthread_mutex_lock(&cache_lock);
+	/* Another thread may have loaded it meanwhile: use that one. */
+	for (struct typelib *l = cache; l; l = l->next)
+		if (!strcmp(l->key, key)) {
+			lib_addref(l);
+			pthread_mutex_unlock(&cache_lock);
+			lib_free(lib);
+			*out = l;
+			return S_OK;
+		}
 	lib->next = cache;
 	cache = lib;
 	pthread_mutex_unlock(&cache_lock);
@@ -1481,17 +1557,23 @@ static ITypeLib *tl_iface(struct typelib *lib)
 	return (ITypeLib *)&lib->iface;
 }
 
-/* A loaded library with this GUID and major version (the newest minor). */
-static struct typelib *find_loaded(const GUID *libid, WORD major)
+/*
+ * A loaded library with this GUID and major version, and at least this
+ * minor version (the newest), with a reference; stdole2 for stdole.
+ */
+static struct typelib *find_loaded(const GUID *libid, WORD major,
+				   WORD minor)
 {
 	struct typelib *best = NULL, *std = stdole2_lib();
 
+	/* stdole32 (1.0) has the same GUID: the built-in one stands in. */
 	if (std && guid_eq(libid, &std->attr.guid))
 		return std;
 	pthread_mutex_lock(&cache_lock);
 	for (struct typelib *l = cache; l; l = l->next)
 		if (guid_eq(&l->attr.guid, libid) &&
 		    l->attr.wMajorVerNum == major &&
+		    l->attr.wMinorVerNum >= minor &&
 		    (!best || l->attr.wMinorVerNum > best->attr.wMinorVerNum))
 			best = l;
 	if (best)
@@ -1506,8 +1588,13 @@ static struct typelib *find_loaded(const GUID *libid, WORD major)
 
 #define HREF_DUAL ((HREFTYPE)-2)
 
-/* The import file entry at off in the IMPFILES segment, parsed. */
-static struct tl_import *lib_import(struct typelib *lib, INT off)
+/*
+ * The import file entry at off in the IMPFILES segment, parsed (once) and
+ * copied to *out.  Only what the library is is kept: each use looks the
+ * library up again, so libraries that import each other don't keep each
+ * other alive, and one that couldn't be found is tried again next time.
+ */
+static int lib_import(struct typelib *lib, INT off, struct tl_import *out)
 {
 	struct msft m = { .lib = lib, .d = lib->data, .len = lib->len };
 	const BYTE *p;
@@ -1523,10 +1610,10 @@ static struct tl_import *lib_import(struct typelib *lib, INT off)
 						  : rd32(lib->data + h + 16 * i + 4);
 	}
 	if (!(p = seg_at(&m, SEG_IMPFILES, off, 14)))
-		return NULL;
+		return -1;
 	pthread_mutex_lock(&lib->lock);
 	for (size_t i = 0; i < lib->nimports; i++)
-		if (lib->imports[i].tried == off + 1) {
+		if (lib->imports[i].off == off + 1) {
 			imp = &lib->imports[i];
 			goto out;
 		}
@@ -1537,7 +1624,7 @@ static struct tl_import *lib_import(struct typelib *lib, INT off)
 	lib->imports = n;
 	imp = &n[lib->nimports++];
 	memset(imp, 0, sizeof(*imp));
-	imp->tried = off + 1;
+	imp->off = off + 1;
 	msft_guid(&m, rd32(p), &imp->libid);
 	imp->lcid = rd32(p + 4);
 	imp->major = rd32(p + 8) & 0xffff;
@@ -1546,32 +1633,50 @@ static struct tl_import *lib_import(struct typelib *lib, INT off)
 	const BYTE *name = seg_at(&m, SEG_IMPFILES, off + 14, namelen);
 	if (name && (imp->file = ar_alloc(lib, namelen + 1)))
 		memcpy(imp->file, name, namelen);
-	{
-		struct typelib *l = find_loaded(&imp->libid, imp->major);
-
-		if (!l) {
-			ITypeLib *tl = NULL;
-
-			if (SUCCEEDED(oa_LoadRegTypeLib(&imp->libid,
-							imp->major,
-							imp->minor, imp->lcid,
-							&tl)) &&
-			    tl && tl->lpVtbl == &typelib_vtbl)
-				l = (struct typelib *)tl;
-			else if (tl)
-				tl->lpVtbl->Release((ITypeLib2 *)tl);
-		}
-		if (!l && imp->file && tl_load(imp->file, &l) != S_OK)
-			l = NULL;
-		if (!l)
-			TRACE("type library %s: can't find %s",
-			      lib->key ? lib->key : "", imp->file ? imp->file
-								   : "?");
-		imp->lib = l;
-	}
 out:
+	if (imp)
+		*out = *imp;
 	pthread_mutex_unlock(&lib->lock);
-	return imp;
+	return imp ? 0 : -1;
+}
+
+/* Is lib the library imp names (the same GUID, major, and minor or later)? */
+static int import_matches(const struct tl_import *imp,
+			  const struct typelib *lib)
+{
+	if (!guid_eq(&lib->attr.guid, &imp->libid))
+		return 0;
+	return lib->builtin || (lib->attr.wMajorVerNum == imp->major &&
+				lib->attr.wMinorVerNum >= imp->minor);
+}
+
+/* The library an import names, with a reference, or NULL. */
+static struct typelib *import_load(struct typelib *lib,
+				   const struct tl_import *imp)
+{
+	struct typelib *l = find_loaded(&imp->libid, imp->major, imp->minor);
+	ITypeLib *tl = NULL;
+
+	if (l)
+		return l;
+	if (SUCCEEDED(oa_LoadRegTypeLib(&imp->libid, imp->major, imp->minor,
+					imp->lcid, &tl)) && tl) {
+		if (tl->lpVtbl == &typelib_vtbl &&
+		    import_matches(imp, (struct typelib *)tl))
+			return (struct typelib *)tl;
+		tl->lpVtbl->Release((ITypeLib2 *)tl);
+	}
+	if (imp->file && tl_load(imp->file, &l) == S_OK) {
+		if (import_matches(imp, l))
+			return l;
+		TRACE("type library %s: %s isn't the library imported",
+		      lib->key ? lib->key : "", imp->file);
+		lib_release(l);
+		return NULL;
+	}
+	TRACE("type library %s: can't find %s", lib->key ? lib->key : "",
+	      imp->file ? imp->file : "?");
+	return NULL;
 }
 
 static HRESULT get_type(struct tl_type *t, ITypeInfo **out);
@@ -1620,6 +1725,28 @@ static HRESULT resolve_href(struct tl_type *t, HREFTYPE href,
 		*out = &std->types[(href - STD_HREF_BASE) / 4];
 		return S_OK;		/* stdole2 isn't counted */
 	}
+	if (href >= FOREIGN_HREF_BASE && href < STD_HREF_BASE &&
+	    (href & 3) == 2) {
+		size_t i = (href - FOREIGN_HREF_BASE) / 4;
+		struct tl_foreign f;
+		struct typelib *other;
+		HRESULT hr;
+
+		int known;
+
+		pthread_mutex_lock(&lib->lock);
+		if ((known = i < lib->nforeign))
+			f = lib->foreign[i];
+		pthread_mutex_unlock(&lib->lock);
+		if (!known)
+			return TYPE_E_ELEMENTNOTFOUND;
+		if (!(other = import_load(lib, &f.lib)))
+			return TYPE_E_CANTLOADLIBRARY;
+		hr = other->ntypes ? resolve_href(&other->types[0], f.href, out)
+				   : TYPE_E_ELEMENTNOTFOUND;
+		lib_release(other);
+		return hr;
+	}
 	if (!(href & 3)) {
 		UINT i = href / MSFT_TYPEINFO_SIZE;
 
@@ -1638,7 +1765,7 @@ static HRESULT resolve_href(struct tl_type *t, HREFTYPE href,
 		(rd32(lib->data + 4 * H_VARFLAGS) & MSFT_HELPDLL ? 4 : 0) +
 		4 * (INT)lib->ntypes;
 	const BYTE *p;
-	struct tl_import *imp;
+	struct tl_import imp;
 
 	for (int i = 0; i < SEG_COUNT; i++) {
 		m.seg[i].off = rd32(lib->data + h + 16 * i);
@@ -1648,24 +1775,26 @@ static HRESULT resolve_href(struct tl_type *t, HREFTYPE href,
 	if (!(p = seg_at(&m, SEG_IMPINFO, href & ~3u, 12)))
 		return TYPE_E_ELEMENTNOTFOUND;
 	INT flags = rd32(p), what = rd32(p + 8);
-	if (!(imp = lib_import(lib, rd32(p + 4))) || !imp->lib)
-		return TYPE_E_CANTLOADLIBRARY;
-	struct typelib *other = imp->lib;
+	struct typelib *other;
+	HRESULT hr = TYPE_E_ELEMENTNOTFOUND;
 
+	if (lib_import(lib, rd32(p + 4), &imp))
+		return TYPE_E_ELEMENTNOTFOUND;
+	if (!(other = import_load(lib, &imp)))
+		return TYPE_E_CANTLOADLIBRARY;
+	/* other's reference becomes the reference *out holds. */
 	if (flags & 0x10000) {
 		GUID g;
 
-		if (msft_guid(&m, what, &g))
-			return TYPE_E_ELEMENTNOTFOUND;
-		for (UINT i = 0; i < other->ntypes; i++)
-			if (guid_eq(&other->types[i].attr.guid, &g)) {
-				*out = &other->types[i];
-				lib_addref(other);
-				return S_OK;
-			}
+		if (!msft_guid(&m, what, &g))
+			for (UINT i = 0; i < other->ntypes; i++)
+				if (guid_eq(&other->types[i].attr.guid, &g)) {
+					*out = &other->types[i];
+					return S_OK;
+				}
 		TRACE("type library: no type in %s with the GUID asked for",
-		      imp->file ? imp->file : "?");
-		return TYPE_E_ELEMENTNOTFOUND;
+		      imp.file ? imp.file : "?");
+		goto fail;
 	}
 	if (other->builtin) {
 		int i = stdole2_index(what);
@@ -1673,15 +1802,17 @@ static HRESULT resolve_href(struct tl_type *t, HREFTYPE href,
 		if (i < 0) {
 			TRACE("type library: stdole2's type #%d isn't known",
 			      what);
-			return TYPE_E_ELEMENTNOTFOUND;
+			goto fail;
 		}
 		what = i;
 	}
-	if (what < 0 || (UINT)what >= other->ntypes)
-		return TYPE_E_ELEMENTNOTFOUND;
-	*out = &other->types[what];
-	lib_addref(other);
-	return S_OK;
+	if (what >= 0 && (UINT)what < other->ntypes) {
+		*out = &other->types[what];
+		return S_OK;
+	}
+fail:
+	lib_release(other);
+	return hr;
 }
 
 static HRESULT get_type(struct tl_type *t, ITypeInfo **out)
@@ -1847,6 +1978,202 @@ WINFN(HRESULT) ti_GetTypeComp(ITypeInfo2 *self, ITypeComp **out)
 	return E_NOTIMPL;
 }
 
+static WCHAR *lib_win_path(const struct typelib *lib);
+
+/*
+ * href, a reference in other's types, as one in lib's: other's own
+ * references are made into entries of lib's foreign list.
+ */
+static HREFTYPE foreign_href(struct typelib *lib, struct typelib *other,
+			     HREFTYPE href, const char *file)
+{
+	HREFTYPE r = (HREFTYPE)-1;
+	size_t i;
+
+	if (other == lib || other->builtin ||
+	    (href >= STD_HREF_BASE && href < STD_HREF_BASE + 4 * STD_COUNT))
+		return href;
+	pthread_mutex_lock(&lib->lock);
+	for (i = 0; i < lib->nforeign; i++) {
+		const struct tl_foreign *f = &lib->foreign[i];
+
+		if (f->href == href && guid_eq(&f->lib.libid, &other->attr.guid) &&
+		    f->lib.major == other->attr.wMajorVerNum &&
+		    f->lib.minor == other->attr.wMinorVerNum)
+			goto found;
+	}
+	if (i < FOREIGN_MAX) {
+		struct tl_foreign *n = realloc(lib->foreign,
+					       (i + 1) * sizeof(*n));
+		char *copy = file ? ar_alloc(lib, strlen(file) + 1) : NULL;
+
+		if (!n)
+			goto out;
+		lib->foreign = n;
+		memset(&n[i], 0, sizeof(n[i]));
+		n[i].lib.libid = other->attr.guid;
+		n[i].lib.major = other->attr.wMajorVerNum;
+		n[i].lib.minor = other->attr.wMinorVerNum;
+		n[i].lib.lcid = other->attr.lcid;
+		if (copy)
+			n[i].lib.file = strcpy(copy, file);
+		n[i].href = href;
+		lib->nforeign++;
+		goto found;
+	}
+	goto out;
+found:
+	r = FOREIGN_HREF_BASE + 4 * (HREFTYPE)i;
+out:
+	pthread_mutex_unlock(&lib->lock);
+	return r;
+}
+
+#define ALIGN8(n) (((n) + 7) & ~(size_t)7)
+
+/* The room the descriptions td points to take. */
+static size_t tdesc_extra(const TYPEDESC *td)
+{
+	switch (td->vt) {
+	case VT_PTR:
+	case VT_SAFEARRAY:
+		return ALIGN8(sizeof(TYPEDESC)) + tdesc_extra(td->lptdesc);
+	case VT_CARRAY:
+		return ALIGN8(sizeof(ARRAYDESC) + (td->lpadesc->cDims - 1) *
+						     sizeof(SAFEARRAYBOUND)) +
+		       tdesc_extra(&td->lpadesc->tdescElem);
+	default:
+		return 0;
+	}
+}
+
+struct relocate {
+	BYTE *next;
+	struct typelib *lib, *other;
+	const char *file;
+};
+
+static void *reloc_take(struct relocate *r, size_t n)
+{
+	void *p = r->next;
+
+	r->next += ALIGN8(n);
+	return p;
+}
+
+/* *td, which points into other's memory, with its own copy. */
+static void tdesc_relocate(TYPEDESC *td, struct relocate *r)
+{
+	switch (td->vt) {
+	case VT_PTR:
+	case VT_SAFEARRAY: {
+		TYPEDESC *c = reloc_take(r, sizeof(*c));
+
+		*c = *td->lptdesc;
+		tdesc_relocate(c, r);
+		td->lptdesc = c;
+		break;
+	}
+	case VT_CARRAY: {
+		size_t n = sizeof(ARRAYDESC) + (td->lpadesc->cDims - 1) *
+						     sizeof(SAFEARRAYBOUND);
+		ARRAYDESC *a = reloc_take(r, n);
+
+		memcpy(a, td->lpadesc, n);
+		tdesc_relocate(&a->tdescElem, r);
+		td->lpadesc = a;
+		break;
+	}
+	case VT_USERDEFINED:
+		td->hreftype = foreign_href(r->lib, r->other, td->hreftype,
+					    r->file);
+		break;
+	default:
+		break;
+	}
+}
+
+static size_t paramdesc_extra(const PARAMDESC *p)
+{
+	size_t n;
+
+	if (!(p->wParamFlags & PARAMFLAG_FHASDEFAULT) || !p->pparamdescex)
+		return 0;
+	n = ALIGN8(sizeof(PARAMDESCEX));
+	if (p->pparamdescex->varDefaultValue.vt == VT_BSTR &&
+	    p->pparamdescex->varDefaultValue.bstrVal)
+		n += ALIGN8(4 + oa_SysStringByteLen(
+				    p->pparamdescex->varDefaultValue.bstrVal) +
+			    2);
+	return n;
+}
+
+static void paramdesc_relocate(PARAMDESC *p, struct relocate *r)
+{
+	PARAMDESCEX *x;
+	BSTR b;
+
+	if (!(p->wParamFlags & PARAMFLAG_FHASDEFAULT) || !p->pparamdescex) {
+		p->pparamdescex = NULL;
+		return;
+	}
+	x = reloc_take(r, sizeof(*x));
+	*x = *p->pparamdescex;
+	b = x->varDefaultValue.bstrVal;
+	if (x->varDefaultValue.vt == VT_BSTR && b) {
+		UINT len = oa_SysStringByteLen(b);
+		BYTE *q = reloc_take(r, 4 + len + 2);
+
+		memcpy(q, &len, 4);
+		memcpy(q + 4, b, len);
+		memset(q + 4 + len, 0, 2);
+		x->varDefaultValue.bstrVal = (BSTR)(q + 4);
+	}
+	p->pparamdescex = x;
+}
+
+/*
+ * d with everything it points to in its own block, for a function that
+ * belongs to another library than the view showing it: that library may
+ * go once the description is returned, and its type references mean
+ * nothing in this one.
+ */
+static FUNCDESC *funcdesc_relocate(FUNCDESC *d, struct typelib *lib,
+				   struct typelib *other)
+{
+	size_t n = ALIGN8(sizeof(*d) + d->cParams * sizeof(ELEMDESC));
+	WCHAR *w = lib_win_path(other);
+	char *file = w ? utf16_to_utf8_dup(w) : NULL;
+	struct relocate r = { .lib = lib, .other = other, .file = file };
+	FUNCDESC *c;
+
+	free(w);
+	n += tdesc_extra(&d->elemdescFunc.tdesc) +
+	     paramdesc_extra(&d->elemdescFunc.paramdesc);
+	for (SHORT i = 0; i < d->cParams; i++)
+		n += tdesc_extra(&d->lprgelemdescParam[i].tdesc) +
+		     paramdesc_extra(&d->lprgelemdescParam[i].paramdesc);
+	if ((c = out_alloc(n))) {
+		*c = *d;
+		r.next = (BYTE *)c + ALIGN8(sizeof(*c) +
+					    d->cParams * sizeof(ELEMDESC));
+		c->lprgelemdescParam = d->cParams ? (ELEMDESC *)(c + 1) : NULL;
+		if (d->cParams)
+			memcpy(c->lprgelemdescParam, d->lprgelemdescParam,
+			       d->cParams * sizeof(ELEMDESC));
+		tdesc_relocate(&c->elemdescFunc.tdesc, &r);
+		paramdesc_relocate(&c->elemdescFunc.paramdesc, &r);
+		for (SHORT i = 0; i < c->cParams; i++) {
+			tdesc_relocate(&c->lprgelemdescParam[i].tdesc, &r);
+			paramdesc_relocate(&c->lprgelemdescParam[i].paramdesc,
+					   &r);
+		}
+	}
+	free(file);
+	out_free(d);
+	return c;
+}
+
 /* A copy of a function's description for the caller, as a view shows it. */
 static FUNCDESC *copy_funcdesc(const struct tl_func *f, int dispatch)
 {
@@ -1896,6 +2223,8 @@ WINFN(HRESULT) ti_GetFuncDesc(ITypeInfo2 *self, UINT index, FUNCDESC **out)
 	if (!(f = view_func(t, index, &owner)))
 		return TYPE_E_ELEMENTNOTFOUND;
 	*out = copy_funcdesc(f, is_dual_dispatch(t));
+	if (*out && owner->lib != t->lib && !owner->lib->builtin)
+		*out = funcdesc_relocate(*out, t->lib, owner->lib);
 	lib_release(owner->lib);
 	return *out ? S_OK : E_OUTOFMEMORY;
 }
@@ -2626,8 +2955,9 @@ static int lib_find_name(struct typelib *lib, const WCHAR *name,
 				hit = t->funcs[j].name;
 				id = t->funcs[j].desc.memid;
 			}
-			for (int k = 0; !hit && k < t->funcs[j].desc.cParams;
-			     k++)
+			/* IsName knows parameters; FindName has no id for them. */
+			for (int k = 0;
+			     !infos && !hit && k < t->funcs[j].desc.cParams; k++)
 				if (name_eq(t->funcs[j].param_names[k], name))
 					hit = t->funcs[j].param_names[k];
 		}
@@ -2782,6 +3112,13 @@ static WCHAR *lib_win_path(const struct typelib *lib)
 	return w;
 }
 
+/* A path with a drive letter or a UNC prefix: not one to search for. */
+static int is_full_path(LPCOLESTR f)
+{
+	return f[0] == '\\' ||
+	       (((f[0] | 0x20) >= 'a' && (f[0] | 0x20) <= 'z') && f[1] == ':');
+}
+
 HRESULT STUB_WINAPI oa_LoadTypeLibEx(LPCOLESTR file, REGKIND kind,
 				     ITypeLib **out)
 {
@@ -2798,8 +3135,14 @@ HRESULT STUB_WINAPI oa_LoadTypeLibEx(LPCOLESTR file, REGKIND kind,
 	free(f);
 	if (FAILED(hr))
 		return hr;
-	/* REGKIND_REGISTER: as RegisterTypeLib, with the file found. */
-	if (kind == REGKIND_REGISTER && !lib->builtin) {
+	/*
+	 * REGKIND_REGISTER: as RegisterTypeLib, with the file found.
+	 * REGKIND_DEFAULT (LoadTypeLib) registers too when it had to search
+	 * for the file: a name without a drive or a UNC prefix.
+	 */
+	if ((kind == REGKIND_REGISTER ||
+	     (kind == REGKIND_DEFAULT && !is_full_path(file))) &&
+	    !lib->builtin) {
 		WCHAR *path = lib_win_path(lib);
 
 		hr = path ? oa_register_typelib(tl_iface(lib), path, NULL, 0)

@@ -35,10 +35,12 @@
  *       [default, source] dispinterface IEvents; };
  *   };
  */
+#include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "loader/modules.h"
 #include "runtime/runtime.h"
@@ -327,11 +329,90 @@ static void w_var(struct writer *w, int t, int32_t memid, const char *name,
 	w->ti[t][6] += 1 << 16;
 }
 
+/* The header, directories and members after the segments: the file. */
+static struct buf finish(struct writer *w, const GUID *lib_guid,
+			 const char *doc, const char *name,
+			 int32_t dispatch_href)
+{
+	struct buf out = { 0 };
+
+	/* The header. */
+	int32_t h[21];
+	const char *hello = "hello";
+
+	h[0] = 0x5446534d;
+	h[1] = 0x00010002;
+	h[2] = w_guid(w, lib_guid, -2);
+	h[3] = h[4] = 0x409;
+	h[5] = w->ptr == 8 ? SYS_WIN64 : SYS_WIN32;
+	h[6] = 1 | 2 << 16;
+	h[7] = 0;
+	h[8] = w->ntypes;
+	h[9] = w_string(w, doc);
+	h[10] = 0;
+	h[11] = 7;
+	h[12] = h[13] = 0;
+	h[14] = w_name(w, name);
+	h[15] = w_string(w, "test.hlp");
+	h[16] = w_cust(w, &guid_cust,
+		       w_value(w, VT_BSTR, hello, strlen(hello)), -1);
+	h[17] = h[18] = 0;
+	h[19] = dispatch_href;
+	h[20] = 3;
+	put(&out, h, sizeof(h));
+	for (int i = 0; i < w->ntypes; i++)
+		put32(&out, i * 0x64);
+
+	/* The segment directory, then the segments, then the members. */
+	size_t dir = out.len;
+	for (int i = 0; i < w->ntypes; i++)
+		put(&w->seg[SEG_TYPEINFO], w->ti[i], 0x64);
+	for (int i = 0; i < SEG_COUNT * 4; i++)
+		put32(&out, 0);
+	for (int i = 0; i < SEG_COUNT; i++) {
+		int32_t *e = (int32_t *)(out.d + dir) + 4 * i;
+
+		e[0] = w->seg[i].len ? (int32_t)out.len : -1;
+		e[1] = (int32_t)w->seg[i].len;
+		e[2] = -1;
+		e[3] = 0xf;
+		if (w->seg[i].len)
+			put(&out, w->seg[i].d, w->seg[i].len);
+	}
+	size_t ti_seg = ((int32_t *)(out.d + dir))[0];
+	for (int i = 0; i < w->ntypes; i++) {
+		int n = nmem[i];
+		int32_t len = 0;
+
+		if (!n)
+			continue;
+		((int32_t *)(out.d + ti_seg + i * 0x64))[1] = (int32_t)out.len;
+		for (int j = 0; j < n; j++)
+			len += (int32_t)mem[i][j].rec.len;
+		put32(&out, len);
+		for (int j = 0; j < n; j++)
+			put(&out, mem[i][j].rec.d, mem[i][j].rec.len);
+		for (int j = 0; j < n; j++)
+			put32(&out, mem[i][j].memid);
+		for (int j = 0; j < n; j++)
+			put32(&out, mem[i][j].name);
+		for (int j = 0, off = 0; j < n; j++) {
+			put32(&out, off);
+			off += (int)mem[i][j].rec.len;
+		}
+	}
+	for (int i = 0; i < SEG_COUNT; i++)
+		free(w->seg[i].d);
+	for (int i = 0; i < 16; i++)
+		for (int j = 0; j < 8; j++)
+			free(mem[i][j].rec.d);
+	return out;
+}
+
 /* The library, laid out for pointers of ptr bytes. */
 static struct buf build_library(int ptr)
 {
 	struct writer w = { .ptr = ptr };
-	struct buf out = { 0 };
 	const char *stdole = "stdole2.tlb";
 	int32_t td_i4ptr, td_bstrptr, td_guid, td_guidptr, td_point, td_ppoint,
 		td_tag, ad;
@@ -473,77 +554,45 @@ static struct buf build_library(int ptr)
 	put32(&w.seg[SEG_REFTAB], -1);
 	put32(&w.seg[SEG_REFTAB], -1);
 
-	/* The header. */
-	int32_t h[21];
-	const char *hello = "hello";
+	return finish(&w, &libid, "Test library", "TestLib", href_idispatch);
+}
 
-	h[0] = 0x5446534d;
-	h[1] = 0x00010002;
-	h[2] = w_guid(&w, &libid, -2);
-	h[3] = h[4] = 0x409;
-	h[5] = ptr == 8 ? SYS_WIN64 : SYS_WIN32;
-	h[6] = 1 | 2 << 16;
-	h[7] = 0;
-	h[8] = w.ntypes;
-	h[9] = w_string(&w, "Test library");
-	h[10] = 0;
-	h[11] = 7;
-	h[12] = h[13] = 0;
-	h[14] = w_name(&w, "TestLib");
-	h[15] = w_string(&w, "test.hlp");
-	h[16] = w_cust(&w, &guid_cust,
-		       w_value(&w, VT_BSTR, hello, strlen(hello)), -1);
-	h[17] = h[18] = 0;
-	h[19] = href_idispatch;
-	h[20] = 3;
-	put(&out, h, sizeof(h));
-	for (int i = 0; i < w.ntypes; i++)
-		put32(&out, i * 0x64);
+static const GUID libid_derived = { 0x5eace009, 0x1111, 0x2222,
+	{ 1, 2, 3, 4, 5, 6, 7, 8 } };
+static const GUID iid_derived = { 0x5eace00a, 0x1111, 0x2222,
+	{ 1, 2, 3, 4, 5, 6, 7, 8 } };
 
-	/* The segment directory, then the segments, then the members. */
-	size_t dir = out.len;
-	for (int i = 0; i < w.ntypes; i++)
-		put(&w.seg[SEG_TYPEINFO], w.ti[i], 0x64);
-	for (int i = 0; i < SEG_COUNT * 4; i++)
-		put32(&out, 0);
-	for (int i = 0; i < SEG_COUNT; i++) {
-		int32_t *e = (int32_t *)(out.d + dir) + 4 * i;
+/*
+ * A second library, importing the first from base (a Windows path):
+ *
+ *   [dual] interface IDerived : IThing { HRESULT Extra(); }
+ */
+static struct buf build_derived(int ptr, const char *base)
+{
+	struct writer w = { .ptr = ptr };
 
-		e[0] = w.seg[i].len ? (int32_t)out.len : -1;
-		e[1] = (int32_t)w.seg[i].len;
-		e[2] = -1;
-		e[3] = 0xf;
-		if (w.seg[i].len)
-			put(&out, w.seg[i].d, w.seg[i].len);
-	}
-	size_t ti_seg = ((int32_t *)(out.d + dir))[0];
-	for (int i = 0; i < w.ntypes; i++) {
-		int n = nmem[i];
-		int32_t len = 0;
+	memset(mem, 0, sizeof(mem));
+	memset(nmem, 0, sizeof(nmem));
+	int32_t impfile = put32(&w.seg[SEG_IMPFILES], w_guid(&w, &libid, -1));
+	put32(&w.seg[SEG_IMPFILES], 0x409);
+	put32(&w.seg[SEG_IMPFILES], 1 | 2 << 16);
+	put16(&w.seg[SEG_IMPFILES], (int16_t)(strlen(base) << 2));
+	put(&w.seg[SEG_IMPFILES], base, strlen(base));
+	pad4(&w.seg[SEG_IMPFILES]);
+	const int32_t href_ithing = 1;
+	put32(&w.seg[SEG_IMPINFO], 0x10000 | TKIND_DISPATCH << 24);
+	put32(&w.seg[SEG_IMPINFO], impfile);
+	put32(&w.seg[SEG_IMPINFO], w_guid(&w, &iid_thing, href_ithing));
 
-		if (!n)
-			continue;
-		((int32_t *)(out.d + ti_seg + i * 0x64))[1] = (int32_t)out.len;
-		for (int j = 0; j < n; j++)
-			len += (int32_t)mem[i][j].rec.len;
-		put32(&out, len);
-		for (int j = 0; j < n; j++)
-			put(&out, mem[i][j].rec.d, mem[i][j].rec.len);
-		for (int j = 0; j < n; j++)
-			put32(&out, mem[i][j].memid);
-		for (int j = 0; j < n; j++)
-			put32(&out, mem[i][j].name);
-		for (int j = 0, off = 0; j < n; j++) {
-			put32(&out, off);
-			off += (int)mem[i][j].rec.len;
-		}
-	}
-	for (int i = 0; i < SEG_COUNT; i++)
-		free(w.seg[i].d);
-	for (int i = 0; i < 16; i++)
-		for (int j = 0; j < 8; j++)
-			free(mem[i][j].rec.d);
-	return out;
+	int t = w_type(&w, TKIND_DISPATCH, "IDerived", &iid_derived,
+		       TYPEFLAG_FDUAL | TYPEFLAG_FDISPATCHABLE |
+			       TYPEFLAG_FOLEAUTOMATION, ptr, ptr);
+	w.ti[t][19] = 1 | (12 * ptr) << 16;
+	w.ti[t][21] = href_ithing;
+	w_func(&w, t, 20, "Extra", FUNC_PUREVIRTUAL, INVOKE_FUNC,
+	       simple(VT_HRESULT), 11, NULL, 0, NULL);
+	return finish(&w, &libid_derived, "Derived library", "DerivedLib",
+		      -1);
 }
 
 /* ----------------------------------------------------------------------
@@ -1010,6 +1059,76 @@ static void test_library(int ptr)
 	free(path);
 }
 
+/*
+ * A dual interface deriving from another library's: the functions it
+ * inherits from there, as its dispatch view shows them, refer to types
+ * through this library, and outlive the other library.
+ */
+static const char *narrow(const WCHAR *w);
+
+static void test_derived(int ptr)
+{
+	struct buf b = build_library(ptr);
+	WCHAR *base = write_lib(ptr == 8 ? "base64.tlb" : "base32.tlb", b.d,
+				b.len);
+	char base8[256];
+	ITypeLib *lib = NULL;
+	ITypeInfo *ti;
+	FUNCDESC *f;
+	TYPEATTR *a;
+
+	free(b.d);
+	if (!base) {
+		CHECK(0);
+		return;
+	}
+	snprintf(base8, sizeof(base8), "%s", narrow(base));
+	free(base);
+	b = build_derived(ptr, base8);
+	base = write_lib(ptr == 8 ? "derived64.tlb" : "derived32.tlb", b.d,
+			 b.len);
+	free(b.d);
+	CHECK_EQ(pLoadTypeLibEx(base, REGKIND_NONE, &lib), S_OK);
+	free(base);
+	if (!lib)
+		return;
+	ti = type_at(lib, 0);
+	CHECK_EQ(ti->lpVtbl->GetTypeAttr(ti, &a), S_OK);
+	CHECK_EQ(a->cFuncs, 12);
+	ti->lpVtbl->ReleaseTypeAttr(ti, a);
+
+	/* IThing's Add: a default value, from the other library. */
+	CHECK_EQ(ti->lpVtbl->GetFuncDesc(ti, 7, &f), S_OK);
+	CHECK_EQ(f->memid, 1);
+	CHECK_EQ(f->cParams, 2);
+	PARAMDESCEX *x = f->lprgelemdescParam[1].paramdesc.pparamdescex;
+	CHECK(x && x->varDefaultValue.vt == VT_I4 &&
+	      x->varDefaultValue.lVal == 2);
+	ti->lpVtbl->ReleaseFuncDesc(ti, f);
+
+	/* IThing's Check(GUID *): GUID is an import of the other library. */
+	CHECK_EQ(ti->lpVtbl->GetFuncDesc(ti, 10, &f), S_OK);
+	CHECK_EQ(f->memid, 3);
+	CHECK_EQ(f->cParams, 1);
+	CHECK_EQ(f->lprgelemdescParam[0].tdesc.vt, VT_PTR);
+	CHECK_EQ(f->lprgelemdescParam[0].tdesc.lptdesc->vt, VT_USERDEFINED);
+	CHECK_STR(ref_name(ti, f->lprgelemdescParam[0].tdesc.lptdesc->hreftype),
+		  "GUID");
+	ti->lpVtbl->ReleaseFuncDesc(ti, f);
+
+	/* IThing's Name, through the interface it is a view of. */
+	CHECK_EQ(ti->lpVtbl->GetFuncDesc(ti, 8, &f), S_OK);
+	CHECK_EQ(f->invkind, INVOKE_PROPERTYGET);
+	CHECK_EQ(f->elemdescFunc.tdesc.vt, VT_BSTR);
+	ti->lpVtbl->ReleaseFuncDesc(ti, f);
+
+	CHECK_EQ(ti->lpVtbl->GetFuncDesc(ti, 11, &f), S_OK);
+	CHECK_EQ(f->memid, 20);
+	ti->lpVtbl->ReleaseFuncDesc(ti, f);
+	ti->lpVtbl->Release(ti);
+	CHECK_EQ(lib->lpVtbl->Release(lib), 0);
+}
+
 static void test_stdole2(void)
 {
 	ITypeLib *lib = NULL;
@@ -1180,6 +1299,79 @@ static void walk_library(const void *d, size_t len)
 	free(p);
 }
 
+/* Replaces every aligned 32-bit word from with to; how many there were. */
+static int patch_words(unsigned char *d, size_t len, uint32_t from,
+		       uint32_t to)
+{
+	int n = 0;
+
+	for (size_t i = 0; i + 4 <= len; i += 4)
+		if (!memcmp(d + i, &from, 4)) {
+			memcpy(d + i, &to, 4);
+			n++;
+		}
+	return n;
+}
+
+/* Does the library load, and its type infos read? */
+static int loads(const void *d, size_t len)
+{
+	WCHAR *p = write_lib("patched.tlb", d, len);
+	ITypeLib *lib = NULL;
+	int ok = 0;
+
+	if (p && SUCCEEDED(pLoadTypeLib(p, &lib))) {
+		UINT n = lib->lpVtbl->GetTypeInfoCount(lib);
+
+		ok = 1;
+		for (UINT i = 0; i < n; i++) {
+			ITypeInfo *ti;
+
+			if (FAILED(lib->lpVtbl->GetTypeInfo(lib, i, &ti)))
+				ok = 0;
+			else
+				ti->lpVtbl->Release(ti);
+		}
+		lib->lpVtbl->Release(lib);
+	}
+	free(p);
+	return ok;
+}
+
+/*
+ * What can't be encoded in a word: a packed value that would need data
+ * (a BSTR, an interface), a type that needs another description.
+ */
+static void test_inline_encodings(void)
+{
+	struct buf b = build_library(sizeof(void *));
+
+	CHECK(loads(b.d, b.len));
+	/* Red = 1, a packed I4, made a packed BSTR. */
+	CHECK_EQ(patch_words(b.d, b.len, (uint32_t)INLINE_I4(1),
+			     0x80000000u | VT_BSTR << 26 | 1), 1);
+	CHECK(!loads(b.d, b.len));
+	free(b.d);
+
+	b = build_library(sizeof(void *));
+	CHECK_EQ(patch_words(b.d, b.len, (uint32_t)INLINE_I4(1),
+			     0x80000000u | VT_UNKNOWN << 26 | 1), 1);
+	CHECK(!loads(b.d, b.len));
+	free(b.d);
+
+	/* Every inline I4 made an inline VT_PTR, VT_USERDEFINED. */
+	b = build_library(sizeof(void *));
+	CHECK(patch_words(b.d, b.len, (uint32_t)simple(VT_I4),
+			  (uint32_t)simple(VT_PTR)) > 0);
+	CHECK(!loads(b.d, b.len));
+	free(b.d);
+	b = build_library(sizeof(void *));
+	CHECK(patch_words(b.d, b.len, (uint32_t)simple(VT_I4),
+			  (uint32_t)simple(VT_USERDEFINED)) > 0);
+	CHECK(!loads(b.d, b.len));
+	free(b.d);
+}
+
 static void test_bad_libraries(void)
 {
 	struct buf b = build_library(sizeof(void *));
@@ -1187,7 +1379,7 @@ static void test_bad_libraries(void)
 	uint32_t seed = 12345;
 
 	/* Every truncation. */
-	for (size_t len = 0; len < b.len; len += 1 + len / 64)
+	for (size_t len = 0; len < b.len; len++)
 		walk_library(b.d, len);
 
 	/* Bytes changed at random, a few at a time. */
@@ -1332,6 +1524,36 @@ static void test_registration(void)
 	if (again)
 		again->lpVtbl->Release(again);
 
+	/*
+	 * Version 1.5 beside 1.2: asking for 1.2 gets 1.2, asking for 1.0 the
+	 * newest minor.
+	 */
+	reg_lock();
+	struct reg_key *v = reg_create(MACHINE LIBKEY "\\1.5\\409\\win32", 0,
+				       NULL, NULL);
+	if (v)
+		reg_set(v, "", REG_SZ, wide("C:\\other.tlb"),
+			13 * sizeof(WCHAR));
+	reg_unlock();
+	CHECK_EQ(pQueryPathOfRegTypeLib(&libid, 1, 2, 0x409, &found), S_OK);
+	CHECK_STR(narrow(found), narrow(path));
+	pSysFreeString(found);
+	CHECK_EQ(pQueryPathOfRegTypeLib(&libid, 1, 0, 0x409, &found), S_OK);
+	CHECK_STR(narrow(found), "C:\\other.tlb");
+	pSysFreeString(found);
+	CHECK_EQ(pQueryPathOfRegTypeLib(&libid, 1, 3, 0x409, &found), S_OK);
+	CHECK_STR(narrow(found), "C:\\other.tlb");
+	pSysFreeString(found);
+	reg_lock();
+	if ((v = reg_open(MACHINE LIBKEY "\\1.5")))
+		reg_delete_tree(v, 0);
+	reg_unlock();
+
+	/* An interface 1.5 of the library has taken over stays too. */
+	reg_lock();
+	if ((v = reg_open(MACHINE IFACE(2) "\\TypeLib")))
+		reg_set(v, "Version", REG_SZ, wide("1.5"), 4 * sizeof(WCHAR));
+	reg_unlock();
 	/* An interface another library has taken over since stays. */
 	reg_lock();
 	struct reg_key *k = reg_open(MACHINE IFACE(4) "\\TypeLib");
@@ -1341,8 +1563,14 @@ static void test_registration(void)
 	reg_unlock();
 	CHECK_EQ(pUnRegisterTypeLib(&libid, 1, 2, 0x409, SYS_WIN32), S_OK);
 	CHECK(!reg_exists(MACHINE LIBKEY));
-	CHECK(!reg_exists(MACHINE IFACE(2)));
+	CHECK(reg_exists(MACHINE IFACE(2)));
 	CHECK(reg_exists(MACHINE IFACE(4)));
+	reg_lock();
+	if ((v = reg_open(MACHINE IFACE(4))))
+		reg_delete_tree(v, 0);
+	if ((v = reg_open(MACHINE IFACE(2))))
+		reg_delete_tree(v, 0);
+	reg_unlock();
 	CHECK_EQ(pUnRegisterTypeLib(&libid, 1, 2, 0x409, SYS_WIN32),
 		 TYPE_E_REGISTRYACCESS);
 	CHECK_EQ(pQueryPathOfRegTypeLib(&libid, 1, 2, 0x409, &found),
@@ -1383,6 +1611,27 @@ static void test_registration(void)
 	if (lib)
 		CHECK_EQ(lib->lpVtbl->Release(lib), 0);
 	CHECK_EQ(pUnRegisterTypeLib(&libid, 1, 2, 0x409, SYS_WIN32), S_OK);
+
+	/* LoadTypeLib registers a library it had to search for. */
+	char cwd[512];
+
+	if (getcwd(cwd, sizeof(cwd)) && !chdir(dir)) {
+		CHECK_EQ(pLoadTypeLib(wide("reg32.tlb"), &lib), S_OK);
+		CHECK_STR(reg_str(MACHINE LIBKEY "\\1.2\\409\\win32", ""),
+			  narrow(path));
+		if (lib)
+			CHECK_EQ(lib->lpVtbl->Release(lib), 0);
+		CHECK_EQ(pUnRegisterTypeLib(&libid, 1, 2, 0x409, SYS_WIN32),
+			 S_OK);
+		CHECK(!chdir(cwd));
+	} else {
+		CHECK(0);
+	}
+	/* ... and not one named by its full path. */
+	CHECK_EQ(pLoadTypeLib(path, &lib), S_OK);
+	CHECK(!reg_exists(MACHINE LIBKEY));
+	if (lib)
+		CHECK_EQ(lib->lpVtbl->Release(lib), 0);
 	free(path);
 
 	/* A Win64 library is found by either build. */
@@ -1412,8 +1661,14 @@ int main(void)
 	reg_reload();
 	oa = mod_load("oleaut32.dll", NULL);
 	CHECK(oa != NULL);
-	if (!oa || !mkdtemp(dir))
+	if (!oa)
 		return test_summary("test_typelib");
+	if (!mkdtemp(dir)) {
+		fprintf(stderr, "mkdtemp %s: %s\n", dir, strerror(errno));
+		CHECK(0);
+		mod_free(oa);
+		return test_summary("test_typelib");
+	}
 	pLoadTypeLib = get("LoadTypeLib");
 	pLoadTypeLibEx = get("LoadTypeLibEx");
 	pSysFreeString = get("SysFreeString");
@@ -1429,8 +1684,11 @@ int main(void)
 	test_library(4);
 	test_library(8);
 	test_stdole2();
+	test_derived(4);
+	test_derived(8);
 	test_errors();
 	test_bad_libraries();
+	test_inline_encodings();
 	test_registration();
 
 	snprintf(cleanup, sizeof(cleanup), "rm -rf -- '%s'", dir);
