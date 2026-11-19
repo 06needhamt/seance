@@ -1633,11 +1633,14 @@ static int lib_import(struct typelib *lib, INT off, struct tl_import *out)
 	const BYTE *name = seg_at(&m, SEG_IMPFILES, off + 14, namelen);
 	if (name && (imp->file = ar_alloc(lib, namelen + 1)))
 		memcpy(imp->file, name, namelen);
-out:
+out:;
+	/* Decided under the lock: imp means nothing once it is released. */
+	int r = imp ? 0 : -1;
+
 	if (imp)
 		*out = *imp;
 	pthread_mutex_unlock(&lib->lock);
-	return imp ? 0 : -1;
+	return r;
 }
 
 /* Is lib the library imp names (the same GUID, major, and minor or later)? */
