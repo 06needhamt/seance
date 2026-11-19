@@ -235,6 +235,25 @@ EXPORT int seh_unhandled_filter(void)
 	return r == 1;
 }
 
+/* A handler that resumes every fault as it is, mending nothing, as
+ * Delphi's does in a DLL whose heap it has already freed (abcAVI.dll):
+ * the fault comes back for ever, so the harness takes it as unhandled.
+ * Never returns. */
+static LONG WINAPI stubborn_handler(EXCEPTION_RECORD *rec, void *frame,
+				    CONTEXT *ctx, void *disp)
+{
+	return rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION ?
+	       DISP_CONTINUE_EXECUTION : DISP_CONTINUE_SEARCH;
+}
+
+EXPORT int seh_fault_storm(void)
+{
+	struct seh_frame f;
+
+	chain_push(&f, stubborn_handler);
+	return vfw_seh_try_write();
+}
+
 /* No frame, no filter: still faults normally, for the harness's crash
  * report to catch. Never returns. */
 EXPORT int seh_unhandled_crash(void)

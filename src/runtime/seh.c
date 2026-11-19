@@ -209,6 +209,39 @@ EXCEPTION_DISPOSITION seh_call_handler(PEXCEPTION_ROUTINE handler,
 				       CONTEXT *ctx, void *dispatch)
 	__asm__("seh_call_handler") __attribute__((cdecl));
 
+/*
+ * A handler that has the faulting instruction run again, unchanged, each
+ * time it faults - Delphi's, in a DLL whose heap its own finalization has
+ * already released (abcAVI.dll, unloaded after a failed DllMain) - would
+ * spin for ever. After STORM_LIMIT resumes at the same instruction for the
+ * same address in a row, the fault counts as unhandled and is reported.
+ * A handler that mends the fault (a guard page committed, a page made
+ * writable) sees each address fault once, so it never gets near.
+ */
+#define STORM_LIMIT 10000
+static __thread struct {
+	uintptr_t pc, addr;
+	unsigned n;
+} storm;
+
+/* 1 if this resume is one too many of the same fault. */
+static int fault_storm(const EXCEPTION_RECORD *rec, const CONTEXT *ctx)
+{
+	if (rec->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
+	    rec->NumberParameters < 2 ||
+	    (uintptr_t)ctx->Eip != (uintptr_t)rec->ExceptionAddress) {
+		storm.n = 0;
+		return 0;
+	}
+	uintptr_t addr = (uintptr_t)rec->ExceptionInformation[1];
+	if (storm.n && storm.pc == ctx->Eip && storm.addr == addr)
+		return ++storm.n > STORM_LIMIT;
+	storm.pc = ctx->Eip;
+	storm.addr = addr;
+	storm.n = 1;
+	return 0;
+}
+
 /* Walks teb's fs:[0] chain, calling each handler until one returns
  * ExceptionContinueExecution (then resumes ctx, never returning) or the
  * chain ends. Returns if nothing handled it, for the caller to report. */
@@ -222,6 +255,13 @@ static void walk_chain(struct win_teb *teb, EXCEPTION_RECORD *rec, CONTEXT *ctx,
 		EXCEPTION_DISPOSITION d =
 			seh_call_handler(frame->Handler, rec, frame, ctx, NULL);
 
+		if (d == ExceptionContinueExecution && fault_storm(rec, ctx)) {
+			TRACE("handler %p resumed the same fault %u times: "
+			      "taking it as unhandled", (void *)frame->Handler,
+			      STORM_LIMIT);
+			storm.n = 0;
+			return;
+		}
 		if (d == ExceptionContinueExecution) {
 			if (vfw_trace_enabled) {
 				char h[160];
