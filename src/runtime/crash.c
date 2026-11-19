@@ -335,14 +335,27 @@ static void on_fault(int sig, siginfo_t *si, void *ctx)
 		raise(sig);
 }
 
+/* The SIGILL handler sanitizer builds had before on_sigill. */
+static struct sigaction old_sigill;
+
 /*
- * Sanitizer builds' SIGILL handler: 3DNow! as above, and anything else
- * dies of the signal when the instruction runs again.
+ * Sanitizer builds' SIGILL handler: 3DNow! as above. Anything else goes
+ * to the handler that was there (the sanitizer's, with handle_sigill=1),
+ * or else dies of the signal when the instruction runs again.
  */
 static void on_sigill(int sig, siginfo_t *si, void *ctx)
 {
 	if (si->si_code > 0 && amd3dnow_emulate(ctx))
 		return;
+	if ((old_sigill.sa_flags & SA_SIGINFO) && old_sigill.sa_sigaction) {
+		old_sigill.sa_sigaction(sig, si, ctx);
+		return;
+	}
+	if (!(old_sigill.sa_flags & SA_SIGINFO) &&
+	    old_sigill.sa_handler != SIG_DFL && old_sigill.sa_handler != SIG_IGN) {
+		old_sigill.sa_handler(sig);
+		return;
+	}
 	signal(sig, SIG_DFL);
 	if (si->si_code <= 0)
 		raise(sig);
@@ -405,8 +418,12 @@ int crash_install(void)
 		sigaction(sigs[i], &sa, NULL);
 	/* They don't take SIGILL, though, and 3DNow! needs it. */
 	if (VFW_SANITIZER_BUILD) {
+		struct sigaction was;
 		sa.sa_sigaction = on_sigill;
-		sigaction(SIGILL, &sa, NULL);
+		/* Installed again, it must not keep itself as the old one. */
+		if (!sigaction(SIGILL, &sa, &was) &&
+		    !((was.sa_flags & SA_SIGINFO) && was.sa_sigaction == on_sigill))
+			old_sigill = was;
 	}
 
 	if (timeout_secs) {

@@ -7,10 +7,12 @@
  * leave alone, FEMMS, and an operand it can't read.
  */
 #include <cpuid.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <float.h>
 #include <signal.h>
 #include <stdint.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 
 #include "runtime/amd3dnow.h"
@@ -120,6 +122,17 @@ static void test_operations(void)
 	r = pfpnacc(a, b); CHECK_F(r, 3.75f, 4.5f);
 	r = pfmin(a, b);   CHECK_F(r, 0.5f, -2.25f);
 	r = pfmax(a, b);   CHECK_F(r, 1.5f, 4.0f);
+	/* A zero from either is +0; a negative beats a zero to the minimum. */
+	r = pfmin(F(-0.0f, -1.0f), F(0.0f, 0.0f));
+	CHECK_D(r, 0, 0xbf800000);
+	r = pfmax(F(-0.0f, -1.0f), F(-0.0f, -0.0f));
+	CHECK_D(r, 0, 0);
+
+	/* No infinities: an overflow gives the largest number of its sign. */
+	r = pfadd(F(FLT_MAX, -FLT_MAX), F(FLT_MAX, -FLT_MAX));
+	CHECK_F(r, FLT_MAX, -FLT_MAX);
+	r = pfmul(F(1e30f, -1e30f), F(1e30f, 1e30f));
+	CHECK_F(r, FLT_MAX, -FLT_MAX);
 
 	r = pfcmpgt(a, b);             CHECK_D(r, 0xffffffff, 0);
 	r = pfcmpge(a, F(1.5f, 4.0f)); CHECK_D(r, 0xffffffff, 0);
@@ -141,6 +154,9 @@ static void test_operations(void)
 	CHECK_F(r, 1.0f / 3.0f, 1.0f / 3.0f);
 
 	r = pi2fd(a, D((uint32_t)-3, 1u << 24)); CHECK_F(r, -3.0f, 16777216.0f);
+	/* Too many bits for a float: toward zero, not to nearest. */
+	r = pi2fd(a, D(16777219, (uint32_t)-16777219));
+	CHECK_F(r, 16777218.0f, -16777218.0f);
 	r = pi2fw(a, D(0x0001ffff, 0x00007fff)); CHECK_F(r, -1.0f, 32767.0f);
 	r = pf2id(a, F(-3.75f, 3e9f));  CHECK_D(r, (uint32_t)-3, 0x7fffffff);
 	r = pf2id(a, F(-3e9f, 7.99f));  CHECK_D(r, 0x80000000u, 7);
@@ -166,6 +182,11 @@ static void test_operations(void)
 	memcpy(wb.b, bb, 8);
 	r = pavgusb(wa, wb);
 	CHECK(!memcmp(r.b, avg, 8));
+
+	/* The code resumed sees its own errno, whatever the emulator did. */
+	errno = 1234;
+	r = pfadd(a, b);
+	CHECK_EQ(errno, 1234);
 
 	/* No denormals: in or out, they are zeros. */
 	r = pfadd(F(1e-40f, 1.0f), F(0.0f, 0.0f));
@@ -229,6 +250,25 @@ static void test_addressing(void)
 			 "movq %%mm3, %0\n\temms"
 			 : "=m"(r.q) : "m"(a.q) : "mm3", "memory", X87);
 	CHECK_F(r, 101.0f, 202.0f);
+
+	/*
+	 * The address-size override: [eax], with rax's high half ignored.
+	 * The operand has to lie below 4 GB for that.
+	 */
+	mmx *low = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+			MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+	CHECK(low != MAP_FAILED);
+	if (low != MAP_FAILED) {
+		*low = F(10.0f, 20.0f);
+		uint64_t rax = 0xdead000000000000ull | (uintptr_t)low;
+		__asm__ volatile("movq %1, %%mm3\n\t"
+				 ".byte 0x67, 0x0f, 0x0f, 0x18, 0x9e\n\t"
+				 "movq %%mm3, %0\n\temms"
+				 : "=m"(r.q) : "m"(a.q), "a"(rax)
+				 : "mm3", "memory", X87);
+		CHECK_F(r, 11.0f, 22.0f);
+		munmap(low, 4096);
+	}
 #endif
 }
 
@@ -332,19 +372,28 @@ static int cpu_3dnow(void)
 int main(void)
 {
 	CHECK_EQ(crash_install(), 0);
+	/*
+	 * A CPU with 3DNow! runs these itself, and its estimates and
+	 * refining steps aren't the emulator's: then only what both agree
+	 * on is checked.
+	 */
+	if (cpu_3dnow()) {
+		fprintf(stderr, "test_3dnow: this CPU has 3DNow!, so the "
+			"emulator isn't exercised\n");
+		test_stack_top();
+		test_femms();
+		return test_summary("test_3dnow");
+	}
 	unsigned long before = amd3dnow_count();
 	test_operations();
 	test_addressing();
 	test_stack_top();
 	test_femms();
-	/* Here, the CPU did none of it itself. */
-	if (!cpu_3dnow())
-		CHECK(amd3dnow_count() - before >= 39);
+	/* The CPU did none of it itself. */
+	CHECK(amd3dnow_count() - before >= 39);
 
 	/* What it can't do is still the illegal instruction it was. */
-	if (!cpu_3dnow()) {
-		CHECK(died_of_sigill(in_child(bad_operand)));
-		CHECK(died_of_sigill(in_child(bad_suffix)));
-	}
+	CHECK(died_of_sigill(in_child(bad_operand)));
+	CHECK(died_of_sigill(in_child(bad_suffix)));
 	return test_summary("test_3dnow");
 }

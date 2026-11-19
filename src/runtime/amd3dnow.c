@@ -43,9 +43,10 @@ typedef union {
 
 /*
  * Copies n bytes from addr in this process, without faulting: the
- * kernel checks the address. Returns how many it copied.
+ * kernel checks the address. Returns how many it copied. code says addr
+ * is the faulting instruction's, whose page is known to be mapped.
  */
-static size_t peek(void *to, uintptr_t addr, size_t n)
+static size_t peek(void *to, uintptr_t addr, size_t n, int code)
 {
 	struct iovec l = { to, n }, r = { (void *)addr, n };
 	ssize_t got;
@@ -55,10 +56,12 @@ static size_t peek(void *to, uintptr_t addr, size_t n)
 	while (got < 0 && errno == EINTR);
 	if (got < 0 && errno == ENOSYS) {
 		/*
-		 * No process_vm_readv: read up to the end of addr's page,
-		 * which faults (as the instruction would have) if it isn't
-		 * mapped.
+		 * No process_vm_readv. The instruction's own page is mapped
+		 * (it was fetched from), so that much can be read directly;
+		 * an operand can't be checked, so it isn't read at all.
 		 */
+		if (!code)
+			return 0;
 		size_t page = (size_t)sysconf(_SC_PAGESIZE);
 		size_t left = page - (addr & (page - 1));
 		got = (ssize_t)(n < left ? n : left);
@@ -100,13 +103,24 @@ static int decode(const uint8_t *code, size_t n, uintptr_t pc,
 		  const greg_t *g, struct insn *in)
 {
 	size_t at = 0;
-	int rex = 0;
+	int rex = 0, addr32 = 0;
 
-	/* Prefixes: segment overrides with a base of 0 (all, on x86-64). */
+	/*
+	 * Prefixes: segment overrides with a base of 0 (all, on x86-64),
+	 * and on x86-64 the address-size override, which makes the address
+	 * 32 bits. On i386 that would mean 16-bit addressing, which flat
+	 * code doesn't use; it isn't decoded.
+	 */
 	for (; at < n; at++) {
 		uint8_t p = code[at];
 		if (p == 0x26 || p == 0x2e || p == 0x36 || p == 0x3e)
 			continue;
+#ifdef __x86_64__
+		if (p == 0x67) {
+			addr32 = 1;
+			continue;
+		}
+#endif
 		break;
 	}
 #ifdef __x86_64__
@@ -193,6 +207,8 @@ static int decode(const uint8_t *code, size_t n, uintptr_t pc,
 		in->addr += pc + at;
 	if (in->mem)
 		in->mem = 1;
+	if (addr32)
+		in->addr = (uint32_t)in->addr;
 	return 0;
 }
 
@@ -200,6 +216,16 @@ static int decode(const uint8_t *code, size_t n, uintptr_t pc,
 static float ftz(float x)
 {
 	return fpclassify(x) == FP_SUBNORMAL ? copysignf(0.0f, x) : x;
+}
+
+/* int32 to float, toward zero when it doesn't fit, as 3DNow! converts. */
+static float from_i32(int32_t v)
+{
+	volatile float rounded = (float)v;	/* to float, not x87's width */
+	float f = rounded;
+	if (fabs((double)f) > fabs((double)v))
+		f = nextafterf(f, 0.0f);
+	return f;
 }
 
 /* float to int32, toward zero, saturating (NaN gives the low end). */
@@ -256,7 +282,7 @@ static int operate(uint8_t op, mmx *dst, const mmx *src)
 		break;
 	case 0x0d:			/* pi2fd */
 		for (int k = 0; k < 2; k++)
-			r.f[k] = (float)src->i[k];
+			r.f[k] = from_i32(src->i[k]);
 		break;
 	case 0x1c:			/* pf2iw */
 		for (int k = 0; k < 2; k++)
@@ -341,10 +367,23 @@ static int operate(uint8_t op, mmx *dst, const mmx *src)
 	default:
 		return -1;
 	}
-	/* The float results (the integer conversions are exact anyway). */
-	if (op != 0x1c && op != 0x1d)
-		for (int k = 0; k < 2; k++)
+	/*
+	 * The float results (not the conversions to integers). 3DNow! has
+	 * no infinities: from finite operands, an overflow gives the largest
+	 * number of its sign. A zero PFMIN or PFMAX gives is +0, whichever
+	 * zero it came from.
+	 */
+	if (op != 0x1c && op != 0x1d) {
+		int finite = isfinite(a.f[0]) && isfinite(a.f[1]) &&
+			     isfinite(b.f[0]) && isfinite(b.f[1]);
+		for (int k = 0; k < 2; k++) {
 			r.f[k] = ftz(r.f[k]);
+			if (finite && isinf(r.f[k]))
+				r.f[k] = copysignf(FLT_MAX, r.f[k]);
+			if ((op == 0x94 || op == 0xa4) && r.f[k] == 0.0f)
+				r.f[k] = 0.0f;
+		}
+	}
 	*dst = r;
 	return 0;
 }
@@ -515,10 +554,11 @@ int amd3dnow_emulate(void *ucontext)
 	uint8_t code[15];
 	struct insn in = { 0 };
 	struct x87 x;
+	int saved = errno;	/* the code resumed sees its own errno */
 
-	size_t n = peek(code, pc, sizeof(code));
+	size_t n = peek(code, pc, sizeof(code), 1);
 	if (n < 2 || decode(code, n, pc, g, &in) || frame_x87(uc, &x))
-		return 0;
+		goto decline;
 
 	if (in.kind == FEMMS) {
 		empty_regs(&x);
@@ -530,13 +570,13 @@ int amd3dnow_emulate(void *ucontext)
 		read_regs(&x, r);
 		memcpy(&dst, r[in.reg], 8);
 		if (in.mem) {
-			if (peek(&src, in.addr, 8) != 8)
-				return 0;
+			if (peek(&src, in.addr, 8, 0) != 8)
+				goto decline;
 		} else {
 			memcpy(&src, r[in.rm], 8);
 		}
 		if (operate(in.op, &dst, &src))
-			return 0;
+			goto decline;
 		memcpy(r[in.reg], &dst, 8);
 		r[in.reg][8] = r[in.reg][9] = 0xff;	/* as MMX writes */
 		write_regs(&x, r);
@@ -544,5 +584,9 @@ int amd3dnow_emulate(void *ucontext)
 	trace_first(pc, &in);
 	g[REG_PC] = (greg_t)(pc + (uintptr_t)in.len);
 	__atomic_fetch_add(&emulated, 1, __ATOMIC_RELAXED);
+	errno = saved;
 	return 1;
+decline:
+	errno = saved;
+	return 0;
 }

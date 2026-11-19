@@ -1007,17 +1007,37 @@ instructions fault with SIGILL. seance now emulates them
 - PREFETCH and PREFETCHW, should the CPU lack those too.
 
 They work on the MMX registers in the signal context, on i386 and
-x86-64. The unit test `test_3dnow` checks each operation, each
-addressing form and the x87 stack top.
+x86-64. Where AMD defines the edge cases, the emulator follows them:
+- PI2FD rounds toward zero;
+- an overflow gives the largest number of its sign, as 3DNow! has no
+  infinities;
+- PFMIN and PFMAX give +0 for a zero;
+- denormals read and write as zeros.
+
+The unit test `test_3dnow` checks:
+- each operation, against results worked out by hand;
+- these addressing forms: `[eax]`, `ds:[eax+disp8]` and
+  `[eax+ecx*8+disp32]`, plus on x86-64 `[r9]`, RIP-relative and the
+  address-size override;
+- a nonzero x87 stack top;
+- FEMMS;
+- that what it can't emulate still raises SIGILL.
+
+It runs PREFETCHW too, but this CPU has PREFETCHW, so that runs natively
+and doesn't test the emulator's prefetch path. On a CPU that has 3DNow!,
+the test checks only what the hardware and the emulator agree on.
 
 - **Limits:**
   - PFRCP and PFRSQRT give full-precision results, not the hardware's
     14- and 15-bit estimates. The steps that refine those estimates
     (PFRCPIT1, PFRSQIT1, PFRCPIT2) pass the estimate through, so AMD's
     documented sequences still end at the right answer.
-  - An operand behind an `fs:` or `gs:` override isn't emulated, nor is
-    one at an address that can't be read. Either is reported as the
-    illegal instruction it is.
+  - These aren't emulated, and are reported as the illegal instruction
+    they are:
+    - an operand behind an `fs:` or `gs:` override;
+    - one at an address that can't be read;
+    - on i386, one with the address-size override (16-bit addressing,
+      which flat code doesn't use).
   - Each instruction costs a signal. `_arvic.dll` takes about 2.5 s to
     encode or decode ten 320x240 frames.
 - **`IsProcessorFeaturePresent(PF_3DNOW_INSTRUCTIONS_AVAILABLE)` still
