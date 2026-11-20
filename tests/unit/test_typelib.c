@@ -78,6 +78,9 @@ static HRESULT (WINAPI *pQueryPathOfRegTypeLib)(REFGUID, WORD, WORD, LCID,
 						BSTR *);
 static HRESULT (WINAPI *pLoadRegTypeLib)(REFGUID, WORD, WORD, LCID,
 					 ITypeLib **);
+static BSTR (WINAPI *pSysAllocString)(LPCOLESTR);
+static HRESULT (WINAPI *pCreateErrorInfo)(ICreateErrorInfo **);
+static HRESULT (WINAPI *pSetErrorInfo)(ULONG, IErrorInfo *);
 
 static const GUID libid = { 0x5eace001, 0x1111, 0x2222,
 			    { 1, 2, 3, 4, 5, 6, 7, 8 } };
@@ -102,6 +105,8 @@ static const GUID iid_idispatch = { 0x00020400, 0, 0,
 				    { 0xc0, 0, 0, 0, 0, 0, 0, 0x46 } };
 static const GUID iid_iunknown = { 0, 0, 0,
 				   { 0xc0, 0, 0, 0, 0, 0, 0, 0x46 } };
+static const GUID iid_ierrorinfo = { 0x1cf2b120, 0x547d, 0x101b,
+	{ 0x8e, 0x65, 0x08, 0x00, 0x2b, 0x2b, 0xd1, 0x19 } };
 
 /* ----------------------------------------------------------------------
  * Writing the library.
@@ -1030,6 +1035,307 @@ static void check_others(ITypeLib *lib)
 	ti->lpVtbl->Release(ti);
 }
 
+/*
+ * ITypeInfo::Invoke on an object implementing IThing (the dual
+ * interface's vtable: IDispatch's seven methods, then Add, the Name
+ * property and Check), through the dispatch view, the vtable view and the
+ * coclass; and on one implementing only IDispatch, for IEvents.
+ */
+static const char *narrow(const WCHAR *w);
+
+struct thing {
+	const void *const *vtbl;
+	WCHAR name[32];
+	GUID seen;
+	int calls;
+};
+
+static HRESULT WINAPI th_unused(struct thing *t)
+{
+	return E_NOTIMPL;
+}
+
+static HRESULT WINAPI th_add(struct thing *t, LONG a, LONG b, LONG *r)
+{
+	t->calls++;
+	if (a < 0) {
+		ICreateErrorInfo *c = NULL;
+		IErrorInfo *e = NULL;
+
+		if (pCreateErrorInfo(&c) == S_OK) {
+			c->lpVtbl->SetDescription(c, wide("negative"));
+			c->lpVtbl->SetSource(c, wide("Thing"));
+			c->lpVtbl->QueryInterface(c, &iid_ierrorinfo,
+						  (void **)&e);
+			pSetErrorInfo(0, e);
+			if (e)
+				e->lpVtbl->Release(e);
+			c->lpVtbl->Release(c);
+		}
+		return E_INVALIDARG;
+	}
+	*r = a + b;
+	return S_OK;
+}
+
+static HRESULT WINAPI th_get_name(struct thing *t, BSTR *v)
+{
+	*v = pSysAllocString(t->name);
+	return S_OK;
+}
+
+static HRESULT WINAPI th_put_name(struct thing *t, BSTR v)
+{
+	size_t i = 0;
+
+	for (; v && v[i] && i < 31; i++)
+		t->name[i] = v[i];
+	t->name[i] = 0;
+	return S_OK;
+}
+
+static HRESULT WINAPI th_check(struct thing *t, GUID *g)
+{
+	t->seen = *g;
+	return S_OK;
+}
+
+static const void *const thing_vtbl[] = {
+	(void *)th_unused, (void *)th_unused, (void *)th_unused,
+	(void *)th_unused, (void *)th_unused, (void *)th_unused,
+	(void *)th_unused, (void *)th_add, (void *)th_get_name,
+	(void *)th_put_name, (void *)th_check,
+};
+
+/* An object with only IDispatch, recording what Invoke is asked. */
+struct events {
+	IDispatch disp;
+	DISPID last;
+	UINT args;
+};
+
+static HRESULT WINAPI ev_qi(IDispatch *d, REFIID riid, void **ppv)
+{
+	if (!memcmp(riid, &iid_idispatch, sizeof(GUID)) ||
+	    !memcmp(riid, &iid_iunknown, sizeof(GUID))) {
+		*ppv = d;
+		return S_OK;
+	}
+	*ppv = NULL;
+	return E_NOINTERFACE;
+}
+
+static ULONG WINAPI ev_ref(IDispatch *d)
+{
+	return 1;
+}
+
+static HRESULT WINAPI ev_count(IDispatch *d, UINT *n)
+{
+	return E_NOTIMPL;
+}
+
+static HRESULT WINAPI ev_info(IDispatch *d, UINT i, LCID l, void **p)
+{
+	return E_NOTIMPL;
+}
+
+static HRESULT WINAPI ev_ids(IDispatch *d, REFIID r, LPOLESTR *n, UINT c,
+			     LCID l, DISPID *ids)
+{
+	return E_NOTIMPL;
+}
+
+static HRESULT WINAPI ev_invoke(IDispatch *d, DISPID id, REFIID riid,
+				LCID lcid, WORD flags, DISPPARAMS *dp,
+				VARIANT *res, EXCEPINFO *ex, UINT *err)
+{
+	struct events *e = (struct events *)d;
+
+	e->last = id;
+	e->args = dp->cArgs;
+	return S_OK;
+}
+
+static const IDispatchVtbl events_vtbl = {
+	ev_qi, ev_ref, ev_ref, ev_count, ev_info, ev_ids, ev_invoke,
+};
+
+static HRESULT inv(ITypeInfo *ti, void *obj, MEMBERID id, WORD flags,
+		   VARIANT *args, UINT n, DISPID *named, UINT nnamed,
+		   VARIANT *res, EXCEPINFO *ex, UINT *err)
+{
+	DISPPARAMS dp = { args, named, n, nnamed };
+
+	if (res)
+		memset(res, 0, sizeof(*res));
+	return ti->lpVtbl->Invoke(ti, obj, id, flags, &dp, res, ex, err);
+}
+
+static void check_invoke(ITypeLib *lib)
+{
+	ITypeInfo *thing = type_at(lib, 0), *events = type_at(lib, 2),
+		  *cls = type_at(lib, 7), *vt = NULL;
+	struct thing obj = { thing_vtbl, { 0 }, { 0 }, 0 };
+	struct events ev = { { &events_vtbl }, 0, 0 };
+	VARIANT a[4], r;
+	EXCEPINFO ex;
+	DISPID named[2];
+	HREFTYPE h;
+	UINT err;
+
+	if (!thing || !events || !cls)
+		goto done;
+	memset(a, 0, sizeof(a));
+
+	/* Add(3, 4): positional arguments, in reverse. */
+	a[0].vt = VT_I4;
+	a[0].lVal = 4;
+	a[1].vt = VT_I4;
+	a[1].lVal = 3;
+	CHECK_EQ(inv(thing, &obj, 1, DISPATCH_METHOD, a, 2, NULL, 0, &r, NULL,
+		     &err), S_OK);
+	CHECK_EQ(r.vt, VT_I4);
+	CHECK_EQ(r.lVal, 7);
+	/* b left out: its default, 2. */
+	CHECK_EQ(inv(thing, &obj, 1, DISPATCH_METHOD, &a[1], 1, NULL, 0, &r,
+		     NULL, &err), S_OK);
+	CHECK_EQ(r.lVal, 5);
+	/* Named: b = 20, then a = 1 by position. */
+	named[0] = 1;
+	a[0].lVal = 20;
+	a[1].lVal = 1;
+	CHECK_EQ(inv(thing, &obj, 1, DISPATCH_METHOD, a, 2, named, 1, &r, NULL,
+		     &err), S_OK);
+	CHECK_EQ(r.lVal, 21);
+	/* Both named, in any order. */
+	named[0] = 0;
+	named[1] = 1;
+	a[0].lVal = 100;
+	a[1].lVal = 11;
+	CHECK_EQ(inv(thing, &obj, 1, DISPATCH_METHOD, a, 2, named, 2, &r, NULL,
+		     &err), S_OK);
+	CHECK_EQ(r.lVal, 111);
+	/* No such parameter. */
+	named[0] = 5;
+	err = 99;
+	CHECK_EQ(inv(thing, &obj, 1, DISPATCH_METHOD, a, 2, named, 1, &r, NULL,
+		     &err), DISP_E_PARAMNOTFOUND);
+	CHECK_EQ(err, 0);
+	named[0] = 2;			/* the [retval] can't be given */
+	CHECK_EQ(inv(thing, &obj, 1, DISPATCH_METHOD, a, 2, named, 1, &r, NULL,
+		     &err), DISP_E_PARAMNOTFOUND);
+	/* Converted from a string; one that isn't a number. */
+	a[1].vt = VT_BSTR;
+	a[1].bstrVal = pSysAllocString(wide("40"));
+	a[0].vt = VT_I2;
+	a[0].iVal = 2;
+	CHECK_EQ(inv(thing, &obj, 1, DISPATCH_METHOD, a, 2, NULL, 0, &r, NULL,
+		     &err), S_OK);
+	CHECK_EQ(r.lVal, 42);
+	pSysFreeString(a[1].bstrVal);
+	a[1].bstrVal = pSysAllocString(wide("forty"));
+	err = 99;
+	CHECK_EQ(inv(thing, &obj, 1, DISPATCH_METHOD, a, 2, NULL, 0, &r, NULL,
+		     &err), DISP_E_TYPEMISMATCH);
+	CHECK_EQ(err, 1);
+	pSysFreeString(a[1].bstrVal);
+	a[1].vt = VT_I4;
+	a[1].lVal = 1;
+	/* Counts. */
+	CHECK_EQ(inv(thing, &obj, 1, DISPATCH_METHOD, a, 3, NULL, 0, &r, NULL,
+		     &err), DISP_E_BADPARAMCOUNT);
+	CHECK_EQ(inv(thing, &obj, 1, DISPATCH_METHOD, a, 0, NULL, 0, &r, NULL,
+		     &err), DISP_E_PARAMNOTOPTIONAL);
+	CHECK_EQ(inv(thing, &obj, 99, DISPATCH_METHOD, a, 0, NULL, 0, &r, NULL,
+		     &err), DISP_E_MEMBERNOTFOUND);
+	CHECK_EQ(inv(thing, &obj, 1, DISPATCH_PROPERTYGET, a, 0, NULL, 0, &r,
+		     NULL, &err), DISP_E_MEMBERNOTFOUND);
+	CHECK_EQ(inv(thing, NULL, 1, DISPATCH_METHOD, a, 0, NULL, 0, &r, NULL,
+		     &err), E_INVALIDARG);
+
+	/* A failed HRESULT: DISP_E_EXCEPTION, with the error information. */
+	a[0].vt = VT_I4;
+	a[0].lVal = 0;
+	a[1].vt = VT_I4;
+	a[1].lVal = -1;
+	memset(&ex, 0x55, sizeof(ex));
+	CHECK_EQ(inv(thing, &obj, 1, DISPATCH_METHOD, a, 2, NULL, 0, &r, &ex,
+		     &err), DISP_E_EXCEPTION);
+	CHECK_EQ(ex.scode, E_INVALIDARG);
+	CHECK_EQ(ex.wCode, 0);
+	CHECK_STR(utf8(ex.bstrDescription), "negative");
+	CHECK_STR(utf8(ex.bstrSource), "Thing");
+	CHECK_EQ(r.vt, VT_EMPTY);
+
+	/* The Name property: put as DISPID_PROPERTYPUT, then get. */
+	named[0] = DISPID_PROPERTYPUT;
+	a[0].vt = VT_BSTR;
+	a[0].bstrVal = pSysAllocString(wide("widget"));
+	CHECK_EQ(inv(thing, &obj, 2, DISPATCH_PROPERTYPUT, a, 1, named, 1,
+		     NULL, NULL, &err), S_OK);
+	CHECK_STR(narrow(obj.name), "widget");
+	pSysFreeString(a[0].bstrVal);
+	CHECK_EQ(inv(thing, &obj, 2, DISPATCH_PROPERTYPUT, a, 0, NULL, 0, NULL,
+		     NULL, &err), DISP_E_PARAMNOTOPTIONAL);
+	/* A number, converted to the property's BSTR. */
+	a[0].vt = VT_I4;
+	a[0].lVal = 12;
+	CHECK_EQ(inv(thing, &obj, 2, DISPATCH_PROPERTYPUT, a, 1, named, 1,
+		     NULL, NULL, &err), S_OK);
+	CHECK_STR(narrow(obj.name), "12");
+	CHECK_EQ(inv(thing, &obj, 2, DISPATCH_METHOD | DISPATCH_PROPERTYGET,
+		     a, 0, NULL, 0, &r, NULL, &err), S_OK);
+	CHECK_EQ(r.vt, VT_BSTR);
+	CHECK_STR(utf8(r.bstrVal), "12");
+
+	/* A pointer to a record, as VT_RECORD | VT_BYREF. */
+	{
+		GUID g = iid_thing;
+
+		memset(&a[0], 0, sizeof(a[0]));
+		a[0].vt = VT_RECORD | VT_BYREF;
+		a[0].pvRecord = &g;
+		CHECK_EQ(inv(thing, &obj, 3, DISPATCH_METHOD, a, 1, NULL, 0, &r,
+			     NULL, &err), S_OK);
+		CHECK(!memcmp(&obj.seen, &iid_thing, sizeof(GUID)));
+	}
+
+	/* The vtable view, and the coclass (its default interface). */
+	a[0].vt = VT_I4;
+	a[0].lVal = 30;
+	a[1].vt = VT_I4;
+	a[1].lVal = 12;
+	CHECK_EQ(thing->lpVtbl->GetRefTypeOfImplType(thing, (UINT)-1, &h),
+		 S_OK);
+	CHECK_EQ(thing->lpVtbl->GetRefTypeInfo(thing, h, &vt), S_OK);
+	if (vt) {
+		CHECK_EQ(inv(vt, &obj, 1, DISPATCH_METHOD, a, 2, NULL, 0, &r,
+			     NULL, &err), S_OK);
+		CHECK_EQ(r.lVal, 42);
+		vt->lpVtbl->Release(vt);
+	}
+	CHECK_EQ(inv(cls, &obj, 1, DISPATCH_METHOD, a, 2, NULL, 0, &r, NULL,
+		     &err), S_OK);
+	CHECK_EQ(r.lVal, 42);
+
+	/* A dispatch-only interface: the object's own IDispatch::Invoke. */
+	CHECK_EQ(inv(events, &ev.disp, 10, DISPATCH_METHOD, a, 1, NULL, 0,
+		     NULL, NULL, &err), S_OK);
+	CHECK_EQ(ev.last, 10);
+	CHECK_EQ(ev.args, 1);
+	CHECK_EQ(inv(events, &ev.disp, 11, DISPATCH_METHOD, a, 1, NULL, 0,
+		     NULL, NULL, &err), DISP_E_MEMBERNOTFOUND);
+	CHECK_EQ(obj.calls, 8);
+done:
+	if (thing)
+		thing->lpVtbl->Release(thing);
+	if (events)
+		events->lpVtbl->Release(events);
+	if (cls)
+		cls->lpVtbl->Release(cls);
+}
+
 static void test_library(int ptr)
 {
 	struct buf b = build_library(ptr);
@@ -1049,6 +1355,7 @@ static void test_library(int ptr)
 	check_library(lib, ptr);
 	check_dual(lib, ptr);
 	check_others(lib);
+	check_invoke(lib);
 
 	/* Loaded again: the same library. */
 	CHECK_EQ(pLoadTypeLibEx(path, REGKIND_NONE, &again), S_OK);
@@ -1064,7 +1371,6 @@ static void test_library(int ptr)
  * inherits from there, as its dispatch view shows them, refer to types
  * through this library, and outlive the other library.
  */
-static const char *narrow(const WCHAR *w);
 static int patch_words(unsigned char *d, size_t len, uint32_t from,
 		       uint32_t to);
 
@@ -1723,6 +2029,9 @@ int main(void)
 	pUnRegisterTypeLibForUser = get("UnRegisterTypeLibForUser");
 	pQueryPathOfRegTypeLib = get("QueryPathOfRegTypeLib");
 	pLoadRegTypeLib = get("LoadRegTypeLib");
+	pSysAllocString = get("SysAllocString");
+	pCreateErrorInfo = get("CreateErrorInfo");
+	pSetErrorInfo = get("SetErrorInfo");
 
 	test_library(4);
 	test_library(8);

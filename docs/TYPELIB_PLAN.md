@@ -104,7 +104,33 @@ registered libraries.
    and version (the version asked for if it is registered, else the
    highest minor version above it), and load it from its path.
 
-## Phase C: calling through a type library
+## Phase C: calling through a type library (done)
+
+Status: `src/win32/oleaut_dispatch.c` (`DispCallFunc`, `ITypeInfo::Invoke`
+over any type info's public methods, `DispGetIDsOfNames`, `DispInvoke`,
+`CreateStdDispatch`) and `CreateDispTypeInfo` in `oleaut_typelib.c`;
+tests in `test_dispatch` and `test_typelib`, on both architectures.
+Changes from the plan below:
+
+- `DispCallFunc` has its own small assembly call per architecture rather
+  than seance's call gate, which takes at most six word arguments and
+  returns neither `%edx` nor a floating-point register. x86-64 loads each
+  of the first four arguments into both its integer and XMM register, so
+  a `float` or `double` is where the callee looks for it.
+- A method returning a `VARIANT` or `DECIMAL` gets the hidden result
+  pointer after the object, as MSVC compiles member functions; a plain
+  function gets it first.
+- `Invoke` on a coclass calls its default interface, on a dual interface
+  its vtable half, and on a dispatch-only interface the object's own
+  `IDispatch::Invoke`. A `VT_BYREF | VT_VARIANT` argument of another type
+  than the parameter's (as VBScript passes them) is converted, and the
+  result is put back in the caller's `VARIANT` as the parameter's type.
+- `CreateDispTypeInfo` gives a coclass whose default interface has the
+  methods, as Windows does.
+- Not done: `FUNC_STATIC` and `FUNC_NONVIRTUAL` functions (a module's,
+  which need `AddressOfMember`), records passed by value, and `VT_LPSTR`
+  and `VT_LPWSTR` parameters. `Invoke` returns `DISP_E_MEMBERNOTFOUND` or
+  `DISP_E_BADVARTYPE` for them.
 
 1. `DispCallFunc`: a vtable slot or a function, called with a
    `VARIANTARG` list. stdcall and cdecl on i386, ms_abi (four register

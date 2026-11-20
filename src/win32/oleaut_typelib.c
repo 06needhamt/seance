@@ -28,8 +28,11 @@
  * - A type info's references are its library's: AddRef and Release on a
  *   type info count on the library, which is freed (and leaves the cache
  *   of loaded libraries) when the last goes.
- * - Not here yet: ITypeComp, ITypeInfo::Invoke, CreateInstance,
- *   AddressOfMember. Registration is in oleaut_typereg.c. A dual interface's functions
+ * - ITypeInfo::Invoke is oa_typeinfo_invoke (oleaut_dispatch.c).
+ *   CreateDispTypeInfo builds a library of two types: the interface it
+ *   describes, and a coclass whose default interface it is.
+ * - Not here yet: ITypeComp, CreateInstance, AddressOfMember.
+ *   Registration is in oleaut_typereg.c. A dual interface's functions
  *   inherited from a dual interface in a third library (rather than
  *   stdole2's IDispatch) keep that library's hrefs, which this one's
  *   GetRefTypeInfo doesn't know; no library in use has one.
@@ -2431,8 +2434,8 @@ WINFN(HRESULT) ti_Invoke(ITypeInfo2 *self, PVOID instance, MEMBERID memid,
 			 WORD flags, DISPPARAMS *params, VARIANT *result,
 			 EXCEPINFO *excep, UINT *arg_err)
 {
-	TRACE("ITypeInfo::Invoke(%#x): not implemented", (unsigned)memid);
-	return E_NOTIMPL;
+	return oa_typeinfo_invoke((ITypeInfo *)self, instance, memid, flags,
+				  params, result, excep, arg_err);
 }
 
 static BSTR bstr_or_null(const WCHAR *s)
@@ -3218,9 +3221,130 @@ WINFN(void) oa_ClearCustData(CUSTDATA *data)
 	data->cCustData = 0;
 }
 
+/*
+ * CreateDispTypeInfo: a library of the interface data describes (type 0,
+ * its methods virtual, at iMeth in the vtable) and a coclass (type 1)
+ * implementing it, which is the type info given out.
+ */
+static int disp_tdesc(struct typelib *lib, VARTYPE vt, TYPEDESC *td)
+{
+	if (vt & VT_BYREF) {
+		TYPEDESC *in = ar_alloc(lib, sizeof(*in));
+
+		if (!in)
+			return -1;
+		in->vt = vt & ~VT_BYREF;
+		td->vt = VT_PTR;
+		td->lptdesc = in;
+		return 0;
+	}
+	td->vt = vt;
+	return 0;
+}
+
+WINFN(HRESULT) oa_CreateDispTypeInfo(INTERFACEDATA *data, LCID lcid,
+				     ITypeInfo **out)
+{
+	struct typelib *lib;
+	struct tl_type *it, *co;
+	UINT vft = 0;
+
+	if (!out)
+		return E_INVALIDARG;
+	*out = NULL;
+	if (!data || (data->cMembers && !data->pmethdata) ||
+	    data->cMembers > 0xffff)
+		return E_INVALIDARG;
+	if (!(lib = lib_new()))
+		return E_OUTOFMEMORY;
+	lib->attr.lcid = lcid;
+	lib->attr.syskind = PTR_SIZE == 8 ? SYS_WIN64 : SYS_WIN32;
+	if (!(lib->types = ar_alloc(lib, 2 * sizeof(*lib->types))))
+		goto oom;
+	lib->ntypes = 2;
+	it = &lib->types[0];
+	co = &lib->types[1];
+	type_init(lib, it, 0);
+	type_init(lib, co, 1);
+	it->attr.typekind = TKIND_INTERFACE;
+	it->attr.cbAlignment = PTR_SIZE;
+	it->attr.cFuncs = data->cMembers;
+	if (data->cMembers &&
+	    !(it->funcs = ar_alloc(lib, data->cMembers * sizeof(*it->funcs))))
+		goto oom;
+	for (UINT i = 0; i < data->cMembers; i++) {
+		const METHODDATA *m = &data->pmethdata[i];
+		struct tl_func *f = &it->funcs[i];
+		FUNCDESC *d = &f->desc;
+
+		if (m->cArgs > 0x7fff || (m->cArgs && !m->ppdata) ||
+		    m->iMeth >= 0x7fff / PTR_SIZE)
+			goto bad;
+		f->ordinal = -1;
+		if (m->szName && !(f->name = ar_alloc(lib, (wstrlen(m->szName) + 1) *
+							 sizeof(WCHAR))))
+			goto oom;
+		if (m->szName)
+			memcpy(f->name, m->szName,
+			       (wstrlen(m->szName) + 1) * sizeof(WCHAR));
+		d->memid = m->dispid;
+		d->funckind = FUNC_VIRTUAL;
+		d->invkind = m->wFlags & 0xf ? m->wFlags & 0xf : INVOKE_FUNC;
+		d->callconv = m->cc;
+		d->cParams = (SHORT)m->cArgs;
+		d->oVft = (SHORT)(m->iMeth * PTR_SIZE);
+		if (m->iMeth + 1 > vft)
+			vft = m->iMeth + 1;
+		if (disp_tdesc(lib, m->vtReturn, &d->elemdescFunc.tdesc))
+			goto oom;
+		if (!m->cArgs)
+			continue;
+		d->lprgelemdescParam = ar_alloc(lib, m->cArgs * sizeof(ELEMDESC));
+		f->param_names = ar_alloc(lib, m->cArgs * sizeof(WCHAR *));
+		f->param_cust = ar_alloc(lib, m->cArgs *
+					      sizeof(struct tl_cust *));
+		if (!d->lprgelemdescParam || !f->param_names || !f->param_cust)
+			goto oom;
+		for (UINT j = 0; j < m->cArgs; j++) {
+			const PARAMDATA *pd = &m->ppdata[j];
+			ELEMDESC *e = &d->lprgelemdescParam[j];
+
+			if (pd->szName) {
+				size_t len = wstrlen(pd->szName) + 1;
+
+				if (!(f->param_names[j] =
+					      ar_alloc(lib, len * sizeof(WCHAR))))
+					goto oom;
+				memcpy(f->param_names[j], pd->szName,
+				       len * sizeof(WCHAR));
+			}
+			e->paramdesc.wParamFlags = PARAMFLAG_FIN;
+			if (disp_tdesc(lib, pd->vt, &e->tdesc))
+				goto oom;
+		}
+	}
+	it->attr.cbSizeVft = (WORD)(vft * PTR_SIZE);
+	co->attr.typekind = TKIND_COCLASS;
+	co->attr.cbAlignment = 4;
+	co->attr.cImplTypes = 1;
+	if (!(co->impls = ar_alloc(lib, sizeof(*co->impls))))
+		goto oom;
+	co->impls[0].href = 0;		/* type 0 */
+	co->impls[0].flags = IMPLTYPEFLAG_FDEFAULT;
+	*out = (ITypeInfo *)&co->iface;
+	return S_OK;
+bad:
+	lib_free(lib);
+	return E_INVALIDARG;
+oom:
+	lib_free(lib);
+	return E_OUTOFMEMORY;
+}
+
 #define E(name, ord) { #name, ord, (void *)oa_##name }
 
 const struct builtin_export oa_typelib_exports[] = {
+	E(CreateDispTypeInfo, 31),
 	E(LoadTypeLib, 161),
 	E(LoadRegTypeLib, 162),
 	E(ClearCustData, 171),
