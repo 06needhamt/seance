@@ -143,7 +143,19 @@ Changes from the plan below:
 3. `DispGetIDsOfNames`, `DispInvoke`, `CreateStdDispatch` and
    `CreateDispTypeInfo` over those.
 
-## Phase D: tests
+## Phase D: tests (done)
+
+Status: `pe_typelib.dll`, built from `tests/fixtures/pe_typelib.c` with
+the library `gen_tlb` writes, and its check in `test_typelib`, on both
+architectures. Changes from the plan below:
+
+- `gen_tlb` is a C program, not Python (nothing else in the build needs
+  Python). It shares the MSFT writer `test_typelib` uses
+  (`tests/unit/tlb_writer.h`), so the fixture's library is the one
+  `test_typelib` checks field by field.
+- The fuzz pass is in `test_typelib` (since Phase A), not a separate
+  target.
+
 
 - There is no `midl` or `widl` here, so `tests/fixtures/gen_tlb.py`
   writes an `MSFT` library: a dual interface with methods, properties,
@@ -164,7 +176,18 @@ Changes from the plan below:
   libraries loads, and every name and reference resolves. That checks the
   parser against libraries `gen_tlb.py` did not write.
 
-## Phase E: the codecs
+## Phase E: the codecs (done)
+
+Status, in `MISSING_FEATURES.md`:
+- abcAVI and abcAVIIT load and register their library, and no longer
+  crash. They are a COM object for AVI tags, not codecs.
+- `DSKernel2` registers its library, then needed `SetEntriesInAcl`,
+  which advapi32 now has. With it registered, `LEncVP8` (both
+  architectures) encodes.
+- The other LEAD encoders stop at LEAD's evaluation check, which is not
+  worked around.
+- `ltmm175` and `eescreen` register.
+
 
 Re-run `abcAVI.dll`, `abcAVIIT.dll`, the 15 LEAD encoders (both
 architectures), `ltmm175`, `DSKernel2`, `eescreen` and the LEAD decoders

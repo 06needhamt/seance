@@ -1594,6 +1594,248 @@ WINFN(BOOL) adv_DeleteAce(PACL acl, DWORD i)
 	return TRUE;
 }
 
+/* ----------------------------------------------------------------------
+ * Trustees and SetEntriesInAcl.
+ */
+
+WINFN(void) adv_BuildTrusteeWithSidA(PTRUSTEE_A t, PSID sid)
+{
+	if (!t)
+		return;
+	t->pMultipleTrustee = NULL;
+	t->MultipleTrusteeOperation = NO_MULTIPLE_TRUSTEE;
+	t->TrusteeForm = TRUSTEE_IS_SID;
+	t->TrusteeType = TRUSTEE_IS_UNKNOWN;
+	t->ptstrName = sid;
+}
+
+WINFN(void) adv_BuildTrusteeWithSidW(PTRUSTEE_W t, PSID sid)
+{
+	adv_BuildTrusteeWithSidA((PTRUSTEE_A)t, sid);
+}
+
+WINFN(void) adv_BuildTrusteeWithNameA(PTRUSTEE_A t, LPSTR name)
+{
+	if (!t)
+		return;
+	t->pMultipleTrustee = NULL;
+	t->MultipleTrusteeOperation = NO_MULTIPLE_TRUSTEE;
+	t->TrusteeForm = TRUSTEE_IS_NAME;
+	t->TrusteeType = TRUSTEE_IS_UNKNOWN;
+	t->ptstrName = name;
+}
+
+WINFN(void) adv_BuildTrusteeWithNameW(PTRUSTEE_W t, LPWSTR name)
+{
+	adv_BuildTrusteeWithNameA((PTRUSTEE_A)t, (LPSTR)name);
+}
+
+WINFN(void) adv_BuildExplicitAccessWithNameA(PEXPLICIT_ACCESS_A ea,
+					     LPSTR name, DWORD perms,
+					     ACCESS_MODE mode, DWORD inherit)
+{
+	if (!ea)
+		return;
+	ea->grfAccessPermissions = perms;
+	ea->grfAccessMode = mode;
+	ea->grfInheritance = inherit;
+	adv_BuildTrusteeWithNameA(&ea->Trustee, name);
+}
+
+WINFN(void) adv_BuildExplicitAccessWithNameW(PEXPLICIT_ACCESS_W ea,
+					     LPWSTR name, DWORD perms,
+					     ACCESS_MODE mode, DWORD inherit)
+{
+	adv_BuildExplicitAccessWithNameA((PEXPLICIT_ACCESS_A)ea, (LPSTR)name,
+					 perms, mode, inherit);
+}
+
+WINFN(TRUSTEE_FORM) adv_GetTrusteeFormA(PTRUSTEE_A t)
+{
+	return t ? t->TrusteeForm : TRUSTEE_BAD_FORM;
+}
+
+WINFN(TRUSTEE_FORM) adv_GetTrusteeFormW(PTRUSTEE_W t)
+{
+	return t ? t->TrusteeForm : TRUSTEE_BAD_FORM;
+}
+
+WINFN(TRUSTEE_TYPE) adv_GetTrusteeTypeA(PTRUSTEE_A t)
+{
+	return t ? t->TrusteeType : TRUSTEE_IS_UNKNOWN;
+}
+
+WINFN(TRUSTEE_TYPE) adv_GetTrusteeTypeW(PTRUSTEE_W t)
+{
+	return t ? t->TrusteeType : TRUSTEE_IS_UNKNOWN;
+}
+
+WINFN(LPSTR) adv_GetTrusteeNameA(PTRUSTEE_A t)
+{
+	return t ? t->ptstrName : NULL;
+}
+
+WINFN(LPWSTR) adv_GetTrusteeNameW(PTRUSTEE_W t)
+{
+	return t ? t->ptstrName : NULL;
+}
+
+/*
+ * A trustee's SID, into *out: given as one, or by account name
+ * ("CURRENT_USER" being the user's).
+ */
+static DWORD trustee_sid(const TRUSTEE_A *t, int wide, struct sid *out)
+{
+	if (t->pMultipleTrustee || t->MultipleTrusteeOperation)
+		return ERROR_INVALID_PARAMETER;
+	if (t->TrusteeForm == TRUSTEE_IS_SID) {
+		if (!sid_ok(t->ptstrName))
+			return ERROR_INVALID_SID;
+		memset(out, 0, sizeof(*out));
+		memcpy(out, t->ptstrName, sid_size(t->ptstrName));
+		return 0;
+	}
+	if (t->TrusteeForm != TRUSTEE_IS_NAME || !t->ptstrName)
+		return ERROR_INVALID_PARAMETER;
+	char *name = wide ? utf16_to_utf8_dup((const WCHAR *)t->ptstrName)
+			  : acp_to_utf8(t->ptstrName);
+	DWORD err = 0;
+
+	if (!name)
+		return ERROR_NOT_ENOUGH_MEMORY;
+	if (!strcasecmp(name, "CURRENT_USER")) {
+		*out = user_sid();
+	} else {
+		char domain[256];
+		DWORD cb = sizeof(*out), dcch = sizeof(domain);
+		SID_NAME_USE use;
+
+		if (!lookup_name(name, 0, out, &cb, domain, &dcch, &use))
+			err = ERROR_NONE_MAPPED;
+	}
+	free(name);
+	return err;
+}
+
+/* Whether an ACE is an explicit allow or deny for sid. */
+static int ace_for(const BYTE *ace, const struct sid *sid)
+{
+	const ACE_HEADER *h = (const ACE_HEADER *)ace;
+
+	if ((h->AceType != ACCESS_ALLOWED_ACE_TYPE &&
+	     h->AceType != ACCESS_DENIED_ACE_TYPE) ||
+	    (h->AceFlags & INHERITED_ACE) ||
+	    h->AceSize < offsetof(ACCESS_ALLOWED_ACE, SidStart) + 8)
+		return 0;
+	const void *s = &((const ACCESS_ALLOWED_ACE *)ace)->SidStart;
+	return sid_size(s) == sid_size(sid) &&
+	       h->AceSize >= offsetof(ACCESS_ALLOWED_ACE, SidStart) +
+				     sid_size(sid) &&
+	       !memcmp(s, sid, sid_size(sid));
+}
+
+/*
+ * SetEntriesInAcl: a new ACL, from LocalAlloc, of old's ACEs with the
+ * entries applied in order. GRANT_ACCESS adds an allowing ACE, SET_ACCESS
+ * replaces the trustee's own ACEs with one, DENY_ACCESS puts a denying
+ * ACE first, and REVOKE_ACCESS removes the trustee's. Audit entries
+ * (the SACL's) are left out.
+ */
+static DWORD set_entries(ULONG n, const EXPLICIT_ACCESS_A *list, size_t each,
+			 int wide, PACL old, PACL *out)
+{
+	struct sid *sids = NULL;
+	DWORD size = sizeof(ACL), err = 0;
+	ACL *acl;
+
+	if (!out)
+		return ERROR_INVALID_PARAMETER;
+	*out = NULL;
+	if (n && !list)
+		return ERROR_INVALID_PARAMETER;
+	if (old && !acl_ok(old))
+		return ERROR_INVALID_ACL;
+	if (old)
+		size = old->AclSize;
+	if (n && !(sids = calloc(n, sizeof(*sids))))
+		return ERROR_NOT_ENOUGH_MEMORY;
+	for (ULONG i = 0; i < n; i++) {
+		const EXPLICIT_ACCESS_A *e =
+			(const EXPLICIT_ACCESS_A *)((const BYTE *)list + i * each);
+
+		if (e->grfAccessMode == NOT_USED_ACCESS ||
+		    e->grfAccessMode >= SET_AUDIT_SUCCESS)
+			continue;
+		if ((err = trustee_sid(&e->Trustee, wide, &sids[i])))
+			goto done;
+		size += offsetof(ACCESS_ALLOWED_ACE, SidStart) +
+			sid_size(&sids[i]);
+	}
+	size = (size + 3) & ~3u;
+	if (size > 0xfffc) {
+		err = ERROR_INVALID_PARAMETER;
+		goto done;
+	}
+	if (!(acl = global_alloc(GMEM_FIXED | GMEM_ZEROINIT, size))) {
+		err = ERROR_NOT_ENOUGH_MEMORY;
+		goto done;
+	}
+	if (old) {
+		memcpy(acl, old, (BYTE *)acl_end(old) - (BYTE *)old);
+		acl->AclSize = (WORD)size;
+	} else {
+		adv_InitializeAcl(acl, size, ACL_REVISION);
+	}
+	for (ULONG i = 0; i < n; i++) {
+		const EXPLICIT_ACCESS_A *e =
+			(const EXPLICIT_ACCESS_A *)((const BYTE *)list + i * each);
+		DWORD flags = e->grfInheritance & VALID_INHERIT_FLAGS;
+		ACCESS_MODE mode = e->grfAccessMode;
+
+		if (mode == NOT_USED_ACCESS || mode >= SET_AUDIT_SUCCESS)
+			continue;
+		if (mode == SET_ACCESS || mode == REVOKE_ACCESS)
+			for (DWORD j = acl->AceCount; j-- > 0;)
+				if (ace_for(ace_at(acl, j), &sids[i]))
+					adv_DeleteAce(acl, j);
+		if (mode == REVOKE_ACCESS)
+			continue;
+		if (mode == DENY_ACCESS) {
+			BYTE ace[sizeof(ACCESS_ALLOWED_ACE) + sizeof(struct sid)];
+			ACCESS_ALLOWED_ACE *a = (ACCESS_ALLOWED_ACE *)ace;
+			DWORD len = offsetof(ACCESS_ALLOWED_ACE, SidStart) +
+				    sid_size(&sids[i]);
+
+			a->Header.AceType = ACCESS_DENIED_ACE_TYPE;
+			a->Header.AceFlags = (BYTE)flags;
+			a->Header.AceSize = (WORD)len;
+			a->Mask = e->grfAccessPermissions;
+			memcpy(&a->SidStart, &sids[i], sid_size(&sids[i]));
+			adv_AddAce(acl, ACL_REVISION, 0, ace, len);
+		} else {
+			add_ace(acl, ACL_REVISION, ACCESS_ALLOWED_ACE_TYPE, flags,
+				e->grfAccessPermissions, &sids[i]);
+		}
+	}
+	*out = acl;
+done:
+	free(sids);
+	return err;
+}
+
+WINFN(DWORD) adv_SetEntriesInAclA(ULONG n, PEXPLICIT_ACCESS_A list, PACL old,
+				  PACL *out)
+{
+	return set_entries(n, list, sizeof(*list), 0, old, out);
+}
+
+WINFN(DWORD) adv_SetEntriesInAclW(ULONG n, PEXPLICIT_ACCESS_W list, PACL old,
+				  PACL *out)
+{
+	return set_entries(n, (const EXPLICIT_ACCESS_A *)list, sizeof(*list),
+			   1, old, out);
+}
+
 WINFN(BOOL) adv_GetAclInformation(PACL acl, LPVOID info, DWORD len,
 				  ACL_INFORMATION_CLASS c)
 {
@@ -2412,6 +2654,12 @@ const struct builtin_export adv_security_exports[] = {
 	E(ConvertSidToStringSidW),
 	E(ConvertStringSidToSidA),
 	E(ConvertStringSidToSidW),
+	E(BuildExplicitAccessWithNameA),
+	E(BuildExplicitAccessWithNameW),
+	E(BuildTrusteeWithNameA),
+	E(BuildTrusteeWithNameW),
+	E(BuildTrusteeWithSidA),
+	E(BuildTrusteeWithSidW),
 	E(CopySid),
 	E(CreateWellKnownSid),
 	E(CryptAcquireContextA),
@@ -2438,6 +2686,12 @@ const struct builtin_export adv_security_exports[] = {
 	E(GetFileSecurityA),
 	E(GetFileSecurityW),
 	E(GetLengthSid),
+	E(GetTrusteeFormA),
+	E(GetTrusteeFormW),
+	E(GetTrusteeNameA),
+	E(GetTrusteeNameW),
+	E(GetTrusteeTypeA),
+	E(GetTrusteeTypeW),
 	E(GetNamedSecurityInfoA),
 	E(GetNamedSecurityInfoW),
 	E(GetSecurityDescriptorControl),
@@ -2482,6 +2736,8 @@ const struct builtin_export adv_security_exports[] = {
 	E(SetSecurityDescriptorGroup),
 	E(SetSecurityDescriptorOwner),
 	E(SetSecurityDescriptorSacl),
+	E(SetEntriesInAclA),
+	E(SetEntriesInAclW),
 	E(SetSecurityInfo),
 	E(SetThreadToken),
 	E(SetTokenInformation),
