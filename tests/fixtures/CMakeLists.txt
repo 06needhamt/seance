@@ -221,6 +221,21 @@ fixture(pe_comctl pe_comctl.c LIBS comctl_ord_imports comdlg32 user32 kernel32
 fixture(pe_com pe_com.c pe_com.def pe_com.rc LIBS ole32 version kernel32
 	OPTIONS -mpreferred-stack-boundary=2 -fno-builtin)
 
+# A type library as its TYPELIB resource (from gen_tlb, by the top-level
+# build), and the library's coclass implemented through CreateStdDispatch
+# and through ITypeInfo::Invoke.
+if(VFW_TYPELIB)
+	set(typelib_rc ${CMAKE_BINARY_DIR}/pe_typelib.rc)
+	file(WRITE ${typelib_rc}.tmp "1 TYPELIB \"${VFW_TYPELIB}\"\n")
+	configure_file(${typelib_rc}.tmp ${typelib_rc} COPYONLY)
+	fixture(pe_typelib pe_typelib.c ${typelib_rc}
+		LIBS oleaut32 kernel32
+		OPTIONS -mpreferred-stack-boundary=2 -fno-builtin
+			-fno-tree-loop-distribute-patterns)
+	set_source_files_properties(${typelib_rc} PROPERTIES
+		OBJECT_DEPENDS ${VFW_TYPELIB})
+endif()
+
 # Imports msvcrt's math and string functions, as a codec with a dynamic
 # CRT (/MD) would.
 # -Wl,--disable-auto-import: no CRT startup object is linked (-nostdlib),

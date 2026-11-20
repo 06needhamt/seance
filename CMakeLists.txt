@@ -126,6 +126,22 @@ install(TARGETS seance RUNTIME DESTINATION bin)
 # or (for the seance64 an i386 build makes) by the build that made it,
 # which then passes VFW_EXTERNAL_FIXTURES and the directories they're in.
 
+# pe_typelib.dll's type library, for each architecture, written by a
+# host program (there is no midl here) before the fixtures are built.
+add_executable(gen_tlb tests/fixtures/gen_tlb.c)
+target_include_directories(gen_tlb PRIVATE include tests/unit)
+set(VFW_TYPELIB32 ${CMAKE_BINARY_DIR}/typelib/pe_typelib32.tlb)
+set(VFW_TYPELIB64 ${CMAKE_BINARY_DIR}/typelib/pe_typelib64.tlb)
+add_custom_command(OUTPUT ${VFW_TYPELIB32} ${VFW_TYPELIB64}
+	COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/typelib
+	COMMAND ${CMAKE_CROSSCOMPILING_EMULATOR} $<TARGET_FILE:gen_tlb> 4
+		${VFW_TYPELIB32}
+	COMMAND ${CMAKE_CROSSCOMPILING_EMULATOR} $<TARGET_FILE:gen_tlb> 8
+		${VFW_TYPELIB64}
+	DEPENDS gen_tlb
+	VERBATIM)
+add_custom_target(typelibs ALL DEPENDS ${VFW_TYPELIB32} ${VFW_TYPELIB64})
+
 option(VFW_EXTERNAL_FIXTURES "Use fixture DLLs built elsewhere" OFF)
 mark_as_advanced(VFW_EXTERNAL_FIXTURES)
 set(VFW_FIXTURE_DIR ${CMAKE_BINARY_DIR}/fixtures CACHE PATH
@@ -146,6 +162,7 @@ elseif(VFW_MINGW_CC)
 			-DCMAKE_TOOLCHAIN_FILE=${PROJECT_SOURCE_DIR}/cmake/mingw-i686.cmake
 			-DVFW_MINGW_PREFIX=${VFW_MINGW_PREFIX}
 			-DVFW_FIXTURE_DIR=${VFW_FIXTURE_DIR}
+			-DVFW_TYPELIB=${VFW_TYPELIB32}
 		INSTALL_COMMAND ""
 		BUILD_ALWAYS ON
 		# Ninja: their output as it comes, not held back to the end.
@@ -169,6 +186,7 @@ elseif(VFW_MINGW64_CC)
 			-DCMAKE_TOOLCHAIN_FILE=${PROJECT_SOURCE_DIR}/cmake/mingw-x86_64.cmake
 			-DVFW_MINGW_PREFIX=${VFW_MINGW64_PREFIX}
 			-DVFW_FIXTURE_DIR=${VFW_FIXTURE64_DIR}
+			-DVFW_TYPELIB=${VFW_TYPELIB64}
 		INSTALL_COMMAND ""
 		BUILD_ALWAYS ON
 		USES_TERMINAL_CONFIGURE ON
