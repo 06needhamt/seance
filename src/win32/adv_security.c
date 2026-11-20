@@ -1734,19 +1734,54 @@ static int ace_for(const BYTE *ace, const struct sid *sid)
 	       !memcmp(s, sid, sid_size(sid));
 }
 
+/* One ACE for sid, put at index start (MAXDWORD: the end). */
+static BOOL put_ace(ACL *acl, BYTE type, DWORD flags, DWORD mask,
+		    const struct sid *sid, DWORD start)
+{
+	BYTE ace[sizeof(ACCESS_ALLOWED_ACE) + sizeof(struct sid)];
+	ACCESS_ALLOWED_ACE *a = (ACCESS_ALLOWED_ACE *)ace;
+	DWORD len = offsetof(ACCESS_ALLOWED_ACE, SidStart) + sid_size(sid);
+
+	a->Header.AceType = type;
+	a->Header.AceFlags = (BYTE)flags;
+	a->Header.AceSize = (WORD)len;
+	a->Mask = mask;
+	memcpy(&a->SidStart, sid, sid_size(sid));
+	return adv_AddAce(acl, ACL_REVISION, start, ace, len);
+}
+
+/* Where a new grant goes: after the explicit denies at the front, so
+ * ahead of the allows and of everything inherited. */
+static DWORD grant_index(ACL *acl)
+{
+	DWORD i = 0;
+
+	while (i < acl->AceCount) {
+		ACE_HEADER *h = (ACE_HEADER *)ace_at(acl, i);
+
+		if (h->AceType != ACCESS_DENIED_ACE_TYPE ||
+		    (h->AceFlags & INHERITED_ACE))
+			break;
+		i++;
+	}
+	return i;
+}
+
 /*
- * SetEntriesInAcl: a new ACL, from LocalAlloc, of old's ACEs with the
- * entries applied in order. GRANT_ACCESS adds an allowing ACE, SET_ACCESS
- * replaces the trustee's own ACEs with one, DENY_ACCESS puts a denying
- * ACE first, and REVOKE_ACCESS removes the trustee's. Audit entries
- * (the SACL's) are left out.
+ * Applies n EXPLICIT_ACCESS entries (each `each` bytes apart, A or W) to
+ * a copy of old, into a new LocalAlloc'd ACL: GRANT_ACCESS adds an
+ * allowing ACE after the explicit denies, SET_ACCESS replaces the
+ * trustee's own ACEs with one, DENY_ACCESS puts a denying ACE first, and
+ * REVOKE_ACCESS removes the trustee's. Audit entries (the SACL's) are
+ * left out. The work is done in an ACL of the largest size, and the
+ * result is sized to what it holds.
  */
 static DWORD set_entries(ULONG n, const EXPLICIT_ACCESS_A *list, size_t each,
 			 int wide, PACL old, PACL *out)
 {
 	struct sid *sids = NULL;
-	DWORD size = sizeof(ACL), err = 0;
-	ACL *acl;
+	DWORD err = 0, used;
+	ACL *work = NULL, *acl;
 
 	if (!out)
 		return ERROR_INVALID_PARAMETER;
@@ -1755,8 +1790,6 @@ static DWORD set_entries(ULONG n, const EXPLICIT_ACCESS_A *list, size_t each,
 		return ERROR_INVALID_PARAMETER;
 	if (old && !acl_ok(old))
 		return ERROR_INVALID_ACL;
-	if (old)
-		size = old->AclSize;
 	if (n && !(sids = calloc(n, sizeof(*sids))))
 		return ERROR_NOT_ENOUGH_MEMORY;
 	for (ULONG i = 0; i < n; i++) {
@@ -1768,57 +1801,55 @@ static DWORD set_entries(ULONG n, const EXPLICIT_ACCESS_A *list, size_t each,
 			continue;
 		if ((err = trustee_sid(&e->Trustee, wide, &sids[i])))
 			goto done;
-		size += offsetof(ACCESS_ALLOWED_ACE, SidStart) +
-			sid_size(&sids[i]);
 	}
-	size = (size + 3) & ~3u;
-	if (size > 0xfffc) {
-		err = ERROR_INVALID_PARAMETER;
-		goto done;
-	}
-	if (!(acl = global_alloc(GMEM_FIXED | GMEM_ZEROINIT, size))) {
+	if (!(work = calloc(1, 0xfffc))) {
 		err = ERROR_NOT_ENOUGH_MEMORY;
 		goto done;
 	}
 	if (old) {
-		memcpy(acl, old, (BYTE *)acl_end(old) - (BYTE *)old);
-		acl->AclSize = (WORD)size;
+		memcpy(work, old, (BYTE *)acl_end(old) - (BYTE *)old);
+		work->AclSize = 0xfffc;
 	} else {
-		adv_InitializeAcl(acl, size, ACL_REVISION);
+		adv_InitializeAcl(work, 0xfffc, ACL_REVISION);
 	}
 	for (ULONG i = 0; i < n; i++) {
 		const EXPLICIT_ACCESS_A *e =
 			(const EXPLICIT_ACCESS_A *)((const BYTE *)list + i * each);
 		DWORD flags = e->grfInheritance & VALID_INHERIT_FLAGS;
+		DWORD mask = e->grfAccessPermissions;
 		ACCESS_MODE mode = e->grfAccessMode;
+		BOOL ok;
 
 		if (mode == NOT_USED_ACCESS || mode >= SET_AUDIT_SUCCESS)
 			continue;
 		if (mode == SET_ACCESS || mode == REVOKE_ACCESS)
-			for (DWORD j = acl->AceCount; j-- > 0;)
-				if (ace_for(ace_at(acl, j), &sids[i]))
-					adv_DeleteAce(acl, j);
+			for (DWORD j = work->AceCount; j-- > 0;)
+				if (ace_for(ace_at(work, j), &sids[i]))
+					adv_DeleteAce(work, j);
 		if (mode == REVOKE_ACCESS)
 			continue;
-		if (mode == DENY_ACCESS) {
-			BYTE ace[sizeof(ACCESS_ALLOWED_ACE) + sizeof(struct sid)];
-			ACCESS_ALLOWED_ACE *a = (ACCESS_ALLOWED_ACE *)ace;
-			DWORD len = offsetof(ACCESS_ALLOWED_ACE, SidStart) +
-				    sid_size(&sids[i]);
-
-			a->Header.AceType = ACCESS_DENIED_ACE_TYPE;
-			a->Header.AceFlags = (BYTE)flags;
-			a->Header.AceSize = (WORD)len;
-			a->Mask = e->grfAccessPermissions;
-			memcpy(&a->SidStart, &sids[i], sid_size(&sids[i]));
-			adv_AddAce(acl, ACL_REVISION, 0, ace, len);
-		} else {
-			add_ace(acl, ACL_REVISION, ACCESS_ALLOWED_ACE_TYPE, flags,
-				e->grfAccessPermissions, &sids[i]);
+		if (mode == DENY_ACCESS)
+			ok = put_ace(work, ACCESS_DENIED_ACE_TYPE, flags, mask,
+				     &sids[i], 0);
+		else
+			ok = put_ace(work, ACCESS_ALLOWED_ACE_TYPE, flags, mask,
+				     &sids[i], grant_index(work));
+		if (!ok) {
+			err = ERROR_INVALID_PARAMETER;
+			goto done;
 		}
 	}
+	used = (DWORD)((BYTE *)acl_end(work) - (BYTE *)work);
+	used = (used + 3) & ~3u;
+	if (!(acl = global_alloc(GMEM_FIXED | GMEM_ZEROINIT, used))) {
+		err = ERROR_NOT_ENOUGH_MEMORY;
+		goto done;
+	}
+	memcpy(acl, work, (BYTE *)acl_end(work) - (BYTE *)work);
+	acl->AclSize = (WORD)used;
 	*out = acl;
 done:
+	free(work);
 	free(sids);
 	return err;
 }

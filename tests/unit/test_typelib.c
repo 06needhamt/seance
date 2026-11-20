@@ -1541,10 +1541,14 @@ static void test_fixture(void)
 	int (WINAPI *run)(void);
 
 	snprintf(path, sizeof(path), "%s/pe_typelib.dll", fdir ? fdir : ".");
-	if (!(m = mod_load(path, NULL))) {
+	if (access(path, F_OK) != 0) {
 		printf("pe_typelib.dll not built: skipping\n");
 		return;
 	}
+	m = mod_load(path, NULL);
+	CHECK(m != NULL);
+	if (!m)
+		return;
 	run = mod_get_proc(m, "typelib_run");
 	CHECK(run != NULL);
 	if (run) {

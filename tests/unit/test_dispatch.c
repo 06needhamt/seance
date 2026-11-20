@@ -53,9 +53,9 @@ static const IID iid_other = { 0x5eace0ff, 0, 0, { 0 } };
 
 static WCHAR *w(const char *s)
 {
-	static WCHAR bufs[8][64];
+	static WCHAR bufs[16][64];
 	static int n;
-	WCHAR *b = bufs[n++ % 8];
+	WCHAR *b = bufs[n++ % 16];
 	size_t i;
 
 	for (i = 0; s[i] && i < 63; i++)
@@ -146,6 +146,16 @@ static int WINAPI o_add(struct obj *o, int x)
  * A method returning a VARIANT, as MSVC compiles one: the object, then the
  * hidden pointer to the result (a C function gets the pointer first).
  */
+static DECIMAL WINAPI f_ret_decimal(int a)
+{
+	DECIMAL d;
+
+	memset(&d, 0, sizeof(d));
+	d.scale = 2;
+	d.Lo64 = (ULONGLONG)a * 3;
+	return d;
+}
+
 static VARIANT *WINAPI o_ret_variant(struct obj *o, VARIANT *v, int x)
 {
 	memset(v, 0, sizeof(*v));
@@ -286,6 +296,15 @@ static void test_dispcallfunc(void)
 	CHECK_EQ(call(NULL, (ULONG_PTR)f_ret_variant, CC_STDCALL, VT_VARIANT,
 		      1, vt, a, NULL), E_INVALIDARG);
 
+	/* A DECIMAL: written over the whole VARIANT, then tagged. */
+	vt[0] = VT_I4;
+	a[0].lVal = 7;
+	CHECK_EQ(call(NULL, (ULONG_PTR)f_ret_decimal, CC_STDCALL, VT_DECIMAL,
+		      1, vt, a, &r), S_OK);
+	CHECK_EQ(r.vt, VT_DECIMAL);
+	CHECK_EQ(r.decVal.scale, 2);
+	CHECK(r.decVal.Lo64 == 21);
+
 	/* VT_BYREF: the pointer itself. */
 	{
 		LONG l = 7;
@@ -368,12 +387,22 @@ static void WINAPI c_set(struct calc *c, LONG v)
 	c->value = v;
 }
 
+/* Adds one to a DECIMAL, writing the whole of it as a callee does. */
+static void WINAPI c_inc_dec(struct calc *c, DECIMAL *d)
+{
+	DECIMAL n = *d;
+
+	n.wReserved = 0;
+	n.Lo64++;
+	*d = n;
+}
+
 static const void *const calc_vtbl[] = {
 	(void *)c_mul, (void *)c_twice, (void *)c_value, (void *)c_sum5,
-	(void *)c_mix, (void *)c_set,
+	(void *)c_mix, (void *)c_set, (void *)c_inc_dec,
 };
 
-enum { ID_MUL = 1, ID_TWICE, ID_VALUE, ID_SUM5, ID_MIX };
+enum { ID_MUL = 1, ID_TWICE, ID_VALUE, ID_SUM5, ID_MIX, ID_INCDEC };
 
 static PARAMDATA mul_params[] = {
 	{ NULL, VT_I4 }, { NULL, VT_R8 },
@@ -388,6 +417,7 @@ static PARAMDATA mix_params[] = {
 	{ NULL, VT_I4 },
 };
 static PARAMDATA set_params[] = { { NULL, VT_I4 } };
+static PARAMDATA incdec_params[] = { { NULL, VT_DECIMAL | VT_BYREF } };
 
 static HRESULT invoke(IDispatch *d, DISPID id, WORD flags, UINT n,
 		      VARIANT *args, VARIANT *res, UINT *err)
@@ -420,6 +450,8 @@ static void test_std_dispatch(void)
 		  VT_R8 },
 		{ NULL, set_params, ID_VALUE, 5, CC_STDCALL, 1,
 		  DISPATCH_PROPERTYPUT, VT_VOID },
+		{ NULL, incdec_params, ID_INCDEC, 6, CC_STDCALL, 1,
+		  DISPATCH_METHOD, VT_VOID },
 	};
 	INTERFACEDATA idata = { m, sizeof(m) / sizeof(m[0]) };
 	struct calc c = { calc_vtbl, 9, 0 };
@@ -441,6 +473,7 @@ static void test_std_dispatch(void)
 	m[3].szName = w("Sum5");
 	m[4].szName = w("Mix");
 	m[5].szName = w("Value");
+	m[6].szName = w("IncDec");
 	CHECK_EQ(pCreateDispTypeInfo(&idata, 0x409, &ti), S_OK);
 	if (!ti)
 		return;
@@ -456,8 +489,8 @@ static void test_std_dispatch(void)
 
 		CHECK_EQ(ref->lpVtbl->GetTypeAttr(ref, &attr), S_OK);
 		CHECK_EQ(attr->typekind, TKIND_INTERFACE);
-		CHECK_EQ(attr->cFuncs, 6);
-		CHECK_EQ(attr->cbSizeVft, 6 * sizeof(void *));
+		CHECK_EQ(attr->cFuncs, 7);
+		CHECK_EQ(attr->cbSizeVft, 7 * sizeof(void *));
 		ref->lpVtbl->ReleaseTypeAttr(ref, attr);
 		CHECK_EQ(ref->lpVtbl->GetFuncDesc(ref, 1, &fd), S_OK);
 		CHECK_EQ(fd->memid, ID_TWICE);
@@ -589,6 +622,24 @@ static void test_std_dispatch(void)
 			 S_OK);
 		CHECK_EQ(inner.vt, VT_I4);
 		CHECK_EQ(inner.lVal, 16);
+
+		/* A DECIMAL in it: the callee gets the whole DECIMAL, and the
+		 * vt it overwrote is put back. */
+		memset(&inner, 0, sizeof(inner));
+		inner.decVal.scale = 1;
+		inner.decVal.Lo64 = 41;
+		inner.vt = VT_DECIMAL;
+		CHECK_EQ(invoke(d, ID_INCDEC, DISPATCH_METHOD, 1, a, &r, &err),
+			 S_OK);
+		CHECK_EQ(inner.vt, VT_DECIMAL);
+		CHECK_EQ(inner.decVal.scale, 1);
+		CHECK(inner.decVal.Lo64 == 42);
+		/* (Empty: a zero DECIMAL in a temporary, then put back.) */
+		memset(&inner, 0, sizeof(inner));
+		CHECK_EQ(invoke(d, ID_INCDEC, DISPATCH_METHOD, 1, a, &r, &err),
+			 S_OK);
+		CHECK_EQ(inner.vt, VT_DECIMAL);
+		CHECK(inner.decVal.Lo64 == 1);
 
 		/* Empty, as an [out] one is: a zero. */
 		inner.vt = VT_EMPTY;

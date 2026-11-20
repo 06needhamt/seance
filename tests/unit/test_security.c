@@ -691,6 +691,7 @@ static void test_entries(void)
 	FN(DWORD, SetEntriesInAclW, ULONG, PEXPLICIT_ACCESS_W, PACL, PACL *);
 	FN(TRUSTEE_FORM, GetTrusteeFormA, PTRUSTEE_A);
 	FN(BOOL, GetAce, PACL, DWORD, LPVOID *);
+	FN(BOOL, InitializeAcl, PACL, DWORD, DWORD);
 	FN(BOOL, IsValidAcl, PACL);
 	FN(BOOL, EqualSid, PSID, PSID);
 	BYTE world[SECURITY_MAX_SID_SIZE], users[SECURITY_MAX_SID_SIZE];
@@ -718,7 +719,8 @@ static void test_entries(void)
 	CHECK_EQ(ace->Mask, KEY_ALL_ACCESS);
 	CHECK(EqualSid(&ace->SidStart, world));
 
-	/* On top of it: a deny by name goes first, a grant at the end. */
+	/* On top of it: a deny by name goes first, a grant after the
+	 * denies, ahead of the existing allow. */
 	BuildExplicitAccessWithNameA(&ea[0], "Users", DELETE, DENY_ACCESS, 0);
 	BuildExplicitAccessWithNameA(&ea[1], "CURRENT_USER", GENERIC_READ,
 				     GRANT_ACCESS, NO_INHERITANCE);
@@ -730,10 +732,34 @@ static void test_entries(void)
 		CHECK_EQ(ace->Header.AceType, ACCESS_DENIED_ACE_TYPE);
 		CHECK(EqualSid(&ace->SidStart, users));
 		CHECK(GetAce(acl2, 1, (void **)&ace));
-		CHECK(EqualSid(&ace->SidStart, world));
-		CHECK(GetAce(acl2, 2, (void **)&ace));
 		CHECK_EQ(ace->Mask, GENERIC_READ);
+		CHECK(GetAce(acl2, 2, (void **)&ace));
+		CHECK(EqualSid(&ace->SidStart, world));
 		local_free(acl2);
+	}
+
+	/* The result is sized to its ACEs, not to the old ACL's room: an
+	 * empty ACL of the largest size takes a grant, and setting the same
+	 * trustee again doesn't grow it. */
+	{
+		ACL *big = calloc(1, 0xfffc), *a1 = NULL, *a2 = NULL;
+
+		CHECK(big && InitializeAcl(big, 0xfffc, ACL_REVISION));
+		ea[0].grfAccessPermissions = KEY_READ;
+		ea[0].grfAccessMode = SET_ACCESS;
+		ea[0].grfInheritance = 0;
+		BuildTrusteeWithSidA(&ea[0].Trustee, world);
+		CHECK_EQ(SetEntriesInAclA(1, ea, big, &a1), 0);
+		CHECK(a1 && a1->AceCount == 1 && a1->AclSize < 64);
+		if (a1) {
+			CHECK_EQ(SetEntriesInAclA(1, ea, a1, &a2), 0);
+			CHECK(a2 && a2->AceCount == 1 &&
+			      a2->AclSize == a1->AclSize);
+			if (a2)
+				local_free(a2);
+			local_free(a1);
+		}
+		free(big);
 	}
 
 	/* Revoked: the trustee's ACEs go. */

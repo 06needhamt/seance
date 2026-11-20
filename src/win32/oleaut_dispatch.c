@@ -326,6 +326,10 @@ HRESULT STUB_WINAPI oa_DispCallFunc(void *instance, ULONG_PTR offset,
 		}
 	}
 	vfw_dispcall(fn, n, words, out, fp);
+	/* A DECIMAL's wReserved is the VARIANT's vt, which the callee left
+	 * as 0. */
+	if (ret == VT_DECIMAL)
+		result->vt = VT_DECIMAL;
 	if (result && ret != VT_VARIANT && ret != VT_DECIMAL) {
 		memset(result, 0, sizeof(*result));
 		result->vt = ret == VT_VOID ? VT_EMPTY : ret;
@@ -581,6 +585,7 @@ struct slot {
 	VARIANT temp;		/* a converted value, if used */
 	VARIANT missing;	/* an optional VARIANT not given */
 	VARIANT *writeback;	/* the caller's VARIANT temp goes back to */
+	VARIANT *in_place;	/* the caller's VARIANT, passed by reference */
 	int temp_used;
 	VARIANTARG *arg;
 	VARTYPE vt;
@@ -623,7 +628,9 @@ static HRESULT bind_arg(struct slot *s, VARTYPE vt, VARIANTARG *src)
 		}
 		if (in != src && in->vt == base) {
 			/* A value in the caller's VARIANT: written in place. */
-			set_ref(s, vt, &in->llVal);
+			set_ref(s, vt, base == VT_DECIMAL ? (void *)&in->decVal
+							  : (void *)&in->llVal);
+			s->in_place = in;
 			return S_OK;
 		}
 		if (src->vt & VT_BYREF && in == src)
@@ -644,7 +651,8 @@ static HRESULT bind_arg(struct slot *s, VARTYPE vt, VARIANTARG *src)
 		s->temp_used = 1;
 		if (in != src)
 			s->writeback = in;
-		set_ref(s, vt, &s->temp.llVal);
+		set_ref(s, vt, base == VT_DECIMAL ? (void *)&s->temp.decVal
+						  : (void *)&s->temp.llVal);
 		return S_OK;
 	}
 	if (in->vt == vt) {
@@ -814,8 +822,13 @@ static HRESULT call_func(ITypeInfo *owner, FUNCDESC *fd, void *instance,
 				hr = DISP_E_BADVARTYPE;
 				goto out;
 			}
+			/* A DECIMAL is the whole VARIANT; the others are
+			 * its value. */
 			set_ref(sl, vt, vt == (VT_BYREF | VT_VARIANT)
-						? (void *)&ret : &ret.llVal);
+					? (void *)&ret
+					: vt == (VT_BYREF | VT_DECIMAL)
+					? (void *)&ret.decVal
+					: (void *)&ret.llVal);
 			goto bound;
 		}
 		if (pf & PARAMFLAG_FLCID) {
@@ -892,6 +905,14 @@ bound:
 			     types, args, &rv);
 	if (FAILED(hr))
 		goto out;
+	/* A DECIMAL written by reference over a VARIANT also wrote its vt. */
+	for (int p = 0; p < n; p++)
+		if (s[p].vt == (VT_BYREF | VT_DECIMAL)) {
+			if (s[p].in_place)
+				s[p].in_place->vt = VT_DECIMAL;
+			if (s[p].temp_used)
+				s[p].temp.vt = VT_DECIMAL;
+		}
 	if (rvt == VT_HRESULT && FAILED(rv.scode)) {
 		if (excep)
 			fill_excep(excep, rv.scode);

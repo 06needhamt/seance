@@ -128,19 +128,25 @@ install(TARGETS seance RUNTIME DESTINATION bin)
 
 # pe_typelib.dll's type library, for each architecture, written by a
 # host program (there is no midl here) before the fixtures are built.
-add_executable(gen_tlb tests/fixtures/gen_tlb.c)
-target_include_directories(gen_tlb PRIVATE include tests/unit)
-set(VFW_TYPELIB32 ${CMAKE_BINARY_DIR}/typelib/pe_typelib32.tlb)
-set(VFW_TYPELIB64 ${CMAKE_BINARY_DIR}/typelib/pe_typelib64.tlb)
-add_custom_command(OUTPUT ${VFW_TYPELIB32} ${VFW_TYPELIB64}
-	COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/typelib
-	COMMAND ${CMAKE_CROSSCOMPILING_EMULATOR} $<TARGET_FILE:gen_tlb> 4
-		${VFW_TYPELIB32}
-	COMMAND ${CMAKE_CROSSCOMPILING_EMULATOR} $<TARGET_FILE:gen_tlb> 8
-		${VFW_TYPELIB64}
-	DEPENDS gen_tlb
-	VERBATIM)
-add_custom_target(typelibs ALL DEPENDS ${VFW_TYPELIB32} ${VFW_TYPELIB64})
+# A build that can't run what it builds (no emulator) has no fixture
+# tests, so it skips this and the fixtures build without pe_typelib.
+set(VFW_TYPELIB32 "")
+set(VFW_TYPELIB64 "")
+if(vfw_can_run)
+	add_executable(gen_tlb tests/fixtures/gen_tlb.c)
+	target_include_directories(gen_tlb PRIVATE include tests/unit)
+	set(VFW_TYPELIB32 ${CMAKE_BINARY_DIR}/typelib/pe_typelib32.tlb)
+	set(VFW_TYPELIB64 ${CMAKE_BINARY_DIR}/typelib/pe_typelib64.tlb)
+	add_custom_command(OUTPUT ${VFW_TYPELIB32} ${VFW_TYPELIB64}
+		COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/typelib
+		COMMAND ${CMAKE_CROSSCOMPILING_EMULATOR} $<TARGET_FILE:gen_tlb> 4
+			${VFW_TYPELIB32}
+		COMMAND ${CMAKE_CROSSCOMPILING_EMULATOR} $<TARGET_FILE:gen_tlb> 8
+			${VFW_TYPELIB64}
+		DEPENDS gen_tlb
+		VERBATIM)
+	add_custom_target(typelibs ALL DEPENDS ${VFW_TYPELIB32} ${VFW_TYPELIB64})
+endif()
 
 option(VFW_EXTERNAL_FIXTURES "Use fixture DLLs built elsewhere" OFF)
 mark_as_advanced(VFW_EXTERNAL_FIXTURES)
@@ -447,3 +453,10 @@ if(TARGET fixtures)
 		add_dependencies(fixtures64 fixtures)
 	endif()
 endif()
+# The fixtures embed the generated type libraries, also when only the
+# x86-64 fixtures are built.
+foreach(t fixtures fixtures64)
+	if(TARGET ${t} AND TARGET typelibs)
+		add_dependencies(${t} typelibs)
+	endif()
+endforeach()

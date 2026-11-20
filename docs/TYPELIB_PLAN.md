@@ -184,8 +184,9 @@ Status, in `MISSING_FEATURES.md`:
 - `DSKernel2` registers its library, then needed `SetEntriesInAcl`,
   which advapi32 now has. With it registered, `LEncVP8` (both
   architectures) encodes.
-- The other LEAD encoders stop at LEAD's evaluation check, which is not
-  worked around.
+- `LEncAAC`, `LEncAC3`, `LEncAMR`, `lencmpga2` and `LMVMtnDet2` stop at
+  LEAD's evaluation check, which is not worked around.
+- `LENCSCR2` opens but accepts none of the standard formats tried.
 - `ltmm175` and `eescreen` register.
 
 
