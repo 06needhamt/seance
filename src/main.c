@@ -25,8 +25,9 @@ struct command {
 };
 
 static const struct command commands[] = {
-	{ "info", "<dll>",
-	  "show PE headers, sections, exports, imports and resources",
+	{ "info", "[--typelib] <dll>",
+	  "show PE headers, sections, exports, imports and resources, or a "
+	  "type library",
 	  cmd_info, 0 },
 	{ "avi", "<in.avi> [--chunks]",
 	  "show an AVI file's headers, streams and index", cmd_avi, 0 },

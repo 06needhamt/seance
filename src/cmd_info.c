@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * seance info <dll>: describe a PE image without loading or running it.
+ * seance info --typelib <file>: list a type library (cmd_typelib.c).
  */
 #include <stdio.h>
 #include <string.h>
@@ -357,8 +358,10 @@ static void print_resources(const struct pe_image *img)
 
 int cmd_info(int argc, char **argv)
 {
+	if (argc == 3 && !strcmp(argv[1], "--typelib"))
+		return cmd_typelib(argv[2]);
 	if (argc != 2) {
-		fprintf(stderr, "usage: seance info <dll>\n");
+		fprintf(stderr, "usage: seance info [--typelib] <file>\n");
 		return 2;
 	}
 

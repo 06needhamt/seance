@@ -14,5 +14,7 @@ int cmd_list(int argc, char **argv);
 int cmd_probe(int argc, char **argv);
 int cmd_register(int argc, char **argv);
 int cmd_sweep(int argc, char **argv);
+/* seance info --typelib <file>. */
+int cmd_typelib(const char *path);
 
 #endif /* VFW_COMMANDS_H */

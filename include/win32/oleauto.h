@@ -331,6 +331,363 @@ typedef struct tagOCPFIPARAMS {
 
 typedef DWORD OLE_COLOR;
 
+/* Type libraries (oaidl.h): their descriptions and interfaces. */
+typedef DWORD HREFTYPE;
+/*
+ * ITypeInfo is ITypeInfo2 and ITypeLib is ITypeLib2 here: the first is
+ * the start of the second, and seance's objects implement both.
+ */
+typedef struct ITypeInfo2 ITypeInfo;
+typedef struct ITypeInfo2 ITypeInfo2;
+typedef struct ITypeLib2 ITypeLib;
+typedef struct ITypeLib2 ITypeLib2;
+typedef struct ITypeComp ITypeComp;
+
+typedef enum tagTYPEKIND {
+	TKIND_ENUM, TKIND_RECORD, TKIND_MODULE, TKIND_INTERFACE,
+	TKIND_DISPATCH, TKIND_COCLASS, TKIND_ALIAS, TKIND_UNION, TKIND_MAX
+} TYPEKIND;
+
+typedef enum tagSYSKIND {
+	SYS_WIN16, SYS_WIN32, SYS_MAC, SYS_WIN64
+} SYSKIND;
+
+typedef enum tagFUNCKIND {
+	FUNC_VIRTUAL, FUNC_PUREVIRTUAL, FUNC_NONVIRTUAL, FUNC_STATIC,
+	FUNC_DISPATCH
+} FUNCKIND;
+
+typedef enum tagINVOKEKIND {
+	INVOKE_FUNC = 1, INVOKE_PROPERTYGET = 2, INVOKE_PROPERTYPUT = 4,
+	INVOKE_PROPERTYPUTREF = 8
+} INVOKEKIND;
+
+typedef enum tagCALLCONV {
+	CC_FASTCALL, CC_CDECL, CC_MSCPASCAL, CC_PASCAL = CC_MSCPASCAL,
+	CC_MACPASCAL, CC_STDCALL, CC_FPFASTCALL, CC_SYSCALL, CC_MPWCDECL,
+	CC_MPWPASCAL, CC_MAX
+} CALLCONV;
+
+typedef enum tagVARKIND {
+	VAR_PERINSTANCE, VAR_STATIC, VAR_CONST, VAR_DISPATCH
+} VARKIND;
+
+typedef enum tagDESCKIND {
+	DESCKIND_NONE, DESCKIND_FUNCDESC, DESCKIND_VARDESC,
+	DESCKIND_TYPECOMP, DESCKIND_IMPLICITAPPOBJ, DESCKIND_MAX
+} DESCKIND;
+
+typedef struct tagTYPEDESC {
+	union {
+		struct tagTYPEDESC *lptdesc;
+		struct tagARRAYDESC *lpadesc;
+		HREFTYPE hreftype;
+	};
+	VARTYPE vt;
+} TYPEDESC;
+
+typedef struct tagARRAYDESC {
+	TYPEDESC tdescElem;
+	USHORT cDims;
+	SAFEARRAYBOUND rgbounds[1];
+} ARRAYDESC;
+
+typedef struct tagPARAMDESCEX {
+	ULONG cBytes;
+	VARIANTARG varDefaultValue;
+} PARAMDESCEX, *LPPARAMDESCEX;
+
+typedef struct tagPARAMDESC {
+	LPPARAMDESCEX pparamdescex;
+	USHORT wParamFlags;
+} PARAMDESC;
+
+typedef struct tagIDLDESC {
+	ULONG_PTR dwReserved;
+	USHORT wIDLFlags;
+} IDLDESC;
+
+typedef struct tagELEMDESC {
+	TYPEDESC tdesc;
+	union {
+		IDLDESC idldesc;
+		PARAMDESC paramdesc;
+	};
+} ELEMDESC;
+
+typedef struct tagTYPEATTR {
+	GUID guid;
+	LCID lcid;
+	DWORD dwReserved;
+	MEMBERID memidConstructor;
+	MEMBERID memidDestructor;
+	LPOLESTR lpstrSchema;
+	ULONG cbSizeInstance;
+	TYPEKIND typekind;
+	WORD cFuncs;
+	WORD cVars;
+	WORD cImplTypes;
+	WORD cbSizeVft;
+	WORD cbAlignment;
+	WORD wTypeFlags;
+	WORD wMajorVerNum;
+	WORD wMinorVerNum;
+	TYPEDESC tdescAlias;
+	IDLDESC idldescType;
+} TYPEATTR;
+
+typedef struct tagFUNCDESC {
+	MEMBERID memid;
+	SCODE *lprgscode;
+	ELEMDESC *lprgelemdescParam;
+	FUNCKIND funckind;
+	INVOKEKIND invkind;
+	CALLCONV callconv;
+	SHORT cParams;
+	SHORT cParamsOpt;
+	SHORT oVft;
+	SHORT cScodes;
+	ELEMDESC elemdescFunc;
+	WORD wFuncFlags;
+} FUNCDESC;
+
+typedef struct tagVARDESC {
+	MEMBERID memid;
+	LPOLESTR lpstrSchema;
+	union {
+		ULONG oInst;
+		VARIANT *lpvarValue;
+	};
+	ELEMDESC elemdescVar;
+	WORD wVarFlags;
+	VARKIND varkind;
+} VARDESC;
+
+typedef struct tagTLIBATTR {
+	GUID guid;
+	LCID lcid;
+	SYSKIND syskind;
+	WORD wMajorVerNum;
+	WORD wMinorVerNum;
+	WORD wLibFlags;
+} TLIBATTR;
+
+typedef union tagBINDPTR {
+	FUNCDESC *lpfuncdesc;
+	VARDESC *lpvardesc;
+	ITypeComp *lptcomp;
+} BINDPTR;
+
+typedef struct tagCUSTDATAITEM {
+	GUID guid;
+	VARIANTARG varValue;
+} CUSTDATAITEM;
+
+typedef struct tagCUSTDATA {
+	DWORD cCustData;
+	CUSTDATAITEM *prgCustData;
+} CUSTDATA;
+
+/* TYPEATTR.wTypeFlags. */
+#define TYPEFLAG_FAPPOBJECT     0x0001
+#define TYPEFLAG_FCANCREATE     0x0002
+#define TYPEFLAG_FLICENSED      0x0004
+#define TYPEFLAG_FPREDECLID     0x0008
+#define TYPEFLAG_FHIDDEN        0x0010
+#define TYPEFLAG_FCONTROL       0x0020
+#define TYPEFLAG_FDUAL          0x0040
+#define TYPEFLAG_FNONEXTENSIBLE 0x0080
+#define TYPEFLAG_FOLEAUTOMATION 0x0100
+#define TYPEFLAG_FRESTRICTED    0x0200
+#define TYPEFLAG_FAGGREGATABLE  0x0400
+#define TYPEFLAG_FREPLACEABLE   0x0800
+#define TYPEFLAG_FDISPATCHABLE  0x1000
+#define TYPEFLAG_FREVERSEBIND   0x2000
+#define TYPEFLAG_FPROXY         0x4000
+
+/* PARAMDESC.wParamFlags. */
+#define PARAMFLAG_NONE         0x00
+#define PARAMFLAG_FIN          0x01
+#define PARAMFLAG_FOUT         0x02
+#define PARAMFLAG_FLCID        0x04
+#define PARAMFLAG_FRETVAL      0x08
+#define PARAMFLAG_FOPT         0x10
+#define PARAMFLAG_FHASDEFAULT  0x20
+#define PARAMFLAG_FHASCUSTDATA 0x40
+
+/* IMPLTYPEFLAGs. */
+#define IMPLTYPEFLAG_FDEFAULT       0x1
+#define IMPLTYPEFLAG_FSOURCE        0x2
+#define IMPLTYPEFLAG_FRESTRICTED    0x4
+#define IMPLTYPEFLAG_FDEFAULTVTABLE 0x8
+
+/* FUNCDESC.wFuncFlags. */
+#define FUNCFLAG_FRESTRICTED       0x0001
+#define FUNCFLAG_FSOURCE           0x0002
+#define FUNCFLAG_FBINDABLE         0x0004
+#define FUNCFLAG_FREQUESTEDIT      0x0008
+#define FUNCFLAG_FDISPLAYBIND      0x0010
+#define FUNCFLAG_FDEFAULTBIND      0x0020
+#define FUNCFLAG_FHIDDEN           0x0040
+#define FUNCFLAG_FUSESGETLASTERROR 0x0080
+#define FUNCFLAG_FDEFAULTCOLLELEM  0x0100
+#define FUNCFLAG_FUIDEFAULT        0x0200
+#define FUNCFLAG_FNONBROWSABLE     0x0400
+#define FUNCFLAG_FREPLACEABLE      0x0800
+#define FUNCFLAG_FIMMEDIATEBIND    0x1000
+
+/* TLIBATTR.wLibFlags. */
+#define LIBFLAG_FRESTRICTED   0x1
+#define LIBFLAG_FCONTROL      0x2
+#define LIBFLAG_FHIDDEN       0x4
+#define LIBFLAG_FHASDISKIMAGE 0x8
+
+/* LoadTypeLibEx. */
+typedef enum tagREGKIND {
+	REGKIND_DEFAULT, REGKIND_REGISTER, REGKIND_NONE
+} REGKIND;
+
+#define MEMBERID_NIL DISPID_UNKNOWN
+
+typedef struct ITypeCompVtbl {
+	HRESULT (WINAPI *QueryInterface)(ITypeComp *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(ITypeComp *This);
+	ULONG (WINAPI *Release)(ITypeComp *This);
+	HRESULT (WINAPI *Bind)(ITypeComp *This, LPOLESTR name, ULONG hash,
+			       WORD flags, ITypeInfo **info, DESCKIND *kind,
+			       BINDPTR *ptr);
+	HRESULT (WINAPI *BindType)(ITypeComp *This, LPOLESTR name, ULONG hash,
+				   ITypeInfo **info, ITypeComp **comp);
+} ITypeCompVtbl;
+struct ITypeComp {
+	const ITypeCompVtbl *lpVtbl;
+};
+
+/*
+ * ITypeInfo2, of which ITypeInfo is the first part: an ITypeInfo has the
+ * same table, cut short after ReleaseVarDesc.
+ */
+typedef struct ITypeInfo2Vtbl {
+	HRESULT (WINAPI *QueryInterface)(ITypeInfo2 *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(ITypeInfo2 *This);
+	ULONG (WINAPI *Release)(ITypeInfo2 *This);
+	HRESULT (WINAPI *GetTypeAttr)(ITypeInfo2 *This, TYPEATTR **attr);
+	HRESULT (WINAPI *GetTypeComp)(ITypeInfo2 *This, ITypeComp **comp);
+	HRESULT (WINAPI *GetFuncDesc)(ITypeInfo2 *This, UINT index,
+				      FUNCDESC **desc);
+	HRESULT (WINAPI *GetVarDesc)(ITypeInfo2 *This, UINT index,
+				     VARDESC **desc);
+	HRESULT (WINAPI *GetNames)(ITypeInfo2 *This, MEMBERID memid,
+				   BSTR *names, UINT max, UINT *count);
+	HRESULT (WINAPI *GetRefTypeOfImplType)(ITypeInfo2 *This, UINT index,
+					       HREFTYPE *href);
+	HRESULT (WINAPI *GetImplTypeFlags)(ITypeInfo2 *This, UINT index,
+					   INT *flags);
+	HRESULT (WINAPI *GetIDsOfNames)(ITypeInfo2 *This, LPOLESTR *names,
+					UINT count, MEMBERID *ids);
+	HRESULT (WINAPI *Invoke)(ITypeInfo2 *This, PVOID instance,
+				 MEMBERID memid, WORD flags,
+				 DISPPARAMS *params, VARIANT *result,
+				 EXCEPINFO *excep, UINT *arg_err);
+	HRESULT (WINAPI *GetDocumentation)(ITypeInfo2 *This, MEMBERID memid,
+					   BSTR *name, BSTR *doc,
+					   DWORD *help_context,
+					   BSTR *help_file);
+	HRESULT (WINAPI *GetDllEntry)(ITypeInfo2 *This, MEMBERID memid,
+				      INVOKEKIND kind, BSTR *dll, BSTR *name,
+				      WORD *ordinal);
+	HRESULT (WINAPI *GetRefTypeInfo)(ITypeInfo2 *This, HREFTYPE href,
+					 ITypeInfo **info);
+	HRESULT (WINAPI *AddressOfMember)(ITypeInfo2 *This, MEMBERID memid,
+					  INVOKEKIND kind, PVOID *addr);
+	HRESULT (WINAPI *CreateInstance)(ITypeInfo2 *This, IUnknown *outer,
+					 REFIID riid, PVOID *obj);
+	HRESULT (WINAPI *GetMops)(ITypeInfo2 *This, MEMBERID memid,
+				  BSTR *mops);
+	HRESULT (WINAPI *GetContainingTypeLib)(ITypeInfo2 *This,
+					       ITypeLib **lib, UINT *index);
+	void (WINAPI *ReleaseTypeAttr)(ITypeInfo2 *This, TYPEATTR *attr);
+	void (WINAPI *ReleaseFuncDesc)(ITypeInfo2 *This, FUNCDESC *desc);
+	void (WINAPI *ReleaseVarDesc)(ITypeInfo2 *This, VARDESC *desc);
+	/* ITypeInfo2 */
+	HRESULT (WINAPI *GetTypeKind)(ITypeInfo2 *This, TYPEKIND *kind);
+	HRESULT (WINAPI *GetTypeFlags)(ITypeInfo2 *This, ULONG *flags);
+	HRESULT (WINAPI *GetFuncIndexOfMemId)(ITypeInfo2 *This,
+					      MEMBERID memid,
+					      INVOKEKIND kind, UINT *index);
+	HRESULT (WINAPI *GetVarIndexOfMemId)(ITypeInfo2 *This,
+					     MEMBERID memid, UINT *index);
+	HRESULT (WINAPI *GetCustData)(ITypeInfo2 *This, REFGUID guid,
+				      VARIANT *value);
+	HRESULT (WINAPI *GetFuncCustData)(ITypeInfo2 *This, UINT index,
+					  REFGUID guid, VARIANT *value);
+	HRESULT (WINAPI *GetParamCustData)(ITypeInfo2 *This, UINT func,
+					   UINT param, REFGUID guid,
+					   VARIANT *value);
+	HRESULT (WINAPI *GetVarCustData)(ITypeInfo2 *This, UINT index,
+					 REFGUID guid, VARIANT *value);
+	HRESULT (WINAPI *GetImplTypeCustData)(ITypeInfo2 *This, UINT index,
+					      REFGUID guid, VARIANT *value);
+	HRESULT (WINAPI *GetDocumentation2)(ITypeInfo2 *This, MEMBERID memid,
+					    LCID lcid, BSTR *help_string,
+					    DWORD *help_context,
+					    BSTR *help_dll);
+	HRESULT (WINAPI *GetAllCustData)(ITypeInfo2 *This, CUSTDATA *data);
+	HRESULT (WINAPI *GetAllFuncCustData)(ITypeInfo2 *This, UINT index,
+					     CUSTDATA *data);
+	HRESULT (WINAPI *GetAllParamCustData)(ITypeInfo2 *This, UINT func,
+					      UINT param, CUSTDATA *data);
+	HRESULT (WINAPI *GetAllVarCustData)(ITypeInfo2 *This, UINT index,
+					    CUSTDATA *data);
+	HRESULT (WINAPI *GetAllImplTypeCustData)(ITypeInfo2 *This,
+						 UINT index, CUSTDATA *data);
+} ITypeInfo2Vtbl;
+struct ITypeInfo2 {
+	const ITypeInfo2Vtbl *lpVtbl;
+};
+
+/* ITypeLib2, of which ITypeLib is the first part (to ReleaseTLibAttr). */
+typedef struct ITypeLib2Vtbl {
+	HRESULT (WINAPI *QueryInterface)(ITypeLib2 *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(ITypeLib2 *This);
+	ULONG (WINAPI *Release)(ITypeLib2 *This);
+	UINT (WINAPI *GetTypeInfoCount)(ITypeLib2 *This);
+	HRESULT (WINAPI *GetTypeInfo)(ITypeLib2 *This, UINT index,
+				      ITypeInfo **info);
+	HRESULT (WINAPI *GetTypeInfoType)(ITypeLib2 *This, UINT index,
+					  TYPEKIND *kind);
+	HRESULT (WINAPI *GetTypeInfoOfGuid)(ITypeLib2 *This, REFGUID guid,
+					    ITypeInfo **info);
+	HRESULT (WINAPI *GetLibAttr)(ITypeLib2 *This, TLIBATTR **attr);
+	HRESULT (WINAPI *GetTypeComp)(ITypeLib2 *This, ITypeComp **comp);
+	HRESULT (WINAPI *GetDocumentation)(ITypeLib2 *This, INT index,
+					   BSTR *name, BSTR *doc,
+					   DWORD *help_context,
+					   BSTR *help_file);
+	HRESULT (WINAPI *IsName)(ITypeLib2 *This, LPOLESTR name, ULONG hash,
+				 BOOL *found);
+	HRESULT (WINAPI *FindName)(ITypeLib2 *This, LPOLESTR name,
+				   ULONG hash, ITypeInfo **infos,
+				   MEMBERID *memids, USHORT *found);
+	void (WINAPI *ReleaseTLibAttr)(ITypeLib2 *This, TLIBATTR *attr);
+	/* ITypeLib2 */
+	HRESULT (WINAPI *GetCustData)(ITypeLib2 *This, REFGUID guid,
+				      VARIANT *value);
+	HRESULT (WINAPI *GetLibStatistics)(ITypeLib2 *This, ULONG *names,
+					   ULONG *chars);
+	HRESULT (WINAPI *GetDocumentation2)(ITypeLib2 *This, INT index,
+					    LCID lcid, BSTR *help_string,
+					    DWORD *help_context,
+					    BSTR *help_dll);
+	HRESULT (WINAPI *GetAllCustData)(ITypeLib2 *This, CUSTDATA *data);
+} ITypeLib2Vtbl;
+struct ITypeLib2 {
+	const ITypeLib2Vtbl *lpVtbl;
+};
+
 /* Errors. */
 #define DISP_E_UNKNOWNINTERFACE ((HRESULT)0x80020001)
 #define DISP_E_MEMBERNOTFOUND   ((HRESULT)0x80020003)
@@ -350,8 +707,32 @@ typedef DWORD OLE_COLOR;
 #define DISP_E_NOTACOLLECTION   ((HRESULT)0x80020011)
 #define DISP_E_DIVBYZERO        ((HRESULT)0x80020012)
 #define DISP_E_BUFFERTOOSMALL   ((HRESULT)0x80020013)
+#define TYPE_E_BUFFERTOOSMALL   ((HRESULT)0x80028016)
+#define TYPE_E_FIELDNOTFOUND    ((HRESULT)0x80028017)
+#define TYPE_E_INVDATAREAD      ((HRESULT)0x80028018)
+#define TYPE_E_UNSUPFORMAT      ((HRESULT)0x80028019)
+#define TYPE_E_REGISTRYACCESS   ((HRESULT)0x8002801C)
 #define TYPE_E_LIBNOTREGISTERED ((HRESULT)0x8002801D)
+#define TYPE_E_UNDEFINEDTYPE    ((HRESULT)0x80028027)
+#define TYPE_E_QUALIFIEDNAMEDISALLOWED ((HRESULT)0x80028028)
+#define TYPE_E_INVALIDSTATE     ((HRESULT)0x80028029)
+#define TYPE_E_WRONGTYPEKIND    ((HRESULT)0x8002802A)
+#define TYPE_E_ELEMENTNOTFOUND  ((HRESULT)0x8002802B)
+#define TYPE_E_AMBIGUOUSNAME    ((HRESULT)0x8002802C)
+#define TYPE_E_NAMECONFLICT     ((HRESULT)0x8002802D)
+#define TYPE_E_UNKNOWNLCID      ((HRESULT)0x8002802E)
+#define TYPE_E_DLLFUNCTIONNOTFOUND ((HRESULT)0x8002802F)
+#define TYPE_E_BADMODULEKIND    ((HRESULT)0x800288BD)
+#define TYPE_E_SIZETOOBIG       ((HRESULT)0x800288C5)
+#define TYPE_E_DUPLICATEID      ((HRESULT)0x800288C6)
+#define TYPE_E_INVALIDID        ((HRESULT)0x800288CF)
+#define TYPE_E_TYPEMISMATCH     ((HRESULT)0x80028CA0)
+#define TYPE_E_OUTOFBOUNDS      ((HRESULT)0x80028CA1)
+#define TYPE_E_IOERROR          ((HRESULT)0x80028CA2)
+#define TYPE_E_CANTCREATETMPFILE ((HRESULT)0x80028CA3)
 #define TYPE_E_CANTLOADLIBRARY  ((HRESULT)0x80029C4A)
+#define TYPE_E_INCONSISTENTPROPFUNCS ((HRESULT)0x80029C83)
+#define TYPE_E_CIRCULARTYPE     ((HRESULT)0x80029C84)
 #define CTL_E_OVERFLOW          ((HRESULT)0x800A0006)
 #define CTL_E_OUTOFMEMORY       ((HRESULT)0x800A0007)
 #define CTL_E_ILLEGALFUNCTIONCALL ((HRESULT)0x800A0005)
@@ -393,7 +774,17 @@ struct IPropertyBag {
 	G(IID_IErrorLog, 0x3127ca40, 0x446e, 0x11ce, \
 	  0x81, 0x35, 0x00, 0xaa, 0x00, 0x4b, 0xb8, 0x51) \
 	G(IID_IPropertyBag, 0x55272a00, 0x42cb, 0x11ce, \
-	  0x81, 0x35, 0x00, 0xaa, 0x00, 0x4b, 0xb8, 0x51)
+	  0x81, 0x35, 0x00, 0xaa, 0x00, 0x4b, 0xb8, 0x51) \
+	G(IID_ITypeInfo, 0x00020401, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_ITypeLib, 0x00020402, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_ITypeComp, 0x00020403, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_ITypeLib2, 0x00020411, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_ITypeInfo2, 0x00020412, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46)
 
 VFW_OLEAUTO_GUIDS(VFW_GUID_DECLARE)
 

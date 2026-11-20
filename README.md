@@ -208,6 +208,10 @@ build/seance info some-codec.dll
 `info` parses a DLL without loading or running it. It prints the headers,
 sections, exports (including ordinal-only exports and forwarders), imports
 and delay imports, TLS callbacks, resources and version information.
+`info --typelib` lists the type library in a `.tlb` file or a DLL's
+`TYPELIB` resource instead (`file.dll\2` for its second), read by seance's
+own oleaut32: each type, its GUID and flags, and its functions with their
+parameters, as `ITypeInfo` reports them.
 When a DLL is loaded, its delay-load imports are bound straight away, like
 its other imports; one whose DLL or function can't be found is bound to a
 trap that says why if the codec ever calls it.
