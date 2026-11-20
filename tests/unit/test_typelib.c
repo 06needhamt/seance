@@ -78,484 +78,15 @@ static HRESULT (WINAPI *pQueryPathOfRegTypeLib)(REFGUID, WORD, WORD, LCID,
 						BSTR *);
 static HRESULT (WINAPI *pLoadRegTypeLib)(REFGUID, WORD, WORD, LCID,
 					 ITypeLib **);
+static BSTR (WINAPI *pSysAllocString)(LPCOLESTR);
+static HRESULT (WINAPI *pCreateErrorInfo)(ICreateErrorInfo **);
+static HRESULT (WINAPI *pSetErrorInfo)(ULONG, IErrorInfo *);
 
-static const GUID libid = { 0x5eace001, 0x1111, 0x2222,
-			    { 1, 2, 3, 4, 5, 6, 7, 8 } };
-static const GUID iid_thing = { 0x5eace002, 0x1111, 0x2222,
-				{ 1, 2, 3, 4, 5, 6, 7, 8 } };
-static const GUID iid_plain = { 0x5eace003, 0x1111, 0x2222,
-				{ 1, 2, 3, 4, 5, 6, 7, 8 } };
-static const GUID iid_events = { 0x5eace004, 0x1111, 0x2222,
-				 { 1, 2, 3, 4, 5, 6, 7, 8 } };
-static const GUID guid_colors = { 0x5eace005, 0x1111, 0x2222,
-				  { 1, 2, 3, 4, 5, 6, 7, 8 } };
-static const GUID guid_point = { 0x5eace006, 0x1111, 0x2222,
-				 { 1, 2, 3, 4, 5, 6, 7, 8 } };
-static const GUID clsid_thing = { 0x5eace007, 0x1111, 0x2222,
-				  { 1, 2, 3, 4, 5, 6, 7, 8 } };
+#include "tlb_writer.h"
+
 static const GUID guid_none;
-static const GUID guid_cust = { 0x5eace008, 0x1111, 0x2222,
-				{ 1, 2, 3, 4, 5, 6, 7, 8 } };
-static const GUID stdole2 = { 0x00020430, 0, 0,
-			      { 0xc0, 0, 0, 0, 0, 0, 0, 0x46 } };
-static const GUID iid_idispatch = { 0x00020400, 0, 0,
-				    { 0xc0, 0, 0, 0, 0, 0, 0, 0x46 } };
-static const GUID iid_iunknown = { 0, 0, 0,
-				   { 0xc0, 0, 0, 0, 0, 0, 0, 0x46 } };
-
-/* ----------------------------------------------------------------------
- * Writing the library.
- */
-
-struct buf {
-	unsigned char *d;
-	size_t len, cap;
-};
-
-static size_t put(struct buf *b, const void *p, size_t n)
-{
-	size_t at = b->len;
-
-	if (b->len + n > b->cap) {
-		b->cap = (b->len + n) * 2 + 64;
-		b->d = realloc(b->d, b->cap);
-	}
-	memcpy(b->d + b->len, p, n);
-	b->len += n;
-	return at;
-}
-
-static size_t put32(struct buf *b, int32_t v)
-{
-	return put(b, &v, 4);
-}
-
-static size_t put16(struct buf *b, int16_t v)
-{
-	return put(b, &v, 2);
-}
-
-static void pad4(struct buf *b)
-{
-	while (b->len % 4)
-		put(b, "", 1);
-}
-
-enum {
-	SEG_TYPEINFO, SEG_IMPINFO, SEG_IMPFILES, SEG_REFTAB, SEG_GUIDHASH,
-	SEG_GUID, SEG_NAMEHASH, SEG_NAME, SEG_STRING, SEG_TYPEDESC,
-	SEG_ARRAYDESC, SEG_CUSTDATA, SEG_CDGUIDS, SEG_COUNT = 15
-};
-
-struct writer {
-	int ptr;			/* 4 or 8 */
-	struct buf seg[SEG_COUNT];
-	struct buf members[16];
-	int32_t ti[16][25];		/* each type info's words */
-	int ntypes;
-};
-
-static int32_t w_guid(struct writer *w, const GUID *g, int32_t href)
-{
-	int32_t off = put(&w->seg[SEG_GUID], g, 16);
-
-	put32(&w->seg[SEG_GUID], href);
-	put32(&w->seg[SEG_GUID], -1);
-	return off;
-}
-
-static int32_t w_name(struct writer *w, const char *s)
-{
-	struct buf *b = &w->seg[SEG_NAME];
-	int32_t off = put32(b, -1);
-
-	put32(b, -1);
-	put32(b, (int32_t)strlen(s) | 0x1234 << 16);
-	put(b, s, strlen(s));
-	pad4(b);
-	return off;
-}
-
-static int32_t w_string(struct writer *w, const char *s)
-{
-	struct buf *b = &w->seg[SEG_STRING];
-	int32_t off = put16(b, (int16_t)strlen(s));
-
-	put(b, s, strlen(s));
-	pad4(b);
-	return off;
-}
-
-/* A simple type, encoded in the word itself. */
-static int32_t simple(VARTYPE vt)
-{
-	return (int32_t)(0x80000000u | (uint32_t)vt << 16 | vt);
-}
-
-static int32_t w_tdesc(struct writer *w, VARTYPE vt, int32_t v)
-{
-	struct buf *b = &w->seg[SEG_TYPEDESC];
-	int32_t off = put16(b, (int16_t)(vt | 0x7000));
-
-	put16(b, -1);
-	put32(b, v);
-	return off;
-}
-
-/* A value in the custom data segment: a VARTYPE, then the data. */
-static int32_t w_value(struct writer *w, VARTYPE vt, const void *p,
-		       size_t n)
-{
-	struct buf *b = &w->seg[SEG_CUSTDATA];
-	int32_t off = put16(b, (int16_t)vt);
-
-	if (vt == VT_BSTR)
-		put32(b, (int32_t)n);
-	put(b, p, n);
-	pad4(b);
-	return off;
-}
-
-static int32_t w_cust(struct writer *w, const GUID *g, int32_t value,
-		      int32_t next)
-{
-	struct buf *b = &w->seg[SEG_CDGUIDS];
-	int32_t off = put32(b, w_guid(w, g, -1));
-
-	put32(b, value);
-	put32(b, next);
-	return off;
-}
-
-#define INLINE_I4(v) ((int32_t)(0x80000000u | VT_I4 << 26 | (v)))
-
-static int w_type(struct writer *w, TYPEKIND kind, const char *name,
-		  const GUID *g, int flags, int size, int align)
-{
-	int i = w->ntypes++;
-	int32_t *t = w->ti[i];
-
-	memset(t, 0xff, sizeof(w->ti[i]));
-	t[0] = kind | align << 11 | i << 16;
-	t[2] = t[3] = t[4] = t[5] = 0;
-	t[6] = 0;
-	t[7] = t[8] = t[9] = t[10] = 0;
-	t[11] = g ? w_guid(w, g, i * 0x64) : -1;
-	t[12] = flags;
-	t[13] = w_name(w, name);
-	t[14] = 0;
-	t[16] = t[17] = 0;
-	t[19] = 0;
-	t[20] = size;
-	t[22] = 0;
-	t[23] = t[24] = 0;
-	return i;
-}
-
-/* The ints after a function record's fixed part. */
-struct opt {
-	int n;
-	int32_t v[8];
-};
-
-struct param {
-	int32_t type;
-	const char *name;
-	int flags;
-	int32_t def;			/* with PARAMFLAG_FHASDEFAULT */
-};
-
-struct member {
-	int32_t memid, name;
-	struct buf rec;
-};
-
-static struct member mem[16][8];
-static int nmem[16];
-
-static void w_func(struct writer *w, int t, int32_t memid, const char *name,
-		   int funckind, int invkind, int32_t ret, int vft_slot,
-		   const struct opt *o, int nparams, const struct param *p)
-{
-	struct member *m = &mem[t][nmem[t]++];
-	struct buf *r = &m->rec;
-	int defaults = 0;
-
-	for (int i = 0; i < nparams; i++)
-		if (p[i].flags & PARAMFLAG_FHASDEFAULT)
-			defaults = 1;
-	m->memid = memid;
-	m->name = w_name(w, name);
-	put32(r, 0);				/* the length, below */
-	put32(r, ret);
-	put32(r, 0);				/* FUNCFLAGs */
-	put16(r, (int16_t)(vft_slot * w->ptr));
-	put16(r, 0);
-	put32(r, funckind | invkind << 3 | CC_STDCALL << 8 |
-		 (defaults ? 0x1000 : 0) |
-		 (o && o->n > 2 && o->v[2] >= 0 && o->v[2] < 0x10000 &&
-		  !strcmp(name, "Tick") ? 0x2000 : 0));
-	put16(r, (int16_t)nparams);
-	put16(r, 0);
-	for (int i = 0; o && i < o->n; i++)
-		put32(r, o->v[i]);
-	if (defaults)
-		for (int i = 0; i < nparams; i++)
-			put32(r, p[i].flags & PARAMFLAG_FHASDEFAULT ? p[i].def
-								     : -1);
-	for (int i = 0; i < nparams; i++) {
-		put32(r, p[i].type);
-		put32(r, p[i].name ? w_name(w, p[i].name) : -1);
-		put32(r, p[i].flags);
-	}
-	*(int32_t *)r->d = (int32_t)r->len;
-	w->ti[t][6] += 1;
-}
-
-static void w_var(struct writer *w, int t, int32_t memid, const char *name,
-		  int32_t type, int kind, int32_t value)
-{
-	struct member *m = &mem[t][nmem[t]++];
-	struct buf *r = &m->rec;
-
-	m->memid = memid;
-	m->name = w_name(w, name);
-	put32(r, 20);
-	put32(r, type);
-	put32(r, 0);
-	put16(r, (int16_t)kind);
-	put16(r, 0);
-	put32(r, value);
-	w->ti[t][6] += 1 << 16;
-}
-
-/* The header, directories and members after the segments: the file. */
-static struct buf finish(struct writer *w, const GUID *lib_guid,
-			 const char *doc, const char *name,
-			 int32_t dispatch_href)
-{
-	struct buf out = { 0 };
-
-	/* The header. */
-	int32_t h[21];
-	const char *hello = "hello";
-
-	h[0] = 0x5446534d;
-	h[1] = 0x00010002;
-	h[2] = w_guid(w, lib_guid, -2);
-	h[3] = h[4] = 0x409;
-	h[5] = w->ptr == 8 ? SYS_WIN64 : SYS_WIN32;
-	h[6] = 1 | 2 << 16;
-	h[7] = 0;
-	h[8] = w->ntypes;
-	h[9] = w_string(w, doc);
-	h[10] = 0;
-	h[11] = 7;
-	h[12] = h[13] = 0;
-	h[14] = w_name(w, name);
-	h[15] = w_string(w, "test.hlp");
-	h[16] = w_cust(w, &guid_cust,
-		       w_value(w, VT_BSTR, hello, strlen(hello)), -1);
-	h[17] = h[18] = 0;
-	h[19] = dispatch_href;
-	h[20] = 3;
-	put(&out, h, sizeof(h));
-	for (int i = 0; i < w->ntypes; i++)
-		put32(&out, i * 0x64);
-
-	/* The segment directory, then the segments, then the members. */
-	size_t dir = out.len;
-	for (int i = 0; i < w->ntypes; i++)
-		put(&w->seg[SEG_TYPEINFO], w->ti[i], 0x64);
-	for (int i = 0; i < SEG_COUNT * 4; i++)
-		put32(&out, 0);
-	for (int i = 0; i < SEG_COUNT; i++) {
-		int32_t *e = (int32_t *)(out.d + dir) + 4 * i;
-
-		e[0] = w->seg[i].len ? (int32_t)out.len : -1;
-		e[1] = (int32_t)w->seg[i].len;
-		e[2] = -1;
-		e[3] = 0xf;
-		if (w->seg[i].len)
-			put(&out, w->seg[i].d, w->seg[i].len);
-	}
-	size_t ti_seg = ((int32_t *)(out.d + dir))[0];
-	for (int i = 0; i < w->ntypes; i++) {
-		int n = nmem[i];
-		int32_t len = 0;
-
-		if (!n)
-			continue;
-		((int32_t *)(out.d + ti_seg + i * 0x64))[1] = (int32_t)out.len;
-		for (int j = 0; j < n; j++)
-			len += (int32_t)mem[i][j].rec.len;
-		put32(&out, len);
-		for (int j = 0; j < n; j++)
-			put(&out, mem[i][j].rec.d, mem[i][j].rec.len);
-		for (int j = 0; j < n; j++)
-			put32(&out, mem[i][j].memid);
-		for (int j = 0; j < n; j++)
-			put32(&out, mem[i][j].name);
-		for (int j = 0, off = 0; j < n; j++) {
-			put32(&out, off);
-			off += (int)mem[i][j].rec.len;
-		}
-	}
-	for (int i = 0; i < SEG_COUNT; i++)
-		free(w->seg[i].d);
-	for (int i = 0; i < 16; i++)
-		for (int j = 0; j < 8; j++)
-			free(mem[i][j].rec.d);
-	return out;
-}
-
-/* The library, laid out for pointers of ptr bytes. */
-static struct buf build_library(int ptr)
-{
-	struct writer w = { .ptr = ptr };
-	const char *stdole = "stdole2.tlb";
-	int32_t td_i4ptr, td_bstrptr, td_guid, td_guidptr, td_point, td_ppoint,
-		td_tag, ad;
-
-	memset(mem, 0, sizeof(mem));
-	memset(nmem, 0, sizeof(nmem));
-
-	/* Imports: IDispatch and IUnknown by GUID, GUID by index. */
-	int32_t impfile = put32(&w.seg[SEG_IMPFILES],
-				w_guid(&w, &stdole2, -1));
-	put32(&w.seg[SEG_IMPFILES], 0);
-	put32(&w.seg[SEG_IMPFILES], 2);
-	put16(&w.seg[SEG_IMPFILES], (int16_t)(strlen(stdole) << 2));
-	put(&w.seg[SEG_IMPFILES], stdole, strlen(stdole));
-	pad4(&w.seg[SEG_IMPFILES]);
-	const int32_t href_idispatch = 1, href_iunknown = 13, href_guid = 25;
-	put32(&w.seg[SEG_IMPINFO], 0x10000 | TKIND_DISPATCH << 24);
-	put32(&w.seg[SEG_IMPINFO], impfile);
-	put32(&w.seg[SEG_IMPINFO], w_guid(&w, &iid_idispatch, href_idispatch));
-	put32(&w.seg[SEG_IMPINFO], 0x10000 | TKIND_INTERFACE << 24);
-	put32(&w.seg[SEG_IMPINFO], impfile);
-	put32(&w.seg[SEG_IMPINFO], w_guid(&w, &iid_iunknown, href_iunknown));
-	put32(&w.seg[SEG_IMPINFO], TKIND_RECORD << 24);
-	put32(&w.seg[SEG_IMPINFO], impfile);
-	put32(&w.seg[SEG_IMPINFO], 0);
-
-	/* Type descriptions. */
-	td_i4ptr = w_tdesc(&w, VT_PTR, simple(VT_I4));
-	td_bstrptr = w_tdesc(&w, VT_PTR, simple(VT_BSTR));
-	td_guid = w_tdesc(&w, VT_USERDEFINED, href_guid);
-	td_guidptr = w_tdesc(&w, VT_PTR, td_guid);
-	td_point = w_tdesc(&w, VT_USERDEFINED, 4 * 0x64);
-	td_ppoint = w_tdesc(&w, VT_PTR, td_point);
-	ad = put32(&w.seg[SEG_ARRAYDESC], simple(VT_UI1));
-	put16(&w.seg[SEG_ARRAYDESC], 1);
-	put16(&w.seg[SEG_ARRAYDESC], 0);
-	put32(&w.seg[SEG_ARRAYDESC], 4);
-	put32(&w.seg[SEG_ARRAYDESC], 0);
-	td_tag = w_tdesc(&w, VT_CARRAY, ad);
-
-	/* 0: IThing, dual. */
-	int t = w_type(&w, TKIND_DISPATCH, "IThing", &iid_thing,
-		       TYPEFLAG_FDUAL | TYPEFLAG_FDISPATCHABLE |
-			       TYPEFLAG_FOLEAUTOMATION, ptr, ptr);
-	int32_t v42 = 42;
-	w.ti[t][18] = w_cust(&w, &guid_cust,
-			     w_value(&w, VT_I4, &v42, 4), -1);
-	w.ti[t][19] = 1 | (11 * ptr) << 16;
-	w.ti[t][21] = href_idispatch;
-	w.ti[t][14] = 1;
-	{
-		struct opt o = { 2, { 0, w_string(&w, "Adds two numbers") } };
-		struct param p[] = {
-			{ simple(VT_I4), "a", PARAMFLAG_FIN, 0 },
-			{ simple(VT_I4), "b",
-			  PARAMFLAG_FIN | PARAMFLAG_FOPT |
-				  PARAMFLAG_FHASDEFAULT, INLINE_I4(2) },
-			{ td_i4ptr, "r", PARAMFLAG_FOUT | PARAMFLAG_FRETVAL, 0 },
-		};
-		struct param get[] = {
-			{ td_bstrptr, "v", PARAMFLAG_FOUT | PARAMFLAG_FRETVAL, 0 },
-		};
-		struct param set[] = { { simple(VT_BSTR), "v", PARAMFLAG_FIN, 0 } };
-		struct param chk[] = { { td_guidptr, "g", PARAMFLAG_FIN, 0 } };
-
-		w_func(&w, t, 1, "Add", FUNC_PUREVIRTUAL, INVOKE_FUNC,
-		       simple(VT_HRESULT), 7, &o, 3, p);
-		w_func(&w, t, 2, "Name", FUNC_PUREVIRTUAL, INVOKE_PROPERTYGET,
-		       simple(VT_HRESULT), 8, NULL, 1, get);
-		w_func(&w, t, 2, "Name", FUNC_PUREVIRTUAL, INVOKE_PROPERTYPUT,
-		       simple(VT_HRESULT), 9, NULL, 1, set);
-		w_func(&w, t, 3, "Check", FUNC_PUREVIRTUAL, INVOKE_FUNC,
-		       simple(VT_HRESULT), 10, NULL, 1, chk);
-	}
-
-	/* 1: IPlain. */
-	t = w_type(&w, TKIND_INTERFACE, "IPlain", &iid_plain, 0, ptr, ptr);
-	w.ti[t][19] = 1 | (4 * ptr) << 16;
-	w.ti[t][21] = href_iunknown;
-	{
-		struct param p[] = { { td_ppoint, "p", PARAMFLAG_FIN, 0 } };
-
-		w_func(&w, t, 0x60010000, "Ping", FUNC_PUREVIRTUAL,
-		       INVOKE_FUNC, simple(VT_HRESULT), 3, NULL, 1, p);
-	}
-
-	/* 2: IEvents. */
-	t = w_type(&w, TKIND_DISPATCH, "IEvents", &iid_events, 0, ptr, ptr);
-	w.ti[t][19] = 1 | (7 * ptr) << 16;
-	w.ti[t][21] = href_idispatch;
-	{
-		struct param p[] = { { simple(VT_I4), "what", PARAMFLAG_FIN, 0 } };
-
-		w_func(&w, t, 10, "Changed", FUNC_DISPATCH, INVOKE_FUNC,
-		       simple(VT_VOID), 0, NULL, 1, p);
-	}
-
-	/* 3: Colors. */
-	t = w_type(&w, TKIND_ENUM, "Colors", &guid_colors, 0, 4, 4);
-	w_var(&w, t, 0x40000000, "Red", simple(VT_I4), VAR_CONST,
-	      INLINE_I4(1));
-	w_var(&w, t, 0x40000001, "Green", simple(VT_I4), VAR_CONST,
-	      INLINE_I4(2));
-
-	/* 4: Point. */
-	t = w_type(&w, TKIND_RECORD, "Point", &guid_point, 0, 12, 4);
-	w_var(&w, t, 0x40000000, "x", simple(VT_I4), VAR_PERINSTANCE, 0);
-	w_var(&w, t, 0x40000001, "y", simple(VT_I4), VAR_PERINSTANCE, 4);
-	w_var(&w, t, 0x40000002, "tag", td_tag, VAR_PERINSTANCE, 8);
-
-	/* 5: PPoint. */
-	t = w_type(&w, TKIND_ALIAS, "PPoint", NULL, 0, ptr, ptr);
-	w.ti[t][21] = td_ppoint;
-
-	/* 6: Kernel. */
-	t = w_type(&w, TKIND_MODULE, "Kernel", NULL, 0, 4, 4);
-	w.ti[t][21] = w_string(&w, "kernel32.dll");
-	{
-		struct opt beep = { 3, { 0, -1, w_string(&w, "Beep") } };
-		struct opt tick = { 3, { 0, -1, 42 } };
-
-		w_func(&w, t, 0x60000000, "Beep", FUNC_STATIC, INVOKE_FUNC,
-		       simple(VT_HRESULT), 0, &beep, 0, NULL);
-		w_func(&w, t, 0x60000001, "Tick", FUNC_STATIC, INVOKE_FUNC,
-		       simple(VT_HRESULT), 0, &tick, 0, NULL);
-	}
-
-	/* 7: Thing. */
-	t = w_type(&w, TKIND_COCLASS, "Thing", &clsid_thing,
-		   TYPEFLAG_FCANCREATE, ptr, ptr);
-	w.ti[t][19] = 2;
-	w.ti[t][21] = put32(&w.seg[SEG_REFTAB], 0);
-	put32(&w.seg[SEG_REFTAB], IMPLTYPEFLAG_FDEFAULT);
-	put32(&w.seg[SEG_REFTAB], -1);
-	put32(&w.seg[SEG_REFTAB], 16);
-	put32(&w.seg[SEG_REFTAB], 2 * 0x64);
-	put32(&w.seg[SEG_REFTAB], IMPLTYPEFLAG_FDEFAULT |
-				   IMPLTYPEFLAG_FSOURCE);
-	put32(&w.seg[SEG_REFTAB], -1);
-	put32(&w.seg[SEG_REFTAB], -1);
-
-	return finish(&w, &libid, "Test library", "TestLib", href_idispatch);
-}
+static const GUID iid_ierrorinfo = { 0x1cf2b120, 0x547d, 0x101b,
+	{ 0x8e, 0x65, 0x08, 0x00, 0x2b, 0x2b, 0xd1, 0x19 } };
 
 static const GUID libid_derived = { 0x5eace009, 0x1111, 0x2222,
 	{ 1, 2, 3, 4, 5, 6, 7, 8 } };
@@ -1030,6 +561,307 @@ static void check_others(ITypeLib *lib)
 	ti->lpVtbl->Release(ti);
 }
 
+/*
+ * ITypeInfo::Invoke on an object implementing IThing (the dual
+ * interface's vtable: IDispatch's seven methods, then Add, the Name
+ * property and Check), through the dispatch view, the vtable view and the
+ * coclass; and on one implementing only IDispatch, for IEvents.
+ */
+static const char *narrow(const WCHAR *w);
+
+struct thing {
+	const void *const *vtbl;
+	WCHAR name[32];
+	GUID seen;
+	int calls;
+};
+
+static HRESULT WINAPI th_unused(struct thing *t)
+{
+	return E_NOTIMPL;
+}
+
+static HRESULT WINAPI th_add(struct thing *t, LONG a, LONG b, LONG *r)
+{
+	t->calls++;
+	if (a < 0) {
+		ICreateErrorInfo *c = NULL;
+		IErrorInfo *e = NULL;
+
+		if (pCreateErrorInfo(&c) == S_OK) {
+			c->lpVtbl->SetDescription(c, wide("negative"));
+			c->lpVtbl->SetSource(c, wide("Thing"));
+			c->lpVtbl->QueryInterface(c, &iid_ierrorinfo,
+						  (void **)&e);
+			pSetErrorInfo(0, e);
+			if (e)
+				e->lpVtbl->Release(e);
+			c->lpVtbl->Release(c);
+		}
+		return E_INVALIDARG;
+	}
+	*r = a + b;
+	return S_OK;
+}
+
+static HRESULT WINAPI th_get_name(struct thing *t, BSTR *v)
+{
+	*v = pSysAllocString(t->name);
+	return S_OK;
+}
+
+static HRESULT WINAPI th_put_name(struct thing *t, BSTR v)
+{
+	size_t i = 0;
+
+	for (; v && v[i] && i < 31; i++)
+		t->name[i] = v[i];
+	t->name[i] = 0;
+	return S_OK;
+}
+
+static HRESULT WINAPI th_check(struct thing *t, GUID *g)
+{
+	t->seen = *g;
+	return S_OK;
+}
+
+static const void *const thing_vtbl[] = {
+	(void *)th_unused, (void *)th_unused, (void *)th_unused,
+	(void *)th_unused, (void *)th_unused, (void *)th_unused,
+	(void *)th_unused, (void *)th_add, (void *)th_get_name,
+	(void *)th_put_name, (void *)th_check,
+};
+
+/* An object with only IDispatch, recording what Invoke is asked. */
+struct events {
+	IDispatch disp;
+	DISPID last;
+	UINT args;
+};
+
+static HRESULT WINAPI ev_qi(IDispatch *d, REFIID riid, void **ppv)
+{
+	if (!memcmp(riid, &iid_idispatch, sizeof(GUID)) ||
+	    !memcmp(riid, &iid_iunknown, sizeof(GUID))) {
+		*ppv = d;
+		return S_OK;
+	}
+	*ppv = NULL;
+	return E_NOINTERFACE;
+}
+
+static ULONG WINAPI ev_ref(IDispatch *d)
+{
+	return 1;
+}
+
+static HRESULT WINAPI ev_count(IDispatch *d, UINT *n)
+{
+	return E_NOTIMPL;
+}
+
+static HRESULT WINAPI ev_info(IDispatch *d, UINT i, LCID l, void **p)
+{
+	return E_NOTIMPL;
+}
+
+static HRESULT WINAPI ev_ids(IDispatch *d, REFIID r, LPOLESTR *n, UINT c,
+			     LCID l, DISPID *ids)
+{
+	return E_NOTIMPL;
+}
+
+static HRESULT WINAPI ev_invoke(IDispatch *d, DISPID id, REFIID riid,
+				LCID lcid, WORD flags, DISPPARAMS *dp,
+				VARIANT *res, EXCEPINFO *ex, UINT *err)
+{
+	struct events *e = (struct events *)d;
+
+	e->last = id;
+	e->args = dp->cArgs;
+	return S_OK;
+}
+
+static const IDispatchVtbl events_vtbl = {
+	ev_qi, ev_ref, ev_ref, ev_count, ev_info, ev_ids, ev_invoke,
+};
+
+static HRESULT inv(ITypeInfo *ti, void *obj, MEMBERID id, WORD flags,
+		   VARIANT *args, UINT n, DISPID *named, UINT nnamed,
+		   VARIANT *res, EXCEPINFO *ex, UINT *err)
+{
+	DISPPARAMS dp = { args, named, n, nnamed };
+
+	if (res)
+		memset(res, 0, sizeof(*res));
+	return ti->lpVtbl->Invoke(ti, obj, id, flags, &dp, res, ex, err);
+}
+
+static void check_invoke(ITypeLib *lib)
+{
+	ITypeInfo *thing = type_at(lib, 0), *events = type_at(lib, 2),
+		  *cls = type_at(lib, 7), *vt = NULL;
+	struct thing obj = { thing_vtbl, { 0 }, { 0 }, 0 };
+	struct events ev = { { &events_vtbl }, 0, 0 };
+	VARIANT a[4], r;
+	EXCEPINFO ex;
+	DISPID named[2];
+	HREFTYPE h;
+	UINT err;
+
+	if (!thing || !events || !cls)
+		goto done;
+	memset(a, 0, sizeof(a));
+
+	/* Add(3, 4): positional arguments, in reverse. */
+	a[0].vt = VT_I4;
+	a[0].lVal = 4;
+	a[1].vt = VT_I4;
+	a[1].lVal = 3;
+	CHECK_EQ(inv(thing, &obj, 1, DISPATCH_METHOD, a, 2, NULL, 0, &r, NULL,
+		     &err), S_OK);
+	CHECK_EQ(r.vt, VT_I4);
+	CHECK_EQ(r.lVal, 7);
+	/* b left out: its default, 2. */
+	CHECK_EQ(inv(thing, &obj, 1, DISPATCH_METHOD, &a[1], 1, NULL, 0, &r,
+		     NULL, &err), S_OK);
+	CHECK_EQ(r.lVal, 5);
+	/* Named: b = 20, then a = 1 by position. */
+	named[0] = 1;
+	a[0].lVal = 20;
+	a[1].lVal = 1;
+	CHECK_EQ(inv(thing, &obj, 1, DISPATCH_METHOD, a, 2, named, 1, &r, NULL,
+		     &err), S_OK);
+	CHECK_EQ(r.lVal, 21);
+	/* Both named, in any order. */
+	named[0] = 0;
+	named[1] = 1;
+	a[0].lVal = 100;
+	a[1].lVal = 11;
+	CHECK_EQ(inv(thing, &obj, 1, DISPATCH_METHOD, a, 2, named, 2, &r, NULL,
+		     &err), S_OK);
+	CHECK_EQ(r.lVal, 111);
+	/* No such parameter. */
+	named[0] = 5;
+	err = 99;
+	CHECK_EQ(inv(thing, &obj, 1, DISPATCH_METHOD, a, 2, named, 1, &r, NULL,
+		     &err), DISP_E_PARAMNOTFOUND);
+	CHECK_EQ(err, 0);
+	named[0] = 2;			/* the [retval] can't be given */
+	CHECK_EQ(inv(thing, &obj, 1, DISPATCH_METHOD, a, 2, named, 1, &r, NULL,
+		     &err), DISP_E_PARAMNOTFOUND);
+	/* Converted from a string; one that isn't a number. */
+	a[1].vt = VT_BSTR;
+	a[1].bstrVal = pSysAllocString(wide("40"));
+	a[0].vt = VT_I2;
+	a[0].iVal = 2;
+	CHECK_EQ(inv(thing, &obj, 1, DISPATCH_METHOD, a, 2, NULL, 0, &r, NULL,
+		     &err), S_OK);
+	CHECK_EQ(r.lVal, 42);
+	pSysFreeString(a[1].bstrVal);
+	a[1].bstrVal = pSysAllocString(wide("forty"));
+	err = 99;
+	CHECK_EQ(inv(thing, &obj, 1, DISPATCH_METHOD, a, 2, NULL, 0, &r, NULL,
+		     &err), DISP_E_TYPEMISMATCH);
+	CHECK_EQ(err, 1);
+	pSysFreeString(a[1].bstrVal);
+	a[1].vt = VT_I4;
+	a[1].lVal = 1;
+	/* Counts. */
+	CHECK_EQ(inv(thing, &obj, 1, DISPATCH_METHOD, a, 3, NULL, 0, &r, NULL,
+		     &err), DISP_E_BADPARAMCOUNT);
+	CHECK_EQ(inv(thing, &obj, 1, DISPATCH_METHOD, a, 0, NULL, 0, &r, NULL,
+		     &err), DISP_E_PARAMNOTOPTIONAL);
+	CHECK_EQ(inv(thing, &obj, 99, DISPATCH_METHOD, a, 0, NULL, 0, &r, NULL,
+		     &err), DISP_E_MEMBERNOTFOUND);
+	CHECK_EQ(inv(thing, &obj, 1, DISPATCH_PROPERTYGET, a, 0, NULL, 0, &r,
+		     NULL, &err), DISP_E_MEMBERNOTFOUND);
+	CHECK_EQ(inv(thing, NULL, 1, DISPATCH_METHOD, a, 0, NULL, 0, &r, NULL,
+		     &err), E_INVALIDARG);
+
+	/* A failed HRESULT: DISP_E_EXCEPTION, with the error information. */
+	a[0].vt = VT_I4;
+	a[0].lVal = 0;
+	a[1].vt = VT_I4;
+	a[1].lVal = -1;
+	memset(&ex, 0x55, sizeof(ex));
+	CHECK_EQ(inv(thing, &obj, 1, DISPATCH_METHOD, a, 2, NULL, 0, &r, &ex,
+		     &err), DISP_E_EXCEPTION);
+	CHECK_EQ(ex.scode, E_INVALIDARG);
+	CHECK_EQ(ex.wCode, 0);
+	CHECK_STR(utf8(ex.bstrDescription), "negative");
+	CHECK_STR(utf8(ex.bstrSource), "Thing");
+	CHECK_EQ(r.vt, VT_EMPTY);
+
+	/* The Name property: put as DISPID_PROPERTYPUT, then get. */
+	named[0] = DISPID_PROPERTYPUT;
+	a[0].vt = VT_BSTR;
+	a[0].bstrVal = pSysAllocString(wide("widget"));
+	CHECK_EQ(inv(thing, &obj, 2, DISPATCH_PROPERTYPUT, a, 1, named, 1,
+		     NULL, NULL, &err), S_OK);
+	CHECK_STR(narrow(obj.name), "widget");
+	pSysFreeString(a[0].bstrVal);
+	CHECK_EQ(inv(thing, &obj, 2, DISPATCH_PROPERTYPUT, a, 0, NULL, 0, NULL,
+		     NULL, &err), DISP_E_PARAMNOTOPTIONAL);
+	/* A number, converted to the property's BSTR. */
+	a[0].vt = VT_I4;
+	a[0].lVal = 12;
+	CHECK_EQ(inv(thing, &obj, 2, DISPATCH_PROPERTYPUT, a, 1, named, 1,
+		     NULL, NULL, &err), S_OK);
+	CHECK_STR(narrow(obj.name), "12");
+	CHECK_EQ(inv(thing, &obj, 2, DISPATCH_METHOD | DISPATCH_PROPERTYGET,
+		     a, 0, NULL, 0, &r, NULL, &err), S_OK);
+	CHECK_EQ(r.vt, VT_BSTR);
+	CHECK_STR(utf8(r.bstrVal), "12");
+
+	/* A pointer to a record, as VT_RECORD | VT_BYREF. */
+	{
+		GUID g = iid_thing;
+
+		memset(&a[0], 0, sizeof(a[0]));
+		a[0].vt = VT_RECORD | VT_BYREF;
+		a[0].pvRecord = &g;
+		CHECK_EQ(inv(thing, &obj, 3, DISPATCH_METHOD, a, 1, NULL, 0, &r,
+			     NULL, &err), S_OK);
+		CHECK(!memcmp(&obj.seen, &iid_thing, sizeof(GUID)));
+	}
+
+	/* The vtable view, and the coclass (its default interface). */
+	a[0].vt = VT_I4;
+	a[0].lVal = 30;
+	a[1].vt = VT_I4;
+	a[1].lVal = 12;
+	CHECK_EQ(thing->lpVtbl->GetRefTypeOfImplType(thing, (UINT)-1, &h),
+		 S_OK);
+	CHECK_EQ(thing->lpVtbl->GetRefTypeInfo(thing, h, &vt), S_OK);
+	if (vt) {
+		CHECK_EQ(inv(vt, &obj, 1, DISPATCH_METHOD, a, 2, NULL, 0, &r,
+			     NULL, &err), S_OK);
+		CHECK_EQ(r.lVal, 42);
+		vt->lpVtbl->Release(vt);
+	}
+	CHECK_EQ(inv(cls, &obj, 1, DISPATCH_METHOD, a, 2, NULL, 0, &r, NULL,
+		     &err), S_OK);
+	CHECK_EQ(r.lVal, 42);
+
+	/* A dispatch-only interface: the object's own IDispatch::Invoke. */
+	CHECK_EQ(inv(events, &ev.disp, 10, DISPATCH_METHOD, a, 1, NULL, 0,
+		     NULL, NULL, &err), S_OK);
+	CHECK_EQ(ev.last, 10);
+	CHECK_EQ(ev.args, 1);
+	CHECK_EQ(inv(events, &ev.disp, 11, DISPATCH_METHOD, a, 1, NULL, 0,
+		     NULL, NULL, &err), DISP_E_MEMBERNOTFOUND);
+	CHECK_EQ(obj.calls, 8);
+done:
+	if (thing)
+		thing->lpVtbl->Release(thing);
+	if (events)
+		events->lpVtbl->Release(events);
+	if (cls)
+		cls->lpVtbl->Release(cls);
+}
+
 static void test_library(int ptr)
 {
 	struct buf b = build_library(ptr);
@@ -1049,6 +881,7 @@ static void test_library(int ptr)
 	check_library(lib, ptr);
 	check_dual(lib, ptr);
 	check_others(lib);
+	check_invoke(lib);
 
 	/* Loaded again: the same library. */
 	CHECK_EQ(pLoadTypeLibEx(path, REGKIND_NONE, &again), S_OK);
@@ -1064,7 +897,6 @@ static void test_library(int ptr)
  * inherits from there, as its dispatch view shows them, refer to types
  * through this library, and outlive the other library.
  */
-static const char *narrow(const WCHAR *w);
 static int patch_words(unsigned char *d, size_t len, uint32_t from,
 		       uint32_t to);
 
@@ -1695,6 +1527,60 @@ static void test_registration(void)
 	free(path);
 }
 
+/*
+ * pe_typelib.dll: a library in a DLL's TYPELIB resource, and its coclass
+ * implemented through CreateStdDispatch and through ITypeInfo::Invoke,
+ * driven from the DLL's own code. Then the library by the loaded
+ * module's path, from here.
+ */
+static void test_fixture(void)
+{
+	char path[4096];
+	const char *fdir = getenv("VFW_FIXTURES");
+	struct module *m;
+	int (WINAPI *run)(void);
+
+	snprintf(path, sizeof(path), "%s/pe_typelib.dll", fdir ? fdir : ".");
+	if (access(path, F_OK) != 0) {
+		printf("pe_typelib.dll not built: skipping\n");
+		return;
+	}
+	m = mod_load(path, NULL);
+	CHECK(m != NULL);
+	if (!m)
+		return;
+	run = mod_get_proc(m, "typelib_run");
+	CHECK(run != NULL);
+	if (run) {
+		int r = run();
+
+		if (r)
+			fprintf(stderr, "  typelib_run failed at check %d\n", r);
+		CHECK_EQ(r, 0);
+	}
+	{
+		char *win = path_to_windows(path);
+		WCHAR *w = win ? utf8_to_utf16_dup(win) : NULL;
+		ITypeLib *lib = NULL;
+		ITypeInfo *ti = NULL;
+
+		CHECK(w != NULL);
+		if (w && pLoadTypeLib(w, &lib) == S_OK && lib) {
+			CHECK_EQ(lib->lpVtbl->GetTypeInfoOfGuid(lib, &iid_thing,
+							       &ti), S_OK);
+			if (ti)
+				ti->lpVtbl->Release(ti);
+			check_library(lib, (int)sizeof(void *));
+			lib->lpVtbl->Release(lib);
+		} else {
+			CHECK(0);
+		}
+		free(w);
+		free(win);
+	}
+	mod_free(m);
+}
+
 int main(void)
 {
 	char cleanup[64];
@@ -1723,6 +1609,9 @@ int main(void)
 	pUnRegisterTypeLibForUser = get("UnRegisterTypeLibForUser");
 	pQueryPathOfRegTypeLib = get("QueryPathOfRegTypeLib");
 	pLoadRegTypeLib = get("LoadRegTypeLib");
+	pSysAllocString = get("SysAllocString");
+	pCreateErrorInfo = get("CreateErrorInfo");
+	pSetErrorInfo = get("SetErrorInfo");
 
 	test_library(4);
 	test_library(8);
@@ -1733,6 +1622,7 @@ int main(void)
 	test_bad_libraries();
 	test_inline_encodings();
 	test_registration();
+	test_fixture();
 
 	snprintf(cleanup, sizeof(cleanup), "rm -rf -- '%s'", dir);
 	if (system(cleanup))

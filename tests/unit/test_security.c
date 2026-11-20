@@ -677,6 +677,128 @@ static void test_handles_full(void)
 	RegCloseKey(key);
 }
 
+/*
+ * SetEntriesInAcl, as LEAD's DSKernel2 uses it to open its registry key
+ * to Everyone: entries by SID and by name, applied to an existing ACL.
+ */
+static void test_entries(void)
+{
+	FN(BOOL, CreateWellKnownSid, WELL_KNOWN_SID_TYPE, PSID, PSID, DWORD *);
+	FN(void, BuildTrusteeWithSidA, PTRUSTEE_A, PSID);
+	FN(void, BuildExplicitAccessWithNameA, PEXPLICIT_ACCESS_A, LPSTR, DWORD,
+	   ACCESS_MODE, DWORD);
+	FN(DWORD, SetEntriesInAclA, ULONG, PEXPLICIT_ACCESS_A, PACL, PACL *);
+	FN(DWORD, SetEntriesInAclW, ULONG, PEXPLICIT_ACCESS_W, PACL, PACL *);
+	FN(TRUSTEE_FORM, GetTrusteeFormA, PTRUSTEE_A);
+	FN(BOOL, GetAce, PACL, DWORD, LPVOID *);
+	FN(BOOL, InitializeAcl, PACL, DWORD, DWORD);
+	FN(BOOL, IsValidAcl, PACL);
+	FN(BOOL, EqualSid, PSID, PSID);
+	BYTE world[SECURITY_MAX_SID_SIZE], users[SECURITY_MAX_SID_SIZE];
+	DWORD n1 = sizeof(world), n2 = sizeof(users);
+	EXPLICIT_ACCESS_A ea[3];
+	PACL acl = NULL, acl2 = NULL;
+	ACCESS_ALLOWED_ACE *ace;
+
+	CreateWellKnownSid(WinWorldSid, NULL, world, &n1);
+	CreateWellKnownSid(WinBuiltinUsersSid, NULL, users, &n2);
+	memset(ea, 0, sizeof(ea));
+	ea[0].grfAccessPermissions = KEY_ALL_ACCESS;
+	ea[0].grfAccessMode = SET_ACCESS;
+	ea[0].grfInheritance = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
+	BuildTrusteeWithSidA(&ea[0].Trustee, world);
+	CHECK_EQ(GetTrusteeFormA(&ea[0].Trustee), TRUSTEE_IS_SID);
+	CHECK_EQ(SetEntriesInAclA(1, ea, NULL, &acl), 0);
+	CHECK(acl && IsValidAcl(acl));
+	if (!acl)
+		return;
+	CHECK_EQ(acl->AceCount, 1);
+	CHECK(GetAce(acl, 0, (void **)&ace));
+	CHECK_EQ(ace->Header.AceType, ACCESS_ALLOWED_ACE_TYPE);
+	CHECK_EQ(ace->Header.AceFlags, SUB_CONTAINERS_AND_OBJECTS_INHERIT);
+	CHECK_EQ(ace->Mask, KEY_ALL_ACCESS);
+	CHECK(EqualSid(&ace->SidStart, world));
+
+	/* On top of it: a deny by name goes first, a grant after the
+	 * denies, ahead of the existing allow. */
+	BuildExplicitAccessWithNameA(&ea[0], "Users", DELETE, DENY_ACCESS, 0);
+	BuildExplicitAccessWithNameA(&ea[1], "CURRENT_USER", GENERIC_READ,
+				     GRANT_ACCESS, NO_INHERITANCE);
+	CHECK_EQ(SetEntriesInAclA(2, ea, acl, &acl2), 0);
+	CHECK(acl2 && IsValidAcl(acl2));
+	if (acl2) {
+		CHECK_EQ(acl2->AceCount, 3);
+		CHECK(GetAce(acl2, 0, (void **)&ace));
+		CHECK_EQ(ace->Header.AceType, ACCESS_DENIED_ACE_TYPE);
+		CHECK(EqualSid(&ace->SidStart, users));
+		CHECK(GetAce(acl2, 1, (void **)&ace));
+		CHECK_EQ(ace->Mask, GENERIC_READ);
+		CHECK(GetAce(acl2, 2, (void **)&ace));
+		CHECK(EqualSid(&ace->SidStart, world));
+		local_free(acl2);
+	}
+
+	/* The result is sized to its ACEs, not to the old ACL's room: an
+	 * empty ACL of the largest size takes a grant, and setting the same
+	 * trustee again doesn't grow it. */
+	{
+		ACL *big = calloc(1, 0xfffc), *a1 = NULL, *a2 = NULL;
+
+		CHECK(big && InitializeAcl(big, 0xfffc, ACL_REVISION));
+		ea[0].grfAccessPermissions = KEY_READ;
+		ea[0].grfAccessMode = SET_ACCESS;
+		ea[0].grfInheritance = 0;
+		BuildTrusteeWithSidA(&ea[0].Trustee, world);
+		CHECK_EQ(SetEntriesInAclA(1, ea, big, &a1), 0);
+		CHECK(a1 && a1->AceCount == 1 && a1->AclSize < 64);
+		if (a1) {
+			CHECK_EQ(SetEntriesInAclA(1, ea, a1, &a2), 0);
+			CHECK(a2 && a2->AceCount == 1 &&
+			      a2->AclSize == a1->AclSize);
+			if (a2)
+				local_free(a2);
+			local_free(a1);
+		}
+		free(big);
+	}
+
+	/* Revoked: the trustee's ACEs go. */
+	acl2 = NULL;
+	ea[0].grfAccessMode = REVOKE_ACCESS;
+	BuildTrusteeWithSidA(&ea[0].Trustee, world);
+	CHECK_EQ(SetEntriesInAclA(1, ea, acl, &acl2), 0);
+	CHECK(acl2 && acl2->AceCount == 0);
+	if (acl2)
+		local_free(acl2);
+
+	/* Wide names; a name nobody has. */
+	{
+		static const WCHAR every[] = { 'E', 'v', 'e', 'r', 'y', 'o', 'n',
+					       'e', 0 };
+		EXPLICIT_ACCESS_W w;
+
+		memset(&w, 0, sizeof(w));
+		w.grfAccessPermissions = KEY_READ;
+		w.grfAccessMode = GRANT_ACCESS;
+		w.Trustee.TrusteeForm = TRUSTEE_IS_NAME;
+		w.Trustee.ptstrName = (LPWSTR)every;
+		acl2 = NULL;
+		CHECK_EQ(SetEntriesInAclW(1, &w, NULL, &acl2), 0);
+		CHECK(acl2 && acl2->AceCount == 1);
+		if (acl2) {
+			CHECK(GetAce(acl2, 0, (void **)&ace));
+			CHECK(EqualSid(&ace->SidStart, world));
+			local_free(acl2);
+		}
+	}
+	BuildExplicitAccessWithNameA(&ea[0], "Nobody At All", KEY_READ,
+				     GRANT_ACCESS, 0);
+	acl2 = (PACL)1;
+	CHECK_EQ(SetEntriesInAclA(1, ea, NULL, &acl2), ERROR_NONE_MAPPED);
+	CHECK(acl2 == NULL);
+	local_free(acl);
+}
+
 int main(void)
 {
 	const char *tmpdir = getenv("TMPDIR");
@@ -700,6 +822,7 @@ int main(void)
 	test_sids();
 	test_accounts();
 	test_acls();
+	test_entries();
 	test_descriptors();
 	test_objects();
 	test_crypt();

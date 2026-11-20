@@ -47,6 +47,18 @@ HRESULT STUB_WINAPI oa_LoadTypeLibEx(LPCOLESTR file, REGKIND kind,
 HRESULT STUB_WINAPI oa_LoadRegTypeLib(REFGUID guid, WORD major, WORD minor,
 				      LCID lcid, ITypeLib **out);
 
+/*
+ * Calling through type information (oleaut_dispatch.c): ITypeInfo::Invoke
+ * for any type info, over its public methods, and DispCallFunc.
+ */
+HRESULT oa_typeinfo_invoke(ITypeInfo *ti, PVOID instance, MEMBERID memid,
+			   WORD flags, DISPPARAMS *params, VARIANT *result,
+			   EXCEPINFO *excep, UINT *arg_err);
+HRESULT STUB_WINAPI oa_DispCallFunc(void *instance, ULONG_PTR offset,
+				    CALLCONV cc, VARTYPE ret, UINT count,
+				    VARTYPE *types, VARIANTARG **args,
+				    VARIANT *result);
+
 /* Type library registration (oleaut_typereg.c). */
 HRESULT STUB_WINAPI oa_QueryPathOfRegTypeLib(REFGUID guid, WORD major,
 					     WORD minor, LCID lcid,
@@ -69,6 +81,7 @@ extern const struct builtin_export oa_conv_exports[];
 extern const struct builtin_export oa_array_exports[];
 extern const struct builtin_export oa_typelib_exports[];
 extern const struct builtin_export oa_typereg_exports[];
+extern const struct builtin_export oa_dispatch_exports[];
 extern const struct builtin_export oa_errinfo_ole32_exports[];
 
 #endif /* VFW_WIN32_OLEAUT_H */

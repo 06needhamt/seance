@@ -104,7 +104,33 @@ registered libraries.
    and version (the version asked for if it is registered, else the
    highest minor version above it), and load it from its path.
 
-## Phase C: calling through a type library
+## Phase C: calling through a type library (done)
+
+Status: `src/win32/oleaut_dispatch.c` (`DispCallFunc`, `ITypeInfo::Invoke`
+over any type info's public methods, `DispGetIDsOfNames`, `DispInvoke`,
+`CreateStdDispatch`) and `CreateDispTypeInfo` in `oleaut_typelib.c`;
+tests in `test_dispatch` and `test_typelib`, on both architectures.
+Changes from the plan below:
+
+- `DispCallFunc` has its own small assembly call per architecture rather
+  than seance's call gate, which takes at most six word arguments and
+  returns neither `%edx` nor a floating-point register. x86-64 loads each
+  of the first four arguments into both its integer and XMM register, so
+  a `float` or `double` is where the callee looks for it.
+- A method returning a `VARIANT` or `DECIMAL` gets the hidden result
+  pointer after the object, as MSVC compiles member functions; a plain
+  function gets it first.
+- `Invoke` on a coclass calls its default interface, on a dual interface
+  its vtable half, and on a dispatch-only interface the object's own
+  `IDispatch::Invoke`. A `VT_BYREF | VT_VARIANT` argument of another type
+  than the parameter's (as VBScript passes them) is converted, and the
+  result is put back in the caller's `VARIANT` as the parameter's type.
+- `CreateDispTypeInfo` gives a coclass whose default interface has the
+  methods, as Windows does.
+- Not done: `FUNC_STATIC` and `FUNC_NONVIRTUAL` functions (a module's,
+  which need `AddressOfMember`), records passed by value, and `VT_LPSTR`
+  and `VT_LPWSTR` parameters. `Invoke` returns `DISP_E_MEMBERNOTFOUND` or
+  `DISP_E_BADVARTYPE` for them.
 
 1. `DispCallFunc`: a vtable slot or a function, called with a
    `VARIANTARG` list. stdcall and cdecl on i386, ms_abi (four register
@@ -117,7 +143,19 @@ registered libraries.
 3. `DispGetIDsOfNames`, `DispInvoke`, `CreateStdDispatch` and
    `CreateDispTypeInfo` over those.
 
-## Phase D: tests
+## Phase D: tests (done)
+
+Status: `pe_typelib.dll`, built from `tests/fixtures/pe_typelib.c` with
+the library `gen_tlb` writes, and its check in `test_typelib`, on both
+architectures. Changes from the plan below:
+
+- `gen_tlb` is a C program, not Python (nothing else in the build needs
+  Python). It shares the MSFT writer `test_typelib` uses
+  (`tests/unit/tlb_writer.h`), so the fixture's library is the one
+  `test_typelib` checks field by field.
+- The fuzz pass is in `test_typelib` (since Phase A), not a separate
+  target.
+
 
 - There is no `midl` or `widl` here, so `tests/fixtures/gen_tlb.py`
   writes an `MSFT` library: a dual interface with methods, properties,
@@ -138,7 +176,19 @@ registered libraries.
   libraries loads, and every name and reference resolves. That checks the
   parser against libraries `gen_tlb.py` did not write.
 
-## Phase E: the codecs
+## Phase E: the codecs (done)
+
+Status, in `MISSING_FEATURES.md`:
+- abcAVI and abcAVIIT load and register their library, and no longer
+  crash. They are a COM object for AVI tags, not codecs.
+- `DSKernel2` registers its library, then needed `SetEntriesInAcl`,
+  which advapi32 now has. With it registered, `LEncVP8` (both
+  architectures) encodes.
+- `LEncAAC`, `LEncAC3`, `LEncAMR`, `lencmpga2` and `LMVMtnDet2` stop at
+  LEAD's evaluation check, which is not worked around.
+- `LENCSCR2` opens but accepts none of the standard formats tried.
+- `ltmm175` and `eescreen` register.
+
 
 Re-run `abcAVI.dll`, `abcAVIIT.dll`, the 15 LEAD encoders (both
 architectures), `ltmm175`, `DSKernel2`, `eescreen` and the LEAD decoders

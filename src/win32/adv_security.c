@@ -1594,6 +1594,279 @@ WINFN(BOOL) adv_DeleteAce(PACL acl, DWORD i)
 	return TRUE;
 }
 
+/* ----------------------------------------------------------------------
+ * Trustees and SetEntriesInAcl.
+ */
+
+WINFN(void) adv_BuildTrusteeWithSidA(PTRUSTEE_A t, PSID sid)
+{
+	if (!t)
+		return;
+	t->pMultipleTrustee = NULL;
+	t->MultipleTrusteeOperation = NO_MULTIPLE_TRUSTEE;
+	t->TrusteeForm = TRUSTEE_IS_SID;
+	t->TrusteeType = TRUSTEE_IS_UNKNOWN;
+	t->ptstrName = sid;
+}
+
+WINFN(void) adv_BuildTrusteeWithSidW(PTRUSTEE_W t, PSID sid)
+{
+	adv_BuildTrusteeWithSidA((PTRUSTEE_A)t, sid);
+}
+
+WINFN(void) adv_BuildTrusteeWithNameA(PTRUSTEE_A t, LPSTR name)
+{
+	if (!t)
+		return;
+	t->pMultipleTrustee = NULL;
+	t->MultipleTrusteeOperation = NO_MULTIPLE_TRUSTEE;
+	t->TrusteeForm = TRUSTEE_IS_NAME;
+	t->TrusteeType = TRUSTEE_IS_UNKNOWN;
+	t->ptstrName = name;
+}
+
+WINFN(void) adv_BuildTrusteeWithNameW(PTRUSTEE_W t, LPWSTR name)
+{
+	adv_BuildTrusteeWithNameA((PTRUSTEE_A)t, (LPSTR)name);
+}
+
+WINFN(void) adv_BuildExplicitAccessWithNameA(PEXPLICIT_ACCESS_A ea,
+					     LPSTR name, DWORD perms,
+					     ACCESS_MODE mode, DWORD inherit)
+{
+	if (!ea)
+		return;
+	ea->grfAccessPermissions = perms;
+	ea->grfAccessMode = mode;
+	ea->grfInheritance = inherit;
+	adv_BuildTrusteeWithNameA(&ea->Trustee, name);
+}
+
+WINFN(void) adv_BuildExplicitAccessWithNameW(PEXPLICIT_ACCESS_W ea,
+					     LPWSTR name, DWORD perms,
+					     ACCESS_MODE mode, DWORD inherit)
+{
+	adv_BuildExplicitAccessWithNameA((PEXPLICIT_ACCESS_A)ea, (LPSTR)name,
+					 perms, mode, inherit);
+}
+
+WINFN(TRUSTEE_FORM) adv_GetTrusteeFormA(PTRUSTEE_A t)
+{
+	return t ? t->TrusteeForm : TRUSTEE_BAD_FORM;
+}
+
+WINFN(TRUSTEE_FORM) adv_GetTrusteeFormW(PTRUSTEE_W t)
+{
+	return t ? t->TrusteeForm : TRUSTEE_BAD_FORM;
+}
+
+WINFN(TRUSTEE_TYPE) adv_GetTrusteeTypeA(PTRUSTEE_A t)
+{
+	return t ? t->TrusteeType : TRUSTEE_IS_UNKNOWN;
+}
+
+WINFN(TRUSTEE_TYPE) adv_GetTrusteeTypeW(PTRUSTEE_W t)
+{
+	return t ? t->TrusteeType : TRUSTEE_IS_UNKNOWN;
+}
+
+WINFN(LPSTR) adv_GetTrusteeNameA(PTRUSTEE_A t)
+{
+	return t ? t->ptstrName : NULL;
+}
+
+WINFN(LPWSTR) adv_GetTrusteeNameW(PTRUSTEE_W t)
+{
+	return t ? t->ptstrName : NULL;
+}
+
+/*
+ * A trustee's SID, into *out: given as one, or by account name
+ * ("CURRENT_USER" being the user's).
+ */
+static DWORD trustee_sid(const TRUSTEE_A *t, int wide, struct sid *out)
+{
+	if (t->pMultipleTrustee || t->MultipleTrusteeOperation)
+		return ERROR_INVALID_PARAMETER;
+	if (t->TrusteeForm == TRUSTEE_IS_SID) {
+		if (!sid_ok(t->ptstrName))
+			return ERROR_INVALID_SID;
+		memset(out, 0, sizeof(*out));
+		memcpy(out, t->ptstrName, sid_size(t->ptstrName));
+		return 0;
+	}
+	if (t->TrusteeForm != TRUSTEE_IS_NAME || !t->ptstrName)
+		return ERROR_INVALID_PARAMETER;
+	char *name = wide ? utf16_to_utf8_dup((const WCHAR *)t->ptstrName)
+			  : acp_to_utf8(t->ptstrName);
+	DWORD err = 0;
+
+	if (!name)
+		return ERROR_NOT_ENOUGH_MEMORY;
+	if (!strcasecmp(name, "CURRENT_USER")) {
+		*out = user_sid();
+	} else {
+		char domain[256];
+		DWORD cb = sizeof(*out), dcch = sizeof(domain);
+		SID_NAME_USE use;
+
+		if (!lookup_name(name, 0, out, &cb, domain, &dcch, &use))
+			err = ERROR_NONE_MAPPED;
+	}
+	free(name);
+	return err;
+}
+
+/* Whether an ACE is an explicit allow or deny for sid. */
+static int ace_for(const BYTE *ace, const struct sid *sid)
+{
+	const ACE_HEADER *h = (const ACE_HEADER *)ace;
+
+	if ((h->AceType != ACCESS_ALLOWED_ACE_TYPE &&
+	     h->AceType != ACCESS_DENIED_ACE_TYPE) ||
+	    (h->AceFlags & INHERITED_ACE) ||
+	    h->AceSize < offsetof(ACCESS_ALLOWED_ACE, SidStart) + 8)
+		return 0;
+	const void *s = &((const ACCESS_ALLOWED_ACE *)ace)->SidStart;
+	return sid_size(s) == sid_size(sid) &&
+	       h->AceSize >= offsetof(ACCESS_ALLOWED_ACE, SidStart) +
+				     sid_size(sid) &&
+	       !memcmp(s, sid, sid_size(sid));
+}
+
+/* One ACE for sid, put at index start (MAXDWORD: the end). */
+static BOOL put_ace(ACL *acl, BYTE type, DWORD flags, DWORD mask,
+		    const struct sid *sid, DWORD start)
+{
+	BYTE ace[sizeof(ACCESS_ALLOWED_ACE) + sizeof(struct sid)];
+	ACCESS_ALLOWED_ACE *a = (ACCESS_ALLOWED_ACE *)ace;
+	DWORD len = offsetof(ACCESS_ALLOWED_ACE, SidStart) + sid_size(sid);
+
+	a->Header.AceType = type;
+	a->Header.AceFlags = (BYTE)flags;
+	a->Header.AceSize = (WORD)len;
+	a->Mask = mask;
+	memcpy(&a->SidStart, sid, sid_size(sid));
+	return adv_AddAce(acl, ACL_REVISION, start, ace, len);
+}
+
+/* Where a new grant goes: after the explicit denies at the front, so
+ * ahead of the allows and of everything inherited. */
+static DWORD grant_index(ACL *acl)
+{
+	DWORD i = 0;
+
+	while (i < acl->AceCount) {
+		ACE_HEADER *h = (ACE_HEADER *)ace_at(acl, i);
+
+		if (h->AceType != ACCESS_DENIED_ACE_TYPE ||
+		    (h->AceFlags & INHERITED_ACE))
+			break;
+		i++;
+	}
+	return i;
+}
+
+/*
+ * Applies n EXPLICIT_ACCESS entries (each `each` bytes apart, A or W) to
+ * a copy of old, into a new LocalAlloc'd ACL: GRANT_ACCESS adds an
+ * allowing ACE after the explicit denies, SET_ACCESS replaces the
+ * trustee's own ACEs with one, DENY_ACCESS puts a denying ACE first, and
+ * REVOKE_ACCESS removes the trustee's. Audit entries (the SACL's) are
+ * left out. The work is done in an ACL of the largest size, and the
+ * result is sized to what it holds.
+ */
+static DWORD set_entries(ULONG n, const EXPLICIT_ACCESS_A *list, size_t each,
+			 int wide, PACL old, PACL *out)
+{
+	struct sid *sids = NULL;
+	DWORD err = 0, used;
+	ACL *work = NULL, *acl;
+
+	if (!out)
+		return ERROR_INVALID_PARAMETER;
+	*out = NULL;
+	if (n && !list)
+		return ERROR_INVALID_PARAMETER;
+	if (old && !acl_ok(old))
+		return ERROR_INVALID_ACL;
+	if (n && !(sids = calloc(n, sizeof(*sids))))
+		return ERROR_NOT_ENOUGH_MEMORY;
+	for (ULONG i = 0; i < n; i++) {
+		const EXPLICIT_ACCESS_A *e =
+			(const EXPLICIT_ACCESS_A *)((const BYTE *)list + i * each);
+
+		if (e->grfAccessMode == NOT_USED_ACCESS ||
+		    e->grfAccessMode >= SET_AUDIT_SUCCESS)
+			continue;
+		if ((err = trustee_sid(&e->Trustee, wide, &sids[i])))
+			goto done;
+	}
+	if (!(work = calloc(1, 0xfffc))) {
+		err = ERROR_NOT_ENOUGH_MEMORY;
+		goto done;
+	}
+	if (old) {
+		memcpy(work, old, (BYTE *)acl_end(old) - (BYTE *)old);
+		work->AclSize = 0xfffc;
+	} else {
+		adv_InitializeAcl(work, 0xfffc, ACL_REVISION);
+	}
+	for (ULONG i = 0; i < n; i++) {
+		const EXPLICIT_ACCESS_A *e =
+			(const EXPLICIT_ACCESS_A *)((const BYTE *)list + i * each);
+		DWORD flags = e->grfInheritance & VALID_INHERIT_FLAGS;
+		DWORD mask = e->grfAccessPermissions;
+		ACCESS_MODE mode = e->grfAccessMode;
+		BOOL ok;
+
+		if (mode == NOT_USED_ACCESS || mode >= SET_AUDIT_SUCCESS)
+			continue;
+		if (mode == SET_ACCESS || mode == REVOKE_ACCESS)
+			for (DWORD j = work->AceCount; j-- > 0;)
+				if (ace_for(ace_at(work, j), &sids[i]))
+					adv_DeleteAce(work, j);
+		if (mode == REVOKE_ACCESS)
+			continue;
+		if (mode == DENY_ACCESS)
+			ok = put_ace(work, ACCESS_DENIED_ACE_TYPE, flags, mask,
+				     &sids[i], 0);
+		else
+			ok = put_ace(work, ACCESS_ALLOWED_ACE_TYPE, flags, mask,
+				     &sids[i], grant_index(work));
+		if (!ok) {
+			err = ERROR_INVALID_PARAMETER;
+			goto done;
+		}
+	}
+	used = (DWORD)((BYTE *)acl_end(work) - (BYTE *)work);
+	used = (used + 3) & ~3u;
+	if (!(acl = global_alloc(GMEM_FIXED | GMEM_ZEROINIT, used))) {
+		err = ERROR_NOT_ENOUGH_MEMORY;
+		goto done;
+	}
+	memcpy(acl, work, (BYTE *)acl_end(work) - (BYTE *)work);
+	acl->AclSize = (WORD)used;
+	*out = acl;
+done:
+	free(work);
+	free(sids);
+	return err;
+}
+
+WINFN(DWORD) adv_SetEntriesInAclA(ULONG n, PEXPLICIT_ACCESS_A list, PACL old,
+				  PACL *out)
+{
+	return set_entries(n, list, sizeof(*list), 0, old, out);
+}
+
+WINFN(DWORD) adv_SetEntriesInAclW(ULONG n, PEXPLICIT_ACCESS_W list, PACL old,
+				  PACL *out)
+{
+	return set_entries(n, (const EXPLICIT_ACCESS_A *)list, sizeof(*list),
+			   1, old, out);
+}
+
 WINFN(BOOL) adv_GetAclInformation(PACL acl, LPVOID info, DWORD len,
 				  ACL_INFORMATION_CLASS c)
 {
@@ -2412,6 +2685,12 @@ const struct builtin_export adv_security_exports[] = {
 	E(ConvertSidToStringSidW),
 	E(ConvertStringSidToSidA),
 	E(ConvertStringSidToSidW),
+	E(BuildExplicitAccessWithNameA),
+	E(BuildExplicitAccessWithNameW),
+	E(BuildTrusteeWithNameA),
+	E(BuildTrusteeWithNameW),
+	E(BuildTrusteeWithSidA),
+	E(BuildTrusteeWithSidW),
 	E(CopySid),
 	E(CreateWellKnownSid),
 	E(CryptAcquireContextA),
@@ -2438,6 +2717,12 @@ const struct builtin_export adv_security_exports[] = {
 	E(GetFileSecurityA),
 	E(GetFileSecurityW),
 	E(GetLengthSid),
+	E(GetTrusteeFormA),
+	E(GetTrusteeFormW),
+	E(GetTrusteeNameA),
+	E(GetTrusteeNameW),
+	E(GetTrusteeTypeA),
+	E(GetTrusteeTypeW),
 	E(GetNamedSecurityInfoA),
 	E(GetNamedSecurityInfoW),
 	E(GetSecurityDescriptorControl),
@@ -2482,6 +2767,8 @@ const struct builtin_export adv_security_exports[] = {
 	E(SetSecurityDescriptorGroup),
 	E(SetSecurityDescriptorOwner),
 	E(SetSecurityDescriptorSacl),
+	E(SetEntriesInAclA),
+	E(SetEntriesInAclW),
 	E(SetSecurityInfo),
 	E(SetThreadToken),
 	E(SetTokenInformation),

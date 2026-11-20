@@ -625,7 +625,11 @@ here:
   `tests/smoke.sh`.
 - **`abcAVI.dll`, `abcAVIIT.dll`** went from "DllMain failed" to a hang.
   - They get further into Delphi's start-up now. There `LoadTypeLib`
-    fails, since seance has no type libraries.
+    failed, since seance had no type libraries. Now it loads their
+    library and `RegisterTypeLib` registers it; `DllRegisterServer`
+    succeeds and nothing crashes. They are the "abcAVI Info Library", a
+    COM object (`ExtendedAVITags`) for an AVI file's tags, not a codec:
+    the sweep reports that they register no filters.
   - Delphi's finalization frees its heap, then runs code in it. Its
     exception handler answers each fault with "continue", unchanged, so
     the fault repeats for ever.
@@ -698,12 +702,25 @@ to a cause; what was seance's is fixed, and the rest is recorded here.
   - The class is `DSKernel2.dll`'s (`{E2B7DDA9-38C5-11D5-91F6-00104BDB8FF9}`),
     which LEAD's installer registers. Without it the open fails with
     `REGDB_E_CLASSNOTREG`; a class that isn't registered is now named in
-    the trace. `seance register DSKernel2.dll` registers it; its
-    `DllRegisterServer` then fails at the type library
-    (`TYPE_E_CANTLOADLIBRARY`), after writing the classes.
-  - With that done they reach LEAD's licence check ("The evaluation
-    period has expired"), and fail with 0x80050010. That isn't worked
-    around.
+    the trace. `seance register DSKernel2.dll` registers it, its type
+    library included. It then opens its registry key to Everyone with
+    `SetEntriesInAcl`, which seance now has (with `BuildTrusteeWith*`,
+    `BuildExplicitAccessWithName` and `GetTrustee*`; test:
+    `test_entries` in `test_security`).
+  - seance has one registry view for both architectures: Windows keeps
+    a 32-bit DLL's classes under `Wow6432Node`. Registering
+    `DSKernel2x.dll` after `DSKernel2.dll` points the class at the 64-bit
+    DLL, and the i386 filters can't load it. Register the one matching
+    the filters, or keep a registry (`HOME`) for each.
+  - With DSKernel2 registered, `LEncVP8` and `LEncVP8x` encode (838 and
+    851 kbit/s; nothing here decodes VP8 to check it). The audio
+    encoders and `LMVMtnDet2` reach LEAD's licence check ("The
+    evaluation period has expired") and fail with 0x80050010 or E_FAIL.
+    That isn't worked around. `LENCSCR2` opens, then takes none of the
+    standard formats at any size; it is a screen-capture encoder, which
+    may want LEAD's own capture source.
+  - `ltmm175`, `eescreen` and LEAD's decoders register their type
+    libraries (`ltmm175`'s has 134 interfaces).
 - **Ut Video** (`utv_vcm.dll`): round-trips now (ULRA, lossless).
   - Its `DRV_OPEN` takes any FOURCC and makes its codec only for one of
     its own, which are kept in `utv_core.dll`, the DLL it calls. seance

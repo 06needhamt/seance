@@ -549,6 +549,28 @@ typedef enum tagREGKIND {
 
 #define MEMBERID_NIL DISPID_UNKNOWN
 
+/* CreateDispTypeInfo's description of an interface. */
+typedef struct tagPARAMDATA {
+	OLECHAR *szName;
+	VARTYPE vt;
+} PARAMDATA, *LPPARAMDATA;
+
+typedef struct tagMETHODDATA {
+	OLECHAR *szName;
+	PARAMDATA *ppdata;
+	DISPID dispid;
+	UINT iMeth;
+	CALLCONV cc;
+	UINT cArgs;
+	WORD wFlags;
+	VARTYPE vtReturn;
+} METHODDATA, *LPMETHODDATA;
+
+typedef struct tagINTERFACEDATA {
+	METHODDATA *pmethdata;
+	UINT cMembers;
+} INTERFACEDATA, *LPINTERFACEDATA;
+
 typedef struct ITypeCompVtbl {
 	HRESULT (WINAPI *QueryInterface)(ITypeComp *This, REFIID riid,
 					 void **ppv);
