@@ -713,7 +713,8 @@ to a cause; what was seance's is fixed, and the rest is recorded here.
     DLL, and the i386 filters can't load it. Register the one matching
     the filters, or keep a registry (`HOME`) for each.
   - With DSKernel2 registered, `LEncVP8` and `LEncVP8x` encode (838 and
-    851 kbit/s; nothing here decodes VP8 to check it). The audio
+    851 kbit/s). `LDecVP8` decodes ffmpeg's VP8 sample (below), but it
+    hasn't been shown to decode `LEncVP8`'s own output. The audio
     encoders and `LMVMtnDet2` reach LEAD's licence check ("The
     evaluation period has expired") and fail with 0x80050010 or E_FAIL.
     That isn't worked around. `LENCSCR2` opens, then takes none of the
