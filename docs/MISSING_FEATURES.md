@@ -721,6 +721,21 @@ to a cause; what was seance's is fixed, and the rest is recorded here.
     may want LEAD's own capture source.
   - `ltmm175`, `eescreen` and LEAD's decoders register their type
     libraries (`ltmm175`'s has 134 interfaces).
+  - LEAD's decoders need the class too. With DSKernel2 registered,
+    `LDecVP8` and `LDecMpg22` (and their `x` variants) open and decode
+    ffmpeg's VP8 and MPEG-2 samples, at 18.9 and 19.9 dB. Without it,
+    they failed with `REGDB_E_CLASSNOTREG`. That is about what LEAD's
+    other decoders give here (19 to 20 dB). `LDecSPDIF` gets as far as
+    the evaluation check (0x80050010).
+  - `LMMkvDmx`, `LMMkvMux`, `LMMxfDmx`, `LMMxfMux` and their `x` variants
+    used to fail `DllRegisterServer` with `TYPE_E_CANTLOADLIBRARY`. They
+    now register their type libraries, and the sweep finds that they are
+    Matroska and MXF demultiplexers and multiplexers, not codecs.
+  - `seance sweep` gives each DLL an empty registry, so on its own it
+    can't show any of this. The catalogue's 21 November sweep took the
+    LEAD rows from a second run with DSKernel2 registered first, one
+    registry per architecture. In that run `LEncVP8` and `LEncVP8x`
+    encode at 836 and 846 kbit/s.
 - **Ut Video** (`utv_vcm.dll`): round-trips now (ULRA, lossless).
   - Its `DRV_OPEN` takes any FOURCC and makes its codec only for one of
     its own, which are kept in `utv_core.dll`, the DLL it calls. seance
