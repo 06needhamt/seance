@@ -556,10 +556,16 @@ static const struct builtin_export exports[] = {
 	E(OleCreateFontIndirect, 420),
 	E(OleTranslateColor, 421),
 	E(OleLoadPicturePath, 424),
-	E(DllCanUnloadNow, 410),
-	E(DllGetClassObject, 1),
-	E(DllRegisterServer, 320),
-	E(DllUnregisterServer, 321),
+	/*
+	 * By name only: they are private exports, never in an import
+	 * library, and newer oleaut32s give their old ordinals to other
+	 * functions (320 and 321 to SafeArrayReleaseData/Descriptor), which
+	 * should find nothing here rather than these.
+	 */
+	E(DllCanUnloadNow, 0),
+	E(DllGetClassObject, 0),
+	E(DllRegisterServer, 0),
+	E(DllUnregisterServer, 0),
 	BUILTIN_END
 };
 

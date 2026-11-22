@@ -1281,9 +1281,6 @@ static void test_ordinals(void)
 		{ 441, "VarUI8FromDec" }, { 177, "VarDecAdd" },
 		{ 178, "VarDecDiv" }, { 179, "VarDecMul" }, { 181, "VarDecSub" },
 		{ 298, "VarDecCmpR8" },
-		/* The COM entry points. */
-		{ 1, "DllGetClassObject" }, { 320, "DllRegisterServer" },
-		{ 321, "DllUnregisterServer" }, { 410, "DllCanUnloadNow" },
 	};
 
 	for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
@@ -1295,6 +1292,10 @@ static void test_ordinals(void)
 		CHECK(by_name && by_ord == by_name);
 	}
 	CHECK(mod_get_ordinal(oa, 999) == NULL);	/* assigned to nothing */
+	/* The COM entry points are by name only (see oleaut32.c). */
+	CHECK(mod_get_proc(oa, "DllRegisterServer") != NULL);
+	CHECK(mod_get_ordinal(oa, 320) == NULL);
+	CHECK(mod_get_ordinal(oa, 321) == NULL);
 }
 
 /* pe_oleaut.dll, which imports oleaut32 by ordinal as MSVC code does. */
