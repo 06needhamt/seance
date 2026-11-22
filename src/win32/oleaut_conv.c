@@ -18,6 +18,8 @@
  * exactly to and from integers, currency and strings, rounding to even
  * where digits are lost; a double becomes the DECIMAL nearest its 15
  * significant digits (7 for a float), so 0.1 is 0.1.
+ * VarDecAdd/Sub/Mul/Div work exactly in wider integers and round the
+ * result the same way to fit.
  *
  * DATE is days since 30 December 1899, the fraction the time of day; a
  * negative date's fraction still counts forward from its midnight.
@@ -1491,7 +1493,7 @@ WINFN(HRESULT) oa_VarBstrFromDisp(IDispatch *disp, LCID lcid, ULONG flags,
 	return hr;
 }
 
-/* DECIMAL arithmetic that needs no wider integers. */
+/* DECIMAL arithmetic. */
 
 WINFN(HRESULT) oa_VarDecAbs(const DECIMAL *in, DECIMAL *out)
 {
@@ -1556,14 +1558,49 @@ WINFN(HRESULT) oa_VarDecInt(const DECIMAL *in, DECIMAL *out)
 	return dec_round(in, 0, R_FLOOR, out);
 }
 
-/* Magnitudes over a common scale: up to 96 bits times 10^28, 7 words. */
-static void wide_from_dec(const DECIMAL *d, int scale, uint32_t *w)
+/*
+ * Wider magnitudes for the arithmetic, in WIDE 32-bit words, low first:
+ * enough for a 96-bit value times 10^57 (a quotient's numerator) or two
+ * 96-bit values multiplied.
+ */
+#define WIDE 10
+
+static void wide_from_dec(const DECIMAL *d, uint32_t *w)
 {
-	memset(w, 0, 7 * sizeof(*w));
+	memset(w, 0, WIDE * sizeof(*w));
 	dec_get(d, w);
-	for (int s = d->scale; s < scale; s++) {
+}
+
+static int wide_zero(const uint32_t *w)
+{
+	for (int i = 0; i < WIDE; i++)
+		if (w[i])
+			return 0;
+	return 1;
+}
+
+static int wide_fits96(const uint32_t *w)
+{
+	for (int i = 3; i < WIDE; i++)
+		if (w[i])
+			return 0;
+	return 1;
+}
+
+static int wide_cmp(const uint32_t *a, const uint32_t *b)
+{
+	for (int i = WIDE - 1; i >= 0; i--)
+		if (a[i] != b[i])
+			return a[i] < b[i] ? -1 : 1;
+	return 0;
+}
+
+/* w *= 10^n (the callers keep it within WIDE words). */
+static void wide_mul10(uint32_t *w, int n)
+{
+	for (; n > 0; n--) {
 		uint64_t c = 0;
-		for (int i = 0; i < 7; i++) {
+		for (int i = 0; i < WIDE; i++) {
 			c += (uint64_t)w[i] * 10;
 			w[i] = (uint32_t)c;
 			c >>= 32;
@@ -1571,25 +1608,237 @@ static void wide_from_dec(const DECIMAL *d, int scale, uint32_t *w)
 	}
 }
 
+static void wide_add(uint32_t *a, const uint32_t *b)
+{
+	uint64_t c = 0;
+
+	for (int i = 0; i < WIDE; i++) {
+		c += (uint64_t)a[i] + b[i];
+		a[i] = (uint32_t)c;
+		c >>= 32;
+	}
+}
+
+/* a -= b, b no greater than a. */
+static void wide_sub(uint32_t *a, const uint32_t *b)
+{
+	int64_t borrow = 0;
+
+	for (int i = 0; i < WIDE; i++) {
+		int64_t d = (int64_t)a[i] - b[i] - borrow;
+		borrow = d < 0;
+		a[i] = (uint32_t)(d + (borrow << 32));
+	}
+}
+
+static void wide_inc(uint32_t *w)
+{
+	for (int i = 0; i < WIDE && !++w[i]; i++)
+		;
+}
+
+/* w /= 10; the remainder. */
+static unsigned wide_div10(uint32_t *w)
+{
+	uint64_t r = 0;
+
+	for (int i = WIDE - 1; i >= 0; i--) {
+		uint64_t x = r << 32 | w[i];
+		w[i] = (uint32_t)(x / 10);
+		r = x % 10;
+	}
+	return (unsigned)r;
+}
+
+/* n = n / d, r = the remainder, by shifting and subtracting; d isn't 0. */
+static void wide_divmod(uint32_t *n, const uint32_t *d, uint32_t *r)
+{
+	memset(r, 0, WIDE * sizeof(*r));
+	for (int bit = WIDE * 32 - 1; bit >= 0; bit--) {
+		for (int i = WIDE - 1; i > 0; i--)
+			r[i] = r[i] << 1 | r[i - 1] >> 31;
+		r[0] = r[0] << 1 | (n[bit / 32] >> (bit % 32) & 1);
+		n[bit / 32] &= ~(1u << (bit % 32));
+		if (wide_cmp(r, d) >= 0) {
+			wide_sub(r, d);
+			n[bit / 32] |= 1u << (bit % 32);
+		}
+	}
+}
+
+/*
+ * v over 10^scale as a DECIMAL: fraction digits dropped, rounding to
+ * even, until it fits 96 bits and a scale of 28. sticky says v is
+ * already short of the true value; *exact (if given) says nothing was
+ * lost.
+ */
+static HRESULT wide_to_dec(uint32_t *v, int scale, int neg, int sticky,
+			   DECIMAL *out, int *exact)
+{
+	unsigned last = 0;
+
+	while (scale > DEC_MAX_SCALE || !wide_fits96(v)) {
+		if (scale == 0)
+			return DISP_E_OVERFLOW;
+		sticky |= last != 0;
+		last = wide_div10(v);
+		scale--;
+	}
+	if (exact)
+		*exact = !sticky && !last;
+	if (last > 5 || (last == 5 && (sticky || (v[0] & 1)))) {
+		wide_inc(v);
+		if (!wide_fits96(v)) {	/* 2^96: one place fewer */
+			if (scale == 0)
+				return DISP_E_OVERFLOW;
+			if (wide_div10(v) >= 5)
+				wide_inc(v);
+			scale--;
+		}
+	}
+	dec_set(out, v, scale, neg);
+	return S_OK;
+}
+
+static int dec_neg(const DECIMAL *d)
+{
+	return (d->sign & DEC_NEG) != 0;
+}
+
 WINFN(HRESULT) oa_VarDecCmp(const DECIMAL *a, const DECIMAL *b)
 {
-	uint32_t wa[7], wb[7];
+	uint32_t wa[WIDE], wb[WIDE];
 
 	if (!a || !b || !dec_valid(a) || !dec_valid(b))
 		return E_INVALIDARG;
-	int scale = a->scale > b->scale ? a->scale : b->scale, c = 0;
-	wide_from_dec(a, scale, wa);
-	wide_from_dec(b, scale, wb);
-	for (int i = 6; i >= 0 && !c; i--)
-		c = wa[i] < wb[i] ? -1 : wa[i] > wb[i];
-	int za = !(wa[0] | wa[1] | wa[2] | wa[3] | wa[4] | wa[5] | wa[6]);
-	int zb = !(wb[0] | wb[1] | wb[2] | wb[3] | wb[4] | wb[5] | wb[6]);
-	int na = (a->sign & DEC_NEG) && !za, nb = (b->sign & DEC_NEG) && !zb;
+	int scale = a->scale > b->scale ? a->scale : b->scale;
+	wide_from_dec(a, wa);
+	wide_from_dec(b, wb);
+	wide_mul10(wa, scale - a->scale);
+	wide_mul10(wb, scale - b->scale);
+	int c = wide_cmp(wa, wb);
+	int na = dec_neg(a) && !wide_zero(wa), nb = dec_neg(b) && !wide_zero(wb);
 	if (na != nb)
 		c = na ? -1 : 1;
 	else if (na)
 		c = -c;
 	return c < 0 ? VARCMP_LT : c > 0 ? VARCMP_GT : VARCMP_EQ;
+}
+
+/* Against a double: the double as VarDecFromR8 makes it. */
+WINFN(HRESULT) oa_VarDecCmpR8(const DECIMAL *a, double b)
+{
+	DECIMAL d;
+	HRESULT hr;
+
+	if (FAILED(hr = dec_from_double(b, 15, &d)))
+		return hr;
+	return oa_VarDecCmp(a, &d);
+}
+
+/* a + b, or a - b: over the larger scale, then rounded to fit. */
+static HRESULT dec_add(const DECIMAL *a, const DECIMAL *b, int negate_b,
+		       DECIMAL *out)
+{
+	uint32_t wa[WIDE], wb[WIDE];
+
+	if (!a || !b || !out)
+		return E_INVALIDARG;
+	if (!dec_valid(a) || !dec_valid(b))
+		return E_INVALIDARG;
+	int scale = a->scale > b->scale ? a->scale : b->scale;
+	int na = dec_neg(a), nb = dec_neg(b) ^ negate_b;
+	wide_from_dec(a, wa);
+	wide_from_dec(b, wb);
+	wide_mul10(wa, scale - a->scale);
+	wide_mul10(wb, scale - b->scale);
+	if (na == nb) {
+		wide_add(wa, wb);
+	} else if (wide_cmp(wa, wb) >= 0) {
+		wide_sub(wa, wb);
+	} else {
+		wide_sub(wb, wa);
+		memcpy(wa, wb, sizeof(wa));
+		na = nb;
+	}
+	return wide_to_dec(wa, scale, na, 0, out, NULL);
+}
+
+WINFN(HRESULT) oa_VarDecAdd(const DECIMAL *a, const DECIMAL *b, DECIMAL *out)
+{
+	return dec_add(a, b, 0, out);
+}
+
+WINFN(HRESULT) oa_VarDecSub(const DECIMAL *a, const DECIMAL *b, DECIMAL *out)
+{
+	return dec_add(a, b, 1, out);
+}
+
+/* The product's scale is the two added, then rounded to fit. */
+WINFN(HRESULT) oa_VarDecMul(const DECIMAL *a, const DECIMAL *b, DECIMAL *out)
+{
+	uint32_t ma[3], mb[3], p[WIDE];
+
+	if (!a || !b || !out)
+		return E_INVALIDARG;
+	if (!dec_valid(a) || !dec_valid(b))
+		return E_INVALIDARG;
+	dec_get(a, ma);
+	dec_get(b, mb);
+	memset(p, 0, sizeof(p));
+	for (int i = 0; i < 3; i++) {
+		uint64_t c = 0;
+		for (int j = 0; j < 3; j++) {
+			c += (uint64_t)ma[i] * mb[j] + p[i + j];
+			p[i + j] = (uint32_t)c;
+			c >>= 32;
+		}
+		p[i + 3] = (uint32_t)c;
+	}
+	return wide_to_dec(p, a->scale + b->scale, dec_neg(a) ^ dec_neg(b), 0,
+			   out, NULL);
+}
+
+/*
+ * The quotient to 29 places (one more than fits, to round on), rounded
+ * to fit, then without trailing zeros if it came out exact: 1 / 4 is
+ * 0.25, 1 / 3 is 0.3333333333333333333333333333.
+ */
+WINFN(HRESULT) oa_VarDecDiv(const DECIMAL *a, const DECIMAL *b, DECIMAL *out)
+{
+	uint32_t n[WIDE], d[WIDE], r[WIDE];
+	HRESULT hr;
+	int exact;
+
+	if (!a || !b || !out)
+		return E_INVALIDARG;
+	if (!dec_valid(a) || !dec_valid(b))
+		return E_INVALIDARG;
+	wide_from_dec(b, d);
+	if (wide_zero(d))
+		return DISP_E_DIVBYZERO;
+	wide_from_dec(a, n);
+	/* a/b = (n * 10^k / d) / 10^(a's scale - b's scale + k) */
+	int k = DEC_MAX_SCALE + 1 - a->scale + b->scale;
+	wide_mul10(n, k);
+	wide_divmod(n, d, r);
+	if (FAILED(hr = wide_to_dec(n, DEC_MAX_SCALE + 1,
+				    dec_neg(a) ^ dec_neg(b), !wide_zero(r),
+				    out, &exact)))
+		return hr;
+	if (exact) {
+		uint32_t m[3], t[3];
+		dec_get(out, m);
+		while (out->scale > 0) {
+			memcpy(t, m, sizeof(t));
+			if (u96_div10(t))
+				break;
+			memcpy(m, t, sizeof(m));
+			out->scale--;
+		}
+		dec_set(out, m, out->scale, dec_neg(out));
+	}
+	return S_OK;
 }
 
 #define ENTRY(to, from, ord) \
@@ -1611,6 +1860,11 @@ const struct builtin_export oa_conv_exports[] = {
 	{ "VarDecNeg", 189, (void *)oa_VarDecNeg },
 	{ "VarDecRound", 203, (void *)oa_VarDecRound },
 	{ "VarDecCmp", 204, (void *)oa_VarDecCmp },
+	{ "VarDecAdd", 177, (void *)oa_VarDecAdd },
+	{ "VarDecDiv", 178, (void *)oa_VarDecDiv },
+	{ "VarDecMul", 179, (void *)oa_VarDecMul },
+	{ "VarDecSub", 181, (void *)oa_VarDecSub },
+	{ "VarDecCmpR8", 298, (void *)oa_VarDecCmpR8 },
 	{ "VariantTimeToDosDateTime", 13, (void *)oa_VariantTimeToDosDateTime },
 	{ "DosDateTimeToVariantTime", 14, (void *)oa_DosDateTimeToVariantTime },
 	{ "SystemTimeToVariantTime", 184, (void *)oa_SystemTimeToVariantTime },

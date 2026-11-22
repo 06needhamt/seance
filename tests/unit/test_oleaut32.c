@@ -597,6 +597,55 @@ static int dec_is(DECIMAL d, uint64_t lo, ULONG hi, int scale, int neg)
 	return 0;
 }
 
+typedef HRESULT (WINAPI *dec_op)(const DECIMAL *, const DECIMAL *, DECIMAL *);
+
+/* a op b as text ("hr 0x..." on failure); scale kept, unlike VarBstrFromDec. */
+static const char *dec_arith(const char *name, const char *a, const char *b)
+{
+	HRESULT (WINAPI *from_str)(OLECHAR *, LCID, ULONG, DECIMAL *) =
+		(HRESULT (WINAPI *)(OLECHAR *, LCID, ULONG, DECIMAL *))
+		get("VarDecFromStr");
+	dec_op op = (dec_op)get(name);
+	static char out[4][64];
+	static int next;
+	char *o = out[next++ % 4];
+	DECIMAL x, y, r;
+	HRESULT hr;
+
+	if (from_str(w(a), 0, 0, &x) != S_OK ||
+	    from_str(w(b), 0, 0, &y) != S_OK)
+		return "bad operand";
+	memset(&r, 0xcc, sizeof(r));
+	if ((hr = op(&x, &y, &r)) != S_OK) {
+		snprintf(o, 64, "hr %#x", (unsigned)hr);
+		return o;
+	}
+	/* Every digit of the scale, so 3.0 and 3 differ. */
+	char d[40];
+	int n = 0;
+	uint64_t lo = r.Lo64;
+	ULONG hi = r.Hi32;
+	do {	/* (hi:lo) /= 10 */
+		uint64_t rem = hi % 10, q_hi = hi / 10;
+		uint64_t mid = rem << 32 | (lo >> 32);
+		uint64_t q_mid = mid / 10;
+		uint64_t low = (mid % 10) << 32 | (lo & 0xffffffff);
+		d[n++] = (char)('0' + low % 10);
+		lo = q_mid << 32 | low / 10;
+		hi = (ULONG)q_hi;
+	} while (lo || hi || n <= r.scale);
+	char *p = o;
+	if (r.sign & 0x80)
+		*p++ = '-';
+	for (int i = n - 1; i >= 0; i--) {
+		if (i == r.scale - 1)
+			*p++ = '.';
+		*p++ = d[i];
+	}
+	*p = '\0';
+	return o;
+}
+
 static void test_decimal(void)
 {
 	FN(HRESULT, VarDecFromStr, OLECHAR *, LCID, ULONG, DECIMAL *);
@@ -621,6 +670,7 @@ static void test_decimal(void)
 	FN(HRESULT, VarDecNeg, const DECIMAL *, DECIMAL *);
 	FN(HRESULT, VarDecAbs, const DECIMAL *, DECIMAL *);
 	FN(HRESULT, VarDecCmp, const DECIMAL *, const DECIMAL *);
+	FN(HRESULT, VarDecCmpR8, const DECIMAL *, double);
 	FN(HRESULT, VariantChangeType, VARIANTARG *, const VARIANTARG *, USHORT,
 	   VARTYPE);
 	FN(HRESULT, VariantClear, VARIANTARG *);
@@ -785,6 +835,64 @@ static void test_decimal(void)
 	x = dec(2, 0, 0, 1);
 	d = dec(1, 0, 0, 1);
 	CHECK_EQ(VarDecCmp(&x, &d), VARCMP_LT);
+
+	/* Arithmetic: exact over the larger scale, else rounded to even. */
+	CHECK_STR(dec_arith("VarDecAdd", "1.5", "2.25"), "3.75");
+	CHECK_STR(dec_arith("VarDecAdd", "1.5", "1.5"), "3.0");
+	CHECK_STR(dec_arith("VarDecSub", "1.5", "2.25"), "-0.75");
+	CHECK_STR(dec_arith("VarDecAdd", "0.1", "-0.1"), "0.0");
+	CHECK_STR(dec_arith("VarDecSub", "-3", "-5"), "2");
+	CHECK_STR(dec_arith("VarDecAdd", "79228162514264337593543950335", "1"),
+		  "hr 0x8002000a");
+	CHECK_STR(dec_arith("VarDecAdd", "79228162514264337593543950335",
+			    "0.5"), "hr 0x8002000a");
+	CHECK_STR(dec_arith("VarDecAdd", "79228162514264337593543950334",
+			    "0.5"), "79228162514264337593543950334");
+	CHECK_STR(dec_arith("VarDecAdd", "7.9228162514264337593543950335", "1"),
+		  "8.922816251426433759354395034");
+	CHECK_STR(dec_arith("VarDecSub", "0.0000000000000000000000000001",
+			    "10000000000000000000000000000"),
+		  "-10000000000000000000000000000");
+	CHECK_STR(dec_arith("VarDecMul", "1.5", "2"), "3.0");
+	CHECK_STR(dec_arith("VarDecMul", "-0.5", "0.5"), "-0.25");
+	CHECK_STR(dec_arith("VarDecMul", "-0.5", "-4"), "2.0");
+	CHECK_STR(dec_arith("VarDecMul", "79228162514264337593543950335",
+			    "0.1"), "7922816251426433759354395033.5");
+	CHECK_STR(dec_arith("VarDecMul", "1.2345678901234567890123456789",
+			    "1.2345678901234567890123456789"),
+		  "1.5241578753238836750495351563");
+	CHECK_STR(dec_arith("VarDecMul", "79228162514264337593543950335", "2"),
+		  "hr 0x8002000a");
+	CHECK_STR(dec_arith("VarDecMul", "0.0000000000001",
+			    "0.0000000000000001"),
+		  "0.0000000000000000000000000000");
+	CHECK_STR(dec_arith("VarDecDiv", "1", "3"),
+		  "0.3333333333333333333333333333");
+	CHECK_STR(dec_arith("VarDecDiv", "2", "3"),
+		  "0.6666666666666666666666666667");
+	CHECK_STR(dec_arith("VarDecDiv", "10", "3"),
+		  "3.3333333333333333333333333333");
+	CHECK_STR(dec_arith("VarDecDiv", "1", "7.7"),
+		  "0.1298701298701298701298701299");
+	CHECK_STR(dec_arith("VarDecDiv", "1", "4"), "0.25");
+	CHECK_STR(dec_arith("VarDecDiv", "10", "2"), "5");
+	CHECK_STR(dec_arith("VarDecDiv", "1.00", "1"), "1");
+	CHECK_STR(dec_arith("VarDecDiv", "-7", "2"), "-3.5");
+	CHECK_STR(dec_arith("VarDecDiv", "0", "-2"), "0");
+	CHECK_STR(dec_arith("VarDecDiv", "1", "0.0000000000000000000000000001"),
+		  "10000000000000000000000000000");
+	CHECK_STR(dec_arith("VarDecDiv", "79228162514264337593543950335", "0.5"),
+		  "hr 0x8002000a");
+	CHECK_STR(dec_arith("VarDecDiv", "79228162514264337593543950335",
+			    "79228162514264337593543950335"), "1");
+	CHECK_STR(dec_arith("VarDecDiv", "1", "0"), "hr 0x80020012");
+	CHECK_STR(dec_arith("VarDecDiv", "0.0000000000000000000000000001", "3"),
+		  "0.0000000000000000000000000000");
+	x = dec(15, 0, 1, 0);
+	CHECK_EQ(VarDecCmpR8(&x, 1.5), VARCMP_EQ);
+	CHECK_EQ(VarDecCmpR8(&x, 2.0), VARCMP_LT);
+	CHECK_EQ(VarDecCmpR8(&x, -2.0), VARCMP_GT);
+	CHECK_EQ(VarDecCmpR8(&x, 1e30), DISP_E_OVERFLOW);
 }
 
 static void test_dates(void)
@@ -1162,6 +1270,17 @@ static void test_ordinals(void)
 		{ 277, "VarUI4FromStr" }, { 313, "VarBstrCat" },
 		{ 411, "SafeArrayCreateVector" }, { 417, "OleCreatePropertyFrame" },
 		{ 421, "OleTranslateColor" }, { 440, "VarUI8FromUI4" },
+		/* The DECIMAL functions. */
+		{ 182, "VarDecAbs" }, { 187, "VarDecFix" }, { 188, "VarDecInt" },
+		{ 189, "VarDecNeg" }, { 190, "VarDecFromUI1" },
+		{ 197, "VarDecFromStr" }, { 203, "VarDecRound" },
+		{ 204, "VarDecCmp" }, { 212, "VarI4FromDec" },
+		{ 232, "VarBstrFromDec" }, { 243, "VarDecFromUI4" },
+		{ 282, "VarUI4FromDec" }, { 345, "VarI8FromDec" },
+		{ 374, "VarDecFromI8" }, { 375, "VarDecFromUI8" },
+		{ 441, "VarUI8FromDec" }, { 177, "VarDecAdd" },
+		{ 178, "VarDecDiv" }, { 179, "VarDecMul" }, { 181, "VarDecSub" },
+		{ 298, "VarDecCmpR8" },
 	};
 
 	for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
@@ -1172,7 +1291,11 @@ static void test_ordinals(void)
 				known[i].name);
 		CHECK(by_name && by_ord == by_name);
 	}
-	CHECK(mod_get_ordinal(oa, 1) == NULL);
+	CHECK(mod_get_ordinal(oa, 999) == NULL);	/* assigned to nothing */
+	/* The COM entry points are by name only (see oleaut32.c). */
+	CHECK(mod_get_proc(oa, "DllRegisterServer") != NULL);
+	CHECK(mod_get_ordinal(oa, 320) == NULL);
+	CHECK(mod_get_ordinal(oa, 321) == NULL);
 }
 
 /* pe_oleaut.dll, which imports oleaut32 by ordinal as MSVC code does. */
