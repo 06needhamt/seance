@@ -14,7 +14,10 @@
  * month names); VT_BOOL as "-1"/"0", or "True"/"False" with
  * VARIANT_ALPHABOOL and from VarBstrFromBool. A VT_DISPATCH converts
  * through its value property (DISPID_VALUE) unless VARIANT_NOVALUEPROP.
- * VT_DECIMAL can be copied but not converted.
+ * VT_DECIMAL (a 96-bit integer over a power of ten up to 10^28) converts
+ * exactly to and from integers, currency and strings, rounding to even
+ * where digits are lost; a double becomes the DECIMAL nearest its 15
+ * significant digits (7 for a float), so 0.1 is 0.1.
  *
  * DATE is days since 30 December 1899, the fraction the time of day; a
  * negative date's fraction still counts forward from its midnight.
@@ -238,14 +241,256 @@ static int is_space(WCHAR c)
 
 /* A number read from a string: an integer if it is one, else a double. */
 struct num {
-	int kind;	/* N_INT, N_UINT, N_DBL, N_CY (i scaled by 10000), N_BOOL */
+	int kind;	/* N_INT, N_UINT, N_DBL, N_CY (i scaled by 10000), N_BOOL,
+			   N_DEC */
 	int hex;	/* read as &H or &O: fills the target's width */
 	int64_t i;
 	uint64_t u;
 	double d;
+	int digits;	/* a double's significant digits: 7 from a float */
+	int text;	/* read from decimal digits: dec_hr and dec hold them */
+	HRESULT dec_hr;
+	DECIMAL dec;	/* N_DEC's value, or the digits read */
 };
 
-enum { N_INT, N_UINT, N_DBL, N_CY, N_BOOL };
+enum { N_INT, N_UINT, N_DBL, N_CY, N_BOOL, N_DEC };
+
+/*
+ * DECIMAL arithmetic on the 96-bit magnitude as three 32-bit words, low
+ * first (there is no 128-bit integer on i386).
+ */
+#define DEC_NEG 0x80
+#define DEC_MAX_SCALE 28
+
+static int u96_zero(const uint32_t *m)
+{
+	return !(m[0] | m[1] | m[2]);
+}
+
+/* m = m * 10 + add; 1 (and m unchanged) if that needs more than 96 bits. */
+static int u96_mul10_add(uint32_t *m, unsigned add)
+{
+	uint32_t r[3];
+	uint64_t c = add;
+
+	for (int i = 0; i < 3; i++) {
+		c += (uint64_t)m[i] * 10;
+		r[i] = (uint32_t)c;
+		c >>= 32;
+	}
+	if (c)
+		return 1;
+	memcpy(m, r, sizeof(r));
+	return 0;
+}
+
+/* m /= 10; the remainder. */
+static unsigned u96_div10(uint32_t *m)
+{
+	uint64_t r = 0;
+
+	for (int i = 2; i >= 0; i--) {
+		uint64_t x = r << 32 | m[i];
+		m[i] = (uint32_t)(x / 10);
+		r = x % 10;
+	}
+	return (unsigned)r;
+}
+
+/* m += 1; 1 if it wrapped. */
+static int u96_inc(uint32_t *m)
+{
+	for (int i = 0; i < 3; i++)
+		if (++m[i])
+			return 0;
+	return 1;
+}
+
+/*
+ * m / 10^k, rounded to even; sticky says digits below the ones dropped
+ * weren't all zero. After one division the increment can't wrap.
+ */
+static void u96_drop(uint32_t *m, int k, int sticky)
+{
+	unsigned last = 0;
+
+	for (; k > 0; k--) {
+		sticky |= last != 0;
+		last = u96_div10(m);
+	}
+	if (last > 5 || (last == 5 && (sticky || (m[0] & 1))))
+		u96_inc(m);
+}
+
+static void dec_get(const DECIMAL *d, uint32_t *m)
+{
+	m[0] = d->Lo32;
+	m[1] = d->Mid32;
+	m[2] = d->Hi32;
+}
+
+static void dec_set(DECIMAL *d, const uint32_t *m, int scale, int neg)
+{
+	memset(d, 0, sizeof(*d));
+	d->Lo32 = m[0];
+	d->Mid32 = m[1];
+	d->Hi32 = m[2];
+	d->scale = (BYTE)scale;
+	d->sign = neg && !u96_zero(m) ? DEC_NEG : 0;
+}
+
+static int dec_valid(const DECIMAL *d)
+{
+	return d->scale <= DEC_MAX_SCALE && !(d->sign & ~DEC_NEG);
+}
+
+/*
+ * The DECIMAL nearest ds * 10^p, ds a string of decimal digits: as many
+ * fraction digits as fit in 96 bits and a scale of 28, the rest rounded
+ * to even. DISP_E_OVERFLOW if the integer part doesn't fit.
+ */
+static HRESULT dec_from_digits(const char *ds, int p, int neg, DECIMAL *out)
+{
+	uint32_t m[3] = { 0, 0, 0 };
+	int n = (int)strlen(ds), i;
+
+	for (i = 0; i < n; i++) {
+		int e = p + (n - 1 - i);	/* this digit's power of ten */
+		if (e < -DEC_MAX_SCALE || u96_mul10_add(m, ds[i] - '0'))
+			break;
+	}
+	int q = p + n - i;	/* m is the value over 10^-q */
+	if (q > 0) {
+		if (i < n)
+			return DISP_E_OVERFLOW;
+		for (; q > 0; q--)
+			if (u96_mul10_add(m, 0))
+				return DISP_E_OVERFLOW;
+	} else if (q < -DEC_MAX_SCALE) {	/* below 10^-28 */
+		dec_set(out, m, 0, 0);
+		return S_OK;
+	} else if (i < n) {
+		unsigned next = ds[i] - '0';
+		int sticky = 0;
+		for (int j = i + 1; j < n; j++)
+			sticky |= ds[j] != '0';
+		if (next > 5 || (next == 5 && (sticky || (m[0] & 1)))) {
+			if (m[0] == UINT32_MAX && m[1] == UINT32_MAX &&
+			    m[2] == UINT32_MAX) {
+				/* 2^96: one fraction digit fewer. */
+				if (q == 0)
+					return DISP_E_OVERFLOW;
+				u96_drop(m, 1, 1);
+				q++;
+			} else {
+				u96_inc(m);
+			}
+		}
+	}
+	dec_set(out, m, -q, neg);
+	return S_OK;
+}
+
+/* Digits as parse_num keeps them: "123.45e-6" (no sign). */
+static HRESULT dec_from_text(const char *t, int neg, DECIMAL *out)
+{
+	char ds[400];
+	int n = 0, frac = 0, p = 0;
+
+	for (; *t && *t != 'e'; t++) {
+		if (*t == '.')
+			frac = 1;
+		else if (n < (int)sizeof(ds) - 1) {
+			ds[n++] = *t;
+			p -= frac;
+		}
+	}
+	ds[n] = '\0';
+	if (*t == 'e') {
+		long e = strtol(t + 1, NULL, 10);
+		p += e > 1000 ? 1000 : e < -1000 ? -1000 : (int)e;
+	}
+	return dec_from_digits(ds, p, neg, out);
+}
+
+static HRESULT dec_from_double(double d, int digits, DECIMAL *out)
+{
+	char buf[64], ds[32];
+	int n = 0, e;
+
+	if (!isfinite(d))
+		return DISP_E_OVERFLOW;
+	if (d == 0) {
+		memset(out, 0, sizeof(*out));
+		return S_OK;
+	}
+	snprintf(buf, sizeof(buf), "%.*e", digits - 1, fabs(d));
+	const char *t = buf;
+	for (; *t && *t != 'e'; t++)
+		if (*t != '.' && n < (int)sizeof(ds) - 1)
+			ds[n++] = *t;
+	ds[n] = '\0';
+	e = atoi(t + 1) - (n - 1);
+	while (n > 1 && ds[n - 1] == '0') {	/* 0.1 has scale 1 */
+		ds[--n] = '\0';
+		e++;
+	}
+	return dec_from_digits(ds, e, d < 0, out);
+}
+
+/* "-123.45": every digit of the scale, unless trim drops trailing zeros. */
+static void dec_to_text(const DECIMAL *d, int trim, char *out)
+{
+	uint32_t m[3];
+	char r[40];
+	int n = 0;
+
+	dec_get(d, m);
+	int neg = (d->sign & DEC_NEG) && !u96_zero(m);
+	do
+		r[n++] = (char)('0' + u96_div10(m));
+	while (!u96_zero(m) || n <= d->scale);
+	int lo = 0;	/* trailing fraction zeros to leave out */
+	if (trim)
+		while (lo < d->scale && r[lo] == '0')
+			lo++;
+	char *o = out;
+	if (neg)
+		*o++ = '-';
+	for (int i = n - 1; i >= lo; i--) {
+		if (i == d->scale - 1)
+			*o++ = '.';
+		*o++ = r[i];
+	}
+	*o = '\0';
+}
+
+/* The integer nearest a DECIMAL (to even), as a struct num; or overflow. */
+static HRESULT dec_round_int(const DECIMAL *d, struct num *out)
+{
+	uint32_t m[3];
+
+	dec_get(d, m);
+	u96_drop(m, d->scale, 0);
+	if (m[2])
+		return DISP_E_OVERFLOW;
+	uint64_t v = (uint64_t)m[1] << 32 | m[0];
+	memset(out, 0, sizeof(*out));
+	out->kind = N_INT;
+	if (!(d->sign & DEC_NEG) || !v) {
+		if (v > INT64_MAX) {
+			out->kind = N_UINT;
+			out->u = v;
+		} else {
+			out->i = (int64_t)v;
+		}
+		return S_OK;
+	}
+	if (v > (uint64_t)INT64_MAX + 1)
+		return DISP_E_OVERFLOW;
+	out->i = v == (uint64_t)INT64_MAX + 1 ? INT64_MIN : -(int64_t)v;
+	return S_OK;
+}
 
 /*
  * Reads a number the way VarParseNumFromStr does in US English: blanks
@@ -337,6 +582,8 @@ static HRESULT parse_num(const WCHAR *s, struct num *out)
 	}
 	if (!digits || *p)
 		return DISP_E_TYPEMISMATCH;
+	out->text = 1;
+	out->dec_hr = dec_from_text(buf, neg, &out->dec);
 	if (frac || exp)
 		integral = 0;
 	char *end;
@@ -573,6 +820,7 @@ static HRESULT to_num(const VARIANT *v, struct num *n)
 	case VT_R4:
 		n->kind = N_DBL;
 		n->d = v->fltVal;
+		n->digits = 7;
 		break;
 	case VT_R8:
 		n->kind = N_DBL;
@@ -586,6 +834,16 @@ static HRESULT to_num(const VARIANT *v, struct num *n)
 		n->kind = N_CY;
 		n->i = v->cyVal.int64;
 		break;
+	case VT_DECIMAL: {
+		char t[48];
+		if (!dec_valid(&v->decVal))
+			return E_INVALIDARG;
+		n->kind = N_DEC;
+		n->dec = v->decVal;
+		dec_to_text(&v->decVal, 0, t);
+		n->d = strtod(t, NULL);
+		return S_OK;
+	}
 	case VT_BSTR:
 		return parse_num(v->bstrVal, n);
 	default:
@@ -618,8 +876,14 @@ static HRESULT to_int(const struct num *n, int64_t lo, uint64_t hi, int bits,
 {
 	int unsigned_target = lo == 0;
 	uint64_t mask = bits == 64 ? UINT64_MAX : (1ull << bits) - 1;
+	struct num r;
+	HRESULT hr;
 
 	switch (n->kind) {
+	case N_DEC:
+		if (FAILED(hr = dec_round_int(&n->dec, &r)))
+			return hr;
+		return to_int(&r, lo, hi, bits, out);
 	case N_BOOL:	/* all ones: the target's cast keeps what fits */
 		*out = (uint64_t)n->i;
 		return S_OK;
@@ -676,12 +940,60 @@ static HRESULT to_cy(const struct num *n, int64_t *out)
 		return S_OK;
 	case N_UINT:
 		return DISP_E_OVERFLOW;
+	case N_DEC: {
+		uint32_t m[3];
+		dec_get(&n->dec, m);
+		if (n->dec.scale > 4)
+			u96_drop(m, n->dec.scale - 4, 0);
+		for (int s = n->dec.scale; s < 4; s++)
+			if (u96_mul10_add(m, 0))
+				return DISP_E_OVERFLOW;
+		uint64_t v = (uint64_t)m[1] << 32 | m[0];
+		int neg = (n->dec.sign & DEC_NEG) != 0;
+		if (m[2] || v > (uint64_t)INT64_MAX + neg)
+			return DISP_E_OVERFLOW;
+		*out = !neg ? (int64_t)v : v == (uint64_t)INT64_MAX + 1 ?
+		       INT64_MIN : -(int64_t)v;
+		return S_OK;
+	}
 	}
 	double r = round_even(n->d * 10000.0);
 	if (!(r >= -9223372036854775808.0 && r < 9223372036854775808.0))
 		return DISP_E_OVERFLOW;
 	*out = (int64_t)r;
 	return S_OK;
+}
+
+static HRESULT to_dec(const struct num *n, DECIMAL *out)
+{
+	uint32_t m[3] = { 0, 0, 0 };
+	uint64_t a;
+
+	if (n->kind == N_DEC) {
+		*out = n->dec;
+		out->wReserved = 0;
+		return S_OK;
+	}
+	if (n->text) {
+		*out = n->dec;
+		return n->dec_hr;
+	}
+	switch (n->kind) {
+	case N_UINT:
+		m[0] = (uint32_t)n->u;
+		m[1] = (uint32_t)(n->u >> 32);
+		dec_set(out, m, 0, 0);
+		return S_OK;
+	case N_INT:
+	case N_BOOL:
+	case N_CY:
+		a = n->i < 0 ? -(uint64_t)n->i : (uint64_t)n->i;
+		m[0] = (uint32_t)a;
+		m[1] = (uint32_t)(a >> 32);
+		dec_set(out, m, n->kind == N_CY ? 4 : 0, n->i < 0);
+		return S_OK;
+	}
+	return dec_from_double(n->d, n->digits ? n->digits : 15, out);
 }
 
 static HRESULT to_bstr(const VARIANT *src, LCID lcid, USHORT flags, BSTR *out)
@@ -713,6 +1025,11 @@ static HRESULT to_bstr(const VARIANT *src, LCID lcid, USHORT flags, BSTR *out)
 		break;
 	case VT_CY:
 		format_cy(src->cyVal.int64, buf, sizeof(buf));
+		break;
+	case VT_DECIMAL:
+		if (!dec_valid(&src->decVal))
+			return E_INVALIDARG;
+		dec_to_text(&src->decVal, 1, buf);
 		break;
 	case VT_DATE:
 		if (format_date(src->date, flags, buf, sizeof(buf)))
@@ -770,8 +1087,7 @@ static HRESULT coerce(VARIANT *dst, const VARIANT *src, LCID lcid,
 		return S_OK;
 	}
 	if (src->vt == VT_NULL || src->vt == VT_ERROR ||
-	    src->vt == VT_DECIMAL || src->vt == VT_RECORD ||
-	    vt == VT_ERROR || vt == VT_DECIMAL || vt == VT_RECORD ||
+	    src->vt == VT_RECORD || vt == VT_ERROR || vt == VT_RECORD ||
 	    vt == VT_VARIANT)
 		return DISP_E_TYPEMISMATCH;
 
@@ -869,8 +1185,12 @@ static HRESULT coerce(VARIANT *dst, const VARIANT *src, LCID lcid,
 		dst->cyVal.int64 = c;
 		break;
 	}
+	case VT_DECIMAL:	/* over the whole VARIANT: vt is set below */
+		if (FAILED(hr = to_dec(&n, &dst->decVal)))
+			return hr;
+		break;
 	case VT_BOOL:
-		dst->boolVal = (n.kind == N_DBL ? n.d != 0 :
+		dst->boolVal = (n.kind == N_DBL || n.kind == N_DEC ? n.d != 0 :
 				n.kind == N_UINT ? 1 : n.i != 0) ?
 			       VARIANT_TRUE : VARIANT_FALSE;
 		break;
@@ -947,6 +1267,7 @@ HRESULT STUB_WINAPI oa_VariantChangeTypeEx(VARIANTARG *dst,
 #define IN_Date double
 #define IN_Cy   int64_t
 #define IN_Bool VARIANT_BOOL
+#define IN_Dec  const DECIMAL *
 
 #define OUT_UI1  BYTE
 #define OUT_I1   signed char
@@ -961,6 +1282,7 @@ HRESULT STUB_WINAPI oa_VariantChangeTypeEx(VARIANTARG *dst,
 #define OUT_Date double
 #define OUT_Cy   CY
 #define OUT_Bool VARIANT_BOOL
+#define OUT_Dec  DECIMAL
 
 #define VT_OF_UI1  VT_UI1
 #define VT_OF_I1   VT_I1
@@ -975,6 +1297,7 @@ HRESULT STUB_WINAPI oa_VariantChangeTypeEx(VARIANTARG *dst,
 #define VT_OF_Date VT_DATE
 #define VT_OF_Cy   VT_CY
 #define VT_OF_Bool VT_BOOL
+#define VT_OF_Dec  VT_DECIMAL
 
 #define SET_UI1(v, x)  ((v).bVal = (x))
 #define SET_I1(v, x)   ((v).cVal = (CHAR)(x))
@@ -989,6 +1312,7 @@ HRESULT STUB_WINAPI oa_VariantChangeTypeEx(VARIANTARG *dst,
 #define SET_Date(v, x) ((v).date = (x))
 #define SET_Cy(v, x)   ((v).cyVal.int64 = (x))
 #define SET_Bool(v, x) ((v).boolVal = (x))
+#define SET_Dec(v, x)  ((v).decVal = *(x), (v).vt = VT_DECIMAL)
 
 #define GET_UI1(v)  ((v).bVal)
 #define GET_I1(v)   ((signed char)(v).cVal)
@@ -1003,6 +1327,14 @@ HRESULT STUB_WINAPI oa_VariantChangeTypeEx(VARIANTARG *dst,
 #define GET_Date(v) ((v).date)
 #define GET_Cy(v)   ((v).cyVal)
 #define GET_Bool(v) ((v).boolVal)
+#define GET_Dec(v)  dec_plain((v).decVal)
+
+/* A DECIMAL out of a VARIANT, without the vt over its wReserved. */
+static DECIMAL dec_plain(DECIMAL d)
+{
+	d.wReserved = 0;
+	return d;
+}
 
 static HRESULT var_from(VARIANT *s, VARTYPE vt, LCID lcid, ULONG flags,
 			VARIANT *d)
@@ -1114,7 +1446,23 @@ static HRESULT var_from(VARIANT *s, VARTYPE vt, LCID lcid, ULONG flags,
 	X(UI4, I8, 425) X(UI4, UI8, 426) X(I8, UI8, 427) X(UI8, I8, 428) \
 	X(UI8, UI1, 429) X(UI8, I2, 430) X(UI8, R4, 431) X(UI8, R8, 432) \
 	X(UI8, Cy, 433) X(UI8, Date, 434) X_STR(UI8, 435) X_DISP(UI8, 436) \
-	X(UI8, Bool, 437) X(UI8, I1, 438) X(UI8, UI2, 439) X(UI8, UI4, 440)
+	X(UI8, Bool, 437) X(UI8, I1, 438) X(UI8, UI2, 439) X(UI8, UI4, 440) \
+	DEC_LIST(X, X_STR, X_DISP, X_BSTR)
+
+/*
+ * The DECIMAL conversions, with the ordinals of Windows' oleaut32.dll
+ * export table (the 64-bit integer ones, which that older copy lacks,
+ * from Wine's spec).
+ */
+#define DEC_LIST(X, X_STR, X_DISP, X_BSTR) \
+	X(Dec, UI1, 190) X(Dec, I2, 191) X(Dec, I4, 192) X(Dec, R4, 193) \
+	X(Dec, R8, 194) X(Dec, Date, 195) X(Dec, Cy, 196) X_STR(Dec, 197) \
+	X_DISP(Dec, 198) X(Dec, Bool, 199) X(I2, Dec, 208) X(I4, Dec, 212) \
+	X(R4, Dec, 216) X(R8, Dec, 220) X(Date, Dec, 224) X(Cy, Dec, 228) \
+	X_BSTR(Dec, 232) X(Bool, Dec, 236) X(UI1, Dec, 240) X(Dec, I1, 241) \
+	X(Dec, UI2, 242) X(Dec, UI4, 243) X(I1, Dec, 256) X(UI2, Dec, 269) \
+	X(UI4, Dec, 282) X(I8, Dec, 345) X(Dec, I8, 374) X(Dec, UI8, 375) \
+	X(UI8, Dec, 441)
 
 VAR_FROM_LIST(DEF, DEF_STR, DEF_DISP, DEF_BSTR)
 
@@ -1143,6 +1491,107 @@ WINFN(HRESULT) oa_VarBstrFromDisp(IDispatch *disp, LCID lcid, ULONG flags,
 	return hr;
 }
 
+/* DECIMAL arithmetic that needs no wider integers. */
+
+WINFN(HRESULT) oa_VarDecAbs(const DECIMAL *in, DECIMAL *out)
+{
+	if (!in || !out)
+		return E_INVALIDARG;
+	*out = *in;
+	out->sign &= ~DEC_NEG;
+	return S_OK;
+}
+
+WINFN(HRESULT) oa_VarDecNeg(const DECIMAL *in, DECIMAL *out)
+{
+	if (!in || !out)
+		return E_INVALIDARG;
+	*out = *in;
+	out->sign ^= DEC_NEG;
+	return S_OK;
+}
+
+/* To dp decimal places: to even, toward zero (Fix) or down (Int). */
+enum { R_EVEN, R_ZERO, R_FLOOR };
+
+static HRESULT dec_round(const DECIMAL *in, int dp, int how, DECIMAL *out)
+{
+	uint32_t m[3];
+	int sticky = 0;
+
+	if (!in || !out || dp < 0)
+		return E_INVALIDARG;
+	if (!dec_valid(in))
+		return E_INVALIDARG;
+	if (dp >= in->scale) {
+		*out = *in;
+		return S_OK;
+	}
+	int neg = (in->sign & DEC_NEG) != 0;
+	dec_get(in, m);
+	if (how == R_EVEN) {
+		u96_drop(m, in->scale - dp, 0);
+	} else {
+		for (int k = in->scale - dp; k > 0; k--)
+			sticky |= u96_div10(m) != 0;
+		if (how == R_FLOOR && neg && sticky)
+			u96_inc(m);
+	}
+	dec_set(out, m, dp, neg);
+	return S_OK;
+}
+
+WINFN(HRESULT) oa_VarDecRound(const DECIMAL *in, int dp, DECIMAL *out)
+{
+	return dec_round(in, dp, R_EVEN, out);
+}
+
+WINFN(HRESULT) oa_VarDecFix(const DECIMAL *in, DECIMAL *out)
+{
+	return dec_round(in, 0, R_ZERO, out);
+}
+
+WINFN(HRESULT) oa_VarDecInt(const DECIMAL *in, DECIMAL *out)
+{
+	return dec_round(in, 0, R_FLOOR, out);
+}
+
+/* Magnitudes over a common scale: up to 96 bits times 10^28, 7 words. */
+static void wide_from_dec(const DECIMAL *d, int scale, uint32_t *w)
+{
+	memset(w, 0, 7 * sizeof(*w));
+	dec_get(d, w);
+	for (int s = d->scale; s < scale; s++) {
+		uint64_t c = 0;
+		for (int i = 0; i < 7; i++) {
+			c += (uint64_t)w[i] * 10;
+			w[i] = (uint32_t)c;
+			c >>= 32;
+		}
+	}
+}
+
+WINFN(HRESULT) oa_VarDecCmp(const DECIMAL *a, const DECIMAL *b)
+{
+	uint32_t wa[7], wb[7];
+
+	if (!a || !b || !dec_valid(a) || !dec_valid(b))
+		return E_INVALIDARG;
+	int scale = a->scale > b->scale ? a->scale : b->scale, c = 0;
+	wide_from_dec(a, scale, wa);
+	wide_from_dec(b, scale, wb);
+	for (int i = 6; i >= 0 && !c; i--)
+		c = wa[i] < wb[i] ? -1 : wa[i] > wb[i];
+	int za = !(wa[0] | wa[1] | wa[2] | wa[3] | wa[4] | wa[5] | wa[6]);
+	int zb = !(wb[0] | wb[1] | wb[2] | wb[3] | wb[4] | wb[5] | wb[6]);
+	int na = (a->sign & DEC_NEG) && !za, nb = (b->sign & DEC_NEG) && !zb;
+	if (na != nb)
+		c = na ? -1 : 1;
+	else if (na)
+		c = -c;
+	return c < 0 ? VARCMP_LT : c > 0 ? VARCMP_GT : VARCMP_EQ;
+}
+
 #define ENTRY(to, from, ord) \
 	{ "Var" #to "From" #from, ord, (void *)oa_Var##to##From##from },
 #define ENTRY_STR(to, ord) \
@@ -1156,6 +1605,12 @@ const struct builtin_export oa_conv_exports[] = {
 	VAR_FROM_LIST(ENTRY, ENTRY_STR, ENTRY_DISP, ENTRY_BSTR)
 	{ "VarBstrFromBool", 116, (void *)oa_VarBstrFromBool },
 	{ "VarBstrFromDisp", 115, (void *)oa_VarBstrFromDisp },
+	{ "VarDecAbs", 182, (void *)oa_VarDecAbs },
+	{ "VarDecFix", 187, (void *)oa_VarDecFix },
+	{ "VarDecInt", 188, (void *)oa_VarDecInt },
+	{ "VarDecNeg", 189, (void *)oa_VarDecNeg },
+	{ "VarDecRound", 203, (void *)oa_VarDecRound },
+	{ "VarDecCmp", 204, (void *)oa_VarDecCmp },
 	{ "VariantTimeToDosDateTime", 13, (void *)oa_VariantTimeToDosDateTime },
 	{ "DosDateTimeToVariantTime", 14, (void *)oa_DosDateTimeToVariantTime },
 	{ "SystemTimeToVariantTime", 184, (void *)oa_SystemTimeToVariantTime },
