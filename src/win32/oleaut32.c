@@ -556,10 +556,10 @@ static const struct builtin_export exports[] = {
 	E(OleCreateFontIndirect, 420),
 	E(OleTranslateColor, 421),
 	E(OleLoadPicturePath, 424),
-	E(DllCanUnloadNow, 0),
-	E(DllGetClassObject, 0),
-	E(DllRegisterServer, 0),
-	E(DllUnregisterServer, 0),
+	E(DllCanUnloadNow, 410),
+	E(DllGetClassObject, 1),
+	E(DllRegisterServer, 320),
+	E(DllUnregisterServer, 321),
 	BUILTIN_END
 };
 

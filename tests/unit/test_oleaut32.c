@@ -1162,6 +1162,18 @@ static void test_ordinals(void)
 		{ 277, "VarUI4FromStr" }, { 313, "VarBstrCat" },
 		{ 411, "SafeArrayCreateVector" }, { 417, "OleCreatePropertyFrame" },
 		{ 421, "OleTranslateColor" }, { 440, "VarUI8FromUI4" },
+		/* The DECIMAL functions. */
+		{ 182, "VarDecAbs" }, { 187, "VarDecFix" }, { 188, "VarDecInt" },
+		{ 189, "VarDecNeg" }, { 190, "VarDecFromUI1" },
+		{ 197, "VarDecFromStr" }, { 203, "VarDecRound" },
+		{ 204, "VarDecCmp" }, { 212, "VarI4FromDec" },
+		{ 232, "VarBstrFromDec" }, { 243, "VarDecFromUI4" },
+		{ 282, "VarUI4FromDec" }, { 345, "VarI8FromDec" },
+		{ 374, "VarDecFromI8" }, { 375, "VarDecFromUI8" },
+		{ 441, "VarUI8FromDec" },
+		/* The COM entry points. */
+		{ 1, "DllGetClassObject" }, { 320, "DllRegisterServer" },
+		{ 321, "DllUnregisterServer" }, { 410, "DllCanUnloadNow" },
 	};
 
 	for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
@@ -1172,7 +1184,7 @@ static void test_ordinals(void)
 				known[i].name);
 		CHECK(by_name && by_ord == by_name);
 	}
-	CHECK(mod_get_ordinal(oa, 1) == NULL);
+	CHECK(mod_get_ordinal(oa, 999) == NULL);	/* assigned to nothing */
 }
 
 /* pe_oleaut.dll, which imports oleaut32 by ordinal as MSVC code does. */
