@@ -640,6 +640,16 @@ static void test_std_dispatch(void)
 			 S_OK);
 		CHECK_EQ(inner.vt, VT_DECIMAL);
 		CHECK(inner.decVal.Lo64 == 1);
+		/* Of another type: converted to a DECIMAL, and put back as one. */
+		memset(&inner, 0, sizeof(inner));
+		inner.vt = VT_BSTR;
+		inner.bstrVal = pSysAllocString(w("-2.5"));
+		CHECK_EQ(invoke(d, ID_INCDEC, DISPATCH_METHOD, 1, a, &r, &err),
+			 S_OK);
+		CHECK_EQ(inner.vt, VT_DECIMAL);
+		CHECK_EQ(inner.decVal.scale, 1);
+		CHECK_EQ(inner.decVal.sign, 0x80);
+		CHECK(inner.decVal.Lo64 == 26);	/* the callee adds 1 to 25 */
 
 		/* Empty, as an [out] one is: a zero. */
 		inner.vt = VT_EMPTY;

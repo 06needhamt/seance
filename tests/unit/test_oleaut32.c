@@ -575,6 +575,218 @@ static void test_var_from(void)
 	CHECK_EQ(VarI4FromDisp(NULL, 0, &l), DISP_E_TYPEMISMATCH);
 }
 
+static DECIMAL dec(uint64_t lo, ULONG hi, int scale, int neg)
+{
+	DECIMAL d;
+
+	memset(&d, 0, sizeof(d));
+	d.Lo64 = lo;
+	d.Hi32 = hi;
+	d.scale = (BYTE)scale;
+	d.sign = neg ? 0x80 : 0;
+	return d;
+}
+
+static int dec_is(DECIMAL d, uint64_t lo, ULONG hi, int scale, int neg)
+{
+	if (d.Lo64 == lo && d.Hi32 == hi && d.scale == scale &&
+	    d.sign == (neg ? 0x80 : 0) && !d.wReserved)
+		return 1;
+	fprintf(stderr, "DECIMAL %08x:%016llx scale %u sign %#x\n",
+		(unsigned)d.Hi32, (unsigned long long)d.Lo64, d.scale, d.sign);
+	return 0;
+}
+
+static void test_decimal(void)
+{
+	FN(HRESULT, VarDecFromStr, OLECHAR *, LCID, ULONG, DECIMAL *);
+	FN(HRESULT, VarDecFromR8, double, DECIMAL *);
+	FN(HRESULT, VarDecFromR4, FLOAT, DECIMAL *);
+	FN(HRESULT, VarDecFromCy, int64_t, DECIMAL *);
+	FN(HRESULT, VarDecFromI4, LONG, DECIMAL *);
+	FN(HRESULT, VarDecFromBool, VARIANT_BOOL, DECIMAL *);
+	FN(HRESULT, VarDecFromUI8, uint64_t, DECIMAL *);
+	FN(HRESULT, VarDecFromI8, int64_t, DECIMAL *);
+	FN(HRESULT, VarI4FromDec, const DECIMAL *, LONG *);
+	FN(HRESULT, VarUI1FromDec, const DECIMAL *, BYTE *);
+	FN(HRESULT, VarI8FromDec, const DECIMAL *, int64_t *);
+	FN(HRESULT, VarUI8FromDec, const DECIMAL *, uint64_t *);
+	FN(HRESULT, VarR8FromDec, const DECIMAL *, double *);
+	FN(HRESULT, VarCyFromDec, const DECIMAL *, CY *);
+	FN(HRESULT, VarBoolFromDec, const DECIMAL *, VARIANT_BOOL *);
+	FN(HRESULT, VarBstrFromDec, const DECIMAL *, LCID, ULONG, BSTR *);
+	FN(HRESULT, VarDecRound, const DECIMAL *, int, DECIMAL *);
+	FN(HRESULT, VarDecFix, const DECIMAL *, DECIMAL *);
+	FN(HRESULT, VarDecInt, const DECIMAL *, DECIMAL *);
+	FN(HRESULT, VarDecNeg, const DECIMAL *, DECIMAL *);
+	FN(HRESULT, VarDecAbs, const DECIMAL *, DECIMAL *);
+	FN(HRESULT, VarDecCmp, const DECIMAL *, const DECIMAL *);
+	FN(HRESULT, VariantChangeType, VARIANTARG *, const VARIANTARG *, USHORT,
+	   VARTYPE);
+	FN(HRESULT, VariantClear, VARIANTARG *);
+	FN(void, SysFreeString, BSTR);
+	DECIMAL d, x;
+	LONG l;
+	BYTE by;
+	int64_t i8;
+	uint64_t u8;
+	double r8;
+	CY cy;
+	VARIANT_BOOL vb;
+	BSTR b = NULL;
+
+	/* From strings: exact, then rounded to even past 28 places. */
+	CHECK(VarDecFromStr(w("1.5"), 0, 0, &d) == S_OK && dec_is(d, 15, 0, 1, 0));
+	CHECK(VarDecFromStr(w(" -0.000123 "), 0, 0, &d) == S_OK &&
+	      dec_is(d, 123, 0, 6, 1));
+	CHECK(VarDecFromStr(w("1,234"), 0, 0, &d) == S_OK &&
+	      dec_is(d, 1234, 0, 0, 0));
+	CHECK(VarDecFromStr(w("1.5E3"), 0, 0, &d) == S_OK &&
+	      dec_is(d, 1500, 0, 0, 0));
+	CHECK(VarDecFromStr(w("79228162514264337593543950335"), 0, 0, &d) ==
+	      S_OK && dec_is(d, UINT64_MAX, 0xffffffff, 0, 0));
+	CHECK_EQ(VarDecFromStr(w("79228162514264337593543950336"), 0, 0, &d),
+		 DISP_E_OVERFLOW);
+	CHECK_EQ(VarDecFromStr(w("1E29"), 0, 0, &d), DISP_E_OVERFLOW);
+	CHECK_EQ(VarDecFromStr(w("abc"), 0, 0, &d), DISP_E_TYPEMISMATCH);
+	CHECK(VarDecFromStr(w("1.23456789012345678901234567890123"), 0, 0,
+			    &d) == S_OK &&
+	      VarBstrFromDec(&d, 0, 0, &b) == S_OK &&
+	      !strcmp(text(b), "1.2345678901234567890123456789"));
+	SysFreeString(b);
+	CHECK(VarDecFromStr(w("0.00000000000000000000000000005"), 0, 0, &d) ==
+	      S_OK && d.Lo64 == 0 && !d.Hi32);
+	CHECK(VarDecFromStr(w("0.000000000000000000000000000051"), 0, 0, &d) ==
+	      S_OK && dec_is(d, 1, 0, 28, 0));
+	CHECK(VarDecFromStr(w("1E-40"), 0, 0, &d) == S_OK && d.Lo64 == 0);
+	/* All ones and a 9 after: one place fewer. */
+	CHECK(VarDecFromStr(w("7.92281625142643375935439503359"), 0, 0, &d) ==
+	      S_OK && VarBstrFromDec(&d, 0, 0, &b) == S_OK &&
+	      !strcmp(text(b), "7.922816251426433759354395034"));
+	SysFreeString(b);
+
+	/* From numbers. */
+	CHECK(VarDecFromR8(0.1, &d) == S_OK && dec_is(d, 1, 0, 1, 0));
+	CHECK(VarDecFromR8(-2.5, &d) == S_OK && dec_is(d, 25, 0, 1, 1));
+	CHECK(VarDecFromR8(1.0 / 3, &d) == S_OK &&
+	      dec_is(d, 333333333333333ull, 0, 15, 0));
+	CHECK(VarDecFromR4(0.1f, &d) == S_OK && dec_is(d, 1, 0, 1, 0));
+	CHECK(VarDecFromR8(1e20, &d) == S_OK &&
+	      dec_is(d, 7766279631452241920ull, 5, 0, 0));
+	CHECK_EQ(VarDecFromR8(1e30, &d), DISP_E_OVERFLOW);
+	CHECK(VarDecFromCy(15000, &d) == S_OK && dec_is(d, 15000, 0, 4, 0));
+	CHECK(VarDecFromI4(-7, &d) == S_OK && dec_is(d, 7, 0, 0, 1));
+	CHECK(VarDecFromBool(VARIANT_TRUE, &d) == S_OK && dec_is(d, 1, 0, 0, 1));
+	CHECK(VarDecFromUI8(UINT64_MAX, &d) == S_OK &&
+	      dec_is(d, UINT64_MAX, 0, 0, 0));
+	CHECK(VarDecFromI8(INT64_MIN, &d) == S_OK &&
+	      dec_is(d, 1ull << 63, 0, 0, 1));
+
+	/* To numbers: rounded to even. */
+	x = dec(25, 0, 1, 0);
+	CHECK(VarI4FromDec(&x, &l) == S_OK && l == 2);
+	x = dec(35, 0, 1, 0);
+	CHECK(VarI4FromDec(&x, &l) == S_OK && l == 4);
+	x = dec(25, 0, 1, 1);
+	CHECK(VarI4FromDec(&x, &l) == S_OK && l == -2);
+	x = dec(2501, 0, 3, 1);
+	CHECK(VarI4FromDec(&x, &l) == S_OK && l == -3);
+	x = dec(256, 0, 0, 0);
+	CHECK_EQ(VarUI1FromDec(&x, &by), DISP_E_OVERFLOW);
+	x = dec(2554, 0, 1, 0);
+	CHECK(VarUI1FromDec(&x, &by) == S_OK && by == 255);
+	x = dec(1ull << 63, 0, 0, 1);
+	CHECK(VarI8FromDec(&x, &i8) == S_OK && i8 == INT64_MIN);
+	x = dec(1ull << 63, 0, 0, 0);
+	CHECK_EQ(VarI8FromDec(&x, &i8), DISP_E_OVERFLOW);
+	CHECK(VarUI8FromDec(&x, &u8) == S_OK && u8 == 1ull << 63);
+	x = dec(0, 1, 0, 0);
+	CHECK_EQ(VarUI8FromDec(&x, &u8), DISP_E_OVERFLOW);
+	x = dec(1, 0, 1, 0);
+	/* (Cast: on x87 a bare 0.1 is a long double.) */
+	CHECK(VarR8FromDec(&x, &r8) == S_OK && r8 == (double)0.1);
+	x = dec(123456, 0, 5, 0);
+	CHECK(VarCyFromDec(&x, &cy) == S_OK && cy.int64 == 12346);
+	x = dec(15, 0, 1, 1);
+	CHECK(VarCyFromDec(&x, &cy) == S_OK && cy.int64 == -15000);
+	x = dec(UINT64_MAX, 0xffffffff, 0, 0);
+	CHECK_EQ(VarCyFromDec(&x, &cy), DISP_E_OVERFLOW);
+	x = dec(1, 0, 28, 0);
+	CHECK(VarBoolFromDec(&x, &vb) == S_OK && vb == VARIANT_TRUE);
+	x = dec(0, 0, 3, 1);
+	CHECK(VarBoolFromDec(&x, &vb) == S_OK && vb == VARIANT_FALSE);
+	x = dec(5, 0, 29, 0);	/* scale past 28 */
+	CHECK_EQ(VarI4FromDec(&x, &l), E_INVALIDARG);
+
+	/* To text: trailing fraction zeros left out. */
+	x = dec(150, 0, 2, 0);
+	CHECK(VarBstrFromDec(&x, 0, 0, &b) == S_OK && !strcmp(text(b), "1.5"));
+	SysFreeString(b);
+	x = dec(5, 0, 2, 1);
+	CHECK(VarBstrFromDec(&x, 0, 0, &b) == S_OK && !strcmp(text(b), "-0.05"));
+	SysFreeString(b);
+	x = dec(100, 0, 0, 0);
+	CHECK(VarBstrFromDec(&x, 0, 0, &b) == S_OK && !strcmp(text(b), "100"));
+	SysFreeString(b);
+	x = dec(0, 0, 2, 1);
+	CHECK(VarBstrFromDec(&x, 0, 0, &b) == S_OK && !strcmp(text(b), "0"));
+	SysFreeString(b);
+	x = dec(UINT64_MAX, 0xffffffff, 28, 1);
+	CHECK(VarBstrFromDec(&x, 0, 0, &b) == S_OK &&
+	      !strcmp(text(b), "-7.9228162514264337593543950335"));
+	SysFreeString(b);
+
+	/* Through VariantChangeType: the DECIMAL covers the VARIANT. */
+	VARIANT v, o;
+	memset(&o, 0, sizeof(o));
+	v.vt = VT_I4;
+	v.lVal = -12;
+	CHECK_EQ(VariantChangeType(&o, &v, 0, VT_DECIMAL), S_OK);
+	CHECK_EQ(o.vt, VT_DECIMAL);
+	CHECK(o.decVal.Lo64 == 12 && o.decVal.sign == 0x80 && !o.decVal.scale);
+	CHECK_EQ(VariantChangeType(&o, &o, 0, VT_BSTR), S_OK);
+	CHECK(o.vt == VT_BSTR && !strcmp(text(o.bstrVal), "-12"));
+	VariantClear(&o);
+	v.decVal = dec(314, 0, 2, 0);
+	v.vt = VT_DECIMAL;
+	CHECK(VariantChangeType(&o, &v, 0, VT_R8) == S_OK && o.dblVal == (double)3.14);
+	CHECK(VariantChangeType(&o, &v, 0, VT_I2) == S_OK && o.iVal == 3);
+	v.decVal = dec(1, 0, 30, 0);
+	v.vt = VT_DECIMAL;
+	CHECK_EQ(VariantChangeType(&o, &v, 0, VT_I4), E_INVALIDARG);
+
+	/* Rounding and comparing. */
+	x = dec(125, 0, 2, 0);
+	CHECK(VarDecRound(&x, 1, &d) == S_OK && dec_is(d, 12, 0, 1, 0));
+	x = dec(135, 0, 2, 0);
+	CHECK(VarDecRound(&x, 1, &d) == S_OK && dec_is(d, 14, 0, 1, 0));
+	CHECK(VarDecRound(&x, 5, &d) == S_OK && dec_is(d, 135, 0, 2, 0));
+	CHECK_EQ(VarDecRound(&x, -1, &d), E_INVALIDARG);
+	x = dec(15, 0, 1, 1);
+	CHECK(VarDecFix(&x, &d) == S_OK && dec_is(d, 1, 0, 0, 1));
+	CHECK(VarDecInt(&x, &d) == S_OK && dec_is(d, 2, 0, 0, 1));
+	x = dec(10, 0, 1, 1);
+	CHECK(VarDecInt(&x, &d) == S_OK && dec_is(d, 1, 0, 0, 1));
+	CHECK(VarDecNeg(&x, &d) == S_OK && dec_is(d, 10, 0, 1, 0));
+	CHECK(VarDecAbs(&x, &d) == S_OK && dec_is(d, 10, 0, 1, 0));
+	x = dec(15, 0, 1, 0);
+	d = dec(150, 0, 2, 0);
+	CHECK_EQ(VarDecCmp(&x, &d), VARCMP_EQ);
+	d = dec(1, 0, 0, 1);
+	CHECK_EQ(VarDecCmp(&d, &x), VARCMP_LT);
+	CHECK_EQ(VarDecCmp(&x, &d), VARCMP_GT);
+	x = dec(0, 0, 0, 1);
+	d = dec(0, 0, 5, 0);
+	CHECK_EQ(VarDecCmp(&x, &d), VARCMP_EQ);
+	/* Scales 28 apart: compared in full. */
+	x = dec(UINT64_MAX, 0xffffffff, 0, 0);
+	d = dec(UINT64_MAX, 0xffffffff, 28, 0);
+	CHECK_EQ(VarDecCmp(&x, &d), VARCMP_GT);
+	x = dec(2, 0, 0, 1);
+	d = dec(1, 0, 0, 1);
+	CHECK_EQ(VarDecCmp(&x, &d), VARCMP_LT);
+}
+
 static void test_dates(void)
 {
 	FN(INT, SystemTimeToVariantTime, SYSTEMTIME *, double *);
@@ -998,6 +1210,7 @@ int main(void)
 	test_variants();
 	test_conversions();
 	test_var_from();
+	test_decimal();
 	test_dates();
 	test_safearrays();
 	test_errinfo();
