@@ -49,8 +49,9 @@
  * dynamic_cast by either finds them; their own RTTI names the former.
  * msvcp's logic_error and runtime_error families, bad_alloc and
  * bad_function_call are here too (the CRT answers to msvcp*.dll), laid
- * out as from VC8 on (exception's members only; VC6/7's kept a string,
- * whose constructors from one aren't exported here), with the helpers
+ * out as from VC8 on (exception's members only), and msvcp60's
+ * constructors from a std::string, whose objects keep VC6's string after
+ * those members (VC7's constructors from one were inline), with the helpers
  * its containers throw them through (std::_Xlength_error, _Xlen, ...).
  *
  * Also the helpers behind C++/CLI and setjmp: __CxxExceptionFilter and
@@ -1110,16 +1111,76 @@ static THISCALL struct exception *crt_exc_ctor_noalloc(struct exception *e,
 	return e;
 }
 
+/*
+ * msvcp60's logic_error family (VC5/VC6) kept a std::string after
+ * exception's members, and exported constructors from one. That string
+ * is Dinkumware's VC6 layout: an allocator (padded to 4), the pointer to
+ * its characters (NULL when empty, a reference count in the byte before
+ * them), the length and the capacity. Objects built from one carry it,
+ * marked by VC6_STR in do_free, so copies, assignment and the destructor
+ * keep it; what() still answers from the name, a copy of it.
+ */
+#define VC6_STR 0x100
+
+struct vc6_string {
+	DWORD allocator;
+	char *ptr;
+	DWORD len;
+	DWORD res;
+};
+
+static struct vc6_string *vc6_tail(struct exception *e)
+{
+	return (struct vc6_string *)(e + 1);
+}
+
+static void vc6_set(struct exception *e, const char *s, size_t n)
+{
+	struct vc6_string *t = vc6_tail(e);
+	char *buf = n ? malloc(n + 2) : NULL;
+
+	memset(t, 0, sizeof(*t));
+	if (!buf)
+		return;
+	buf[0] = 0;	/* the reference count */
+	memcpy(buf + 1, s, n);
+	buf[n + 1] = 0;
+	t->ptr = buf + 1;
+	t->len = t->res = n;
+}
+
+static void vc6_free(struct exception *e)
+{
+	struct vc6_string *t = vc6_tail(e);
+
+	if (t->ptr)
+		free(t->ptr - 1);
+	memset(t, 0, sizeof(*t));
+}
+
+/* Copies rhs's string, if it has one, onto e (whose own is gone). */
+static void vc6_copy(struct exception *e, const struct exception *rhs)
+{
+	if (!(rhs->do_free & VC6_STR))
+		return;
+	const struct vc6_string *t = vc6_tail((struct exception *)rhs);
+	vc6_set(e, t->ptr ? t->ptr : "", t->ptr ? t->len : 0);
+	e->do_free |= VC6_STR;
+}
+
 static THISCALL struct exception *crt_exc_copy(struct exception *e,
 					       const struct exception *rhs)
 {
-	exception_init(e, &exception_vtable, rhs->name, rhs->do_free);
+	exception_init(e, &exception_vtable, rhs->name, rhs->do_free & 1);
+	vc6_copy(e, rhs);
 	return e;
 }
 
 static THISCALL void crt_exc_dtor(struct exception *e)
 {
-	if (e->do_free)
+	if (e->do_free & VC6_STR)
+		vc6_free(e);
+	if (e->do_free & 1)
 		free(e->name);
 	e->name = NULL;
 	e->do_free = 0;
@@ -1132,7 +1193,9 @@ static THISCALL struct exception *crt_exc_assign(struct exception *e,
 	if (e != rhs) {
 		const void *vtable = e->vtable;
 		crt_exc_dtor(e);
-		exception_init(e, &exception_vtable, rhs->name, rhs->do_free);
+		exception_init(e, &exception_vtable, rhs->name,
+			       rhs->do_free & 1);
+		vc6_copy(e, rhs);
 		e->vtable = vtable;
 	}
 	return e;
@@ -1176,7 +1239,27 @@ static THISCALL void *crt_exc_vector_dtor(struct exception *e, unsigned flags)
 	static THISCALL struct exception *crt_##cls##_copy(		\
 		struct exception *e, const struct exception *rhs)	\
 	{								\
-		exception_init(e, &cls##_vtable, rhs->name, rhs->do_free); \
+		exception_init(e, &cls##_vtable, rhs->name,		\
+			       rhs->do_free & 1);			\
+		vc6_copy(e, rhs);					\
+		return e;						\
+	}
+
+/* msvcp60's constructor from a const std::string &. */
+#define SUBCLASS_VC6(cls)						\
+	static THISCALL struct exception *crt_##cls##_ctor_str(	\
+		struct exception *e, const struct vc6_string *str)	\
+	{								\
+		const char *s = str && str->ptr ? str->ptr : "";	\
+		size_t n = str && str->ptr ? str->len : 0;		\
+		char *name = malloc(n + 1);				\
+		if (name) {						\
+			memcpy(name, s, n);				\
+			name[n] = 0;					\
+		}							\
+		exception_init(e, &cls##_vtable, name, 0);		\
+		e->do_free = (name != NULL) | VC6_STR;			\
+		vc6_set(e, s, n);					\
 		return e;						\
 	}
 
@@ -1194,6 +1277,16 @@ SUBCLASS(underflow_error)
 SUBCLASS(range_error)
 SUBCLASS(bad_alloc)
 SUBCLASS(bad_function_call)
+
+SUBCLASS_VC6(logic_error)
+SUBCLASS_VC6(domain_error)
+SUBCLASS_VC6(invalid_argument)
+SUBCLASS_VC6(length_error)
+SUBCLASS_VC6(out_of_range)
+SUBCLASS_VC6(runtime_error)
+SUBCLASS_VC6(overflow_error)
+SUBCLASS_VC6(underflow_error)
+SUBCLASS_VC6(range_error)
 
 static THISCALL struct exception *crt_bad_alloc_default(struct exception *e)
 {
@@ -1857,15 +1950,19 @@ const struct builtin_export crt_cxx_exports[] = {
 	M("??4" #cls "@std@@QAEAAV01@ABV01@@Z", crt_exc_assign),	\
 	M("??_E" #cls "@std@@UAEPAXI@Z", crt_exc_vector_dtor),		\
 	M("??_G" #cls "@std@@UAEPAXI@Z", crt_exc_scalar_dtor)
-	STD_EXPORTS(logic_error),
-	STD_EXPORTS(domain_error),
-	STD_EXPORTS(invalid_argument),
-	STD_EXPORTS(length_error),
-	STD_EXPORTS(out_of_range),
-	STD_EXPORTS(runtime_error),
-	STD_EXPORTS(overflow_error),
-	STD_EXPORTS(underflow_error),
-	STD_EXPORTS(range_error),
+	/* msvcp60's, from a std::string (VC6's layout, after the object). */
+#define STR_EXPORT(cls)							\
+	M("??0" #cls "@std@@QAE@ABV?$basic_string@DU?$char_traits@D@std@@" \
+	  "V?$allocator@D@2@@1@@Z", crt_##cls##_ctor_str)
+	STD_EXPORTS(logic_error), STR_EXPORT(logic_error),
+	STD_EXPORTS(domain_error), STR_EXPORT(domain_error),
+	STD_EXPORTS(invalid_argument), STR_EXPORT(invalid_argument),
+	STD_EXPORTS(length_error), STR_EXPORT(length_error),
+	STD_EXPORTS(out_of_range), STR_EXPORT(out_of_range),
+	STD_EXPORTS(runtime_error), STR_EXPORT(runtime_error),
+	STD_EXPORTS(overflow_error), STR_EXPORT(overflow_error),
+	STD_EXPORTS(underflow_error), STR_EXPORT(underflow_error),
+	STD_EXPORTS(range_error), STR_EXPORT(range_error),
 	STD_EXPORTS(bad_alloc),
 	STD_EXPORTS(bad_function_call),
 	M("?what@logic_error@std@@UBEPBDXZ", crt_exc_what),

@@ -509,8 +509,56 @@ static void test_subclasses(void)
 	CHECK(!rtcast(&le, 0, le_ti, &runtime_d, 0));
 	CHECK(alloc_default(&ba) == &ba);
 	CHECK_STR(what(&ba), "bad allocation");
-	vector_dtor(&le, 0);
 	vector_dtor(&ba, 0);
+
+	/* msvcp60's from a std::string: VC6's string kept after the object. */
+	{
+		struct vc6_string { DWORD al; char *ptr; DWORD len, res; };
+		struct vc6_error { struct exception e; struct vc6_string str; };
+		typedef struct exception *(THISCALL *sctor_fn)(struct exception *,
+						const struct vc6_string *);
+		typedef struct exception *(THISCALL *assign_fn)(struct exception *,
+						const struct exception *);
+		sctor_fn oor_str = get("??0out_of_range@std@@QAE@ABV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@1@@Z");
+		sctor_fn rt_str = get("??0runtime_error@std@@QAE@ABV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@1@@Z");
+		copy_fn oor_copy = get("??0out_of_range@std@@QAE@ABV01@@Z");
+		assign_fn rt_assign = get("??4runtime_error@std@@QAEAAV01@ABV01@@Z");
+		char text[] = "\0index 7";	/* a reference count, then the text */
+		struct vc6_string arg = { 0, text + 1, 7, 7 }, empty = { 0 };
+		struct vc6_error a, b, c;
+
+		memset(&a, 0xcc, sizeof(a));
+		CHECK(oor_str(&a.e, &arg) == &a.e &&
+		      a.e.vtable == get("??_7out_of_range@std@@6B@"));
+		CHECK_STR(logic_what(&a.e), "index 7");
+		CHECK(a.str.ptr && a.str.ptr != arg.ptr && a.str.len == 7 &&
+		      a.str.res == 7 && !a.str.ptr[-1] && !a.str.ptr[7] &&
+		      !memcmp(a.str.ptr, "index 7", 7));
+		/* A copy has its own string. */
+		CHECK(oor_copy(&b.e, &a.e) == &b.e);
+		CHECK_STR(what(&b.e), "index 7");
+		CHECK(b.str.ptr && b.str.ptr != a.str.ptr && b.str.len == 7 &&
+		      !memcmp(b.str.ptr, "index 7", 8));
+		/* Empty: no characters at all, as VC6's empty string. */
+		CHECK(rt_str(&c.e, &empty) == &c.e);
+		CHECK_STR(what(&c.e), "");
+		CHECK(!c.str.ptr && !c.str.len && !c.str.res);
+		/* Assignment replaces the string, the class stays. */
+		const void *rt_vt = c.e.vtable;
+		CHECK(rt_assign(&c.e, &a.e) == &c.e && c.e.vtable == rt_vt);
+		CHECK_STR(what(&c.e), "index 7");
+		CHECK(c.str.ptr && c.str.ptr != a.str.ptr && c.str.len == 7);
+		vector_dtor(&a.e, 0);
+		CHECK(!a.str.ptr && !a.e.name && !a.e.do_free);
+		vector_dtor(&b.e, 0);
+		vector_dtor(&c.e, 0);
+		/* A VC8 object (no string) copies as before. */
+		struct exception plain;
+		CHECK(oor_copy(&plain, &le) == &plain && plain.do_free == 1);
+		vector_dtor(&plain, 0);
+	}
+
+	vector_dtor(&le, 0);
 
 	/* exception(const char *const &, int): the name not copied. */
 	CHECK(exc_noalloc(&e, &msg, 1) == &e && e.name == msg && !e.do_free);
