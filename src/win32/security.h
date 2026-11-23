@@ -22,5 +22,6 @@ int sec_valid_descriptor(const void *sd);
 
 /* The exports, merged into advapi32's. */
 extern const struct builtin_export adv_security_exports[];
+extern const struct builtin_export adv_service_exports[];
 
 #endif /* VFW_WIN32_SECURITY_H */

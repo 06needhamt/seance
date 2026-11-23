@@ -77,6 +77,7 @@
 #define ERROR_UNKNOWN_REVISION         1305
 #define ERROR_NO_IMPERSONATION_TOKEN   1309
 #define ERROR_NO_SUCH_PRIVILEGE        1313
+#define ERROR_PRIVILEGE_NOT_HELD       1314
 #define ERROR_NONE_MAPPED              1332
 #define ERROR_INVALID_ACL              1336
 #define ERROR_INVALID_SID              1337

@@ -22,9 +22,12 @@
  * - Files and registry keys (GetNamedSecurityInfo, GetFileSecurity, ...)
  *   report one descriptor (sec_default_descriptor), and setting one
  *   succeeds without changing anything.
+ * - SDDL for whole descriptors, both ways, and AccessCheck against the
+ *   token's user and groups.
  * - CryptAcquireContext / CryptGenRandom / RtlGenRandom (SystemFunction036),
  *   from the kernel's random numbers; no keys or hashes.
  */
+#include <ctype.h>
 #include <errno.h>
 #include <pthread.h>
 #include <stddef.h>
@@ -2672,6 +2675,857 @@ WINFN(BOOL) adv_CryptSetProvParam(HCRYPTPROV h, DWORD param, const BYTE *data,
 
 #define E(name) { #name, 0, (void *)adv_##name }
 
+/*
+ * SDDL: whole security descriptors as text, "O:<sid>G:<sid>D:<flags>
+ * (<ace>)...S:<flags>(<ace>)...", each ACE "(type;flags;rights;object
+ * guid;inherited object guid;sid)". SIDs are S-1-... or the two-letter
+ * aliases; rights are a number or the two-letter codes run together.
+ */
+
+static const struct {
+	char code[3];
+	BYTE type;
+} sddl_ace_types[] = {
+	{ "A", ACCESS_ALLOWED_ACE_TYPE }, { "D", ACCESS_DENIED_ACE_TYPE },
+	{ "OA", ACCESS_ALLOWED_OBJECT_ACE_TYPE },
+	{ "OD", ACCESS_DENIED_OBJECT_ACE_TYPE },
+	{ "AU", SYSTEM_AUDIT_ACE_TYPE }, { "AL", SYSTEM_ALARM_ACE_TYPE },
+	{ "OU", SYSTEM_AUDIT_OBJECT_ACE_TYPE },
+	{ "OL", SYSTEM_ALARM_OBJECT_ACE_TYPE },
+	{ "ML", SYSTEM_MANDATORY_LABEL_ACE_TYPE },
+};
+
+static const struct {
+	char code[3];
+	BYTE flag;
+} sddl_ace_flags[] = {
+	{ "OI", OBJECT_INHERIT_ACE }, { "CI", CONTAINER_INHERIT_ACE },
+	{ "NP", NO_PROPAGATE_INHERIT_ACE }, { "IO", INHERIT_ONLY_ACE },
+	{ "ID", INHERITED_ACE }, { "SA", SUCCESSFUL_ACCESS_ACE_FLAG },
+	{ "FA", FAILED_ACCESS_ACE_FLAG },
+};
+
+/* Rights: the compound ones first, then in the order Windows writes them. */
+static const struct {
+	char code[3];
+	DWORD mask;
+} sddl_rights[] = {
+	{ "FA", 0x1f01ff }, { "FR", 0x120089 }, { "FW", 0x120116 },
+	{ "FX", 0x1200a0 }, { "KA", 0xf003f }, { "KR", 0x20019 },
+	{ "KW", 0x20006 }, { "KX", 0x20019 },
+	{ "GA", GENERIC_ALL }, { "GR", GENERIC_READ }, { "GW", GENERIC_WRITE },
+	{ "GX", GENERIC_EXECUTE }, { "CC", 0x1 }, { "DC", 0x2 },
+	{ "LC", 0x4 }, { "SW", 0x8 }, { "RP", 0x10 }, { "WP", 0x20 },
+	{ "DT", 0x40 }, { "LO", 0x80 }, { "CR", 0x100 }, { "SD", DELETE },
+	{ "RC", READ_CONTROL }, { "WD", WRITE_DAC }, { "WO", WRITE_OWNER },
+};
+#define SDDL_COMPOUND 8
+
+/* A mandatory label's: no write, read or execute up. */
+static const struct {
+	char code[3];
+	DWORD mask;
+} sddl_label_rights[] = {
+	{ "NW", SYSTEM_MANDATORY_LABEL_NO_WRITE_UP },
+	{ "NR", SYSTEM_MANDATORY_LABEL_NO_READ_UP },
+	{ "NX", SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP },
+};
+
+#define NELEMS(a) (sizeof(a) / sizeof((a)[0]))
+
+static int is_object_ace(BYTE type)
+{
+	return type == ACCESS_ALLOWED_OBJECT_ACE_TYPE ||
+	       type == ACCESS_DENIED_OBJECT_ACE_TYPE ||
+	       type == SYSTEM_AUDIT_OBJECT_ACE_TYPE ||
+	       type == SYSTEM_ALARM_OBJECT_ACE_TYPE;
+}
+
+/* A growing buffer for building a descriptor or a string. */
+struct sbuf {
+	BYTE *p;
+	size_t len, cap;
+	int failed;
+};
+
+static void *sb_room(struct sbuf *b, size_t n)
+{
+	if (b->failed)
+		return NULL;
+	if (b->len + n > b->cap) {
+		size_t cap = b->cap ? b->cap * 2 : 256;
+		while (cap < b->len + n)
+			cap *= 2;
+		BYTE *p = realloc(b->p, cap);
+		if (!p) {
+			b->failed = 1;
+			return NULL;
+		}
+		b->p = p;
+		b->cap = cap;
+	}
+	void *r = b->p + b->len;
+	memset(r, 0, n);
+	b->len += n;
+	return r;
+}
+
+static void sb_puts(struct sbuf *b, const char *s)
+{
+	size_t n = strlen(s);
+	char *r = sb_room(b, n);
+	if (r)
+		memcpy(r, s, n);
+}
+
+/* The SID at *p: an alias (two letters) or S-1-...; 0 or -1. */
+static int sddl_sid(const char **p, struct sid *out)
+{
+	const char *s = *p;
+	char tmp[200];
+	size_t n = 0;
+
+	if ((s[0] == 'S' || s[0] == 's') && s[1] == '-') {
+		/* Digits and dashes; hex digits only in a 0x part. */
+		int hex = 0;
+		n = 2;
+		for (;; n++) {
+			char c = s[n];
+			if (c == '-') {
+				hex = 0;
+			} else if ((c == 'x' || c == 'X') && s[n - 1] == '0' &&
+				   s[n - 2] == '-') {
+				hex = 1;
+			} else if (!(c >= '0' && c <= '9') &&
+				   !(hex && isxdigit((unsigned char)c))) {
+				break;
+			}
+		}
+	} else {
+		n = 2;
+	}
+	if (n >= sizeof(tmp) || strnlen(s, n) < n)
+		return -1;
+	memcpy(tmp, s, n);
+	tmp[n] = 0;
+	if (string_to_sid(tmp, out))
+		return -1;
+	*p = s + n;
+	return 0;
+}
+
+static int sddl_guid(const char *s, size_t n, GUID *g)
+{
+	unsigned d1, d2, d3, b[8];
+	char tmp[40];
+
+	if (n != 36)
+		return -1;
+	memcpy(tmp, s, n);
+	tmp[n] = 0;
+	if (sscanf(tmp, "%8x-%4x-%4x-%2x%2x-%2x%2x%2x%2x%2x%2x", &d1, &d2, &d3,
+		   &b[0], &b[1], &b[2], &b[3], &b[4], &b[5], &b[6], &b[7]) != 11)
+		return -1;
+	g->Data1 = d1;
+	g->Data2 = (WORD)d2;
+	g->Data3 = (WORD)d3;
+	for (int i = 0; i < 8; i++)
+		g->Data4[i] = (BYTE)b[i];
+	return 0;
+}
+
+/* The rights field (s, n chars) of an ACE of type; 0 or -1. */
+static int sddl_mask(const char *s, size_t n, BYTE type, DWORD *mask)
+{
+	*mask = 0;
+	if (n && s[0] >= '0' && s[0] <= '9') {
+		char tmp[16], *end;
+		if (n >= sizeof(tmp))
+			return -1;
+		memcpy(tmp, s, n);
+		tmp[n] = 0;
+		errno = 0;
+		unsigned long long v = strtoull(tmp, &end, 0);
+		if (*end || errno || v > 0xffffffffULL)
+			return -1;
+		*mask = (DWORD)v;
+		return 0;
+	}
+	for (size_t i = 0; i < n; i += 2) {
+		int found = 0;
+		if (i + 1 >= n)
+			return -1;
+		if (type == SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+			for (size_t k = 0; k < NELEMS(sddl_label_rights); k++)
+				if (!strncasecmp(s + i, sddl_label_rights[k].code, 2)) {
+					*mask |= sddl_label_rights[k].mask;
+					found = 1;
+					break;
+				}
+		for (size_t k = 0; !found && k < NELEMS(sddl_rights); k++)
+			if (!strncasecmp(s + i, sddl_rights[k].code, 2)) {
+				*mask |= sddl_rights[k].mask;
+				found = 1;
+			}
+		if (!found)
+			return -1;
+	}
+	return 0;
+}
+
+/* One "(...)" at *p, appended to the ACL being built in b; 0 or -1. */
+static int sddl_ace(const char **p, struct sbuf *b, int *object)
+{
+	const char *f[6];
+	size_t len[6];
+	const char *s = *p + 1;
+
+	for (int i = 0; i < 6; i++) {
+		size_t n = strcspn(s, i < 5 ? ";)" : ")");
+		if (!s[n] || (i < 5 && s[n] != ';'))
+			return -1;
+		f[i] = s;
+		len[i] = n;
+		s += n + 1;
+	}
+	if (s[-1] != ')')
+		return -1;
+
+	BYTE type = 0xff;
+	for (size_t k = 0; k < NELEMS(sddl_ace_types); k++)
+		if (strlen(sddl_ace_types[k].code) == len[0] &&
+		    !strncasecmp(f[0], sddl_ace_types[k].code, len[0]))
+			type = sddl_ace_types[k].type;
+	if (type == 0xff)
+		return -1;
+	BYTE flags = 0;
+	for (size_t i = 0; i < len[1]; i += 2) {
+		int found = 0;
+		for (size_t k = 0; i + 1 < len[1] && k < NELEMS(sddl_ace_flags); k++)
+			if (!strncasecmp(f[1] + i, sddl_ace_flags[k].code, 2)) {
+				flags |= sddl_ace_flags[k].flag;
+				found = 1;
+			}
+		if (!found)
+			return -1;
+	}
+	DWORD mask;
+	if (sddl_mask(f[2], len[2], type, &mask))
+		return -1;
+	GUID obj, inh;
+	DWORD oflags = 0;
+	if (len[3] || len[4]) {
+		if (!is_object_ace(type))
+			return -1;
+		if (len[3]) {
+			if (sddl_guid(f[3], len[3], &obj))
+				return -1;
+			oflags |= ACE_OBJECT_TYPE_PRESENT;
+		}
+		if (len[4]) {
+			if (sddl_guid(f[4], len[4], &inh))
+				return -1;
+			oflags |= ACE_INHERITED_OBJECT_TYPE_PRESENT;
+		}
+	}
+	struct sid sid;
+	const char *sp = f[5];
+	char tmp[200];
+	if (len[5] >= sizeof(tmp))
+		return -1;
+	memcpy(tmp, sp, len[5]);
+	tmp[len[5]] = 0;
+	if (string_to_sid(tmp, &sid))
+		return -1;
+
+	size_t at = b->len;
+	ACE_HEADER *h = sb_room(b, sizeof(ACE_HEADER) + 4);
+	if (!h)
+		return -1;
+	h->AceType = type;
+	h->AceFlags = flags;
+	memcpy(b->p + at + sizeof(ACE_HEADER), &mask, 4);
+	if (is_object_ace(type)) {
+		void *o = sb_room(b, 4);
+		if (o)
+			memcpy(o, &oflags, 4);
+		if (oflags & ACE_OBJECT_TYPE_PRESENT) {
+			if ((o = sb_room(b, sizeof(GUID))))
+				memcpy(o, &obj, sizeof(GUID));
+		}
+		if (oflags & ACE_INHERITED_OBJECT_TYPE_PRESENT) {
+			if ((o = sb_room(b, sizeof(GUID))))
+				memcpy(o, &inh, sizeof(GUID));
+		}
+		*object = 1;
+	}
+	void *o = sb_room(b, sid_size(&sid));
+	if (!o)
+		return -1;
+	memcpy(o, &sid, sid_size(&sid));
+	((ACE_HEADER *)(b->p + at))->AceSize = (WORD)(b->len - at);
+	*p = s;
+	return 0;
+}
+
+/*
+ * An ACL ("P", "AI", "AR" flags, then ACEs) at *p into b, its offset in
+ * *at, or NO_ACCESS_CONTROL (*at stays 0); 0 or -1.
+ */
+static int sddl_acl(const char **p, struct sbuf *b, int sacl, WORD *control,
+		    DWORD *at)
+{
+	const char *s = *p;
+	WORD c = sacl ? SE_SACL_PRESENT : SE_DACL_PRESENT;
+
+	*at = 0;
+	for (;;) {
+		if (*s == 'P' || *s == 'p') {
+			c |= sacl ? SE_SACL_PROTECTED : SE_DACL_PROTECTED;
+			s++;
+		} else if (!strncasecmp(s, "AI", 2)) {
+			c |= sacl ? SE_SACL_AUTO_INHERITED : SE_DACL_AUTO_INHERITED;
+			s += 2;
+		} else if (!strncasecmp(s, "AR", 2)) {
+			c |= sacl ? SE_SACL_AUTO_INHERIT_REQ : SE_DACL_AUTO_INHERIT_REQ;
+			s += 2;
+		} else if (!strncasecmp(s, "NO_ACCESS_CONTROL", 17)) {
+			*control |= c;
+			*p = s + 17;
+			return 0;
+		} else {
+			break;
+		}
+	}
+	size_t start = b->len;
+	if (!sb_room(b, sizeof(ACL)))
+		return -1;
+	WORD count = 0;
+	int object = 0;
+	while (*s == '(') {
+		if (sddl_ace(&s, b, &object))
+			return -1;
+		count++;
+	}
+	if (b->failed || b->len - start > 0xffff)
+		return -1;
+	ACL *acl = (ACL *)(b->p + start);
+	acl->AclRevision = object ? ACL_REVISION_DS : ACL_REVISION;
+	acl->AclSize = (WORD)(b->len - start);
+	acl->AceCount = count;
+	*control |= c;
+	*at = (DWORD)start;
+	*p = s;
+	return 0;
+}
+
+/* A self-relative descriptor from SDDL text, malloc()ed; NULL if bad. */
+static BYTE *sddl_to_sd(const char *s, DWORD *size)
+{
+	struct sbuf b = { 0 };
+	SECURITY_DESCRIPTOR_RELATIVE r = { SECURITY_DESCRIPTOR_REVISION, 0,
+					   SE_SELF_RELATIVE, 0, 0, 0, 0 };
+	int seen = 0;
+
+	if (!sb_room(&b, sizeof(r)))
+		return NULL;
+	while (*s) {
+		while (*s == ' ')
+			s++;
+		if (!*s)
+			break;
+		char part = (char)toupper((unsigned char)s[0]);
+		int bit = part == 'O' ? 1 : part == 'G' ? 2 : part == 'D' ? 4 :
+			  part == 'S' ? 8 : 0;
+		if (!bit || s[1] != ':' || (seen & bit))
+			goto bad;
+		seen |= bit;
+		s += 2;
+		if (bit < 4) {
+			struct sid sid;
+			if (sddl_sid(&s, &sid))
+				goto bad;
+			size_t at = b.len;
+			void *o = sb_room(&b, sid_size(&sid));
+			if (!o)
+				goto bad;
+			memcpy(o, &sid, sid_size(&sid));
+			if (bit == 1)
+				r.Owner = (DWORD)at;
+			else
+				r.Group = (DWORD)at;
+		} else {
+			DWORD at;
+			if (sddl_acl(&s, &b, bit == 8, &r.Control, &at))
+				goto bad;
+			if (bit == 4)
+				r.Dacl = at;
+			else
+				r.Sacl = at;
+		}
+	}
+	if (b.failed)
+		goto bad;
+	memcpy(b.p, &r, sizeof(r));
+	*size = (DWORD)b.len;
+	return b.p;
+bad:
+	free(b.p);
+	return NULL;
+}
+
+static void sddl_put_sid(struct sbuf *b, const void *sid)
+{
+	for (size_t i = 0; i < NELEMS(sddl_aliases); i++) {
+		struct sid w;
+		if (!well_known_sid(sddl_aliases[i].type, NULL, &w) &&
+		    sid_eq(sid, &w)) {
+			sb_puts(b, sddl_aliases[i].alias);
+			return;
+		}
+	}
+	char *s = sid_to_string((PSID)sid);
+	if (s)
+		sb_puts(b, s);
+	else
+		b->failed = 1;
+	free(s);
+}
+
+static void sddl_put_mask(struct sbuf *b, DWORD mask, BYTE type)
+{
+	char tmp[16];
+
+	if (type == SYSTEM_MANDATORY_LABEL_ACE_TYPE) {
+		DWORD left = mask;
+		for (size_t k = 0; k < NELEMS(sddl_label_rights); k++)
+			left &= ~sddl_label_rights[k].mask;
+		if (!left) {
+			for (size_t k = 0; k < NELEMS(sddl_label_rights); k++)
+				if (mask & sddl_label_rights[k].mask)
+					sb_puts(b, sddl_label_rights[k].code);
+			return;
+		}
+	} else {
+		for (size_t k = 0; k < SDDL_COMPOUND; k++)
+			if (mask == sddl_rights[k].mask) {
+				sb_puts(b, sddl_rights[k].code);
+				return;
+			}
+		DWORD left = mask;
+		for (size_t k = SDDL_COMPOUND; k < NELEMS(sddl_rights); k++)
+			left &= ~sddl_rights[k].mask;
+		if (!left) {
+			for (size_t k = SDDL_COMPOUND; k < NELEMS(sddl_rights); k++)
+				if (mask & sddl_rights[k].mask)
+					sb_puts(b, sddl_rights[k].code);
+			return;
+		}
+	}
+	snprintf(tmp, sizeof(tmp), "0x%lx", (unsigned long)mask);
+	sb_puts(b, tmp);
+}
+
+static void sddl_put_guid(struct sbuf *b, const BYTE *p)
+{
+	GUID g;
+	char tmp[40];
+
+	memcpy(&g, p, sizeof(g));
+	snprintf(tmp, sizeof(tmp),
+		 "%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+		 (unsigned long)g.Data1, g.Data2, g.Data3, g.Data4[0],
+		 g.Data4[1], g.Data4[2], g.Data4[3], g.Data4[4], g.Data4[5],
+		 g.Data4[6], g.Data4[7]);
+	sb_puts(b, tmp);
+}
+
+/* An ACL's flags (from control) and ACEs; 0 or -1 if it can't be read. */
+static int sddl_put_acl(struct sbuf *b, const ACL *acl, WORD control, int sacl)
+{
+	if (control & (sacl ? SE_SACL_PROTECTED : SE_DACL_PROTECTED))
+		sb_puts(b, "P");
+	if (control & (sacl ? SE_SACL_AUTO_INHERIT_REQ : SE_DACL_AUTO_INHERIT_REQ))
+		sb_puts(b, "AR");
+	if (control & (sacl ? SE_SACL_AUTO_INHERITED : SE_DACL_AUTO_INHERITED))
+		sb_puts(b, "AI");
+	if (!acl) {
+		sb_puts(b, "NO_ACCESS_CONTROL");
+		return 0;
+	}
+	if (!acl_ok((PACL)acl))
+		return -1;
+	const BYTE *p = (const BYTE *)(acl + 1);
+	for (WORD i = 0; i < acl->AceCount; i++) {
+		const ACE_HEADER *h = (const ACE_HEADER *)p;
+		const char *code = NULL;
+		for (size_t k = 0; k < NELEMS(sddl_ace_types); k++)
+			if (sddl_ace_types[k].type == h->AceType)
+				code = sddl_ace_types[k].code;
+		if (!code)
+			return -1;
+		DWORD mask;
+		memcpy(&mask, p + sizeof(*h), 4);
+		const BYTE *q = p + sizeof(*h) + 4;
+		sb_puts(b, "(");
+		sb_puts(b, code);
+		sb_puts(b, ";");
+		for (size_t k = 0; k < NELEMS(sddl_ace_flags); k++)
+			if (h->AceFlags & sddl_ace_flags[k].flag)
+				sb_puts(b, sddl_ace_flags[k].code);
+		sb_puts(b, ";");
+		sddl_put_mask(b, mask, h->AceType);
+		sb_puts(b, ";");
+		if (is_object_ace(h->AceType)) {
+			DWORD of;
+			memcpy(&of, q, 4);
+			q += 4;
+			if (of & ACE_OBJECT_TYPE_PRESENT) {
+				sddl_put_guid(b, q);
+				q += sizeof(GUID);
+			}
+			sb_puts(b, ";");
+			if (of & ACE_INHERITED_OBJECT_TYPE_PRESENT) {
+				sddl_put_guid(b, q);
+				q += sizeof(GUID);
+			}
+			sb_puts(b, ";");
+		} else {
+			sb_puts(b, ";;");
+		}
+		if (q + 8 > p + h->AceSize || !sid_ok(q) ||
+		    q + sid_size(q) > p + h->AceSize)
+			return -1;
+		sddl_put_sid(b, q);
+		sb_puts(b, ")");
+		p += h->AceSize;
+	}
+	return 0;
+}
+
+/* SDDL text for the parts of sd that info asks for, malloc()ed. */
+static char *sd_to_sddl(const void *sd, SECURITY_INFORMATION info)
+{
+	struct sbuf b = { 0 };
+	PSID o, g;
+	PACL s, d;
+	WORD c = ((const SECURITY_DESCRIPTOR *)sd)->Control;
+
+	sd_parts(sd, &o, &g, &s, &d);
+	if ((info & OWNER_SECURITY_INFORMATION) && o) {
+		sb_puts(&b, "O:");
+		sddl_put_sid(&b, o);
+	}
+	if ((info & GROUP_SECURITY_INFORMATION) && g) {
+		sb_puts(&b, "G:");
+		sddl_put_sid(&b, g);
+	}
+	if ((info & DACL_SECURITY_INFORMATION) && (c & SE_DACL_PRESENT)) {
+		sb_puts(&b, "D:");
+		if (sddl_put_acl(&b, d, c, 0))
+			b.failed = 1;
+	}
+	if ((info & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)) &&
+	    (c & SE_SACL_PRESENT)) {
+		sb_puts(&b, "S:");
+		if (sddl_put_acl(&b, s, c, 1))
+			b.failed = 1;
+	}
+	sb_room(&b, 1);
+	if (b.failed) {
+		free(b.p);
+		return NULL;
+	}
+	return (char *)b.p;
+}
+
+static BOOL sddl_in(const char *s, DWORD rev, PSECURITY_DESCRIPTOR *out,
+		    ULONG * size)
+{
+	if (!s || !out) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	if (rev != SDDL_REVISION_1) {
+		win_set_error(ERROR_UNKNOWN_REVISION);
+		return FALSE;
+	}
+	DWORD n;
+	BYTE *sd = sddl_to_sd(s, &n);
+	if (!sd) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	void *r = global_alloc(0, n);
+	if (!r) {
+		free(sd);
+		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
+		return FALSE;
+	}
+	memcpy(r, sd, n);
+	free(sd);
+	*out = r;
+	if (size)
+		*size = n;
+	return TRUE;
+}
+
+WINFN(BOOL) adv_ConvertStringSecurityDescriptorToSecurityDescriptorA(
+	LPCSTR str, DWORD rev, PSECURITY_DESCRIPTOR *out, ULONG * size)
+{
+	char *s = str ? acp_to_utf8(str) : NULL;
+	BOOL r = sddl_in(s, rev, out, size);
+	free(s);
+	return r;
+}
+
+WINFN(BOOL) adv_ConvertStringSecurityDescriptorToSecurityDescriptorW(
+	LPCWSTR str, DWORD rev, PSECURITY_DESCRIPTOR *out, ULONG * size)
+{
+	char *s = str ? utf16_to_utf8_dup(str) : NULL;
+	BOOL r = sddl_in(s, rev, out, size);
+	free(s);
+	return r;
+}
+
+static BOOL sddl_out(PSECURITY_DESCRIPTOR sd, DWORD rev,
+		     SECURITY_INFORMATION info, void **out, ULONG * len,
+		     int wide)
+{
+	if (!out) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	if (rev != SDDL_REVISION_1) {
+		win_set_error(ERROR_UNKNOWN_REVISION);
+		return FALSE;
+	}
+	if (!sec_valid_descriptor(sd)) {
+		win_set_error(ERROR_INVALID_SECURITY_DESCR);
+		return FALSE;
+	}
+	char *s = sd_to_sddl(sd, info);
+	if (!s) {
+		win_set_error(ERROR_INVALID_ACL);
+		return FALSE;
+	}
+	size_t n = strlen(s) + 1;
+	void *r = global_alloc(0, n * (wide ? sizeof(WCHAR) : 1));
+	if (r) {
+		for (size_t i = 0; i < n; i++) {
+			if (wide)
+				((WCHAR *)r)[i] = (BYTE)s[i];
+			else
+				((char *)r)[i] = s[i];
+		}
+	}
+	free(s);
+	if (!r) {
+		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
+		return FALSE;
+	}
+	*out = r;
+	if (len)
+		*len = (ULONG)n;
+	return TRUE;
+}
+
+WINFN(BOOL) adv_ConvertSecurityDescriptorToStringSecurityDescriptorA(
+	PSECURITY_DESCRIPTOR sd, DWORD rev, SECURITY_INFORMATION info,
+	LPSTR *out, ULONG * len)
+{
+	return sddl_out(sd, rev, info, (void **)out, len, 0);
+}
+
+WINFN(BOOL) adv_ConvertSecurityDescriptorToStringSecurityDescriptorW(
+	PSECURITY_DESCRIPTOR sd, DWORD rev, SECURITY_INFORMATION info,
+	LPWSTR *out, ULONG * len)
+{
+	return sddl_out(sd, rev, info, (void **)out, len, 1);
+}
+
+/*
+ * Access checks: a descriptor's DACL against the token's user and groups,
+ * as the kernel's SeAccessCheck does it. ACEs are read in order; a denied
+ * one refuses the rights it names that aren't granted yet; an allowed one
+ * grants them. The owner may always read and change the DACL;
+ * ACCESS_SYSTEM_SECURITY needs SeSecurityPrivilege enabled and WRITE_OWNER
+ * is granted by SeTakeOwnershipPrivilege if enabled.
+ */
+
+WINFN(void) adv_MapGenericMask(PDWORD mask, PGENERIC_MAPPING map)
+{
+	if (!mask || !map)
+		return;
+	if (*mask & GENERIC_READ)
+		*mask |= map->GenericRead;
+	if (*mask & GENERIC_WRITE)
+		*mask |= map->GenericWrite;
+	if (*mask & GENERIC_EXECUTE)
+		*mask |= map->GenericExecute;
+	if (*mask & GENERIC_ALL)
+		*mask |= map->GenericAll;
+	*mask &= ~(GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL);
+}
+
+WINFN(BOOL) adv_AreAllAccessesGranted(DWORD granted, DWORD desired)
+{
+	return (granted & desired) == desired;
+}
+
+WINFN(BOOL) adv_AreAnyAccessesGranted(DWORD granted, DWORD desired)
+{
+	return (granted & desired) != 0;
+}
+
+/* Whether sid is the token's user or one of its enabled groups. */
+static int token_has_sid(const void *sid, int deny)
+{
+	struct sid u = user_sid();
+	struct group g[8];
+	size_t ng = token_groups(g);
+
+	if (sid_eq(sid, &u))
+		return 1;
+	for (size_t i = 0; i < ng; i++)
+		if (sid_eq(sid, &g[i].sid) &&
+		    ((g[i].attrs & SE_GROUP_ENABLED) ||
+		     (deny && (g[i].attrs & SE_GROUP_USE_FOR_DENY_ONLY))))
+			return 1;
+	return 0;
+}
+
+static int token_priv_on(struct token *t, int i)
+{
+	pthread_mutex_lock(&token_lock);
+	int on = t->held[i] && (t->attrs[i] & SE_PRIVILEGE_ENABLED);
+	pthread_mutex_unlock(&token_lock);
+	return on;
+}
+
+#define SE_SECURITY_PRIVILEGE        8
+#define SE_TAKE_OWNERSHIP_PRIVILEGE  9
+
+WINFN(BOOL) adv_AccessCheck(PSECURITY_DESCRIPTOR sd, HANDLE token,
+			    DWORD desired, PGENERIC_MAPPING map,
+			    PPRIVILEGE_SET privs, LPDWORD privs_len,
+			    LPDWORD granted, LPBOOL status)
+{
+	if (!sd || !map || !privs_len || !granted || !status) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	if (!sec_valid_descriptor(sd)) {
+		win_set_error(ERROR_INVALID_SECURITY_DESCR);
+		return FALSE;
+	}
+	PSID owner, group;
+	PACL sacl, dacl;
+	sd_parts(sd, &owner, &group, &sacl, &dacl);
+	if (!owner || !group) {
+		win_set_error(ERROR_INVALID_SECURITY_DESCR);
+		return FALSE;
+	}
+	struct token *t = token_ref(token);
+	if (!t)
+		return FALSE;
+	if (t->type != TokenImpersonation) {
+		kobj_unref(&t->obj);
+		win_set_error(ERROR_NO_IMPERSONATION_TOKEN);
+		return FALSE;
+	}
+	if (desired & (GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE |
+		       GENERIC_ALL)) {
+		kobj_unref(&t->obj);
+		win_set_error(ERROR_GENERIC_NOT_MAPPED);
+		return FALSE;
+	}
+	DWORD need = offsetof(PRIVILEGE_SET, Privilege) +
+		     ((desired & ACCESS_SYSTEM_SECURITY) ?
+		      sizeof(LUID_AND_ATTRIBUTES) : 0);
+	if (!privs || *privs_len < need) {
+		kobj_unref(&t->obj);
+		*privs_len = need;
+		win_set_error(ERROR_INSUFFICIENT_BUFFER);
+		return FALSE;
+	}
+	int max = (desired & MAXIMUM_ALLOWED) != 0;
+	DWORD want = desired & ~MAXIMUM_ALLOWED, have = 0, denied = 0;
+
+	privs->PrivilegeCount = 0;
+	privs->Control = 0;
+	if (want & ACCESS_SYSTEM_SECURITY) {
+		if (!token_priv_on(t, SE_SECURITY_PRIVILEGE)) {
+			kobj_unref(&t->obj);
+			*granted = 0;
+			*status = FALSE;
+			win_set_error(ERROR_PRIVILEGE_NOT_HELD);
+			return TRUE;
+		}
+		have |= ACCESS_SYSTEM_SECURITY;
+		privs->PrivilegeCount = 1;
+		privs->Privilege[0].Luid.LowPart = SE_SECURITY_PRIVILEGE;
+		privs->Privilege[0].Luid.HighPart = 0;
+		privs->Privilege[0].Attributes = SE_PRIVILEGE_USED_FOR_ACCESS;
+	}
+	if (token_priv_on(t, SE_TAKE_OWNERSHIP_PRIVILEGE))
+		have |= WRITE_OWNER;
+	kobj_unref(&t->obj);
+	if (token_has_sid(owner, 0))
+		have |= READ_CONTROL | WRITE_DAC;
+
+	if (!dacl) {
+		have |= map->GenericAll | STANDARD_RIGHTS_ALL;
+	} else {
+		if (!acl_ok(dacl)) {
+			win_set_error(ERROR_INVALID_ACL);
+			return FALSE;
+		}
+		const BYTE *p = (const BYTE *)(dacl + 1);
+		for (WORD i = 0; i < dacl->AceCount; i++, p += ((const ACE_HEADER *)p)->AceSize) {
+			const ACE_HEADER *h = (const ACE_HEADER *)p;
+			if (h->AceFlags & INHERIT_ONLY_ACE)
+				continue;
+			if (h->AceType != ACCESS_ALLOWED_ACE_TYPE &&
+			    h->AceType != ACCESS_DENIED_ACE_TYPE)
+				continue;
+			const ACCESS_ALLOWED_ACE *a = (const ACCESS_ALLOWED_ACE *)p;
+			DWORD m = a->Mask;
+			adv_MapGenericMask(&m, map);
+			int deny = h->AceType == ACCESS_DENIED_ACE_TYPE;
+			if (!token_has_sid(&a->SidStart, deny))
+				continue;
+			if (deny)
+				denied |= m & ~have;
+			else
+				have |= m & ~denied;
+			if (!max && (have & want) == want)
+				break;
+			if (!max && (denied & want))
+				break;
+		}
+	}
+	if (max) {
+		DWORD all = have & ~denied;
+		if ((all & want) != want || (!want && !all)) {
+			*granted = 0;
+			*status = FALSE;
+			win_set_error(ERROR_ACCESS_DENIED);
+		} else {
+			*granted = all | want;
+			*status = TRUE;
+		}
+	} else if ((have & want) == want && want) {
+		*granted = want;
+		*status = TRUE;
+	} else {
+		*granted = 0;
+		*status = FALSE;
+		win_set_error(ERROR_ACCESS_DENIED);
+	}
+	return TRUE;
+}
+
 const struct builtin_export adv_security_exports[] = {
 	E(AddAccessAllowedAce),
 	E(AddAccessAllowedAceEx),
@@ -2679,7 +3533,15 @@ const struct builtin_export adv_security_exports[] = {
 	E(AddAccessDeniedAceEx),
 	E(AddAce),
 	E(AdjustTokenPrivileges),
+	E(AccessCheck),
 	E(AllocateAndInitializeSid),
+	E(AreAllAccessesGranted),
+	E(AreAnyAccessesGranted),
+	E(ConvertSecurityDescriptorToStringSecurityDescriptorA),
+	E(ConvertSecurityDescriptorToStringSecurityDescriptorW),
+	E(ConvertStringSecurityDescriptorToSecurityDescriptorA),
+	E(ConvertStringSecurityDescriptorToSecurityDescriptorW),
+	E(MapGenericMask),
 	E(CheckTokenMembership),
 	E(ConvertSidToStringSidA),
 	E(ConvertSidToStringSidW),

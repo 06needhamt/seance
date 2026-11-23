@@ -30,6 +30,9 @@ enum kobj_type {
 	KOBJ_SNAPSHOT,
 	KOBJ_IOCP,
 	KOBJ_CHANGE,
+	KOBJ_SCM,
+	KOBJ_SERVICE,
+	KOBJ_EVENTLOG,
 };
 
 struct kobject {
