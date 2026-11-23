@@ -6,8 +6,8 @@
  * directories (whole trees), with wildcards in the last component, and
  * never asks: with no UI, every confirmation is answered "Yes to all", so
  * existing files are replaced unless FOF_RENAMEONCOLLISION says to make
- * "Copy of" names instead. There is no Recycle Bin (FOF_ALLOWUNDO deletes
- * outright). It returns 0, or a Win32 error code for the first failure,
+ * "Copy of" names instead. FOF_ALLOWUNDO deletes into the Recycle Bin
+ * (shell_recycle.c). It returns 0, or a Win32 error code for the first failure,
  * leaving what was done before it done.
  */
 #include <dirent.h>
@@ -352,7 +352,9 @@ static DWORD file_op(UINT func, const struct list *from,
 
 	if (func == FO_DELETE) {
 		for (int i = 0; !err && i < src.n; i++)
-			err = delete_tree(src.item[i],
+			err = (flags & FOF_ALLOWUNDO) ?
+			      shell_recycle(src.item[i]) :
+			      delete_tree(src.item[i],
 					  !(flags & FOF_NORECURSION));
 		list_free(&src);
 		return err;

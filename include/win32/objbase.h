@@ -151,6 +151,8 @@ typedef HRESULT (WINAPI *LPFNGETCLASSOBJECT)(REFCLSID, REFIID, LPVOID *);
 	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
 	G(IID_IPersist, 0x0000010c, 0x0000, 0x0000, \
 	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IPersistFile, 0x0000010b, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
 	G(IID_IPersistStream, 0x00000109, 0x0000, 0x0000, \
 	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
 	G(IID_ISequentialStream, 0x0c733a30, 0x2a1c, 0x11ce, \
@@ -274,6 +276,25 @@ typedef struct IPersistStreamVtbl {
 } IPersistStreamVtbl;
 struct IPersistStream {
 	const IPersistStreamVtbl *lpVtbl;
+};
+
+/* IPersistFile (objidl.h): an object that loads and saves a file. */
+typedef struct IPersistFile IPersistFile;
+typedef struct IPersistFileVtbl {
+	HRESULT (WINAPI *QueryInterface)(IPersistFile *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IPersistFile *This);
+	ULONG (WINAPI *Release)(IPersistFile *This);
+	HRESULT (WINAPI *GetClassID)(IPersistFile *This, CLSID *clsid);
+	HRESULT (WINAPI *IsDirty)(IPersistFile *This);
+	HRESULT (WINAPI *Load)(IPersistFile *This, LPCOLESTR name, DWORD mode);
+	HRESULT (WINAPI *Save)(IPersistFile *This, LPCOLESTR name,
+			       BOOL remember);
+	HRESULT (WINAPI *SaveCompleted)(IPersistFile *This, LPCOLESTR name);
+	HRESULT (WINAPI *GetCurFile)(IPersistFile *This, LPOLESTR *name);
+} IPersistFileVtbl;
+struct IPersistFile {
+	const IPersistFileVtbl *lpVtbl;
 };
 
 /*
