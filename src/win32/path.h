@@ -33,4 +33,11 @@ const char *path_drive_c(void);
 char *path_getcwd(void);
 int path_chdir(const char *win);
 
+/*
+ * rename() of Unix paths that fails with EEXIST instead of replacing a
+ * destination that is there (or appears) already: renameat2's
+ * RENAME_NOREPLACE, or link-and-unlink where the file system lacks it.
+ */
+int path_rename_noreplace(const char *from, const char *to);
+
 #endif /* VFW_WIN32_PATH_H */

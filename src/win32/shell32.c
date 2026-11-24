@@ -652,6 +652,17 @@ static char *known_path(REFKNOWNFOLDERID id, HRESULT *hr)
 	return path;
 }
 
+/*
+ * The profile a token asks for: NULL or a token of this process mean the
+ * one user there is; (HANDLE)-1, the Default User profile, isn't kept, so
+ * that fails rather than answering with the current user's folder.
+ */
+static HRESULT check_token(HANDLE token)
+{
+	return token == (HANDLE)(LONG_PTR)-1 ?
+	       HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED) : S_OK;
+}
+
 static void *task_alloc(SIZE_T n)
 {
 	LPVOID (WINAPI *alloc)(SIZE_T) =
@@ -667,6 +678,8 @@ WINFN(HRESULT) sh_SHGetKnownFolderPath(REFKNOWNFOLDERID id, DWORD flags,
 	if (!out)
 		return E_INVALIDARG;
 	*out = NULL;
+	if (FAILED(hr = check_token(token)))
+		return hr;
 	char *path = known_path(id, &hr);
 	if (!path)
 		return hr;
@@ -688,6 +701,8 @@ WINFN(HRESULT) sh_SHGetFolderPathEx(REFKNOWNFOLDERID id, DWORD flags,
 	if (!buf || !cch)
 		return E_INVALIDARG;
 	buf[0] = 0;
+	if (FAILED(hr = check_token(token)))
+		return hr;
 	char *path = known_path(id, &hr);
 	if (!path)
 		return hr;
@@ -709,6 +724,8 @@ WINFN(HRESULT) sh_SHGetKnownFolderIDList(REFKNOWNFOLDERID id, DWORD flags,
 	if (!out)
 		return E_INVALIDARG;
 	*out = NULL;
+	if (FAILED(hr = check_token(token)))
+		return hr;
 	if (i < 0)
 		return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
 	if (known[i].csidl >= 0)

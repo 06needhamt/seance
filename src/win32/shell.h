@@ -27,9 +27,10 @@ char *shell_folder_path(int csidl);
 
 /*
  * The Recycle Bin (shell_recycle.c): moves a file or directory (Unix path)
- * there; a Win32 error code.
+ * there; a Win32 error code. With norecurse, a directory that isn't
+ * empty is refused (ERROR_DIR_NOT_EMPTY).
  */
-DWORD shell_recycle(const char *unix_path);
+DWORD shell_recycle(const char *unix_path, int norecurse);
 /* Its Windows directory (malloc()ed), made if missing, or NULL. */
 char *shell_recycle_dir(void);
 /* The original Windows path of an item in it (by its name there). */

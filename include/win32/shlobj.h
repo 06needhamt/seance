@@ -290,11 +290,18 @@ struct IShellLinkW {
 #define SHERB_NOPROGRESSUI   0x2
 #define SHERB_NOSOUND        0x4
 
+/* shellapi.h byte-packs this on 32-bit Windows: 20 bytes there. */
+#if !defined(__x86_64__)
+#pragma pack(push, 1)
+#endif
 typedef struct _SHQUERYRBINFO {
 	DWORD cbSize;
 	LONGLONG i64Size;
 	LONGLONG i64NumItems;
 } SHQUERYRBINFO, *LPSHQUERYRBINFO;
+#if !defined(__x86_64__)
+#pragma pack(pop)
+#endif
 
 /* Known folders (shlobj.h, knownfolders.h). */
 typedef GUID KNOWNFOLDERID;

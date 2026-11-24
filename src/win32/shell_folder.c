@@ -72,7 +72,14 @@ static int item_of(LPCITEMIDLIST pidl, struct item *it)
 	if (it->csidl >= 0)
 		return 0;
 	it->path = shell_pidl_path(pidl);
-	return it->path ? 0 : -1;
+	if (!it->path)
+		return -1;
+	/* A parsed C:/x/y keeps its spelling in the PIDL; here it is
+	 * split on backslashes. */
+	for (char *c = it->path; *c; c++)
+		if (*c == '/')
+			*c = '\\';
+	return 0;
 }
 
 static int is_dir_win(const char *win)
@@ -596,14 +603,20 @@ static HRESULT WINAPI f_SetNameOf(IShellFolder *This, HWND hwnd,
 		char *to = win_join(*dir && dir[strlen(dir) - 1] == ':' ?
 				    strcat(dir, "\\") : dir, n);
 		char *uf = path_to_unix(it.path), *ut = to ? path_to_unix(to) : NULL;
-		if (!uf || !ut)
+		/* The new PIDL is made first: once renamed, the old one
+		 * names nothing. */
+		LPITEMIDLIST np = out && to ? shell_pidl_from_path(to) : NULL;
+		if (!uf || !ut || (out && !np))
 			hr = E_OUTOFMEMORY;
-		else if (!access(ut, F_OK) && strcasecmp(uf, ut))
-			hr = HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS);
-		else if (rename(uf, ut))
-			hr = HRESULT_FROM_WIN32(win_error_from_errno(errno));
-		else if (out && !(*out = shell_pidl_from_path(to)))
-			hr = E_OUTOFMEMORY;
+		else if (!strcasecmp(uf, ut) ? rename(uf, ut) :
+			 path_rename_noreplace(uf, ut))
+			hr = HRESULT_FROM_WIN32(errno == EEXIST ?
+						ERROR_ALREADY_EXISTS :
+						win_error_from_errno(errno));
+		if (out && SUCCEEDED(hr))
+			*out = np;
+		else
+			pidl_free(np);
 		free(uf);
 		free(ut);
 		free(to);

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #include <dirent.h>
+#include <fcntl.h>
 #include <errno.h>
 #include <limits.h>
 #include <pthread.h>
@@ -8,6 +9,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include "win32/path.h"
@@ -286,4 +288,36 @@ int path_chdir(const char *win)
 	pthread_mutex_unlock(&cwd_lock);
 	free(w);
 	return 0;
+}
+
+int path_rename_noreplace(const char *from, const char *to)
+{
+#ifdef SYS_renameat2
+	if (!syscall(SYS_renameat2, AT_FDCWD, from, AT_FDCWD, to,
+		     1 /* RENAME_NOREPLACE */))
+		return 0;
+	if (errno != EINVAL && errno != ENOSYS)
+		return -1;
+#endif
+	struct stat st;
+	if (lstat(from, &st))
+		return -1;
+	if (!S_ISDIR(st.st_mode)) {
+		/* link() won't replace; the old name goes once the new one is
+		 * there. */
+		if (link(from, to))
+			return -1;
+		if (unlink(from)) {
+			int e = errno;
+			unlink(to);
+			errno = e;
+			return -1;
+		}
+		return 0;
+	}
+	if (!lstat(to, &st)) {
+		errno = EEXIST;
+		return -1;
+	}
+	return rename(from, to);
 }

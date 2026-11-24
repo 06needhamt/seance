@@ -353,7 +353,8 @@ static DWORD file_op(UINT func, const struct list *from,
 	if (func == FO_DELETE) {
 		for (int i = 0; !err && i < src.n; i++)
 			err = (flags & FOF_ALLOWUNDO) ?
-			      shell_recycle(src.item[i]) :
+			      shell_recycle(src.item[i],
+					    !!(flags & FOF_NORECURSION)) :
 			      delete_tree(src.item[i],
 					  !(flags & FOF_NORECURSION));
 		list_free(&src);

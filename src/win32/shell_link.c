@@ -276,6 +276,57 @@ static HRESULT set_path(struct link *l, char *p)
 	return there ? S_OK : S_FALSE;
 }
 
+/*
+ * SetRelativePath's argument is the shortcut's own file name; what is kept
+ * is the target relative to it (".\\x.exe", "..\\bin\\x.exe"), or nothing
+ * when the two are on different drives or there is no target.
+ */
+static HRESULT set_relative(struct link *l, char *lnk)
+{
+	if (!lnk)
+		return E_OUTOFMEMORY;
+	char *from = full_path(lnk), *rel = NULL;
+	free(lnk);
+	if (!from)
+		return E_OUTOFMEMORY;
+	char *slash = strrchr(from, '\\');
+	const char *to = l->path;
+	if (slash && to && !strncasecmp(from, to, 2)) {
+		*slash = 0;
+		/* The directories the two share, component by component. */
+		size_t common = 0, i = 0;
+		for (;; i++) {
+			char a = from[i], b = to[i];
+			if ((!a || a == '\\') && (b == '\\'))
+				common = i;
+			if (!a || !b ||
+			    k32_toupper_w((unsigned char)a) !=
+			    k32_toupper_w((unsigned char)b))
+				break;
+		}
+		int ups = 0;
+		for (const char *c = from + common; *c; c++)
+			if (*c == '\\')
+				ups++;
+		if (from[common] && from[common] != '\\')
+			ups++;
+		const char *rest = to + common + (to[common] == '\\');
+		rel = malloc(3 * (size_t)ups + strlen(rest) + 3);
+		if (rel) {
+			char *o = rel;
+			if (!ups)
+				o += sprintf(o, ".\\");
+			for (int k = 0; k < ups; k++)
+				o += sprintf(o, "..\\");
+			strcpy(o, rest);
+		}
+	}
+	free(from);
+	set_str(&l->rel, rel);
+	l->dirty = 1;
+	return S_OK;
+}
+
 static HRESULT set_field(struct link *l, char **field, char *v, int given)
 {
 	if (given && !v)
@@ -287,13 +338,16 @@ static HRESULT set_field(struct link *l, char **field, char *v, int given)
 
 static HRESULT resolve(struct link *l, DWORD flags)
 {
-	if (!l->path)
-		return S_OK;
-	char *u = path_to_unix(l->path);
-	int there = u && !access(u, F_OK);
-	free(u);
-	if (there)
-		return S_OK;
+	int there = 0;
+	if (l->path) {
+		char *u = path_to_unix(l->path);
+		there = u && !access(u, F_OK);
+		free(u);
+		if (there)
+			return S_OK;
+	} else if (!(l->rel && l->cur)) {
+		return S_OK;	/* nothing to look for */
+	}
 	/* The relative path, from where the link was loaded, may find it. */
 	if (l->rel && l->cur) {
 		char *dir = strdup(l->cur);
@@ -303,6 +357,14 @@ static HRESULT resolve(struct link *l, DWORD flags)
 			const char *r = l->rel;
 			while (r[0] == '.' && r[1] == '\\')
 				r += 2;
+			/* Each "..\\" climbs out of a directory. */
+			while (r[0] == '.' && r[1] == '.' && r[2] == '\\') {
+				char *up = strrchr(dir, '\\');
+				if (!up)
+					break;
+				*up = 0;
+				r += 3;
+			}
 			char *p = malloc(strlen(dir) + strlen(r) + 2);
 			if (p) {
 				sprintf(p, "%s\\%s", dir, r);
@@ -415,7 +477,9 @@ static HRESULT WINAPI a_SetIconLocation(IShellLinkA *This, LPCSTR s, int i)
 }
 static HRESULT WINAPI a_SetRelativePath(IShellLinkA *This, LPCSTR s, DWORD r)
 {
-	return set_field(LA(This), &LA(This)->rel, dup_a(s), s != NULL);
+	if (!s)
+		return E_INVALIDARG;
+	return set_relative(LA(This), dup_a(s));
 }
 static HRESULT WINAPI a_Resolve(IShellLinkA *This, HWND h, DWORD flags)
 {
@@ -517,7 +581,9 @@ static HRESULT WINAPI w_SetIconLocation(IShellLinkW *This, LPCWSTR s, int i)
 }
 static HRESULT WINAPI w_SetRelativePath(IShellLinkW *This, LPCWSTR s, DWORD r)
 {
-	return set_field(LW(This), &LW(This)->rel, dup_w(s), s != NULL);
+	if (!s)
+		return E_INVALIDARG;
+	return set_relative(LW(This), dup_w(s));
 }
 static HRESULT WINAPI w_Resolve(IShellLinkW *This, HWND h, DWORD flags)
 {
@@ -591,12 +657,41 @@ static void put_string(struct buf *b, const char *s)
 	free(w);
 }
 
+/* The bytes of an item ID list, its terminator included. */
+static size_t pidl_bytes(LPCITEMIDLIST pidl)
+{
+	const BYTE *p = (const BYTE *)pidl;
+	size_t n = 0;
+	WORD cb;
+
+	for (;;) {
+		memcpy(&cb, p + n, 2);
+		if (!cb)
+			return n + 2;
+		n += cb;
+	}
+}
+
 static BYTE *serialize(struct link *l, size_t *len)
 {
 	struct buf b = { 0 };
 	DWORD flags = IS_UNICODE;
 	char *base = l->path ? utf8_to_acp_dup(l->path) : NULL;
+	WCHAR *wbase = l->path ? utf8_to_utf16_dup(l->path) : NULL;
+	size_t idlen = l->pidl ? pidl_bytes(l->pidl) : 0;
 
+	if (l->path && (!base || !wbase)) {
+		free(base);
+		free(wbase);
+		return NULL;
+	}
+	if (idlen > 0xffff) {
+		free(base);
+		free(wbase);
+		return NULL;
+	}
+	if (l->pidl)
+		flags |= HAS_ID_LIST;
 	if (base)
 		flags |= HAS_LINK_INFO;
 	if (l->desc)
@@ -639,12 +734,22 @@ static BYTE *serialize(struct link *l, size_t *len)
 	put16(&b, l->hotkey);
 	put(&b, zero, 10);
 
-	/* LinkInfo: a fixed volume, the local base path, no suffix. */
+	/* The target's item IDs, when the link was given them. */
+	if (l->pidl) {
+		put16(&b, (WORD)idlen);
+		put(&b, l->pidl, idlen);
+	}
+
+	/* LinkInfo: a fixed volume, the local base path in the ANSI code
+	 * page and (header 0x24) in UTF-16, no suffix. */
 	if (base) {
 		DWORD vol = 0x11;	/* VolumeID: 16 bytes, then "" */
-		DWORD hdr = 0x1c, at_vol = hdr, at_base = hdr + vol;
+		DWORD hdr = 0x24, at_vol = hdr, at_base = hdr + vol;
 		DWORD at_suffix = at_base + (DWORD)strlen(base) + 1;
-		DWORD total = at_suffix + 1;
+		DWORD at_wbase = (at_suffix + 1 + 1) & ~1u;	/* aligned */
+		DWORD wbytes = (DWORD)(wstrlen(wbase) + 1) * sizeof(WCHAR);
+		DWORD at_wsuffix = at_wbase + wbytes;
+		DWORD total = at_wsuffix + sizeof(WCHAR);
 		put32(&b, total);
 		put32(&b, hdr);
 		put32(&b, 1);	/* VolumeIDAndLocalBasePath */
@@ -652,6 +757,8 @@ static BYTE *serialize(struct link *l, size_t *len)
 		put32(&b, at_base);
 		put32(&b, 0);	/* no network path */
 		put32(&b, at_suffix);
+		put32(&b, at_wbase);
+		put32(&b, at_wsuffix);
 		put32(&b, vol);
 		put32(&b, 3);	/* DRIVE_FIXED */
 		put32(&b, 0x5ea9ce00);	/* serial */
@@ -659,8 +766,13 @@ static BYTE *serialize(struct link *l, size_t *len)
 		put(&b, "", 1);
 		put(&b, base, strlen(base) + 1);
 		put(&b, "", 1);
+		if ((at_suffix + 1) & 1)
+			put(&b, "", 1);
+		put(&b, wbase, wbytes);
+		put16(&b, 0);
 	}
 	free(base);
+	free(wbase);
 	if (l->desc)
 		put_string(&b, l->desc);
 	if (l->rel)
@@ -682,7 +794,7 @@ static BYTE *serialize(struct link *l, size_t *len)
 
 static int get32(const BYTE *p, size_t n, size_t at, DWORD *v)
 {
-	if (at + 4 > n)
+	if (at > n || n - at < 4)
 		return -1;
 	memcpy(v, p + at, 4);
 	return 0;
@@ -696,9 +808,73 @@ static char *ansi_at(const BYTE *p, size_t n, size_t at)
 	return acp_to_utf8((const char *)p + at);
 }
 
+/* A NUL-terminated UTF-16 string at at, within n bytes, as UTF-8. */
+static char *wide_at(const BYTE *p, size_t n, size_t at)
+{
+	size_t k;
+	WCHAR c;
+
+	if (at >= n)
+		return NULL;
+	for (k = at; k + 1 < n; k += 2) {
+		memcpy(&c, p + k, 2);
+		if (!c)
+			break;
+	}
+	if (k + 1 >= n)
+		return NULL;
+	WCHAR *w = malloc(k - at + 2);
+	if (!w)
+		return NULL;
+	memcpy(w, p + at, k - at);
+	w[(k - at) / 2] = 0;
+	char *r = utf16_to_utf8_dup(w);
+	free(w);
+	return r;
+}
+
+/* Whether the n bytes at p are a list of whole items, ending in a zero
+ * terminator at the very end. */
+static int id_list_ok(const BYTE *p, size_t n)
+{
+	size_t k = 0;
+	WORD cb;
+
+	for (;;) {
+		if (n - k < 2)
+			return 0;
+		memcpy(&cb, p + k, 2);
+		if (!cb)
+			return k + 2 == n;
+		if (cb < 2 || cb > n - k - 2)
+			return 0;
+		k += cb;
+	}
+}
+
+/* Base path and suffix, joined (either may be NULL). */
+static char *join_base(char *base, char *suffix)
+{
+	char *path = NULL;
+
+	if (base) {
+		size_t bl = strlen(base);
+		path = malloc(bl + (suffix ? strlen(suffix) : 0) + 2);
+		if (path)
+			sprintf(path, "%s%s%s", base,
+				suffix && *suffix && bl &&
+				base[bl - 1] != '\\' ? "\\" : "",
+				suffix ? suffix : "");
+	}
+	free(base);
+	free(suffix);
+	return path;
+}
+
 static HRESULT parse(struct link *l, const BYTE *p, size_t n)
 {
 	DWORD hsize, flags, v;
+	HRESULT hr = E_FAIL;
 
 	if (get32(p, n, 0, &hsize) || hsize != 0x4c || n < 0x4c ||
 	    memcmp(p + 4, &CLSID_ShellLink, sizeof(GUID)))
@@ -716,48 +892,51 @@ static HRESULT parse(struct link *l, const BYTE *p, size_t n)
 
 	if (flags & HAS_ID_LIST) {
 		WORD idsize;
-		if (at + 2 > n)
+		if (n - at < 2)
 			return E_FAIL;
 		memcpy(&idsize, p + at, 2);
 		at += 2;
-		if (at + idsize > n)
+		if (idsize > n - at)
 			return E_FAIL;
-		/* Only this shell32's own items say where they point. */
-		if (idsize >= 2) {
-			BYTE *c = heap_alloc(heap_process(), 0, idsize);
-			if (c) {
-				memcpy(c, p + at, idsize);
-				c[idsize - 2] = c[idsize - 1] = 0;
-				path = shell_pidl_path((LPCITEMIDLIST)c);
-				if (path)
-					pidl = (LPITEMIDLIST)c;
-				else
-					heap_free(heap_process(), 0, c);
-			}
+		if (idsize) {
+			/* Every item has to end inside the list before any of
+			 * it is walked. */
+			if (!id_list_ok(p + at, idsize))
+				return E_FAIL;
+			pidl = heap_alloc(heap_process(), 0, idsize);
+			if (!pidl)
+				return E_OUTOFMEMORY;
+			memcpy(pidl, p + at, idsize);
+			/* Only this shell32's own items say where they
+			 * point; others are kept as they are. */
+			path = shell_pidl_path(pidl);
 		}
 		at += idsize;
 	}
 	if (flags & HAS_LINK_INFO) {
-		DWORD size, lflags, base_at, suffix_at;
-		if (get32(p, n, at, &size) || at + size > n ||
-		    get32(p, n, at + 8, &lflags) ||
-		    get32(p, n, at + 16, &base_at) ||
-		    get32(p, n, at + 24, &suffix_at))
+		DWORD size, lhdr, lflags, base_at, suffix_at;
+		DWORD wbase_at = 0, wsuffix_at = 0;
+		if (get32(p, n, at, &size) || size < 0x1c || size > n - at)
+			goto bad;
+		const BYTE *li = p + at;
+		get32(li, size, 4, &lhdr);
+		get32(li, size, 8, &lflags);
+		get32(li, size, 16, &base_at);
+		get32(li, size, 24, &suffix_at);
+		if (lhdr >= 0x24 && (get32(li, size, 0x1c, &wbase_at) ||
+				     get32(li, size, 0x20, &wsuffix_at)))
 			goto bad;
 		if ((lflags & 1) && !path) {
-			char *base = ansi_at(p + at, size, base_at);
-			char *suffix = ansi_at(p + at, size, suffix_at);
-			if (base) {
-				size_t bl = strlen(base);
-				path = malloc(bl + (suffix ? strlen(suffix) : 0) + 2);
-				if (path)
-					sprintf(path, "%s%s%s", base,
-						suffix && *suffix && bl &&
-						base[bl - 1] != '\\' ? "\\" : "",
-						suffix ? suffix : "");
-			}
-			free(base);
-			free(suffix);
+			/* The UTF-16 path, when there is one, keeps what the
+			 * code page can't. */
+			if (lhdr >= 0x24 && wbase_at)
+				path = join_base(wide_at(li, size, wbase_at),
+						 wsuffix_at ?
+						 wide_at(li, size, wsuffix_at) :
+						 NULL);
+			if (!path)
+				path = join_base(ansi_at(li, size, base_at),
+						 ansi_at(li, size, suffix_at));
 		}
 		at += size;
 	}
@@ -768,12 +947,12 @@ static HRESULT parse(struct link *l, const BYTE *p, size_t n)
 		if (!(flags & bits[i]))
 			continue;
 		WORD count;
-		if (at + 2 > n)
+		if (n - at < 2)
 			goto bad;
 		memcpy(&count, p + at, 2);
 		at += 2;
 		if (flags & IS_UNICODE) {
-			if (at + count * 2u > n)
+			if (count * 2u > n - at)
 				goto bad;
 			WCHAR *w = malloc((count + 1) * sizeof(WCHAR));
 			if (w) {
@@ -784,7 +963,7 @@ static HRESULT parse(struct link *l, const BYTE *p, size_t n)
 			free(w);
 			at += count * 2u;
 		} else {
-			if (at + count > n)
+			if (count > n - at)
 				goto bad;
 			char *a = malloc(count + 1u);
 			if (a) {
@@ -794,6 +973,11 @@ static HRESULT parse(struct link *l, const BYTE *p, size_t n)
 			}
 			free(a);
 			at += count;
+		}
+		/* A field that is there isn't dropped quietly. */
+		if (!str[i]) {
+			hr = E_OUTOFMEMORY;
+			goto bad;
 		}
 	}
 	set_str(&l->path, path);
@@ -816,7 +1000,7 @@ bad:
 		free(str[i]);
 	if (pidl)
 		heap_free(heap_process(), 0, pidl);
-	return E_FAIL;
+	return hr;
 }
 
 /* IPersistFile. */
@@ -851,6 +1035,10 @@ static HRESULT WINAPI pf_Load(IPersistFile *This, LPCOLESTR name, DWORD mode)
 
 	if (!name) {
 		hr = E_INVALIDARG;
+	} else if (!win) {
+		hr = E_OUTOFMEMORY;
+	} else if (!u) {
+		hr = HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
 	} else if (!f) {
 		hr = HRESULT_FROM_WIN32(errno == ENOENT ? ERROR_FILE_NOT_FOUND :
 					win_error_from_errno(errno));
@@ -882,35 +1070,73 @@ static HRESULT WINAPI pf_Load(IPersistFile *This, LPCOLESTR name, DWORD mode)
 	return hr;
 }
 
+/*
+ * Writes data to the Unix path u through a temporary file beside it, so an
+ * existing shortcut is only replaced by a complete one.
+ */
+static HRESULT write_file(const char *u, const BYTE *data, size_t n)
+{
+	char *tmp = malloc(strlen(u) + 16);
+	if (!tmp)
+		return E_OUTOFMEMORY;
+	sprintf(tmp, "%s.XXXXXX", u);
+	int fd = mkstemp(tmp);
+	if (fd < 0) {
+		HRESULT hr = HRESULT_FROM_WIN32(win_error_from_errno(errno));
+		free(tmp);
+		return hr;
+	}
+	fchmod(fd, 0644);
+	FILE *f = fdopen(fd, "wb");
+	HRESULT hr = S_OK;
+	if (!f) {
+		close(fd);
+		hr = E_OUTOFMEMORY;
+	} else {
+		if (fwrite(data, 1, n, f) != n)
+			hr = STG_E_WRITEFAULT;
+		if (fclose(f) && hr == S_OK)
+			hr = STG_E_WRITEFAULT;
+	}
+	if (hr == S_OK && rename(tmp, u))
+		hr = HRESULT_FROM_WIN32(win_error_from_errno(errno));
+	if (hr != S_OK)
+		unlink(tmp);
+	free(tmp);
+	return hr;
+}
+
+/*
+ * Save(NULL) saves to the current file; Save(name, TRUE) saves as name,
+ * which becomes current; Save(name, FALSE) saves a copy, and the current
+ * file and the dirty flag stay as they were.
+ */
 static HRESULT WINAPI pf_Save(IPersistFile *This, LPCOLESTR name, BOOL remember)
 {
 	struct link *l = LF(This);
 	char *win = name ? utf16_to_utf8_dup(name) : (l->cur ? strdup(l->cur) : NULL);
 	size_t n;
 	BYTE *data = NULL;
-	HRESULT hr = S_OK;
+	HRESULT hr;
 
-	if (!win)
+	if (!name && !l->cur)
 		return E_INVALIDARG;
+	if (!win)
+		return E_OUTOFMEMORY;
 	char *u = path_to_unix(win);
-	data = serialize(l, &n);
-	FILE *f = u && data ? fopen(u, "wb") : NULL;
-	if (!data)
+	data = u ? serialize(l, &n) : NULL;
+	if (!u)
+		hr = HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
+	else if (!data)
 		hr = E_OUTOFMEMORY;
-	else if (!f)
-		hr = HRESULT_FROM_WIN32(win_error_from_errno(errno));
-	else if (fwrite(data, 1, n, f) != n)
-		hr = STG_E_WRITEFAULT;
-	if (f && fclose(f) && hr == S_OK)
-		hr = STG_E_WRITEFAULT;
+	else
+		hr = write_file(u, data, n);
 	free(data);
 	free(u);
-	if (hr == S_OK) {
+	if (hr == S_OK && (!name || remember)) {
 		l->dirty = 0;
-		if (remember || !l->cur) {
-			set_str(&l->cur, win);
-			win = NULL;
-		}
+		set_str(&l->cur, win);
+		win = NULL;
 	}
 	free(win);
 	return hr;
@@ -930,15 +1156,16 @@ static HRESULT WINAPI pf_GetCurFile(IPersistFile *This, LPOLESTR *name)
 	if (!name)
 		return E_POINTER;
 	*name = NULL;
-	if (!l->cur)
-		return S_FALSE;
-	WCHAR *w = utf8_to_utf16_dup(l->cur);
+	/* With no file yet, S_FALSE and the default prompt. */
+	WCHAR *w = utf8_to_utf16_dup(l->cur ? l->cur : "*.lnk");
 	size_t n = w ? (wstrlen(w) + 1) * sizeof(WCHAR) : 0;
 	*name = w && alloc ? alloc(n) : NULL;
 	if (*name)
 		memcpy(*name, w, n);
 	free(w);
-	return *name ? S_OK : E_OUTOFMEMORY;
+	if (!*name)
+		return E_OUTOFMEMORY;
+	return l->cur ? S_OK : S_FALSE;
 }
 
 static const IPersistFileVtbl pf_vtbl = {
@@ -1028,32 +1255,50 @@ static HRESULT WINAPI ps_Load(IPersistStream *This, IStream *s)
 			break;
 		}
 		bytes = (size_t)count * ((flags & IS_UNICODE) ? 2 : 1);
-		if (!(p = malloc(bytes ? bytes : 1)) ||
-		    read_all(s, p, (ULONG)bytes))
+		if (!(p = malloc(bytes ? bytes : 1))) {
+			hr = E_OUTOFMEMORY;
+			break;
+		}
+		if (read_all(s, p, (ULONG)bytes)) {
+			free(p);
 			hr = E_FAIL;
+			break;
+		}
 		put(&b, &count, 2);
 		put(&b, p, bytes);
 		free(p);
 	}
-	/* Extra data blocks, to the terminal one. */
-	for (int i = 0; hr == S_OK && i < 64; i++) {
+	/* Extra data blocks, skipped through a small buffer, up to the
+	 * terminal block, which has to come. */
+	int ended = 0;
+	for (int i = 0; hr == S_OK && i < 256; i++) {
 		DWORD n;
 		if (read_all(s, &n, 4)) {
 			hr = E_FAIL;
 			break;
 		}
-		if (n < 4)
+		if (n < 4) {
+			ended = 1;
 			break;
-		BYTE *p = malloc(n);
-		if (!p || read_all(s, p, n - 4))
-			hr = E_FAIL;
-		free(p);
+		}
+		BYTE scratch[256];
+		for (DWORD left = n - 4; hr == S_OK && left; ) {
+			ULONG k = left < sizeof(scratch) ? left : sizeof(scratch);
+			if (read_all(s, scratch, k))
+				hr = E_FAIL;
+			left -= k;
+		}
 	}
+	if (hr == S_OK && !ended)
+		hr = E_FAIL;
 	if (hr == S_OK && b.failed)
 		hr = E_OUTOFMEMORY;
 	if (hr == S_OK)
 		hr = parse(LS(This), b.p, b.len);
 	free(b.p);
+	/* A link from a stream belongs to no file. */
+	if (hr == S_OK)
+		set_str(&LS(This)->cur, NULL);
 	return hr;
 }
 
@@ -1067,12 +1312,16 @@ static HRESULT WINAPI ps_Save(IPersistStream *This, IStream *s, BOOL clear)
 		return E_POINTER;
 	if (!(data = serialize(LS(This), &n)))
 		return E_OUTOFMEMORY;
+	/* Cleared first: an edit made during Write stays dirty. */
+	int was_dirty = LS(This)->dirty;
+	if (clear)
+		LS(This)->dirty = 0;
 	HRESULT hr = s->lpVtbl->Write(s, data, (ULONG)n, &wrote);
 	free(data);
 	if (hr == S_OK && wrote != n)
 		hr = STG_E_MEDIUMFULL;
-	if (hr == S_OK && clear)
-		LS(This)->dirty = 0;
+	if (clear && hr != S_OK)
+		LS(This)->dirty |= was_dirty;
 	return hr;
 }
 

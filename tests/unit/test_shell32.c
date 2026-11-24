@@ -570,6 +570,11 @@ static void test_known_folders(void)
 	CHECK(is_dir("Documents and Settings/tester/Downloads"));
 	free(s);
 	task_free(w);
+	/* The Default User's profile isn't the current user's. */
+	w = NULL;
+	CHECK(SHGetKnownFolderPath(&FOLDERID_Downloads, 0, (HANDLE)(LONG_PTR)-1,
+				   &w) == HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED));
+	CHECK(w == NULL);
 	/* No path for a virtual folder; an unknown one isn't found. */
 	CHECK(SHGetKnownFolderPath(&FOLDERID_ComputerFolder, 0, NULL, &w) ==
 	      E_INVALIDARG && !w);
@@ -975,6 +980,97 @@ static void test_shell_link(void)
 	uninit();
 }
 
+/* Relative paths, saving copies, Unicode targets, the default prompt. */
+static void test_shell_link_more(void)
+{
+	HRESULT (WINAPI *init)(void *) = get_from(ole, "CoInitialize");
+	void (WINAPI *uninit)(void) = get_from(ole, "CoUninitialize");
+	HRESULT (WINAPI *create)(REFCLSID, IUnknown *, DWORD, REFIID, void **) =
+		get_from(ole, "CoCreateInstance");
+	IShellLinkW *lw = NULL;
+	IPersistFile *pf = NULL;
+	WCHAR w[MAX_PATH];
+
+	CHECK(SUCCEEDED(init(NULL)));
+	CHECK(create(&CLSID_ShellLink, NULL, 1, &IID_IShellLinkW, (void **)&lw) ==
+	      S_OK && lw);
+	if (!lw)
+		return;
+	CHECK(lw->lpVtbl->QueryInterface(lw, &IID_IPersistFile, (void **)&pf) ==
+	      S_OK && pf);
+
+	/* A new link has no file: S_FALSE, with the default prompt. */
+	LPOLESTR cur = NULL;
+	CHECK(pf->lpVtbl->GetCurFile(pf, &cur) == S_FALSE && cur);
+	if (cur) {
+		char *c = utf16_to_utf8_dup(cur);
+		CHECK_STR(c, "*.lnk");
+		free(c);
+		task_free(cur);
+	}
+
+	/* A target the ANSI code page can't spell survives a reload. */
+	mkdir(on_disk("old"), 0755);
+	write_file("old/\xe6\x97\xa5.exe", "MZ");
+	WCHAR *t = w16("C:\\old\\\xe6\x97\xa5.exe");
+	WCHAR *lnk = w16("C:\\old\\run.lnk");
+	CHECK(lw->lpVtbl->SetPath(lw, t) == S_OK);
+	/* SetRelativePath takes the link's own name. */
+	CHECK(lw->lpVtbl->SetRelativePath(lw, lnk, 0) == S_OK);
+	CHECK(pf->lpVtbl->Save(pf, lnk, TRUE) == S_OK);
+
+	/* Saving a copy leaves the current file and dirty flag alone. */
+	WCHAR *d = w16("edited");
+	CHECK(lw->lpVtbl->SetDescription(lw, d) == S_OK);
+	free(d);
+	WCHAR *copy = w16("C:\\copy.lnk");
+	CHECK(pf->lpVtbl->Save(pf, copy, FALSE) == S_OK);
+	CHECK(pf->lpVtbl->IsDirty(pf) == S_OK);
+	CHECK(pf->lpVtbl->GetCurFile(pf, &cur) == S_OK && cur);
+	if (cur) {
+		char *c = utf16_to_utf8_dup(cur);
+		CHECK_STR(c, "C:\\old\\run.lnk");
+		free(c);
+		task_free(cur);
+	}
+	free(copy);
+	pf->lpVtbl->Release(pf);
+	lw->lpVtbl->Release(lw);
+	lw = NULL;
+	pf = NULL;
+
+	/* Both moved to C:\new: Resolve finds the target beside the link. */
+	mkdir(on_disk("new"), 0755);
+	CHECK(!rename(on_disk("old/\xe6\x97\xa5.exe"),
+		      on_disk("new/\xe6\x97\xa5.exe")));
+	CHECK(!rename(on_disk("old/run.lnk"), on_disk("new/run.lnk")));
+	WCHAR *nlnk = w16("C:\\new\\run.lnk");
+	CHECK(create(&CLSID_ShellLink, NULL, 1, &IID_IPersistFile, (void **)&pf) ==
+	      S_OK && pf);
+	if (pf) {
+		CHECK(pf->lpVtbl->Load(pf, nlnk, 0) == S_OK);
+		CHECK(pf->lpVtbl->QueryInterface(pf, &IID_IShellLinkW,
+						 (void **)&lw) == S_OK);
+		pf->lpVtbl->Release(pf);
+	}
+	if (lw) {
+		CHECK(lw->lpVtbl->GetPath(lw, w, MAX_PATH, NULL, 0) == S_OK);
+		char *c = utf16_to_utf8_dup(w);
+		CHECK_STR(c, "C:\\old\\\xe6\x97\xa5.exe");
+		free(c);
+		CHECK(lw->lpVtbl->Resolve(lw, NULL, SLR_NO_UI) == S_OK);
+		CHECK(lw->lpVtbl->GetPath(lw, w, MAX_PATH, NULL, 0) == S_OK);
+		c = utf16_to_utf8_dup(w);
+		CHECK_STR(c, "C:\\new\\\xe6\x97\xa5.exe");
+		free(c);
+		lw->lpVtbl->Release(lw);
+	}
+	free(nlnk);
+	free(t);
+	free(lnk);
+	uninit();
+}
+
 int main(void)
 {
 	const char *tmpdir = getenv("TMPDIR");
@@ -1008,6 +1104,7 @@ int main(void)
 	test_namespace();
 	test_recycle_bin();
 	test_shell_link();
+	test_shell_link_more();
 	mod_free(ole);
 
 	mod_free(k32);
