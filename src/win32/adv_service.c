@@ -324,13 +324,55 @@ static void service_destroy(struct kobject *obj)
 	free(s);
 }
 
+/* The computer's name, as GetComputerName gives it. */
+static const char *machine_name(void)
+{
+	static char name[64];
+	if (!name[0]) {
+		BOOL (WINAPI *get)(LPSTR, LPDWORD) =
+			builtin_export(&builtin_kernel32, "GetComputerNameA");
+		DWORD n = sizeof(name);
+		if (!get || !get(name, &n))
+			strcpy(name, "SEANCE");
+	}
+	return name;
+}
+
+/*
+ * A handle's rights as asked for, generic ones mapped through the SCM's
+ * or a service's mapping; MAXIMUM_ALLOWED is all of them, nothing being
+ * refused here.
+ */
+static DWORD map_access(DWORD a, DWORD r, DWORD w, DWORD x, DWORD all)
+{
+	if (a & (GENERIC_ALL | MAXIMUM_ALLOWED))
+		a |= all;
+	if (a & GENERIC_READ)
+		a |= STANDARD_RIGHTS_READ | r;
+	if (a & GENERIC_WRITE)
+		a |= STANDARD_RIGHTS_WRITE | w;
+	if (a & GENERIC_EXECUTE)
+		a |= STANDARD_RIGHTS_EXECUTE | x;
+	return a & ~(GENERIC_ALL | GENERIC_READ | GENERIC_WRITE |
+		     GENERIC_EXECUTE | MAXIMUM_ALLOWED);
+}
+
+/* This machine, by any of its names: ".", localhost or its own. */
+static int is_local(const char *m)
+{
+	if (!m || !*m)
+		return 1;
+	if (m[0] == '\\' && m[1] == '\\')
+		m += 2;
+	return !strcmp(m, ".") || !strcasecmp(m, "localhost") ||
+	       !strcasecmp(m, machine_name());
+}
+
 static SC_HANDLE open_scm(const void *machine, const void *db, DWORD access,
 			  int wide)
 {
 	char *m = in_str(machine, wide), *d = in_str(db, wide);
-	int remote = m && *m && strcmp(m, ".") &&
-		     strcmp(m + (m[0] == '\\' && m[1] == '\\' ? 2 : 0),
-			    "localhost");
+	int remote = !is_local(m);
 	int bad_db = d && *d && strcasecmp(d, "ServicesActive");
 
 	free(m);
@@ -349,7 +391,10 @@ static SC_HANDLE open_scm(const void *machine, const void *db, DWORD access,
 		return NULL;
 	}
 	kobj_init(&s->obj, KOBJ_SCM, scm_destroy);
-	s->access = access;
+	s->access = map_access(access,
+		SC_MANAGER_ENUMERATE_SERVICE | SC_MANAGER_QUERY_LOCK_STATUS,
+		SC_MANAGER_CREATE_SERVICE | SC_MANAGER_MODIFY_BOOT_CONFIG,
+		SC_MANAGER_CONNECT | SC_MANAGER_LOCK, SC_MANAGER_ALL_ACCESS);
 	HANDLE h = handle_new(&s->obj);
 	if (!h)
 		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
@@ -414,7 +459,12 @@ static SC_HANDLE new_service(const char *name, DWORD access)
 	free(n2);
 	kobj_init(&s->obj, KOBJ_SERVICE, service_destroy);
 	s->name = n;
-	s->access = access;
+	s->access = map_access(access,
+		SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS |
+		SERVICE_INTERROGATE | SERVICE_ENUMERATE_DEPENDENTS,
+		SERVICE_CHANGE_CONFIG,
+		SERVICE_START | SERVICE_STOP | SERVICE_PAUSE_CONTINUE |
+		SERVICE_USER_DEFINED_CONTROL, SERVICE_ALL_ACCESS);
 	HANDLE h = handle_new(&s->obj);
 	if (!h)
 		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
@@ -1491,20 +1541,6 @@ static size_t w_size(const char *s)
 	size_t n = w ? wstrlen(w) + 1 : 1;
 	free(w);
 	return n * sizeof(WCHAR);
-}
-
-/* The computer's name, as GetComputerName gives it. */
-static const char *machine_name(void)
-{
-	static char name[64];
-	if (!name[0]) {
-		BOOL (WINAPI *get)(LPSTR, LPDWORD) =
-			builtin_export(&builtin_kernel32, "GetComputerNameA");
-		DWORD n = sizeof(name);
-		if (!get || !get(name, &n))
-			strcpy(name, "SEANCE");
-	}
-	return name;
 }
 
 static BOOL report(HANDLE h, WORD type, WORD cat, DWORD id, PSID sid,

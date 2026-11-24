@@ -956,6 +956,10 @@ static void test_access_check(void)
 	   DWORD, PSECURITY_DESCRIPTOR *, ULONG *);
 	FN(BOOL, AdjustTokenPrivileges, HANDLE, BOOL, PTOKEN_PRIVILEGES, DWORD,
 	   PTOKEN_PRIVILEGES, PDWORD);
+	FN(BOOL, GetSecurityDescriptorDacl, PSECURITY_DESCRIPTOR, LPBOOL, PACL *,
+	   LPBOOL);
+	FN(BOOL, ConvertSecurityDescriptorToStringSecurityDescriptorA,
+	   PSECURITY_DESCRIPTOR, DWORD, SECURITY_INFORMATION, LPSTR *, ULONG *);
 	DWORD (WINAPI *last_error)(void) = get_from(k32, "GetLastError");
 	GENERIC_MAPPING map = { 0x120089, 0x120116, 0x1200a0, 0x1f01ff };
 	DWORD m = GENERIC_READ | DELETE;
@@ -1007,12 +1011,16 @@ static void test_access_check(void)
 	local_free(sd);
 
 	/* No DACL: anything. The owner may read and change the DACL. */
-	CHECK(ConvertStringSecurityDescriptorToSecurityDescriptorA(
-		"O:BAG:BA", 1, &sd, NULL));
-	CHECK(AccessCheck(sd, tok, DELETE | 0x1, &map, privs, &plen,
-			  &granted, &status));
-	CHECK(status && granted == (DELETE | 0x1));
-	local_free(sd);
+	sd = NULL;
+	BOOL converted = ConvertStringSecurityDescriptorToSecurityDescriptorA(
+		"O:BAG:BA", 1, &sd, NULL);
+	CHECK(converted);
+	if (converted) {
+		CHECK(AccessCheck(sd, tok, DELETE | 0x1, &map, privs, &plen,
+				  &granted, &status));
+		CHECK(status && granted == (DELETE | 0x1));
+		local_free(sd);
+	}
 	CHECK(ConvertStringSecurityDescriptorToSecurityDescriptorA(
 		"O:BAG:BAD:", 1, &sd, NULL));
 	CHECK(AccessCheck(sd, tok, READ_CONTROL | WRITE_DAC, &map, privs,
@@ -1041,6 +1049,73 @@ static void test_access_check(void)
 			  &granted, &status));
 	CHECK(!status);
 	local_free(sd);
+
+	/* An object ACE naming no object types is an ordinary one. */
+	sd = NULL;
+	CHECK(ConvertStringSecurityDescriptorToSecurityDescriptorA(
+		"O:SYG:SYD:(OA;;FR;;;WD)", 1, &sd, NULL));
+	if (sd) {
+		PACL d = NULL;
+		BOOL present = 0, dflt = 0;
+		CHECK(GetSecurityDescriptorDacl(sd, &present, &d, &dflt) && d);
+		CHECK(d && ((ACE_HEADER *)(d + 1))->AceType ==
+		      ACCESS_ALLOWED_ACE_TYPE);
+		CHECK(AccessCheck(sd, tok, FILE_READ_DATA, &map, privs, &plen,
+				  &granted, &status));
+		CHECK(status && granted == FILE_READ_DATA);
+		/* A truncated ACE (no SID) makes the ACL invalid. */
+		if (d) {
+			((ACE_HEADER *)(d + 1))->AceSize = 8;
+			CHECK(!AccessCheck(sd, tok, FILE_READ_DATA, &map, privs,
+					   &plen, &granted, &status));
+			CHECK_EQ(last_error(), ERROR_INVALID_ACL);
+			LPSTR out = NULL;
+			CHECK(!ConvertSecurityDescriptorToStringSecurityDescriptorA(
+				sd, 1, DACL_SECURITY_INFORMATION, &out, NULL));
+		}
+		local_free(sd);
+	}
+	/* Every character of a GUID is checked. */
+	sd = NULL;
+	CHECK(!ConvertStringSecurityDescriptorToSecurityDescriptorA(
+		"O:SYG:SYD:(OA;;FR;bf967aba-0de6-11d0-a285-00aa003049eZ;;WD)", 1,
+		&sd, NULL));
+	CHECK(ConvertStringSecurityDescriptorToSecurityDescriptorA(
+		"O:SYG:SYD:(OA;;FR;BF967ABA-0de6-11d0-a285-00aa003049e2;;WD)", 1,
+		&sd, NULL));
+	local_free(sd);
+	/* OWNER RIGHTS (S-1-3-4) takes the place of the owner's own rights. */
+	sd = NULL;
+	CHECK(ConvertStringSecurityDescriptorToSecurityDescriptorA(
+		"O:BAG:BAD:(A;;RC;;;S-1-3-4)", 1, &sd, NULL));
+	if (sd) {
+		CHECK(AccessCheck(sd, tok, READ_CONTROL, &map, privs, &plen,
+				  &granted, &status));
+		CHECK(status && granted == READ_CONTROL);
+		CHECK(AccessCheck(sd, tok, WRITE_DAC, &map, privs, &plen,
+				  &granted, &status));
+		CHECK(!status);
+		local_free(sd);
+	}
+	/* SeTakeOwnershipPrivilege grants WRITE_OWNER, and says so. */
+	sd = NULL;
+	CHECK(ConvertStringSecurityDescriptorToSecurityDescriptorA(
+		"O:SYG:SYD:", 1, &sd, NULL));
+	if (sd) {
+		TOKEN_PRIVILEGES take = { 1, { { { 9, 0 }, SE_PRIVILEGE_ENABLED } } };
+		CHECK(AdjustTokenPrivileges(tok, FALSE, &take, 0, NULL, NULL));
+		DWORD tiny = 8;
+		CHECK(!AccessCheck(sd, tok, WRITE_OWNER, &map, privs, &tiny,
+				   &granted, &status));
+		CHECK(last_error() == ERROR_INSUFFICIENT_BUFFER && tiny == 20);
+		plen = sizeof(privbuf);
+		CHECK(AccessCheck(sd, tok, WRITE_OWNER | ACCESS_SYSTEM_SECURITY,
+				  &map, privs, &plen, &granted, &status));
+		CHECK(status && privs->PrivilegeCount == 2 &&
+		      privs->Privilege[0].Luid.LowPart == 8 &&
+		      privs->Privilege[1].Luid.LowPart == 9);
+		local_free(sd);
+	}
 	close_handle(tok);
 	CHECK(RevertToSelf());
 }
@@ -1078,6 +1153,19 @@ static void test_services(void)
 
 	CHECK(!OpenSCManagerA("\\\\elsewhere", NULL, SC_MANAGER_CONNECT));
 	CHECK_EQ(last_error(), ERROR_ACCESS_DENIED);
+	/* This machine by any of its names. */
+	char host[80] = "\\\\";
+	DWORD hn = sizeof(host) - 2;
+	BOOL (WINAPI *computer)(LPSTR, LPDWORD) =
+		get_from(k32, "GetComputerNameA");
+	CHECK(computer(host + 2, &hn));
+	const char *locals[] = { ".", "\\\\.", "LOCALHOST", host, host + 2 };
+	for (size_t i = 0; i < sizeof(locals) / sizeof(*locals); i++) {
+		SC_HANDLE l = OpenSCManagerA(locals[i], NULL, SC_MANAGER_CONNECT);
+		CHECK(l != NULL);
+		if (l)
+			CloseServiceHandle(l);
+	}
 	SC_HANDLE ro = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
 	SC_HANDLE scm = OpenSCManagerA(NULL, "ServicesActive",
 				       SC_MANAGER_ALL_ACCESS);
@@ -1119,8 +1207,9 @@ static void test_services(void)
 	CHECK(!QueryServiceConfigA(s, NULL, 0, &need));
 	CHECK(last_error() == ERROR_INSUFFICIENT_BUFFER && need > 0);
 	QUERY_SERVICE_CONFIGA *ca = malloc(need);
-	CHECK(ca && QueryServiceConfigA(s, ca, need, &need));
-	if (ca) {
+	int queried = ca && QueryServiceConfigA(s, ca, need, &need);
+	CHECK(queried);
+	if (queried) {
 		CHECK_EQ(ca->dwServiceType, SERVICE_WIN32_OWN_PROCESS);
 		CHECK_EQ(ca->dwStartType, SERVICE_DEMAND_START);
 		CHECK_EQ(ca->dwErrorControl, SERVICE_ERROR_NORMAL);
@@ -1136,16 +1225,31 @@ static void test_services(void)
 				    SERVICE_QUERY_CONFIG);
 	CHECK(s2 != NULL);
 	need = 0;
-	QueryServiceConfigW(s2, NULL, 0, &need);
-	QUERY_SERVICE_CONFIGW *cw = malloc(need);
-	CHECK(cw && QueryServiceConfigW(s2, cw, need, &need));
-	if (cw) {
+	CHECK(!QueryServiceConfigW(s2, NULL, 0, &need) && need > 0);
+	QUERY_SERVICE_CONFIGW *cw = need ? malloc(need) : NULL;
+	queried = cw && QueryServiceConfigW(s2, cw, need, &need);
+	CHECK(queried);
+	if (queried) {
 		static const WCHAR path[] = { 'C', ':', '\\', 's', 'v', 'c', '.',
 					      'e', 'x', 'e', ' ', '-', 'x', 0 };
 		CHECK(!memcmp(cw->lpBinaryPathName, path, sizeof(path)));
 		CHECK(((ULONG_PTR)cw->lpDisplayName & 1) == 0);
 	}
 	free(cw);
+	/* Generic rights stand for the specific ones. */
+	SC_HANDLE gr = OpenServiceA(scm, "seancetest", GENERIC_READ);
+	SERVICE_STATUS gst;
+	CHECK(gr && QueryServiceStatus(gr, &gst));
+	if (gr)
+		CloseServiceHandle(gr);
+	SC_HANDLE gscm = OpenSCManagerA(NULL, NULL, GENERIC_READ);
+	SC_HANDLE nope = gscm ? CreateServiceA(gscm, "seancetest2", NULL,
+		SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS,
+		SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL, "C:\\x.exe", NULL,
+		NULL, NULL, NULL, NULL) : NULL;
+	CHECK(gscm && !nope && last_error() == ERROR_ACCESS_DENIED);
+	if (gscm)
+		CloseServiceHandle(gscm);
 	/* Opened for config only: no status. */
 	SERVICE_STATUS st;
 	CHECK(!QueryServiceStatus(s2, &st));
@@ -1306,11 +1410,19 @@ static void test_event_log(void)
 	CHECK_STR((char *)buf + r->StringOffset + 6, "second");
 	CHECK(!memcmp(buf + r->DataOffset, data, 3));
 	CHECK_SID(buf + r->UserSidOffset, "S-1-5-32-544");
-	CHECK(!memcmp(buf + r->Length - 4, &r->Length, 4));
-	EVENTLOGRECORD *r2 = (EVENTLOGRECORD *)(buf + r->Length);
-	CHECK(r2->RecordNumber == 2 && r2->EventID == 99 &&
-	      r2->UserSidLength == 0);
-	CHECK_STR((char *)buf + r->Length + r2->StringOffset, "w");
+	/* The second record, if the first's length leaves room for it. */
+	int fits = r->Length >= sizeof(*r) && r->Length < got &&
+		   r->Length + sizeof(EVENTLOGRECORD) <= sizeof(buf);
+	CHECK(fits);
+	if (fits) {
+		CHECK(!memcmp(buf + r->Length - 4, &r->Length, 4));
+		EVENTLOGRECORD *r2 = (EVENTLOGRECORD *)(buf + r->Length);
+		CHECK(r2->RecordNumber == 2 && r2->EventID == 99 &&
+		      r2->UserSidLength == 0);
+		if (r->Length + r2->StringOffset < sizeof(buf))
+			CHECK_STR((char *)buf + r->Length + r2->StringOffset,
+				  "w");
+	}
 	/* Then the end. */
 	CHECK(!ReadEventLogA(log, EVENTLOG_SEQUENTIAL_READ |
 			     EVENTLOG_FORWARDS_READ, 0, buf, sizeof(buf), &got,

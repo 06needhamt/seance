@@ -1444,6 +1444,40 @@ static int acl_ok(const ACL *acl)
 	return 1;
 }
 
+static int is_object_ace(BYTE type);
+
+/*
+ * Whether the ACE at p (AceSize already checked by acl_ok) holds its mask,
+ * object flags and GUIDs if it has them, and a whole SID; *sid is set to
+ * where the SID starts.
+ */
+static int ace_payload_ok(const BYTE *p, const BYTE **sid)
+{
+	const ACE_HEADER *h = (const ACE_HEADER *)p;
+	const BYTE *end = p + h->AceSize;
+	const BYTE *q = p + sizeof(*h) + 4;
+
+	if (q > end)
+		return 0;
+	if (is_object_ace(h->AceType)) {
+		DWORD of;
+		if (q + 4 > end)
+			return 0;
+		memcpy(&of, q, 4);
+		q += 4;
+		if (of & ACE_OBJECT_TYPE_PRESENT)
+			q += sizeof(GUID);
+		if (of & ACE_INHERITED_OBJECT_TYPE_PRESENT)
+			q += sizeof(GUID);
+		if (q > end)
+			return 0;
+	}
+	if (q + 8 > end || !sid_ok(q) || q + sid_size(q) > end)
+		return 0;
+	*sid = q;
+	return 1;
+}
+
 /* Where the next ACE goes (past the last), or NULL if acl is bad. */
 static BYTE *acl_end(ACL *acl)
 {
@@ -2821,6 +2855,11 @@ static int sddl_guid(const char *s, size_t n, GUID *g)
 
 	if (n != 36)
 		return -1;
+	for (size_t i = 0; i < n; i++) {
+		int dash = i == 8 || i == 13 || i == 18 || i == 23;
+		if (dash ? s[i] != '-' : !isxdigit((unsigned char)s[i]))
+			return -1;
+	}
 	memcpy(tmp, s, n);
 	tmp[n] = 0;
 	if (sscanf(tmp, "%8x-%4x-%4x-%2x%2x-%2x%2x%2x%2x%2x%2x", &d1, &d2, &d3,
@@ -2927,6 +2966,13 @@ static int sddl_ace(const char **p, struct sbuf *b, int *object)
 				return -1;
 			oflags |= ACE_INHERITED_OBJECT_TYPE_PRESENT;
 		}
+	}
+	/* An object ACE naming no object types is an ordinary one. */
+	if (!len[3] && !len[4]) {
+		if (type == ACCESS_ALLOWED_OBJECT_ACE_TYPE)
+			type = ACCESS_ALLOWED_ACE_TYPE;
+		else if (type == ACCESS_DENIED_OBJECT_ACE_TYPE)
+			type = ACCESS_DENIED_ACE_TYPE;
 	}
 	struct sid sid;
 	const char *sp = f[5];
@@ -3162,7 +3208,8 @@ static int sddl_put_acl(struct sbuf *b, const ACL *acl, WORD control, int sacl)
 		for (size_t k = 0; k < NELEMS(sddl_ace_types); k++)
 			if (sddl_ace_types[k].type == h->AceType)
 				code = sddl_ace_types[k].code;
-		if (!code)
+		const BYTE *sid_at;
+		if (!code || !ace_payload_ok(p, &sid_at))
 			return -1;
 		DWORD mask;
 		memcpy(&mask, p + sizeof(*h), 4);
@@ -3440,68 +3487,114 @@ WINFN(BOOL) adv_AccessCheck(PSECURITY_DESCRIPTOR sd, HANDLE token,
 		win_set_error(ERROR_GENERIC_NOT_MAPPED);
 		return FALSE;
 	}
-	DWORD need = offsetof(PRIVILEGE_SET, Privilege) +
-		     ((desired & ACCESS_SYSTEM_SECURITY) ?
-		      sizeof(LUID_AND_ATTRIBUTES) : 0);
-	if (!privs || *privs_len < need) {
+	if (dacl && !acl_ok(dacl)) {
 		kobj_unref(&t->obj);
+		win_set_error(ERROR_INVALID_ACL);
+		return FALSE;
+	}
+	int max = (desired & MAXIMUM_ALLOWED) != 0;
+	DWORD want = desired & ~MAXIMUM_ALLOWED;
+	int sec_on = token_priv_on(t, SE_SECURITY_PRIVILEGE);
+	int take_on = token_priv_on(t, SE_TAKE_OWNERSHIP_PRIVILEGE);
+	kobj_unref(&t->obj);
+
+	/* The privileges this check uses, which the caller is told of. */
+	int use_sec = (want & ACCESS_SYSTEM_SECURITY) && sec_on;
+	int use_take = take_on && (max || (want & WRITE_OWNER));
+	DWORD need = offsetof(PRIVILEGE_SET, Privilege) +
+		     (use_sec + use_take) * sizeof(LUID_AND_ATTRIBUTES);
+	if (!privs || *privs_len < need) {
 		*privs_len = need;
 		win_set_error(ERROR_INSUFFICIENT_BUFFER);
 		return FALSE;
 	}
-	int max = (desired & MAXIMUM_ALLOWED) != 0;
-	DWORD want = desired & ~MAXIMUM_ALLOWED, have = 0, denied = 0;
-
 	privs->PrivilegeCount = 0;
 	privs->Control = 0;
-	if (want & ACCESS_SYSTEM_SECURITY) {
-		if (!token_priv_on(t, SE_SECURITY_PRIVILEGE)) {
-			kobj_unref(&t->obj);
-			*granted = 0;
-			*status = FALSE;
-			win_set_error(ERROR_PRIVILEGE_NOT_HELD);
-			return TRUE;
-		}
-		have |= ACCESS_SYSTEM_SECURITY;
-		privs->PrivilegeCount = 1;
-		privs->Privilege[0].Luid.LowPart = SE_SECURITY_PRIVILEGE;
-		privs->Privilege[0].Luid.HighPart = 0;
-		privs->Privilege[0].Attributes = SE_PRIVILEGE_USED_FOR_ACCESS;
+	if ((want & ACCESS_SYSTEM_SECURITY) && !sec_on) {
+		*granted = 0;
+		*status = FALSE;
+		win_set_error(ERROR_PRIVILEGE_NOT_HELD);
+		return TRUE;
 	}
-	if (token_priv_on(t, SE_TAKE_OWNERSHIP_PRIVILEGE))
-		have |= WRITE_OWNER;
-	kobj_unref(&t->obj);
-	if (token_has_sid(owner, 0))
-		have |= READ_CONTROL | WRITE_DAC;
 
+	/* What the privileges and ownership give, which no ACE takes away. */
+	DWORD implicit = 0;
+	if (use_sec) {
+		implicit |= ACCESS_SYSTEM_SECURITY;
+		LUID_AND_ATTRIBUTES *l = &privs->Privilege[privs->PrivilegeCount++];
+		l->Luid.LowPart = SE_SECURITY_PRIVILEGE;
+		l->Luid.HighPart = 0;
+		l->Attributes = SE_PRIVILEGE_USED_FOR_ACCESS;
+	}
+	if (use_take) {
+		implicit |= WRITE_OWNER;
+		LUID_AND_ATTRIBUTES *l = &privs->Privilege[privs->PrivilegeCount++];
+		l->Luid.LowPart = SE_TAKE_OWNERSHIP_PRIVILEGE;
+		l->Luid.HighPart = 0;
+		l->Attributes = SE_PRIVILEGE_USED_FOR_ACCESS;
+	}
+	/*
+	 * The owner may read and change the DACL, unless the DACL says what
+	 * the owner may do through OWNER RIGHTS (S-1-3-4), which then stands
+	 * for the owner in its ACEs.
+	 */
+	const struct sid owner_rights = mksid(3, 1, 4);
+	int is_owner = token_has_sid(owner, 0), owner_rights_ace = 0;
+	if (dacl) {
+		const BYTE *p = (const BYTE *)(dacl + 1), *sid;
+		for (WORD i = 0; i < dacl->AceCount;
+		     i++, p += ((const ACE_HEADER *)p)->AceSize) {
+			const ACE_HEADER *h = (const ACE_HEADER *)p;
+			if (!ace_payload_ok(p, &sid)) {
+				if (h->AceType == ACCESS_ALLOWED_ACE_TYPE ||
+				    h->AceType == ACCESS_DENIED_ACE_TYPE) {
+					win_set_error(ERROR_INVALID_ACL);
+					return FALSE;
+				}
+				continue;
+			}
+			if (!(h->AceFlags & INHERIT_ONLY_ACE) &&
+			    sid_eq(sid, &owner_rights))
+				owner_rights_ace = 1;
+		}
+	}
+	if (is_owner && !owner_rights_ace)
+		implicit |= READ_CONTROL | WRITE_DAC;
+
+	/*
+	 * The ACEs, in order, as the kernel walks them: a denied one refuses
+	 * the rights it names not yet granted, an allowed one grants those
+	 * not yet refused (so in a DACL not in canonical order, order
+	 * matters, for MAXIMUM_ALLOWED too). Asked for given rights, the walk
+	 * stops once the answer is known.
+	 */
+	DWORD have = implicit, denied = 0;
 	if (!dacl) {
 		have |= map->GenericAll | STANDARD_RIGHTS_ALL;
 	} else {
-		if (!acl_ok(dacl)) {
-			win_set_error(ERROR_INVALID_ACL);
-			return FALSE;
-		}
-		const BYTE *p = (const BYTE *)(dacl + 1);
-		for (WORD i = 0; i < dacl->AceCount; i++, p += ((const ACE_HEADER *)p)->AceSize) {
+		const BYTE *p = (const BYTE *)(dacl + 1), *sid;
+		for (WORD i = 0; i < dacl->AceCount;
+		     i++, p += ((const ACE_HEADER *)p)->AceSize) {
 			const ACE_HEADER *h = (const ACE_HEADER *)p;
 			if (h->AceFlags & INHERIT_ONLY_ACE)
 				continue;
 			if (h->AceType != ACCESS_ALLOWED_ACE_TYPE &&
 			    h->AceType != ACCESS_DENIED_ACE_TYPE)
 				continue;
-			const ACCESS_ALLOWED_ACE *a = (const ACCESS_ALLOWED_ACE *)p;
-			DWORD m = a->Mask;
+			ace_payload_ok(p, &sid);	/* checked above */
+			DWORD m;
+			memcpy(&m, p + sizeof(*h), 4);
 			adv_MapGenericMask(&m, map);
 			int deny = h->AceType == ACCESS_DENIED_ACE_TYPE;
-			if (!token_has_sid(&a->SidStart, deny))
+			int applies = sid_eq(sid, &owner_rights) ? is_owner :
+				      token_has_sid(sid, deny);
+			if (!applies)
 				continue;
 			if (deny)
 				denied |= m & ~have;
 			else
 				have |= m & ~denied;
-			if (!max && (have & want) == want)
-				break;
-			if (!max && (denied & want))
+			if (!max && ((have & want) == want || (denied & want)))
 				break;
 		}
 	}
