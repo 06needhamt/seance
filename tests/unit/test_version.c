@@ -3,6 +3,7 @@
  * version.dll, called through its export table: version blocks from
  * files, loaded modules and the built-in DLLs, and VerQueryValue on them.
  */
+#include <dirent.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -614,6 +615,64 @@ static void test_install(void)
 		      fixed->dwFileVersionMS == 0x00020000);
 		free(block);
 		free(w);
+	}
+
+	/* Compressed data cut short is unreadable, and replaces nothing. */
+	{
+		static const BYTE cut[] = { 'S', 'Z', 'D', 'D', 0x88, 0xf0,
+					    0x27, 0x33, 'A', 'L', 9, 0, 0, 0,
+					    0x07, 'a', 'b' };
+		snprintf(p, sizeof(p), "%s/CUT.TX_", src);
+		FILE *f = fopen(p, "wb");
+		if (f) {
+			fwrite(cut, 1, sizeof(cut), f);
+			fclose(f);
+		}
+		snprintf(p, sizeof(p), "%s/CUT.TXT", dst);
+		f = fopen(p, "wb");
+		if (f) {
+			fputs("old", f);
+			fclose(f);
+		}
+		tmp[0] = '\0';
+		tl = sizeof(tmp);
+		CHECK_EQ(VerInstallFileA(1, "CUT.TX_", "CUT.TXT", wsrc, wdst,
+					 NULL, tmp, &tl),
+			 0x10000);	/* VIF_CANNOTREADSRC */
+		CHECK(file_is(p, "old", 3));
+		CHECK_STR(tmp, "");
+		unlink(p);
+		snprintf(p, sizeof(p), "%s/CUT.TX_", src);
+		unlink(p);
+		/* No temporary file was left behind. */
+		DIR *d = opendir(dst);
+		struct dirent *e;
+		int left = 0;
+		while (d && (e = readdir(d)))
+			left += !strncmp(e->d_name, "VER", 3);
+		if (d)
+			closedir(d);
+		CHECK_EQ(left, 0);
+	}
+
+	/*
+	 * The installed copy is the one being replaced, though its directory
+	 * is spelt another way: it is not deleted as an old copy.
+	 */
+	{
+		char link[600];
+		snprintf(link, sizeof(link), "%s/via", src);
+		if (!symlink(dst, link)) {
+			char *wlink = path_to_windows(link);
+			tmp[0] = '\0';
+			tl = sizeof(tmp);
+			CHECK_EQ(VerInstallFileA(1, "APP.DLL", "APP.DLL", wsrc,
+						 wdst, wlink, tmp, &tl), 0);
+			snprintf(p, sizeof(p), "%s/APP.DLL", dst);
+			CHECK(!access(p, F_OK));
+			free(wlink);
+			unlink(link);
+		}
 	}
 
 	/* A missing source. */

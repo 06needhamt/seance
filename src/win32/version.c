@@ -22,6 +22,7 @@
  * programs of the 16-bit era expect, expanding COMPRESS.EXE (SZDD) files.
  */
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
 #include <sys/stat.h>
@@ -137,6 +138,10 @@ static void end_node(struct builder *b, size_t start)
 	if (b->failed)
 		return;
 	size_t len = b->len - start;
+	if (len > 0xffff) {	/* too big for its WORD length */
+		b->failed = 1;
+		return;
+	}
 	b->buf[start] = (BYTE)len;
 	b->buf[start + 1] = (BYTE)(len >> 8);
 }
@@ -262,14 +267,19 @@ static int ne_node(struct builder *b, const BYTE *blk, const BYTE *p,
 
 	size_t start;
 	if (kind == NE_STRINGS) {
-		WCHAR w[1024];
-		int n = vlen ? cp_to_utf16(CP_ACP, (const char *)val, vlen, w,
-					   1023, 0) : 0;
-		if (n < 0)
-			n = 0;
+		/* No more characters than bytes, and the NUL. */
+		WCHAR *w = malloc(((size_t)vlen + 1) * sizeof(WCHAR));
+		int n = w && vlen ? cp_to_utf16(CP_ACP, (const char *)val, vlen,
+						w, vlen, 0) : 0;
+		if (!w || n < 0) {
+			free(w);
+			b->failed = 1;
+			return -1;
+		}
 		if (!n || w[n - 1])	/* text values end in a NUL */
 			w[n++] = 0;
 		start = begin_node_w(b, wkey, 1, w, (WORD)n);
+		free(w);
 	} else {
 		start = begin_node_w(b, wkey, 0, val, vlen);
 	}
@@ -281,7 +291,7 @@ static int ne_node(struct builder *b, const BYTE *blk, const BYTE *p,
 		child_kind = NE_STRINGS;
 	else if (depth == 1) {
 		int same = 1;
-		for (int i = 0; sfi[i] || wkey[i]; i++)
+		for (int i = 0; same && (sfi[i] || wkey[i]); i++)
 			if (k32_toupper_w(sfi[i]) != k32_toupper_w(wkey[i]))
 				same = 0;
 		if (same)
@@ -1014,12 +1024,16 @@ WINFN(DWORD) ver_VerFindFileW(DWORD flags, LPCWSTR name, LPCWSTR windir,
  * whose bits (low first) say literal (1) or a 12-bit position and a
  * 4-bit length less 3.
  */
-static BYTE *szdd_expand(const BYTE *in, size_t n, size_t *out_n)
+static int is_szdd(const BYTE *in, size_t n)
 {
 	static const BYTE magic[8] = { 'S', 'Z', 'D', 'D', 0x88, 0xf0, 0x27,
 				       0x33 };
-	if (n < 14 || memcmp(in, magic, 8) || in[8] != 'A')
-		return NULL;
+	return n >= 14 && !memcmp(in, magic, 8) && in[8] == 'A';
+}
+
+/* The expansion of an SZDD file (is_szdd), or NULL if it can't be made. */
+static BYTE *szdd_expand(const BYTE *in, size_t n, size_t *out_n)
+{
 	size_t size = in[10] | in[11] << 8 | (size_t)in[12] << 16 |
 		      (size_t)in[13] << 24;
 	if (size > 256u * 1024 * 1024)
@@ -1050,6 +1064,10 @@ static BYTE *szdd_expand(const BYTE *in, size_t n, size_t *out_n)
 				}
 			}
 		}
+	}
+	if (o != size) {	/* cut short */
+		free(out);
+		return NULL;
 	}
 	*out_n = o;
 	return out;
@@ -1082,33 +1100,41 @@ static int file_version(const char *unix_path, VS_FIXEDFILEINFO *fixed,
 	return ok;
 }
 
-/* The source, expanded if it was compressed, written to a new file. */
-static DWORD copy_expanded(const char *src, const char *dst)
+/*
+ * The source, expanded if it was compressed, written to fd (a new file,
+ * which is closed). Compressed data that doesn't expand is unreadable.
+ */
+static DWORD copy_expanded(const char *src, int fd)
 {
-	size_t n, out_n;
-	BYTE *data = read_file(src, &n), *exp;
+	size_t n, out_n = 0;
+	BYTE *data = read_file(src, &n);
+	DWORD r = 0;
 
 	if (!data) {
 		/* An empty file reads as nothing: copy it as such. */
 		struct stat st;
 		if (stat(src, &st) || st.st_size)
-			return VIF_CANNOTREADSRC;
+			r = VIF_CANNOTREADSRC;
 		n = 0;
-	}
-	if (data && (exp = szdd_expand(data, n, &out_n))) {
+	} else if (is_szdd(data, n)) {
+		BYTE *exp = szdd_expand(data, n, &out_n);
 		free(data);
 		data = exp;
 		n = out_n;
+		if (!exp)
+			r = VIF_CANNOTREADSRC;
 	}
-	FILE *f = fopen(dst, "wb");
-	DWORD r = 0;
-	if (!f)
-		r = errno == EACCES || errno == EROFS ? VIF_WRITEPROT :
-		    VIF_CANNOTCREATE;
-	else if ((n && fwrite(data, 1, n, f) != n) | fclose(f))
+	for (size_t done = 0; !r && done < n;) {
+		ssize_t k = write(fd, data + done, n - done);
+		if (k < 0 && errno == EINTR)
+			continue;
+		if (k <= 0)
+			r = VIF_OUTOFSPACE;
+		else
+			done += (size_t)k;
+	}
+	if (close(fd) && !r)
 		r = VIF_OUTOFSPACE;
-	if (r && f)
-		unlink(dst);
 	free(data);
 	return r;
 }
@@ -1129,6 +1155,7 @@ static DWORD install_file(DWORD flags, const char *srcname,
 	char *src_w = NULL, *src = NULL, *tmp_w = NULL, *tmp_u = NULL;
 	char *dst_w = NULL, *dst_u = NULL, *cur_w = NULL, *cur_u = NULL;
 	DWORD r = 0;
+	int fd = -1;
 
 	if (!srcname || !destname || !destdir)
 		return VIF_CANNOTREADSRC;
@@ -1175,12 +1202,25 @@ static DWORD install_file(DWORD flags, const char *srcname,
 				r = VIF_OUTOFMEMORY;
 				goto out;
 			}
-			if (access(tmp_u, F_OK)) {
+			/* Made here, so no other install takes it too. */
+			fd = open(tmp_u, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
+				  0644);
+			if (fd >= 0) {
 				snprintf(tmp, tmpsize, "%s", name);
 				break;
 			}
+			if (errno != EEXIST) {
+				r = errno == EACCES || errno == EROFS ?
+				    VIF_WRITEPROT : VIF_CANNOTCREATE;
+				goto out;
+			}
 		}
-		if ((r = copy_expanded(src, tmp_u))) {
+		if (fd < 0) {
+			r = VIF_CANNOTCREATE;
+			goto out;
+		}
+		if ((r = copy_expanded(src, fd))) {
+			unlink(tmp_u);
 			*tmp = '\0';
 			goto out;
 		}
@@ -1199,7 +1239,8 @@ static DWORD install_file(DWORD flags, const char *srcname,
 				r |= VIF_DIFFLANG;
 			if ((ta >> 16) != (tb >> 16))
 				r |= VIF_DIFFCODEPG;
-			if (a.dwFileType != b.dwFileType ||
+			if (a.dwFileOS != b.dwFileOS ||
+			    a.dwFileType != b.dwFileType ||
 			    a.dwFileSubtype != b.dwFileSubtype)
 				r |= VIF_DIFFTYPE;
 		}
@@ -1209,6 +1250,14 @@ static DWORD install_file(DWORD flags, const char *srcname,
 		}
 	}
 
+	/*
+	 * Whether the copy in cur is the one being replaced: the same file,
+	 * however its directory was spelt.
+	 */
+	struct stat cs, ds;
+	int same = !strcmp(cur_u, dst_u) ||
+		   (!stat(cur_u, &cs) && !stat(dst_u, &ds) &&
+		    cs.st_dev == ds.st_dev && cs.st_ino == ds.st_ino);
 	if (!access(dst_u, F_OK) && unlink(dst_u)) {
 		r = errno == EACCES || errno == EPERM ? VIF_ACCESSVIOLATION :
 		    VIF_CANNOTDELETE;
@@ -1220,7 +1269,8 @@ static DWORD install_file(DWORD flags, const char *srcname,
 		goto out;
 	}
 	*tmp = '\0';
-	if (!same_dir(curdir, destdir) && !(flags & VIFF_DONTDELETEOLD) &&
+	if (!same && !same_dir(curdir, destdir) &&
+	    !(flags & VIFF_DONTDELETEOLD) &&
 	    !access(cur_u, F_OK) && unlink(cur_u))
 		r = VIF_CANNOTDELETECUR;
 out:
