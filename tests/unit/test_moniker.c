@@ -138,18 +138,18 @@ WINAPI static ULONG ct_release(IOleItemContainer *self)
 	return --container_refs;
 }
 
-/* "!Name" up to the next "!". */
+/* "!Name" (or "|Name") up to the next "!". */
 WINAPI static HRESULT ct_parse(IOleItemContainer *self, IBindCtx *bc,
 			       LPOLESTR name, ULONG *eaten, IMoniker **out)
 {
 	*out = NULL;
 	*eaten = 0;
-	if (name[0] != '!')
+	if (name[0] != '!' && name[0] != '|')
 		return MK_E_SYNTAX;
 	ULONG n = 1;
 	while (name[n] && name[n] != '!' && name[n] != '?')
 		n++;
-	WCHAR delim[2] = { '!', 0 }, item[64];
+	WCHAR delim[2] = { name[0], 0 }, item[64];
 	if (n - 1 >= 64)
 		return MK_E_SYNTAX;
 	memcpy(item, name + 1, (n - 1) * sizeof(WCHAR));
@@ -489,6 +489,22 @@ static void test_simple(void)
 	CHECK(named(c, "..\\x"));
 	release(c);
 	release(g);
+	/* Going up to the drive keeps its root: "C:\\", not "C:". */
+	g = file_of("..\\..\\..");
+	CHECK_EQ(f->lpVtbl->ComposeWith(f, g, TRUE, &c), S_OK);
+	CHECK(named(c, "C:\\"));
+	release(c);
+	release(g);
+	g = file_of("..\\..\\..\\e.doc");
+	CHECK_EQ(f->lpVtbl->ComposeWith(f, g, TRUE, &c), S_OK);
+	CHECK(named(c, "C:\\e.doc"));
+	release(c);
+	release(g);
+	/* A file moniker gives only storage from BindToStorage. */
+	void *ps = (void *)1;
+	CHECK_EQ(f->lpVtbl->BindToStorage(f, NULL, NULL, &IID_IPersistFile,
+					  &ps), E_NOINTERFACE);
+	CHECK(ps == NULL);
 	g = file_of("D:\\abs");
 	c = (IMoniker *)1;
 	CHECK_EQ(f->lpVtbl->ComposeWith(f, g, TRUE, &c), MK_E_SYNTAX);
@@ -688,6 +704,54 @@ static void test_persist(void)
 		CHECK(n == sizeof(want) && !memcmp(got, want, sizeof(want)));
 	}
 	release(plain);
+
+	/* A UNC path records its "\\\\server" length as endServer. */
+	plain = file_of("\\\\srv\\share\\f.doc");
+	stm->lpVtbl->SetSize(stm, (ULARGE_INTEGER){ 0 });
+	stm->lpVtbl->Seek(stm, zero, 0, NULL);
+	CHECK_EQ(OleSaveToStream((IPersistStream *)plain, stm), S_OK);
+	{
+		BYTE got[64];
+		ULONG n = 0;
+		stm->lpVtbl->Seek(stm, zero, 0, NULL);
+		stm->lpVtbl->Read(stm, got, sizeof(got), &n);
+		/* the CLSID, 2 + 4 + 18 bytes of path, then endServer and
+		 * the 0xDEAD version */
+		CHECK(n >= 44 && got[40] == 5 && got[41] == 0 &&
+		      got[42] == 0xad && got[43] == 0xde);
+		stm->lpVtbl->Seek(stm, zero, 0, NULL);
+		CHECK_EQ(OleLoadFromStream(stm, &IID_IMoniker, (void **)&back),
+			 S_OK);
+		CHECK(back && back->lpVtbl->IsEqual(back, plain) == S_OK);
+		release(back);
+	}
+	release(plain);
+
+	/* An anti count too large to name, and composites nested without
+	 * end, are refused. */
+	static const BYTE anti_clsid[16] = { 5, 3, 0, 0, 0, 0, 0, 0,
+					     0xc0, 0, 0, 0, 0, 0, 0, 0x46 };
+	static const BYTE comp_clsid[16] = { 9, 3, 0, 0, 0, 0, 0, 0,
+					     0xc0, 0, 0, 0, 0, 0, 0, 0x46 };
+	DWORD big = 0x40000000, two = 2;
+	stm->lpVtbl->SetSize(stm, (ULARGE_INTEGER){ 0 });
+	stm->lpVtbl->Seek(stm, zero, 0, NULL);
+	stm->lpVtbl->Write(stm, anti_clsid, 16, NULL);
+	stm->lpVtbl->Write(stm, &big, 4, NULL);
+	stm->lpVtbl->Seek(stm, zero, 0, NULL);
+	back = (IMoniker *)1;
+	CHECK(FAILED(OleLoadFromStream(stm, &IID_IMoniker, (void **)&back)));
+	CHECK(back == NULL);
+	stm->lpVtbl->SetSize(stm, (ULARGE_INTEGER){ 0 });
+	stm->lpVtbl->Seek(stm, zero, 0, NULL);
+	for (int d = 0; d < 200; d++) {
+		stm->lpVtbl->Write(stm, comp_clsid, 16, NULL);
+		stm->lpVtbl->Write(stm, &two, 4, NULL);
+	}
+	stm->lpVtbl->Seek(stm, zero, 0, NULL);
+	back = (IMoniker *)1;
+	CHECK(FAILED(OleLoadFromStream(stm, &IID_IMoniker, (void **)&back)));
+	CHECK(back == NULL);
 	stm->lpVtbl->Release(stm);
 
 	release(all);
@@ -742,7 +806,7 @@ static void test_rot(void)
 	CHECK_EQ(rot->lpVtbl->Revoke(rot, c1), E_INVALIDARG);
 	CHECK_EQ(rot->lpVtbl->Revoke(rot, c2), S_OK);
 	CHECK_EQ(o.refs, 1);
-	CHECK_EQ(rot->lpVtbl->GetObject(rot, f, &u), MK_E_UNAVAILABLE);
+	CHECK_EQ(rot->lpVtbl->GetObject(rot, f, &u), S_FALSE);
 	CHECK(u == NULL);
 	CHECK_EQ(rot->lpVtbl->Register(rot, 4, &o.iface, f, &c1),
 		 E_INVALIDARG);
@@ -801,6 +865,14 @@ static void test_parse_bind(void)
 	free(name);
 	name = wide("C:\\nowhere\\none.tdoc");
 	CHECK_EQ(MkParseDisplayName(bc, name, &eaten, &m), MK_E_CANTOPENFILE);
+	free(name);
+
+	/* An item delimiter other than "!" still finds the running file. */
+	name = wide("C:\\docs\\book.tdoc|Sheet3");
+	CHECK_EQ(MkParseDisplayName(bc, name, &eaten, &m), S_OK);
+	CHECK_EQ(eaten, wstrlen(name));
+	CHECK(named(m, "C:\\docs\\book.tdoc|Sheet3"));
+	release(m);
 	free(name);
 
 	/* CoGetObject parses and binds in one. */

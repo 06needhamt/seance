@@ -227,6 +227,12 @@ static HRESULT stm_read(IStream *s, void *p, ULONG n)
 
 /* ---- the monikers ---- */
 
+/* An anti moniker's largest count: its "\\.." display name must fit. */
+#define ANTI_MAX 0x100000u
+/* How deep composite records may nest inside one another on Load. */
+#define LOAD_DEPTH_MAX 32
+static __thread unsigned load_depth;
+
 enum kind { K_FILE, K_ITEM, K_ANTI, K_COMPOSITE, K_CLASS, K_POINTER };
 
 struct mk {
@@ -523,6 +529,11 @@ static WCHAR *join(const WCHAR *base, const WCHAR *rel)
 	}
 	while (keep && is_sep(base[keep - 1]))
 		keep--;
+	/* A root keeps its separator: "C:\" and "\" are not "C:" and "". */
+	if (keep == 2 && base[1] == ':' && is_sep(base[2]))
+		keep = 3;
+	else if (!keep && bl && is_sep(base[0]) && !(bl > 1 && is_sep(base[1])))
+		keep = 1;
 	size_t rest = wlen(rel), at = 0;
 	if (up)		/* past the last ".." and its separator */
 		at = (size_t)(r[up - 1].s + 2 - rel);
@@ -566,12 +577,35 @@ static struct rot_entry *rot;
 static size_t rot_n, rot_cap;
 static DWORD rot_next = 1;
 
+/* The entry with this cookie, or NULL; call with rot_lock held. */
+static struct rot_entry *rot_by_cookie(DWORD cookie)
+{
+	for (size_t i = 0; i < rot_n; i++)
+		if (rot[i].cookie == cookie)
+			return &rot[i];
+	return NULL;
+}
+
+/* Call with rot_lock held. IsEqual may re-enter the table (the lock is
+ * recursive) and revoke or register entries, so each candidate is held
+ * by its cookie and a reference, and looked up again after the call. */
 static struct rot_entry *rot_find(IMoniker *name)
 {
+	unsigned restarts = 0;
 	for (size_t i = 0; i < rot_n; i++) {
 		IMoniker *m = rot[i].name;
-		if (m->lpVtbl->IsEqual(m, name) == S_OK)
-			return &rot[i];
+		DWORD cookie = rot[i].cookie;
+		m->lpVtbl->AddRef(m);
+		HRESULT eq = m->lpVtbl->IsEqual(m, name);
+		m->lpVtbl->Release(m);
+		struct rot_entry *e = rot_by_cookie(cookie);
+		if (eq == S_OK && e && e->name == m)
+			return e;
+		if (!e || e != &rot[i]) {	/* the table moved: start again */
+			if (++restarts > 64)
+				return NULL;
+			i = (size_t)-1;
+		}
 	}
 	return NULL;
 }
@@ -734,7 +768,17 @@ static HRESULT save_file(struct mk *m, IStream *stm)
 	if (!a)
 		return E_OUTOFMEMORY;
 	DWORD an = (DWORD)strlen(a) + 1;
-	static const BYTE marker[24] = { 0xff, 0xff, 0xad, 0xde };
+	BYTE marker[24] = { 0xff, 0xff, 0xad, 0xde };
+	/* endServer: the "\\server" length of a UNC path, else 0xFFFF. */
+	if (is_sep(rest[0]) && is_sep(rest[1]) && rest[2]) {
+		size_t e = 2;
+		while (rest[e] && !is_sep(rest[e]))
+			e++;
+		if (e < 0xffff) {
+			marker[0] = (BYTE)e;
+			marker[1] = (BYTE)(e >> 8);
+		}
+	}
 	DWORD wbytes = lossy ? (DWORD)(wlen(rest) * sizeof(WCHAR)) : 0;
 	DWORD extra = wbytes ? wbytes + 6 : 0;
 	WORD three = 3;
@@ -770,8 +814,9 @@ static HRESULT load_file(struct mk *m, IStream *stm)
 	    FAILED(hr = stm_read(stm, marker, sizeof(marker))) ||
 	    FAILED(hr = stm_read(stm, &extra, 4)))
 		goto out;
-	if (marker[0] != 0xff || marker[1] != 0xff || marker[2] != 0xad ||
-	    marker[3] != 0xde) {
+	/* endServer (marker[0..1]) is the UNC server length or 0xFFFF;
+	 * the version that follows is always 0xDEAD. */
+	if (marker[2] != 0xad || marker[3] != 0xde) {
 		hr = E_FAIL;
 		goto out;
 	}
@@ -842,8 +887,15 @@ WINFN(HRESULT) mk_Load(IMoniker *self, IStream *stm)
 		}
 		return hr;
 	}
-	case K_ANTI:
-		return stm_read(stm, &m->count, 4);
+	case K_ANTI: {
+		DWORD c;
+		if (FAILED(hr = stm_read(stm, &c, 4)))
+			return hr;
+		if (!c || c > ANTI_MAX)
+			return E_FAIL;
+		m->count = c;
+		return S_OK;
+	}
 	case K_CLASS: {
 		DWORD extra;
 		if (SUCCEEDED(hr = stm_read(stm, &m->clsid, sizeof(CLSID))) &&
@@ -861,6 +913,9 @@ WINFN(HRESULT) mk_Load(IMoniker *self, IStream *stm)
 			return hr;
 		if (n > 0x10000)
 			return E_FAIL;
+		if (load_depth >= LOAD_DEPTH_MAX)
+			return E_FAIL;
+		load_depth++;
 		for (DWORD i = 0; i < n && SUCCEEDED(hr); i++) {
 			IMoniker *p = NULL;
 			if (SUCCEEDED(hr = load_from_stream(stm, &p))) {
@@ -869,6 +924,7 @@ WINFN(HRESULT) mk_Load(IMoniker *self, IStream *stm)
 				p->lpVtbl->Release(p);
 			}
 		}
+		load_depth--;
 		if (SUCCEEDED(hr) && l.n < 2)
 			hr = E_FAIL;
 		if (SUCCEEDED(hr)) {
@@ -996,16 +1052,29 @@ static DWORD bind_mode(IBindCtx *bc)
 
 WINFN(HRESULT) ole_GetClassFile(LPCOLESTR name, CLSID *clsid);
 
-static HRESULT bind_file(struct mk *m, IBindCtx *bc, REFIID riid, void **ppv)
+/* A moniker to the left (a class moniker, say) supplies the class
+ * factory; with none, the file's own class does. */
+static HRESULT bind_file(struct mk *m, IBindCtx *bc, IMoniker *left,
+			 REFIID riid, void **ppv)
 {
 	CLSID clsid;
 	IPersistFile *pf;
-	HRESULT hr = ole_GetClassFile(m->name, &clsid);
+	HRESULT hr;
 
-	if (FAILED(hr))
-		return hr;
-	hr = create_instance(&clsid, bind_context(bc), &IID_IPersistFile,
-			     (void **)&pf);
+	if (left) {
+		IClassFactory *cf;
+		hr = left->lpVtbl->BindToObject(left, bc, NULL,
+						&IID_IClassFactory,
+						(void **)&cf);
+		if (FAILED(hr))
+			return hr;
+		hr = cf->lpVtbl->CreateInstance(cf, NULL, &IID_IPersistFile,
+						(void **)&pf);
+		cf->lpVtbl->Release(cf);
+	} else if (SUCCEEDED(hr = ole_GetClassFile(m->name, &clsid))) {
+		hr = create_instance(&clsid, bind_context(bc),
+				     &IID_IPersistFile, (void **)&pf);
+	}
 	if (FAILED(hr))
 		return hr;
 	hr = pf->lpVtbl->Load(pf, m->name, bind_mode(bc));
@@ -1041,6 +1110,8 @@ static HRESULT split_last(struct mk *m, IMoniker *left, IMoniker **rest,
 			  IMoniker **last)
 {
 	IMoniker *before;
+	if (m->nparts < 2)	/* a composite not yet loaded */
+		return E_UNEXPECTED;
 	HRESULT hr = from_parts(m->parts, m->nparts - 1, &before);
 	if (FAILED(hr))
 		return hr;
@@ -1093,7 +1164,7 @@ WINFN(HRESULT) mk_BindToObject(IMoniker *self, IBindCtx *bc, IMoniker *left,
 
 	switch (m->kind) {
 	case K_FILE:
-		hr = bind_file(m, bc, riid, ppv);
+		hr = bind_file(m, bc, left, riid, ppv);
 		break;
 	case K_ITEM: {
 		IOleItemContainer *c;
@@ -1144,7 +1215,7 @@ WINFN(HRESULT) mk_BindToStorage(IMoniker *self, IBindCtx *bc, IMoniker *left,
 		if (guid_eq(riid, &IID_IStream) ||
 		    guid_eq(riid, &IID_ILockBytes))
 			return MK_E_NOSTORAGE;
-		return mk_BindToObject(self, bc, left, riid, ppv);
+		return E_NOINTERFACE;	/* storage only, never the object */
 	case K_ITEM: {
 		IOleItemContainer *c;
 		if (FAILED(hr = item_container(bc, left, &c)))
@@ -1196,7 +1267,8 @@ WINFN(HRESULT) mk_ComposeWith(IMoniker *self, IMoniker *right, BOOL only,
 		return compose(self, right, out);
 	if (r && r->kind == K_ANTI) {
 		if (m->kind == K_ANTI)
-			return anti_new(m->count + r->count, out);
+			return m->count + (uint64_t)r->count > ANTI_MAX ?
+				E_FAIL : anti_new(m->count + r->count, out);
 		return r->count > 1 ? anti_new(r->count - 1, out) : S_OK;
 	}
 	if (m->kind == K_FILE && r && r->kind == K_FILE) {
@@ -1344,7 +1416,7 @@ WINFN(HRESULT) mk_IsEqual(IMoniker *self, IMoniker *other)
 		return S_FALSE;
 	switch (m->kind) {
 	case K_FILE:
-	case K_ITEM:
+	case K_ITEM:	/* Windows compares the item alone, not its delimiter */
 		return wieq(m->name, o->name) ? S_OK : S_FALSE;
 	case K_ANTI:
 		return m->count == o->count ? S_OK : S_FALSE;
@@ -1713,6 +1785,8 @@ static HRESULT display_name(IMoniker *mon, IBindCtx *bc, WCHAR **out)
 		break;
 	}
 	case K_ANTI:
+		if (m->count > ANTI_MAX)
+			return E_FAIL;
 		if ((*out = malloc((3 * (size_t)m->count + 1) *
 				   sizeof(WCHAR)))) {
 			for (DWORD i = 0; i < m->count; i++) {
@@ -2260,10 +2334,11 @@ WINFN(HRESULT) bc_RegisterObjectParam(IBindCtx *self, LPOLESTR key,
 	if (!key || !obj)
 		return E_INVALIDARG;
 	struct param *p = find_param(b, key);
-	if (p) {
+	if (p) {	/* publish the new object, then let the old go */
+		IUnknown *old = p->obj;
 		obj->lpVtbl->AddRef(obj);
-		p->obj->lpVtbl->Release(p->obj);
 		p->obj = obj;
+		old->lpVtbl->Release(old);
 		return S_OK;
 	}
 	if (b->nparams == b->capparams) {
@@ -2327,11 +2402,14 @@ WINFN(HRESULT) bc_RevokeObjectParam(IBindCtx *self, LPOLESTR key)
 	struct param *p = find_param(b, key);
 	if (!p)
 		return S_FALSE;
-	free(p->key);
-	p->obj->lpVtbl->Release(p->obj);
+	/* Detach first: the last Release may call back into the context. */
+	WCHAR *k = p->key;
+	IUnknown *obj = p->obj;
 	DWORD i = (DWORD)(p - b->params);
 	memmove(p, p + 1, (b->nparams - i - 1) * sizeof(*p));
 	b->nparams--;
+	free(k);
+	obj->lpVtbl->Release(obj);
 	return S_OK;
 }
 
@@ -2467,7 +2545,8 @@ WINFN(HRESULT) rot_GetObject(IRunningObjectTable *self, IMoniker *name,
 	*obj = NULL;
 	if (!name)
 		return E_INVALIDARG;
-	return rot_object(name, obj);
+	HRESULT hr = rot_object(name, obj);
+	return hr == MK_E_UNAVAILABLE ? S_FALSE : hr;	/* a miss */
 }
 
 WINFN(HRESULT) rot_NoteChangeTime(IRunningObjectTable *self, DWORD cookie,
@@ -2583,8 +2662,7 @@ WINFN(HRESULT) ole_CreateGenericComposite(IMoniker *first, IMoniker *rest,
 	if (!out)
 		return E_POINTER;
 	*out = NULL;
-	if (first && rest)
-		return first->lpVtbl->ComposeWith(first, rest, FALSE, out);
+	/* compose() itself; a custom ComposeWith(FALSE) may call us. */
 	return compose(first, rest, out);
 }
 
@@ -2692,6 +2770,17 @@ static int file_exists(const WCHAR *path, size_t n)
 	return yes;
 }
 
+static int item_boundary(const WCHAR *name, size_t end, size_t n)
+{
+	if (end == n)
+		return 1;
+	WCHAR c = name[end];
+	if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+	    (c >= 'a' && c <= 'z') || c >= 0x80)
+		return 0;
+	return !strchr(".-_ \\/:~$'()[]{}+,;=", (char)c);
+}
+
 WINFN(HRESULT) ole_MkParseDisplayName(IBindCtx *bc, LPCOLESTR name,
 				      ULONG *eaten, IMoniker **out)
 {
@@ -2738,18 +2827,15 @@ WINFN(HRESULT) ole_MkParseDisplayName(IBindCtx *bc, LPCOLESTR name,
 		    SUCCEEDED(progid_clsid(name, colon, &clsid)))
 			return parse_by_class(bc, &clsid, (LPOLESTR)name,
 					      eaten, out);
-		/* The longest prefix that is a file, ending before a "!". */
+		/* The longest prefix that is a running or real file, ending
+		 * at the end or before a character that can start an item
+		 * ("!", "|", ...: not part of an ordinary path). */
 		size_t end = n;
-		for (;;) {
-			if (file_exists(name, end))
-				break;
-			while (end && name[end - 1] != '!')
-				end--;
-			if (end)
-				end--;
-			if (!end)
-				return MK_E_CANTOPENFILE;
-		}
+		while (end && !(item_boundary(name, end, n) &&
+				file_exists(name, end)))
+			end--;
+		if (!end)
+			return MK_E_CANTOPENFILE;
 		if (FAILED(hr = file_new(name, end, &acc)))
 			return hr;
 		at = (ULONG)end;
@@ -2771,6 +2857,8 @@ WINFN(HRESULT) ole_MkParseDisplayName(IBindCtx *bc, LPCOLESTR name,
 		hr = compose(acc, next, &c);
 		next->lpVtbl->Release(next);
 		acc->lpVtbl->Release(acc);
+		if (SUCCEEDED(hr) && !c)	/* it cancelled to nothing */
+			hr = MK_E_SYNTAX;
 		if (FAILED(hr)) {
 			*eaten = at;
 			return hr;
