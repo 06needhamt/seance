@@ -69,6 +69,23 @@ struct node {
 	int gone;
 };
 
+/*
+ * What a backing store is known by across roots: the generation counts the
+ * commits to it, for STGC_ONLYIFCURRENT. File-backed arrays are keyed by
+ * device and inode, others by the ILockBytes pointer.
+ */
+struct backing {
+	struct backing *next;
+	dev_t dev;
+	ino_t ino;
+	const void *ptr;
+	ULONG gen;
+	int users;
+	/* For files: how many openers have read and write access, and how
+	 * many deny each to others (the STGM_SHARE_* bits). */
+	int nread, nwrite, deny_read, deny_write;
+};
+
 /* An open compound file: its bytes, mode and tree. */
 struct file {
 	LONG refs;
@@ -77,6 +94,10 @@ struct file {
 	struct node *root;
 	int dirty;
 	WCHAR *name;
+	BYTE *saved;		/* the image last committed to (or read from) lb */
+	size_t saved_len;
+	struct backing *bk;
+	ULONG gen;		/* bk's generation when saved was current */
 };
 
 extern const struct builtin_dll builtin_user32, builtin_ole32;
@@ -173,22 +194,13 @@ static void node_add(struct node *parent, struct node *n)
 	parent->child = n;
 }
 
-static WCHAR upper(WCHAR c)
-{
-	if (c >= 'a' && c <= 'z')
-		return c - 0x20;
-	if (c >= 0xe0 && c <= 0xfe && c != 0xf7)
-		return c - 0x20;
-	return c;
-}
-
 /* The order the format sorts siblings in: by length, then upper case. */
 static int name_cmp(const WCHAR *a, int al, const WCHAR *b, int bl)
 {
 	if (al != bl)
 		return al < bl ? -1 : 1;
 	for (int i = 0; i < al; i++) {
-		WCHAR x = upper(a[i]), y = upper(b[i]);
+		WCHAR x = k32_toupper_w(a[i]), y = k32_toupper_w(b[i]);
 		if (x != y)
 			return x < y ? -1 : 1;
 	}
@@ -263,10 +275,11 @@ static WORD rd16(const BYTE *p)
 
 static const BYTE *sector(struct reader *r, ULONG s)
 {
-	size_t at = ((size_t)s + 1) * r->ssz;
-	if (s >= 0xfffffffau || at + r->ssz > r->len)
+	size_t nsec = r->len / r->ssz;	/* sectors, counting the header */
+
+	if (nsec == 0 || s >= nsec - 1)
 		return NULL;
-	return r->buf + at;
+	return r->buf + ((size_t)s + 1) * r->ssz;
 }
 
 /*
@@ -836,7 +849,33 @@ static HRESULT file_load(struct file *f, int empty_ok)
 	} else {
 		hr = parse(buf, len, &root);
 	}
-	free(buf);
+	if (SUCCEEDED(hr)) {
+		if (f->root)
+			node_detach(f->root);
+		f->root = root;
+		free(f->saved);
+		f->saved = buf;
+		f->saved_len = len;
+		f->gen = f->bk ? f->bk->gen : 0;
+	} else {
+		free(buf);
+	}
+	return hr;
+}
+
+/* Rebuilds the tree from the last committed image, for Revert. */
+static HRESULT file_reload(struct file *f)
+{
+	struct node *root = NULL;
+	HRESULT hr;
+
+	if (!f->saved_len) {
+		static const WCHAR rn[] = { 'R','o','o','t',' ','E','n','t','r','y' };
+		root = node_new(rn, 10, STGTY_STORAGE);
+		hr = root ? S_OK : E_OUTOFMEMORY;
+	} else {
+		hr = parse(f->saved, f->saved_len, &root);
+	}
 	if (SUCCEEDED(hr)) {
 		if (f->root)
 			node_detach(f->root);
@@ -845,6 +884,29 @@ static HRESULT file_load(struct file *f, int empty_ok)
 	return hr;
 }
 
+/* Writes image to the backing store whole. */
+static HRESULT lb_put_all(ILockBytes *lb, const BYTE *buf, size_t len)
+{
+	ULARGE_INTEGER zero = { 0 }, size;
+	ULONG written = 0;
+	HRESULT hr;
+
+	size.QuadPart = len;
+	hr = lb->lpVtbl->SetSize(lb, size);
+	if (SUCCEEDED(hr) && len)
+		hr = lb->lpVtbl->WriteAt(lb, zero, buf, (ULONG)len, &written);
+	if (SUCCEEDED(hr) && len && written != len)
+		hr = STG_E_WRITEFAULT;
+	if (SUCCEEDED(hr))
+		hr = lb->lpVtbl->Flush(lb);
+	return hr;
+}
+
+/*
+ * Commits the tree. The previous image is kept until the new one is
+ * written whole; if writing fails part way, the previous image is put
+ * back, so the store (and Revert) still hold the last commit.
+ */
 static HRESULT file_flush(struct file *f)
 {
 	if (!f->dirty || !writable(f->mode))
@@ -854,20 +916,39 @@ static HRESULT file_flush(struct file *f)
 	HRESULT hr = serialise(f->root, &buf, &len);
 	if (FAILED(hr))
 		return hr;
-	ULARGE_INTEGER zero = { 0 }, size;
-	ULONG written = 0;
-	size.QuadPart = len;
-	hr = f->lb->lpVtbl->SetSize(f->lb, size);
-	if (SUCCEEDED(hr))
-		hr = f->lb->lpVtbl->WriteAt(f->lb, zero, buf, (ULONG)len, &written);
-	if (SUCCEEDED(hr) && written != len)
-		hr = STG_E_WRITEFAULT;
-	if (SUCCEEDED(hr))
-		f->lb->lpVtbl->Flush(f->lb);
-	free(buf);
-	if (SUCCEEDED(hr))
-		f->dirty = 0;
-	return hr;
+	hr = lb_put_all(f->lb, buf, len);
+	if (FAILED(hr)) {
+		lb_put_all(f->lb, f->saved, f->saved_len);
+		free(buf);
+		return hr;
+	}
+	free(f->saved);
+	f->saved = buf;
+	f->saved_len = len;
+	if (f->bk)
+		f->gen = ++f->bk->gen;
+	f->dirty = 0;
+	return S_OK;
+}
+
+static struct backing *backings;
+
+static const ILockBytesVtbl flb_vtbl;
+static struct backing *backing_find(dev_t dev, ino_t ino, const void *ptr);
+
+/* Finds or adds lb's entry in the list of backing stores (lock held). */
+static struct backing *backing_get(ILockBytes *lb);
+
+static void backing_put(struct backing *b)
+{
+	if (!b || --b->users)
+		return;
+	for (struct backing **p = &backings; *p; p = &(*p)->next)
+		if (*p == b) {
+			*p = b->next;
+			break;
+		}
+	free(b);
 }
 
 static void file_unref(struct file *f)
@@ -878,6 +959,8 @@ static void file_unref(struct file *f)
 		file_flush(f);
 	node_detach(f->root);
 	f->lb->lpVtbl->Release(f->lb);
+	backing_put(f->bk);
+	free(f->saved);
 	free(f->name);
 	free(f);
 }
@@ -1260,8 +1343,13 @@ static HRESULT usable(struct stg *s, int write)
  * Makes an element: a new one, or with STGM_CREATE in place of one of
  * the same name that isn't open.
  */
+/*
+ * Creates the element name below s and opens it (out is an IStream or an
+ * IStorage by type). The node and its handle are made before the tree
+ * changes, so a failure leaves any element already there as it was.
+ */
 static HRESULT make_element(struct stg *s, LPCOLESTR name, DWORD mode,
-			    BYTE type, struct node **out)
+			    BYTE type, void **out)
 {
 	HRESULT hr = check_name(name);
 	if (FAILED(hr))
@@ -1274,7 +1362,6 @@ static HRESULT make_element(struct stg *s, LPCOLESTR name, DWORD mode,
 			return STG_E_FILEALREADYEXISTS;
 		if (old->open)
 			return STG_E_ACCESSDENIED;
-		node_unlink(old);
 	}
 	struct node *n = node_new(name, (int)wstrlen(name), type);
 	if (!n)
@@ -1282,10 +1369,18 @@ static HRESULT make_element(struct stg *s, LPCOLESTR name, DWORD mode,
 	if (type == STGTY_STORAGE) {
 		now(&n->ctime);
 		n->mtime = n->ctime;
+		hr = stg_new(s->f, n, mode, (IStorage **)out);
+	} else {
+		hr = stm_new(s->f, n, mode, (IStream **)out);
 	}
-	node_add(s->n, n);
+	if (FAILED(hr)) {
+		node_unref(n);
+		return STG_E_INSUFFICIENTMEMORY;
+	}
+	if (old)
+		node_unlink(old);
+	node_add(s->n, n);	/* with the reference it was made with */
 	touch(s->f, s->n);
-	*out = n;
 	return S_OK;
 }
 
@@ -1305,7 +1400,6 @@ WINFN(HRESULT) stg_CreateStream(IStorage *self, LPCOLESTR name, DWORD mode,
 				DWORD r1, DWORD r2, IStream **out)
 {
 	struct stg *s = stg_impl(self);
-	struct node *n;
 	HRESULT hr;
 
 	if (!out)
@@ -1314,9 +1408,7 @@ WINFN(HRESULT) stg_CreateStream(IStorage *self, LPCOLESTR name, DWORD mode,
 	if (FAILED(hr = check_open_mode(s, mode)))
 		return hr;
 	pthread_mutex_lock(&lock);
-	hr = make_element(s, name, mode, STGTY_STREAM, &n);
-	if (SUCCEEDED(hr))
-		hr = stm_new(s->f, n, mode, out);
+	hr = make_element(s, name, mode, STGTY_STREAM, (void **)out);
 	pthread_mutex_unlock(&lock);
 	return hr;
 }
@@ -1362,7 +1454,6 @@ WINFN(HRESULT) stg_CreateStorage(IStorage *self, LPCOLESTR name, DWORD mode,
 				 DWORD r1, DWORD r2, IStorage **out)
 {
 	struct stg *s = stg_impl(self);
-	struct node *n;
 	HRESULT hr;
 
 	if (!out)
@@ -1371,9 +1462,7 @@ WINFN(HRESULT) stg_CreateStorage(IStorage *self, LPCOLESTR name, DWORD mode,
 	if (FAILED(hr = check_open_mode(s, mode)))
 		return hr;
 	pthread_mutex_lock(&lock);
-	hr = make_element(s, name, mode, STGTY_STORAGE, &n);
-	if (SUCCEEDED(hr))
-		hr = stg_new(s->f, n, mode, out);
+	hr = make_element(s, name, mode, STGTY_STORAGE, (void **)out);
 	pthread_mutex_unlock(&lock);
 	return hr;
 }
@@ -1407,7 +1496,11 @@ static int excluded(SNB snb, const WCHAR *name, int len)
 	return 0;
 }
 
-static HRESULT copy_node_to(struct node *n, IStorage *dest, const WCHAR *as);
+/* How copy_node_to treats an element of the same name in dest. */
+enum { COPY_MERGE, COPY_NOREPLACE };
+
+static HRESULT copy_node_to(struct node *n, IStorage *dest, const WCHAR *as,
+			    int how);
 
 /* Copies the elements below src (and its class) into dest. */
 static HRESULT copy_children(struct node *src, IStorage *dest, int streams,
@@ -1426,20 +1519,29 @@ static HRESULT copy_children(struct node *src, IStorage *dest, int streams,
 		WCHAR name[NAME_MAX_CHARS + 1];
 		memcpy(name, c->name, c->len * sizeof(WCHAR));
 		name[c->len] = 0;
-		if (FAILED(hr = copy_node_to(c, dest, name)))
+		if (FAILED(hr = copy_node_to(c, dest, name, COPY_MERGE)))
 			return hr;
 	}
 	return S_OK;
 }
 
-static HRESULT copy_node_to(struct node *n, IStorage *dest, const WCHAR *as)
+/*
+ * Copies n into dest as the element as. With COPY_MERGE (IStorage::CopyTo)
+ * a stream of that name is replaced and a storage of that name is merged
+ * into, keeping its other elements; with COPY_NOREPLACE (MoveElementTo) an
+ * existing element is an error.
+ */
+static HRESULT copy_node_to(struct node *n, IStorage *dest, const WCHAR *as,
+			    int how)
 {
-	const DWORD mode = STGM_CREATE | STGM_READWRITE | STGM_SHARE_EXCLUSIVE;
+	const DWORD mode = STGM_READWRITE | STGM_SHARE_EXCLUSIVE;
+	const DWORD create = how == COPY_MERGE ? STGM_CREATE : 0;
 	HRESULT hr;
 
 	if (n->type == STGTY_STREAM) {
 		IStream *out;
-		hr = dest->lpVtbl->CreateStream(dest, as, mode, 0, 0, &out);
+		hr = dest->lpVtbl->CreateStream(dest, as, mode | create, 0, 0,
+						&out);
 		if (FAILED(hr))
 			return hr;
 		ULONG put = 0;
@@ -1451,13 +1553,30 @@ static HRESULT copy_node_to(struct node *n, IStorage *dest, const WCHAR *as)
 		out->lpVtbl->Release(out);
 		return hr;
 	}
-	IStorage *sub;
-	hr = dest->lpVtbl->CreateStorage(dest, as, mode, 0, 0, &sub);
+	IStorage *sub = NULL;
+	hr = E_FAIL;
+	if (how == COPY_MERGE)
+		hr = dest->lpVtbl->OpenStorage(dest, as, NULL, mode, NULL, 0,
+					       &sub);
+	if (FAILED(hr))
+		hr = dest->lpVtbl->CreateStorage(dest, as, mode | create, 0, 0,
+						 &sub);
 	if (FAILED(hr))
 		return hr;
 	hr = copy_children(n, sub, 1, 1, NULL);
 	sub->lpVtbl->Release(sub);
 	return hr;
+}
+
+/* Whether dest is one of this module's storages at or below n. */
+static int dest_inside(IStorage *dest, struct node *n)
+{
+	if (!dest || dest->lpVtbl != &stg_vtbl)
+		return 0;
+	for (struct node *d = stg_impl(dest)->n; d; d = d->parent)
+		if (d == n)
+			return 1;
+	return 0;
 }
 
 WINFN(HRESULT) stg_CopyTo(IStorage *self, DWORD niid, const IID *iids,
@@ -1469,8 +1588,6 @@ WINFN(HRESULT) stg_CopyTo(IStorage *self, DWORD niid, const IID *iids,
 
 	if (!dest)
 		return STG_E_INVALIDPOINTER;
-	if (dest == self)
-		return STG_E_ACCESSDENIED;
 	for (DWORD i = 0; iids && i < niid; i++) {
 		if (guid_eq(&iids[i], &IID_IStream))
 			streams = 0;
@@ -1479,6 +1596,8 @@ WINFN(HRESULT) stg_CopyTo(IStorage *self, DWORD niid, const IID *iids,
 	}
 	pthread_mutex_lock(&lock);
 	hr = usable(s, 0);
+	if (SUCCEEDED(hr) && dest_inside(dest, s->n))
+		hr = STG_E_ACCESSDENIED;
 	if (SUCCEEDED(hr))
 		hr = copy_children(s->n, dest, streams, storages, exclude);
 	pthread_mutex_unlock(&lock);
@@ -1501,11 +1620,11 @@ WINFN(HRESULT) stg_MoveElementTo(IStorage *self, LPCOLESTR name,
 	struct node *n = SUCCEEDED(hr) ? node_find(s->n, name) : NULL;
 	if (SUCCEEDED(hr) && !n)
 		hr = STG_E_FILENOTFOUND;
-	else if (SUCCEEDED(hr) && n->open)
+	else if (SUCCEEDED(hr) && (n->open || dest_inside(dest, n)))
 		hr = STG_E_ACCESSDENIED;
 	if (SUCCEEDED(hr)) {
 		n->refs++;
-		hr = copy_node_to(n, dest, new_name);
+		hr = copy_node_to(n, dest, new_name, COPY_NOREPLACE);
 		if (SUCCEEDED(hr) && flags == STGMOVE_MOVE && !n->gone) {
 			node_unlink(n);
 			touch(s->f, s->n);
@@ -1523,7 +1642,10 @@ WINFN(HRESULT) stg_Commit(IStorage *self, DWORD flags)
 
 	pthread_mutex_lock(&lock);
 	hr = usable(s, 0);
-	if (SUCCEEDED(hr) && !s->n->parent)
+	if (SUCCEEDED(hr) && !s->n->parent && (flags & STGC_ONLYIFCURRENT) &&
+	    s->f->dirty && s->f->bk && s->f->bk->gen != s->f->gen)
+		hr = STG_E_NOTCURRENT;	/* another root committed since */
+	else if (SUCCEEDED(hr) && !s->n->parent)
 		hr = file_flush(s->f);
 	else if (SUCCEEDED(hr) && !(s->f->mode & STGM_TRANSACTED))
 		hr = file_flush(s->f);
@@ -1544,7 +1666,7 @@ WINFN(HRESULT) stg_Revert(IStorage *self)
 		/* The objects open on the old tree are reverted with it. */
 		struct node *old = s->f->root;
 		s->f->root = NULL;
-		hr = file_load(s->f, 1);
+		hr = file_reload(s->f);
 		if (SUCCEEDED(hr)) {
 			s->f->dirty = 0;
 			old->open--;
@@ -1721,7 +1843,6 @@ WINFN(HRESULT) stg_EnumElements(IStorage *self, DWORD r1, void *r2, DWORD r3,
 		fill_stat(c, st, STATFLAG_NONAME, 0, NULL);
 		st->pwcsName = malloc((c->len + 1) * sizeof(WCHAR));
 		if (!st->pwcsName) {
-			e->count = 0;
 			enm_Release(&e->iface);
 			e = NULL;
 			break;
@@ -1889,9 +2010,74 @@ struct flb {
 	int fd;
 	char *unlink_path;
 	WCHAR *name;
+	struct backing *bk;	/* holds this opener's share reservation */
+	DWORD mode;
 };
 
-static const ILockBytesVtbl hlb_vtbl, flb_vtbl;
+static const ILockBytesVtbl hlb_vtbl;
+
+static struct backing *backing_find(dev_t dev, ino_t ino, const void *ptr)
+{
+	struct backing *b;
+
+	for (b = backings; b; b = b->next)
+		if (ptr ? b->ptr == ptr : (!b->ptr && b->dev == dev &&
+					   b->ino == ino))
+			break;
+	if (!b) {
+		b = calloc(1, sizeof(*b));
+		if (!b)
+			return NULL;
+		b->dev = dev;
+		b->ino = ino;
+		b->ptr = ptr;
+		b->next = backings;
+		backings = b;
+	}
+	b->users++;
+	return b;
+}
+
+static struct backing *backing_get(ILockBytes *lb)
+{
+	if (lb->lpVtbl == &flb_vtbl) {
+		struct backing *b = ((struct flb *)lb)->bk;
+		if (b)
+			b->users++;
+		return b;
+	}
+	return backing_find(0, 0, lb);
+}
+
+static int reads(DWORD mode)
+{
+	return (mode & 3) != STGM_WRITE;
+}
+
+/* The share bits as a pair of denials: 0 and DENY_NONE deny nothing. */
+static void denies(DWORD mode, int *dr, int *dw)
+{
+	DWORD sh = mode & 0x70;
+	*dr = sh == STGM_SHARE_EXCLUSIVE || sh == STGM_SHARE_DENY_READ;
+	*dw = sh == STGM_SHARE_EXCLUSIVE || sh == STGM_SHARE_DENY_WRITE;
+}
+
+/* Reserves (add > 0) or releases a file opener's access and share mode;
+ * a reservation fails if it conflicts with the other openers'. */
+static int share_reserve(struct backing *b, DWORD mode, int add)
+{
+	int r = reads(mode), w = writable(mode), dr, dw;
+
+	denies(mode, &dr, &dw);
+	if (add > 0 && ((r && b->deny_read) || (w && b->deny_write) ||
+			(dr && b->nread) || (dw && b->nwrite)))
+		return 0;
+	b->nread += add * r;
+	b->nwrite += add * w;
+	b->deny_read += add * dr;
+	b->deny_write += add * dw;
+	return 1;
+}
 
 WINFN(HRESULT) lb_QueryInterface(ILockBytes *self, REFIID riid, void **ppv)
 {
@@ -1972,9 +2158,9 @@ WINFN(HRESULT) hlb_WriteAt(ILockBytes *self, ULARGE_INTEGER off,
 		return S_OK;
 	if (!pv)
 		return STG_E_INVALIDPOINTER;
-	ULONGLONG end = off.QuadPart + cb;
-	if (end > 0xffffffffu)
+	if (off.QuadPart > 0xffffffffu - cb)
 		return STG_E_MEDIUMFULL;
+	ULONGLONG end = off.QuadPart + cb;
 	if (end > global_size(l->h)) {
 		ULARGE_INTEGER size;
 		size.QuadPart = end;
@@ -2067,6 +2253,12 @@ WINFN(ULONG) flb_Release(ILockBytes *self)
 	struct flb *l = (struct flb *)self;
 	LONG r = __atomic_sub_fetch(&l->refs, 1, __ATOMIC_SEQ_CST);
 	if (!r) {
+		if (l->bk) {
+			pthread_mutex_lock(&lock);
+			share_reserve(l->bk, l->mode, -1);
+			backing_put(l->bk);
+			pthread_mutex_unlock(&lock);
+		}
 		close(l->fd);
 		if (l->unlink_path)
 			unlink(l->unlink_path);
@@ -2158,12 +2350,22 @@ WINFN(HRESULT) flb_Stat(ILockBytes *self, STATSTG *st, DWORD flags)
 	return S_OK;
 }
 
+WINFN(HRESULT) flb_Flush(ILockBytes *self)
+{
+	struct flb *l = (struct flb *)self;
+	return fsync(l->fd) && errno != EINVAL ? STG_E_WRITEFAULT : S_OK;
+}
+
 static const ILockBytesVtbl flb_vtbl = {
 	lb_QueryInterface, flb_AddRef, flb_Release, flb_ReadAt, flb_WriteAt,
-	lb_Flush, flb_SetSize, lb_LockRegion, lb_UnlockRegion, flb_Stat,
+	flb_Flush, flb_SetSize, lb_LockRegion, lb_UnlockRegion, flb_Stat,
 };
 
-/* Opens (or with create, makes) a file as a byte array. */
+/*
+ * Opens (or with create, makes) a file as a byte array. The access and
+ * share mode are reserved against the file's other openers in this process
+ * before STGM_CREATE truncates it.
+ */
 static HRESULT file_lockbytes(const WCHAR *name, DWORD mode, int create,
 			      ILockBytes **out)
 {
@@ -2174,7 +2376,7 @@ static HRESULT file_lockbytes(const WCHAR *name, DWORD mode, int create,
 		return STG_E_PATHNOTFOUND;
 	int flags = writable(mode) ? O_RDWR : O_RDONLY;
 	if (create)
-		flags |= O_CREAT | ((mode & STGM_CREATE) ? O_TRUNC : O_EXCL);
+		flags |= O_CREAT | ((mode & STGM_CREATE) ? 0 : O_EXCL);
 	int fd = open(path, flags | O_CLOEXEC, 0644);
 	if (fd < 0) {
 		int e = errno;
@@ -2188,14 +2390,43 @@ static HRESULT file_lockbytes(const WCHAR *name, DWORD mode, int create,
 		}
 	}
 	struct flb *l = calloc(1, sizeof(*l));
-	if (!l) {
+	struct stat sb;
+	HRESULT hr = S_OK;
+	if (!l)
+		hr = E_OUTOFMEMORY;
+	else if (fstat(fd, &sb))
+		hr = STG_E_ACCESSDENIED;
+	if (SUCCEEDED(hr)) {
+		pthread_mutex_lock(&lock);
+		l->bk = backing_find(sb.st_dev, sb.st_ino, NULL);
+		if (!l->bk)
+			hr = E_OUTOFMEMORY;
+		else if (!share_reserve(l->bk, mode, 1)) {
+			backing_put(l->bk);
+			l->bk = NULL;
+			hr = STG_E_SHAREVIOLATION;
+		}
+		pthread_mutex_unlock(&lock);
+	}
+	if (SUCCEEDED(hr) && create && (mode & STGM_CREATE) &&
+	    ftruncate(fd, 0))
+		hr = STG_E_ACCESSDENIED;
+	if (FAILED(hr)) {
+		if (l && l->bk) {
+			pthread_mutex_lock(&lock);
+			share_reserve(l->bk, mode, -1);
+			backing_put(l->bk);
+			pthread_mutex_unlock(&lock);
+		}
+		free(l);
 		close(fd);
 		free(path);
-		return E_OUTOFMEMORY;
+		return hr;
 	}
 	l->iface.lpVtbl = &flb_vtbl;
 	l->refs = 1;
 	l->fd = fd;
+	l->mode = mode;
 	l->name = malloc((wstrlen(name) + 1) * sizeof(WCHAR));
 	if (l->name)
 		memcpy(l->name, name, (wstrlen(name) + 1) * sizeof(WCHAR));
@@ -2209,8 +2440,19 @@ static HRESULT file_lockbytes(const WCHAR *name, DWORD mode, int create,
 
 /* ---- creating and opening ---- */
 
+/*
+ * Opens a root on lb, reading its tree or (create) starting a new one. With
+ * old (STGM_CONVERT), the new tree holds old in a CONTENTS stream and lb's
+ * bytes are only replaced once that tree is written whole: at once in
+ * direct mode, at Commit in transacted mode.
+ */
+static const WCHAR contents_name[] = {
+	3, 'C', 'O', 'N', 'T', 'E', 'N', 'T', 'S', 0
+};
+
 static HRESULT open_root(ILockBytes *lb, DWORD mode, int create,
-			 const WCHAR *name, IStorage **out)
+			 const WCHAR *name, BYTE *old, size_t old_len,
+			 IStorage **out)
 {
 	struct file *f = calloc(1, sizeof(*f));
 	HRESULT hr;
@@ -2226,17 +2468,49 @@ static HRESULT open_root(ILockBytes *lb, DWORD mode, int create,
 			memcpy(f->name, name, (wstrlen(name) + 1) * sizeof(WCHAR));
 	}
 	pthread_mutex_lock(&lock);
-	if (create) {
+	f->bk = backing_get(lb);
+	if (!f->bk) {
+		hr = E_OUTOFMEMORY;
+	} else if (create) {
 		static const WCHAR rn[] = { 'R','o','o','t',' ','E','n','t','r','y' };
+		f->gen = f->bk->gen;
 		f->root = node_new(rn, 10, STGTY_STORAGE);
 		hr = f->root ? S_OK : E_OUTOFMEMORY;
 		if (SUCCEEDED(hr)) {
 			now(&f->root->ctime);
 			f->root->mtime = f->root->ctime;
+		}
+		if (SUCCEEDED(hr) && old) {
+			struct node *c = node_new(contents_name,
+						  (int)wstrlen(contents_name),
+						  STGTY_STREAM);
+			hr = c ? S_OK : E_OUTOFMEMORY;
+			if (SUCCEEDED(hr) && old_len > 0x7fffffff)
+				hr = STG_E_MEDIUMFULL;
+			if (SUCCEEDED(hr))
+				hr = node_resize(c, (ULONG)old_len);
+			if (SUCCEEDED(hr)) {
+				if (old_len)
+					memcpy(c->data, old, old_len);
+				c->ctime = c->mtime = f->root->ctime;
+				node_add(f->root, c);
+			} else if (c) {
+				node_unref(c);
+			}
+			/* Until the converted tree is committed, what lb
+			 * holds is the old bytes. */
+			f->saved = old;
+			f->saved_len = old_len;
+		}
+		if (SUCCEEDED(hr)) {
 			f->dirty = 1;
-			/* The header is there from the start, as on Windows. */
-			hr = file_flush(f);
-			f->dirty = 0;
+			/* The header is there from the start, as on Windows,
+			 * except that a transacted conversion waits for
+			 * Commit. */
+			if (!old || !(mode & STGM_TRANSACTED))
+				hr = file_flush(f);
+			if (!old)
+				f->dirty = 0;
 		}
 	} else {
 		hr = file_load(f, 0);
@@ -2249,6 +2523,8 @@ static HRESULT open_root(ILockBytes *lb, DWORD mode, int create,
 		if (f->root)
 			node_detach(f->root);
 		lb->lpVtbl->Release(lb);
+		backing_put(f->bk);
+		free(f->saved);
 		free(f->name);
 		free(f);
 	}
@@ -2264,10 +2540,6 @@ static HRESULT check_root_mode(DWORD mode)
 		return STG_E_INVALIDFLAG;
 	return S_OK;
 }
-
-static const WCHAR contents_name[] = {
-	3, 'C', 'O', 'N', 'T', 'E', 'N', 'T', 'S', 0
-};
 
 WINFN(HRESULT) ole_StgCreateDocfile(LPCOLESTR name, DWORD mode, DWORD reserved,
 				    IStorage **out)
@@ -2305,27 +2577,11 @@ WINFN(HRESULT) ole_StgCreateDocfile(LPCOLESTR name, DWORD mode, DWORD reserved,
 			lb->lpVtbl->Release(lb);
 		return hr;
 	}
-	hr = open_root(lb, mode, 1, name, out);
+	/* open_root owns old from here. */
+	hr = open_root(lb, mode, 1, name, old, old_len, out);
 	lb->lpVtbl->Release(lb);
-	if (SUCCEEDED(hr) && old) {
-		IStream *s;
-		hr = (*out)->lpVtbl->CreateStream(*out, contents_name,
-						  STGM_READWRITE |
-						  STGM_SHARE_EXCLUSIVE, 0, 0, &s);
-		if (SUCCEEDED(hr)) {
-			hr = s->lpVtbl->Write(s, old, (ULONG)old_len, NULL);
-			s->lpVtbl->Release(s);
-		}
-		if (SUCCEEDED(hr) && !(mode & STGM_TRANSACTED))
-			hr = (*out)->lpVtbl->Commit(*out, 0);
-		if (SUCCEEDED(hr))
-			hr = STG_S_CONVERTED;
-		else {
-			(*out)->lpVtbl->Release(*out);
-			*out = NULL;
-		}
-	}
-	free(old);
+	if (SUCCEEDED(hr) && old)
+		hr = STG_S_CONVERTED;
 	return hr;
 }
 
@@ -2341,6 +2597,19 @@ WINFN(HRESULT) ole_StgCreateDocfileOnILockBytes(ILockBytes *lb, DWORD mode,
 		return STG_E_INVALIDPARAMETER;
 	if (FAILED(hr = check_root_mode(mode)))
 		return hr;
+	if (mode & STGM_CONVERT) {
+		/* What the array held goes into a CONTENTS stream. */
+		BYTE *old = NULL;
+		size_t old_len = 0;
+		if (FAILED(hr = lb_read_all(lb, &old, &old_len)))
+			return hr;
+		if (!old_len) {
+			free(old);
+			return open_root(lb, mode, 1, NULL, NULL, 0, out);
+		}
+		hr = open_root(lb, mode, 1, NULL, old, old_len, out);
+		return SUCCEEDED(hr) ? STG_S_CONVERTED : hr;
+	}
 	if (!(mode & STGM_CREATE)) {
 		/* Without STGM_CREATE, a storage already there isn't replaced. */
 		ULONGLONG size = 0;
@@ -2352,7 +2621,7 @@ WINFN(HRESULT) ole_StgCreateDocfileOnILockBytes(ILockBytes *lb, DWORD mode,
 		    got == 8 && !memcmp(head, signature, 8))
 			return STG_E_FILEALREADYEXISTS;
 	}
-	return open_root(lb, mode, 1, NULL, out);
+	return open_root(lb, mode, 1, NULL, NULL, 0, out);
 }
 
 WINFN(HRESULT) ole_StgOpenStorageOnILockBytes(ILockBytes *lb, IStorage *prio,
@@ -2366,7 +2635,7 @@ WINFN(HRESULT) ole_StgOpenStorageOnILockBytes(ILockBytes *lb, IStorage *prio,
 	*out = NULL;
 	if (FAILED(hr = check_root_mode(mode)))
 		return hr;
-	return open_root(lb, mode, 0, NULL, out);
+	return open_root(lb, mode, 0, NULL, NULL, 0, out);
 }
 
 WINFN(HRESULT) ole_StgOpenStorage(LPCOLESTR name, IStorage *prio, DWORD mode,
@@ -2384,7 +2653,7 @@ WINFN(HRESULT) ole_StgOpenStorage(LPCOLESTR name, IStorage *prio, DWORD mode,
 		return hr;
 	if (FAILED(hr = file_lockbytes(name, mode, 0, &lb)))
 		return hr;
-	hr = open_root(lb, mode, 0, name, out);
+	hr = open_root(lb, mode, 0, name, NULL, 0, out);
 	lb->lpVtbl->Release(lb);
 	return hr;
 }
@@ -2430,6 +2699,11 @@ WINFN(HRESULT) ole_StgCreateStorageEx(LPCOLESTR name, DWORD mode, DWORD fmt,
 	if (fmt != STGFMT_STORAGE && fmt != STGFMT_DOCFILE)
 		return fmt == STGFMT_FILE ? STG_E_UNIMPLEMENTEDFUNCTION :
 					    STG_E_INVALIDPARAMETER;
+	/* Checked first, so an unsupported interface doesn't cost the
+	 * caller the file STGM_CREATE would replace. */
+	if (!riid || (!guid_eq(riid, &IID_IUnknown) &&
+		      !guid_eq(riid, &IID_IStorage)))
+		return E_NOINTERFACE;
 	hr = ole_StgCreateDocfile(name, mode, 0, &stg);
 	if (FAILED(hr))
 		return hr;
@@ -2856,8 +3130,21 @@ WINFN(HRESULT) ole_OleSave(IPersistStorage *obj, IStorage *stg, BOOL same)
 		return hr;
 	hr = obj->lpVtbl->Save(obj, stg, same);
 	if (SUCCEEDED(hr))
-		stg->lpVtbl->Commit(stg, STGC_DEFAULT);
+		hr = stg->lpVtbl->Commit(stg, STGC_DEFAULT);
 	return hr;
+}
+
+/* The IOleObject slots OleLoad uses, called through the raw vtable. */
+#define OLEMISC_SETCLIENTSITEFIRST 0x20000
+typedef HRESULT (WINAPI *ole_setsite_fn)(void *self, void *site);
+typedef HRESULT (WINAPI *ole_miscstatus_fn)(void *self, DWORD aspect,
+					     DWORD *status);
+typedef ULONG (WINAPI *ole_release_fn)(void *self);
+
+static HRESULT set_client_site(void *obj, void *site)
+{
+	void **vt = *(void ***)obj;
+	return ((ole_setsite_fn)vt[3])(obj, site);
 }
 
 WINFN(HRESULT) ole_OleLoad(IStorage *stg, REFIID riid, void *client_site,
@@ -2874,9 +3161,31 @@ WINFN(HRESULT) ole_OleLoad(IStorage *stg, REFIID riid, void *client_site,
 		return hr;
 	if (FAILED(hr = create_object(&clsid, &IID_IPersistStorage, (void **)&ps)))
 		return hr;
-	hr = ps->lpVtbl->Load(ps, stg);
+	/*
+	 * An object that is an IOleObject gets the client site before Load if
+	 * it asks for that (OLEMISC_SETCLIENTSITEFIRST), else after.
+	 */
+	void *oo = NULL;
+	int first = 0;
+	if (client_site &&
+	    SUCCEEDED(ps->lpVtbl->QueryInterface(ps, &IID_IOleObject, &oo))) {
+		DWORD misc = 0;
+		void **vt = *(void ***)oo;
+		if (SUCCEEDED(((ole_miscstatus_fn)vt[22])(oo, DVASPECT_CONTENT,
+							  &misc)))
+			first = !!(misc & OLEMISC_SETCLIENTSITEFIRST);
+	}
+	hr = S_OK;
+	if (oo && first)
+		hr = set_client_site(oo, client_site);
+	if (SUCCEEDED(hr))
+		hr = ps->lpVtbl->Load(ps, stg);
+	if (SUCCEEDED(hr) && oo && !first)
+		hr = set_client_site(oo, client_site);
 	if (SUCCEEDED(hr))
 		hr = ps->lpVtbl->QueryInterface(ps, riid, out);
+	if (oo)
+		((ole_release_fn)(*(void ***)oo)[2])(oo);
 	ps->lpVtbl->Release(ps);
 	return hr;
 }

@@ -85,8 +85,24 @@ WINFN(int) k32_WideCharToMultiByte(UINT cp, DWORD flags, LPCWSTR src,
 	return n;
 }
 
-/* Case mapping and classification cover Latin-1; other characters are
- * left unmapped (and classed as letters). */
+/*
+ * Simple (one-to-one) case mapping for Latin-1, Latin Extended-A, Greek,
+ * Cyrillic, Armenian and the fullwidth Latin letters. Classification
+ * below covers Latin-1; other characters are classed as letters.
+ */
+
+/* Latin Extended-A alternates upper/lower in pairs; which code point of
+ * a pair is upper case flips at 0x139 and back at 0x14a, then at 0x179. */
+static int exta_upper_is_even(WCHAR c)
+{
+	return (c >= 0x100 && c <= 0x137) || (c >= 0x14a && c <= 0x177);
+}
+
+static int exta_cased(WCHAR c)
+{
+	return (c >= 0x100 && c <= 0x17e) && c != 0x130 && c != 0x131 &&
+	       c != 0x138 && c != 0x149 && c != 0x178;
+}
 
 WCHAR k32_toupper_w(WCHAR c)
 {
@@ -94,6 +110,30 @@ WCHAR k32_toupper_w(WCHAR c)
 		return c - 32;
 	if (c == 0xff)
 		return 0x178;
+	if (c == 0xb5)
+		return 0x39c;
+	if (c == 0x131)
+		return 'I';
+	if (exta_cased(c))
+		return (c & 1) == exta_upper_is_even(c) ? c - 1 : c;
+	if (c >= 0x3b1 && c <= 0x3cb)
+		return c == 0x3c2 ? 0x3a3 : c - 32;
+	if (c == 0x3ac)
+		return 0x386;
+	if (c >= 0x3ad && c <= 0x3af)
+		return c - 37;
+	if (c == 0x3cc)
+		return 0x38c;
+	if (c == 0x3cd || c == 0x3ce)
+		return c - 63;
+	if (c >= 0x430 && c <= 0x44f)
+		return c - 32;
+	if (c >= 0x450 && c <= 0x45f)
+		return c - 80;
+	if (c >= 0x561 && c <= 0x586)
+		return c - 48;
+	if (c >= 0xff41 && c <= 0xff5a)
+		return c - 32;
 	return c;
 }
 
@@ -103,6 +143,28 @@ WCHAR k32_tolower_w(WCHAR c)
 		return c + 32;
 	if (c == 0x178)
 		return 0xff;
+	if (c == 0x130)
+		return 'i';
+	if (exta_cased(c))
+		return (c & 1) != exta_upper_is_even(c) ? c + 1 : c;
+	if (c >= 0x391 && c <= 0x3ab && c != 0x3a2)
+		return c + 32;
+	if (c == 0x386)
+		return 0x3ac;
+	if (c >= 0x388 && c <= 0x38a)
+		return c + 37;
+	if (c == 0x38c)
+		return 0x3cc;
+	if (c == 0x38e || c == 0x38f)
+		return c + 63;
+	if (c >= 0x410 && c <= 0x42f)
+		return c + 32;
+	if (c >= 0x400 && c <= 0x40f)
+		return c + 80;
+	if (c >= 0x531 && c <= 0x556)
+		return c + 48;
+	if (c >= 0xff21 && c <= 0xff3a)
+		return c + 32;
 	return c;
 }
 

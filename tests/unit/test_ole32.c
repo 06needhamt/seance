@@ -1122,6 +1122,149 @@ static void test_storage_copy(void)
 	s->lpVtbl->Release(s);
 }
 
+/* Copies and moves don't destroy what they shouldn't. */
+static void test_storage_copy_rules(void)
+{
+	FN(HRESULT, StgCreateDocfile, LPCOLESTR, DWORD, DWORD, IStorage **);
+	IStorage *a = NULL, *b = NULL, *sub = NULL;
+
+	CHECK_EQ(StgCreateDocfile(NULL, RW | STGM_CREATE | STGM_DELETEONRELEASE,
+				  0, &a), S_OK);
+	CHECK_EQ(StgCreateDocfile(NULL, RW | STGM_CREATE | STGM_DELETEONRELEASE,
+				  0, &b), S_OK);
+	if (!a || !b)
+		return;
+	/* MoveElementTo doesn't replace an element already there. */
+	put_stream(a, "X", 10, 7);
+	put_stream(b, "X", 10, 8);
+	WCHAR *x = wide("X");
+	CHECK_EQ(a->lpVtbl->MoveElementTo(a, x, b, x, STGMOVE_MOVE),
+		 STG_E_FILEALREADYEXISTS);
+	CHECK(got_stream(a, "X", 10, 7));
+	CHECK(got_stream(b, "X", 10, 8));
+	free(x);
+
+	/* CopyTo merges into a storage of the same name. */
+	WCHAR *dir = wide("Dir");
+	CHECK_EQ(a->lpVtbl->CreateStorage(a, dir, RW, 0, 0, &sub), S_OK);
+	if (sub) {
+		put_stream(sub, "New", 5, 1);
+		sub->lpVtbl->Release(sub);
+		sub = NULL;
+	}
+	CHECK_EQ(b->lpVtbl->CreateStorage(b, dir, RW, 0, 0, &sub), S_OK);
+	if (sub) {
+		put_stream(sub, "Keep", 5, 2);
+		sub->lpVtbl->Release(sub);
+		sub = NULL;
+	}
+	CHECK_EQ(a->lpVtbl->CopyTo(a, 0, NULL, NULL, b), S_OK);
+	CHECK_EQ(b->lpVtbl->OpenStorage(b, dir, NULL, STGM_READ | EXCL, NULL, 0,
+					&sub), S_OK);
+	if (sub) {
+		CHECK(got_stream(sub, "New", 5, 1));
+		CHECK(got_stream(sub, "Keep", 5, 2));
+		sub->lpVtbl->Release(sub);
+		sub = NULL;
+	}
+	/* A storage can't be copied into itself or below itself. */
+	CHECK_EQ(a->lpVtbl->CopyTo(a, 0, NULL, NULL, a), STG_E_ACCESSDENIED);
+	CHECK_EQ(a->lpVtbl->OpenStorage(a, dir, NULL, RW, NULL, 0, &sub), S_OK);
+	if (sub) {
+		CHECK_EQ(a->lpVtbl->CopyTo(a, 0, NULL, NULL, sub),
+			 STG_E_ACCESSDENIED);
+		sub->lpVtbl->Release(sub);
+	}
+	free(dir);
+
+	/* Names compare without case beyond Latin-1, as the format says. */
+	put_stream(a, "\xce\xb1\xd0\xb4", 4, 3);	/* Greek alpha, Cyrillic de */
+	CHECK(got_stream(a, "\xce\x91\xd0\x94", 4, 3));
+	a->lpVtbl->Release(a);
+	b->lpVtbl->Release(b);
+}
+
+/* Sharing modes, STGC_ONLYIFCURRENT and STGM_CONVERT on a byte array. */
+static void test_storage_share(void)
+{
+	FN(HRESULT, StgCreateDocfile, LPCOLESTR, DWORD, DWORD, IStorage **);
+	FN(HRESULT, StgOpenStorage, LPCOLESTR, IStorage *, DWORD, SNB, DWORD,
+	   IStorage **);
+	FN(HRESULT, CreateILockBytesOnHGlobal, HGLOBAL, BOOL, ILockBytes **);
+	FN(HRESULT, StgCreateDocfileOnILockBytes, ILockBytes *, DWORD, DWORD,
+	   IStorage **);
+	WCHAR *file = wide("C:\\shared.stg");
+	IStorage *r1 = NULL, *r2 = NULL;
+	const DWORD TX = STGM_READWRITE | STGM_TRANSACTED |
+			 STGM_SHARE_DENY_NONE;
+
+	CHECK_EQ(StgCreateDocfile(file, RW | STGM_CREATE, 0, &r1), S_OK);
+	if (!r1)
+		return;
+	/* An exclusive root keeps other opens, and truncation, out. */
+	CHECK_EQ(StgOpenStorage(file, NULL, STGM_READ | STGM_SHARE_DENY_NONE,
+				NULL, 0, &r2), STG_E_SHAREVIOLATION);
+	CHECK_EQ(StgCreateDocfile(file, RW | STGM_CREATE, 0, &r2),
+		 STG_E_SHAREVIOLATION);
+	put_stream(r1, "Base", 8, 1);
+	CHECK_EQ(r1->lpVtbl->Commit(r1, 0), S_OK);
+	r1->lpVtbl->Release(r1);
+
+	/* Two transacted roots: the second commit only if current fails. */
+	CHECK_EQ(StgOpenStorage(file, NULL, TX, NULL, 0, &r1), S_OK);
+	CHECK_EQ(StgOpenStorage(file, NULL, TX, NULL, 0, &r2), S_OK);
+	if (r1 && r2) {
+		put_stream(r1, "First", 8, 2);
+		put_stream(r2, "Second", 8, 3);
+		CHECK_EQ(r1->lpVtbl->Commit(r1, STGC_ONLYIFCURRENT), S_OK);
+		CHECK_EQ(r2->lpVtbl->Commit(r2, STGC_ONLYIFCURRENT),
+			 STG_E_NOTCURRENT);
+		/* Without the flag it goes ahead. */
+		CHECK_EQ(r2->lpVtbl->Commit(r2, STGC_DEFAULT), S_OK);
+	}
+	if (r1)
+		r1->lpVtbl->Release(r1);
+	if (r2)
+		r2->lpVtbl->Release(r2);
+	r1 = r2 = NULL;
+	CHECK_EQ(StgOpenStorage(file, NULL, STGM_READ | EXCL, NULL, 0, &r1),
+		 S_OK);
+	if (r1) {
+		CHECK(got_stream(r1, "Second", 8, 3));
+		CHECK(!got_stream(r1, "First", 8, 2));
+		r1->lpVtbl->Release(r1);
+	}
+	free(file);
+
+	/* STGM_CONVERT on a byte array keeps its bytes in CONTENTS. */
+	ILockBytes *lb = NULL;
+	IStorage *stg = NULL;
+	CHECK_EQ(CreateILockBytesOnHGlobal(NULL, TRUE, &lb), S_OK);
+	if (!lb)
+		return;
+	ULARGE_INTEGER zero = { 0 };
+	CHECK_EQ(lb->lpVtbl->WriteAt(lb, zero, "plain text", 10, NULL), S_OK);
+	CHECK_EQ(StgCreateDocfileOnILockBytes(lb, RW | STGM_CONVERT, 0, &stg),
+		 STG_S_CONVERTED);
+	if (stg) {
+		WCHAR *cn = wide("\x03" "CONTENTS");
+		IStream *s = NULL;
+		CHECK_EQ(stg->lpVtbl->OpenStream(stg, cn, NULL, STGM_READ | EXCL,
+						 0, &s), S_OK);
+		if (s) {
+			char buf[16] = { 0 };
+			ULONG got = 0;
+			CHECK_EQ(s->lpVtbl->Read(s, buf, sizeof(buf), &got), S_OK);
+			CHECK_EQ(got, 10);
+			CHECK(!memcmp(buf, "plain text", 10));
+			s->lpVtbl->Release(s);
+		}
+		free(cn);
+		stg->lpVtbl->Release(stg);
+	}
+	lb->lpVtbl->Release(lb);
+}
+
 int main(void)
 {
 	char dir[] = "/tmp/vfw-ole-XXXXXX";
@@ -1152,6 +1295,8 @@ int main(void)
 	test_storage_file();
 	test_storage_big();
 	test_storage_copy();
+	test_storage_copy_rules();
+	test_storage_share();
 
 	mod_free(k32);
 	mod_free(ole);
