@@ -194,6 +194,9 @@ struct typelib {
 	struct arena_block *arena;
 	BSTR *bstrs;			/* to free with the library */
 	size_t nbstrs, bstrs_cap;
+
+	IUnknown *outer;		/* a view's maker (held), or NULL */
+	oa_outer_qi outer_qi;
 };
 
 static const ITypeLib2Vtbl typelib_vtbl;
@@ -291,7 +294,10 @@ static void lib_free(struct typelib *lib)
 	free(lib->foreign);
 	free(lib->data);
 	free(lib->key);
+	IUnknown *outer = lib->outer;
 	free(lib);
+	if (outer)
+		outer->lpVtbl->Release(outer);
 }
 
 static struct typelib *lib_new(void)
@@ -1412,6 +1418,21 @@ HRESULT oa_typelib_from_bytes(const void *d, size_t len, ITypeLib **out)
 	return hr;
 }
 
+HRESULT oa_typelib_view(const void *d, size_t len, IUnknown *outer,
+			oa_outer_qi qi, ITypeLib **out)
+{
+	struct typelib *lib;
+	HRESULT hr = lib_from_bytes(d, len, "memory", &lib);
+
+	if (hr != S_OK)
+		return hr;
+	outer->lpVtbl->AddRef(outer);
+	lib->outer = outer;
+	lib->outer_qi = qi;
+	*out = (ITypeLib *)&lib->iface;
+	return S_OK;
+}
+
 /*
  * The library in the file at path (a Unix path): the file itself, or its
  * TYPELIB resource res.
@@ -1938,8 +1959,14 @@ static struct tl_func *view_func(struct tl_type *t, UINT i,
 
 WINFN(HRESULT) ti_QueryInterface(ITypeInfo2 *self, REFIID riid, void **ppv)
 {
+	struct typelib *lib = type_of(self)->lib;
+
 	if (!ppv)
 		return E_POINTER;
+	if (lib->outer && riid && !guid_eq(riid, &IID_ITypeInfo) &&
+	    !guid_eq(riid, &IID_ITypeInfo2))
+		return lib->outer_qi(lib->outer, (int)type_of(self)->index,
+				     riid, ppv);
 	if (riid && (guid_eq(riid, &oa_IID_IUnknown) ||
 		     guid_eq(riid, &IID_ITypeInfo) ||
 		     guid_eq(riid, &IID_ITypeInfo2))) {
@@ -2847,8 +2874,13 @@ static const ITypeInfo2Vtbl typeinfo_vtbl = {
 
 WINFN(HRESULT) tl_QueryInterface(ITypeLib2 *self, REFIID riid, void **ppv)
 {
+	struct typelib *lib = lib_of(self);
+
 	if (!ppv)
 		return E_POINTER;
+	if (lib->outer && riid && !guid_eq(riid, &IID_ITypeLib) &&
+	    !guid_eq(riid, &IID_ITypeLib2))
+		return lib->outer_qi(lib->outer, -1, riid, ppv);
 	if (riid && (guid_eq(riid, &oa_IID_IUnknown) ||
 		     guid_eq(riid, &IID_ITypeLib) ||
 		     guid_eq(riid, &IID_ITypeLib2))) {

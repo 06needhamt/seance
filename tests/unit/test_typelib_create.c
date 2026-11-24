@@ -600,6 +600,172 @@ static void check(SYSKIND sys, const WCHAR *path)
 	lib->lpVtbl->Release(lib);
 }
 
+/* Review cases: identity, IDispatch bases, duals, slots, member IDs. */
+static void test_more(ITypeLib *std)
+{
+	char path[512];
+	snprintf(path, sizeof(path), "%s/more.tlb", dir);
+	char *win = path_to_windows(path);
+	WCHAR *wpath = utf8_to_utf16_dup(win);
+	ICreateTypeLib2 *ctl = NULL;
+	ITypeInfo *unk = NULL, *disp = NULL;
+	HREFTYPE h;
+
+	CHECK_EQ(pCreateTypeLib2(SYS_WIN32, wpath, &ctl), S_OK);
+	free(wpath);
+	free(win);
+	if (!ctl)
+		return;
+	CHECK_EQ(ctl->lpVtbl->SetName(ctl, w("More")), S_OK);
+	std->lpVtbl->GetTypeInfoOfGuid(std, &iid_unknown, &unk);
+	std->lpVtbl->GetTypeInfoOfGuid(std, &iid_dispatch, &disp);
+
+	FUNCDESC fd;
+	ELEMDESC prm[1];
+	memset(&fd, 0, sizeof(fd));
+	memset(prm, 0, sizeof(prm));
+	fd.funckind = FUNC_DISPATCH;
+	fd.invkind = INVOKE_FUNC;
+	fd.callconv = CC_STDCALL;
+	fd.elemdescFunc.tdesc.vt = VT_HRESULT;
+
+	/* A dispinterface with no base given still has IDispatch's. */
+	ICreateTypeInfo *bare = make(ctl, "DBare", TKIND_DISPATCH);
+	fd.memid = 1;
+	CHECK_EQ(bare->lpVtbl->AddFuncDesc(bare, 0, &fd), S_OK);
+	CHECK_EQ(bare->lpVtbl->LayOut(bare), S_OK);
+
+	/* A dual interface on IDispatch. */
+	ICreateTypeInfo *dual = make(ctl, "IDual", TKIND_INTERFACE);
+	CHECK_EQ(dual->lpVtbl->SetTypeFlags(dual, TYPEFLAG_FDUAL |
+					    TYPEFLAG_FOLEAUTOMATION), S_OK);
+	CHECK_EQ(dual->lpVtbl->AddRefTypeInfo(dual, disp, &h), S_OK);
+	CHECK_EQ(dual->lpVtbl->AddImplType(dual, 0, h), S_OK);
+	fd.funckind = FUNC_PUREVIRTUAL;
+	fd.memid = 1;
+	CHECK_EQ(dual->lpVtbl->AddFuncDesc(dual, 0, &fd), S_OK);
+	CHECK_EQ(dual->lpVtbl->LayOut(dual), S_OK);
+
+	/* An interface with a slot of its own choosing, and members whose
+	 * IDs are made for them. */
+	ICreateTypeInfo *slots = make(ctl, "ISlots", TKIND_INTERFACE);
+	CHECK_EQ(slots->lpVtbl->AddRefTypeInfo(slots, unk, &h), S_OK);
+	CHECK_EQ(slots->lpVtbl->AddImplType(slots, 0, h), S_OK);
+	fd.memid = MEMBERID_NIL;
+	fd.oVft = 6;	/* not a pointer's multiple */
+	CHECK_EQ(slots->lpVtbl->AddFuncDesc(slots, 0, &fd), E_INVALIDARG);
+	fd.oVft = 20;
+	CHECK_EQ(slots->lpVtbl->AddFuncDesc(slots, 0, &fd), S_OK);
+	fd.oVft = 0;
+	CHECK_EQ(slots->lpVtbl->AddFuncDesc(slots, 1, &fd), S_OK);
+	CHECK_EQ(slots->lpVtbl->DeleteFuncDesc(slots, 0), S_OK);
+	CHECK_EQ(slots->lpVtbl->AddFuncDesc(slots, 1, &fd), S_OK);
+	/* A vararg function: the last parameter takes the rest. */
+	TYPEDESC var_td = { .vt = VT_VARIANT };
+	prm[0].tdesc.vt = VT_SAFEARRAY;
+	prm[0].tdesc.lptdesc = &var_td;
+	prm[0].paramdesc.wParamFlags = PARAMFLAG_FIN;
+	fd.cParams = 1;
+	fd.cParamsOpt = -1;
+	fd.lprgelemdescParam = prm;
+	CHECK_EQ(slots->lpVtbl->AddFuncDesc(slots, 2, &fd), S_OK);
+	fd.cParamsOpt = -2;
+	CHECK_EQ(slots->lpVtbl->AddFuncDesc(slots, 2, &fd), E_INVALIDARG);
+	fd.cParams = 0;
+	fd.cParamsOpt = 0;
+	fd.oVft = 32;		/* a slot given: kept */
+	CHECK_EQ(slots->lpVtbl->AddFuncDesc(slots, 3, &fd), S_OK);
+	fd.oVft = 0;
+	CHECK_EQ(slots->lpVtbl->LayOut(slots), S_OK);
+
+	/* The snapshot is the creator, as COM sees it. */
+	ITypeLib *tl = NULL;
+	IUnknown *u1 = NULL, *u2 = NULL;
+	ICreateTypeLib2 *back = NULL;
+	CHECK_EQ(ctl->lpVtbl->QueryInterface(ctl, &IID_ITypeLib, (void **)&tl),
+		 S_OK);
+	if (!tl)
+		goto done;
+	CHECK_EQ(ctl->lpVtbl->QueryInterface(ctl, &iid_unknown, (void **)&u1),
+		 S_OK);
+	CHECK_EQ(tl->lpVtbl->QueryInterface(tl, &iid_unknown, (void **)&u2),
+		 S_OK);
+	CHECK(u1 && u1 == u2);
+	CHECK_EQ(tl->lpVtbl->QueryInterface(tl, &IID_ICreateTypeLib2,
+					    (void **)&back), S_OK);
+	CHECK(back == ctl);
+	if (u1)
+		u1->lpVtbl->Release(u1);
+	if (u2)
+		u2->lpVtbl->Release(u2);
+	if (back)
+		back->lpVtbl->Release(back);
+
+	ITypeInfo *ti = NULL;
+	TYPEATTR *ta;
+	CHECK_EQ(tl->lpVtbl->GetTypeInfo(tl, 0, &ti), S_OK);
+	if (ti) {
+		CHECK_EQ(ti->lpVtbl->GetRefTypeOfImplType(ti, 0, &h), S_OK);
+		CHECK(ref_name_is(ti, h, "IDispatch"));
+		ICreateTypeInfo *ci = NULL;
+		CHECK_EQ(ti->lpVtbl->QueryInterface(ti, &IID_ICreateTypeInfo,
+						    (void **)&ci), S_OK);
+		CHECK(ci == bare);
+		if (ci)
+			ci->lpVtbl->Release(ci);
+		ti->lpVtbl->Release(ti);
+	}
+	CHECK_EQ(tl->lpVtbl->GetTypeInfo(tl, 1, &ti), S_OK);
+	if (ti) {
+		CHECK_EQ(ti->lpVtbl->GetTypeAttr(ti, &ta), S_OK);
+		CHECK_EQ(ta->typekind, TKIND_DISPATCH);
+		CHECK(ta->wTypeFlags & TYPEFLAG_FDUAL);
+		ti->lpVtbl->ReleaseTypeAttr(ti, ta);
+		ITypeInfo *half = NULL;
+		CHECK_EQ(ti->lpVtbl->GetRefTypeOfImplType(ti, (UINT)-1, &h),
+			 S_OK);
+		CHECK_EQ(ti->lpVtbl->GetRefTypeInfo(ti, h, &half), S_OK);
+		if (half) {
+			CHECK_EQ(half->lpVtbl->GetTypeAttr(half, &ta), S_OK);
+			CHECK_EQ(ta->typekind, TKIND_INTERFACE);
+			CHECK_EQ(ta->cFuncs, 1);
+			CHECK_EQ(ta->cbSizeVft, 8 * 4);	/* IDispatch's 7 + 1 */
+			half->lpVtbl->ReleaseTypeAttr(half, ta);
+			half->lpVtbl->Release(half);
+		}
+		ti->lpVtbl->Release(ti);
+	}
+	CHECK_EQ(tl->lpVtbl->GetTypeInfo(tl, 2, &ti), S_OK);
+	if (ti) {
+		FUNCDESC *f;
+		CHECK_EQ(ti->lpVtbl->GetFuncDesc(ti, 0, &f), S_OK);
+		CHECK_EQ(f->oVft, 12);		/* after IUnknown's 3 */
+		CHECK_EQ(f->memid, 0x60000001);
+		ti->lpVtbl->ReleaseFuncDesc(ti, f);
+		CHECK_EQ(ti->lpVtbl->GetFuncDesc(ti, 1, &f), S_OK);
+		CHECK_EQ(f->memid, 0x60000002);	/* the next free one */
+		ti->lpVtbl->ReleaseFuncDesc(ti, f);
+		CHECK_EQ(ti->lpVtbl->GetFuncDesc(ti, 2, &f), S_OK);
+		CHECK_EQ(f->cParamsOpt, -1);
+		ti->lpVtbl->ReleaseFuncDesc(ti, f);
+		CHECK_EQ(ti->lpVtbl->GetFuncDesc(ti, 3, &f), S_OK);
+		CHECK_EQ(f->oVft, 32);
+		ti->lpVtbl->ReleaseFuncDesc(ti, f);
+		CHECK_EQ(ti->lpVtbl->GetTypeAttr(ti, &ta), S_OK);
+		CHECK_EQ(ta->cbSizeVft, 36);
+		ti->lpVtbl->ReleaseTypeAttr(ti, ta);
+		ti->lpVtbl->Release(ti);
+	}
+	tl->lpVtbl->Release(tl);
+done:
+	bare->lpVtbl->Release(bare);
+	dual->lpVtbl->Release(dual);
+	slots->lpVtbl->Release(slots);
+	unk->lpVtbl->Release(unk);
+	disp->lpVtbl->Release(disp);
+	ctl->lpVtbl->Release(ctl);
+}
+
 int main(void)
 {
 	char cleanup[64];
@@ -638,6 +804,8 @@ int main(void)
 		free(wpath);
 		free(win);
 	}
+
+	test_more(std);
 
 	/* Nowhere to write. */
 	ICreateTypeLib2 *ctl = NULL;

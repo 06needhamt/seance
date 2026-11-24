@@ -19,12 +19,21 @@
  *   registered library's its registered file.
  * - The ITypeLib and ITypeInfo the objects give out through
  *   QueryInterface are snapshots: the library as it would be saved then.
- * - A dual interface made with TYPEFLAG_FDUAL on a TKIND_INTERFACE stays a
- *   TKIND_INTERFACE: it isn't turned into the stored dispatch form.
+ *   Each is a view of its creator, sharing its COM identity: it holds the
+ *   creator, and IUnknown or ICreateTypeLib2/ICreateTypeInfo2 asked of it
+ *   come from the creator. The creator keeps none of them.
+ * - A dual interface (TYPEFLAG_FDUAL on a TKIND_INTERFACE) is stored in
+ *   the dispatch form, as MIDL stores one: the reader shows it as the
+ *   dispatch interface, and its interface half by GetRefTypeOfImplType(-1).
+ * - Dispatch interfaces derive from IDispatch: when no type here refers
+ *   to it already, an import of stdole2's IDispatch is written for them.
  */
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "common/log.h"
 #include "win32/codepage.h"
@@ -100,6 +109,7 @@ struct c_func {
 	INVOKEKIND invkind;
 	CALLCONV callconv;
 	SHORT nparams, nopt, oVft;
+	SHORT given_vft;	/* the caller's oVft, kept by LayOut; or 0 */
 	WORD flags;
 	TYPEDESC ret;
 	struct c_param *params;
@@ -178,8 +188,6 @@ struct ctl {
 	UINT ntypes;
 	struct c_ref *refs_out;
 	UINT nrefs;
-	ITypeLib **snapshots;	/* held, to know them again */
-	UINT nsnapshots;
 };
 
 static const ICreateTypeLib2Vtbl ctl_vtbl;
@@ -281,12 +289,19 @@ static HRESULT cust_set(struct c_cust **list, REFGUID guid, VARIANT *value)
 	default:
 		return DISP_E_BADVARTYPE;
 	}
+	/* The copy first: a failure leaves the old value. */
+	VARIANT copy;
+	oa_VariantInit(&copy);
+	if ((hr = oa_VariantCopy(&copy, value)) != S_OK)
+		return hr;
 	for (c = *list; c; c = c->next)
 		if (guid_eq(&c->guid, guid))
 			break;
 	if (!c) {
-		if (!(c = calloc(1, sizeof(*c))))
+		if (!(c = calloc(1, sizeof(*c)))) {
+			oa_VariantClear(&copy);
 			return E_OUTOFMEMORY;
+		}
 		c->guid = *guid;
 		struct c_cust **end = list;
 		while (*end)
@@ -294,14 +309,14 @@ static HRESULT cust_set(struct c_cust **list, REFGUID guid, VARIANT *value)
 		*end = c;
 	}
 	oa_VariantClear(&c->value);
-	hr = oa_VariantCopy(&c->value, value);
-	return hr;
+	c->value = copy;
+	return S_OK;
 }
 
 static void func_free(struct c_func *f)
 {
 	td_free(&f->ret);
-	for (SHORT i = 0; i < f->nparams; i++) {
+	for (SHORT i = 0; f->params && i < f->nparams; i++) {
 		free(f->params[i].name);
 		td_free(&f->params[i].type);
 		oa_VariantClear(&f->params[i].def);
@@ -351,9 +366,6 @@ static void ctl_free(struct ctl *lib)
 		lib->refs_out[i].info->lpVtbl->Release(lib->refs_out[i].info);
 		free(lib->refs_out[i].file);
 	}
-	for (UINT i = 0; i < lib->nsnapshots; i++)
-		lib->snapshots[i]->lpVtbl->Release(lib->snapshots[i]);
-	free(lib->snapshots);
 	free(lib->refs_out);
 	free(lib->types);
 	free(lib->path);
@@ -505,9 +517,21 @@ static HRESULT type_layout(struct c_type *t)
 				break;
 			}
 		}
-		for (UINT i = 0; i < t->nfuncs; i++)
-			t->funcs[i].oVft = (SHORT)(base + i * p);
-		t->vft = (WORD)(base + t->nfuncs * p);
+		/* Slots in order after the base's, except where the caller
+		 * gave one; the table reaches past the last of either. */
+		ULONG end = base + t->nfuncs * p;
+		for (UINT i = 0; i < t->nfuncs; i++) {
+			struct c_func *f = &t->funcs[i];
+			f->oVft = f->given_vft ? f->given_vft :
+				  (SHORT)(base + i * p);
+			if ((ULONG)f->oVft + p > end)
+				end = (ULONG)f->oVft + p;
+		}
+		if (end > 0x7fff) {
+			hr = TYPE_E_SIZETOOBIG;
+			break;
+		}
+		t->vft = (WORD)end;
 		t->size = (ULONG)p;
 		t->align = (WORD)p;
 		break;
@@ -521,7 +545,7 @@ static HRESULT type_layout(struct c_type *t)
 		break;
 	case TKIND_RECORD:
 	case TKIND_UNION: {
-		ULONG off = 0, size = 0;
+		uint64_t off = 0, size = 0;
 		WORD max_align = 1;
 		WORD cap = t->align_set ? t->align_set : 8;
 		for (UINT i = 0; i < t->nvars; i++) {
@@ -542,13 +566,22 @@ static HRESULT type_layout(struct c_type *t)
 					size = s;
 			} else {
 				off = (off + a - 1) / a * a;
-				v->oInst = off;
+				v->oInst = (ULONG)off;
 				off += s;
 				size = off;
 			}
+			if (off > 0xffffffffu) {	/* past a ULONG */
+				hr = TYPE_E_SIZETOOBIG;
+				goto out;
+			}
+		}
+		size = (size + max_align - 1) / max_align * max_align;
+		if (size > 0xffffffffu) {
+			hr = TYPE_E_SIZETOOBIG;
+			goto out;
 		}
 		t->align = max_align;
-		t->size = (size + max_align - 1) / max_align * max_align;
+		t->size = (ULONG)size;
 		break;
 	}
 	case TKIND_ENUM:
@@ -877,8 +910,14 @@ static INT add_impfile(struct writer *w, const struct c_ref *r)
 	for (size_t off = 0; off + 14 <= b->n;) {
 		INT eg = b->d[off] | b->d[off + 1] << 8 | b->d[off + 2] << 16 |
 			 b->d[off + 3] << 24;
+		INT el = b->d[off + 4] | b->d[off + 5] << 8 |
+			 b->d[off + 6] << 16 | b->d[off + 7] << 24;
+		INT ev = b->d[off + 8] | b->d[off + 9] << 8 |
+			 b->d[off + 10] << 16 | b->d[off + 11] << 24;
 		int l = (b->d[off + 12] | b->d[off + 13] << 8) >> 2;
-		if (eg == g)
+		/* the same library: its GUID, locale and version */
+		if (eg == g && el == (INT)r->lcid &&
+		    ev == (INT)(r->major | r->minor << 16))
 			return (INT)off;
 		off += (14 + (size_t)l + 3) & ~(size_t)3;
 	}
@@ -1013,6 +1052,26 @@ static HRESULT serialize(struct ctl *lib, BYTE **out, size_t *out_len)
 		if (guid_eq(&r->guid, &iid_dispatch))
 			w.dispatch_href = ext_href(i);
 	}
+	int dispatches = 0;
+	for (UINT i = 0; i < lib->ntypes; i++)
+		dispatches |= lib->types[i]->kind == TKIND_DISPATCH ||
+			      (lib->types[i]->kind == TKIND_INTERFACE &&
+			       (lib->types[i]->flags & TYPEFLAG_FDUAL));
+	if (dispatches && w.dispatch_href == (HREFTYPE)-1) {
+		/* IDispatch, from stdole2, as the dispatch types' base. */
+		struct c_ref d = { 0 };
+		d.libid = stdole2_libid;
+		d.guid = iid_dispatch;
+		d.major = 2;
+		d.kind = TKIND_INTERFACE;
+		d.file = (char *)"stdole2.tlb";
+		INT file_off = add_impfile(&w, &d);
+		struct buf *b = &w.seg[SEG_IMPINFO];
+		put32(b, (INT)((DWORD)TKIND_INTERFACE << 24 | 0x10000 | 1));
+		put32(b, file_off);
+		put32(b, add_guid(&w, &iid_dispatch, -2));
+		w.dispatch_href = ext_href(lib->nrefs);
+	}
 
 	/* The type infos. */
 	struct buf *ti = &w.seg[SEG_TYPEINFO];
@@ -1040,7 +1099,10 @@ static HRESULT serialize(struct ctl *lib, BYTE **out, size_t *out_len)
 		} else if (t->nimpls)
 			data1 = (INT)t->impls[0].href;
 
-		put32(ti, t->kind | (t->align & 0x1f) << 11);
+		TYPEKIND stored = t->kind == TKIND_INTERFACE &&
+				  (t->flags & TYPEFLAG_FDUAL) ?
+				  TKIND_DISPATCH : t->kind;
+		put32(ti, stored | (t->align & 0x1f) << 11);
 		put32(ti, 0);		/* T_MEMBERS, set below */
 		put32(ti, 0);
 		put32(ti, 0);
@@ -1121,6 +1183,10 @@ static HRESULT serialize(struct ctl *lib, BYTE **out, size_t *out_len)
 	for (UINT i = 0; i < lib->ntypes; i++)
 		put32(&file, (INT)(i * MSFT_TYPEINFO_SIZE));
 	size_t dir = buf_put(&file, NULL, 16 * SEG_COUNT);
+	if (file.bad) {		/* no directory to fill in */
+		hr = E_OUTOFMEMORY;
+		goto out;
+	}
 	for (int i = 0; i < SEG_COUNT; i++) {
 		INT off = -1, len = 0;
 		if (w.seg[i].n) {
@@ -1134,6 +1200,10 @@ static HRESULT serialize(struct ctl *lib, BYTE **out, size_t *out_len)
 		set32(&file, dir + 16 * i + 12, 0x0f);
 	}
 	size_t members = buf_put(&file, mem.d, mem.n);
+	if (file.bad) {
+		hr = E_OUTOFMEMORY;
+		goto out;
+	}
 	size_t ti_at = (size_t)(file.d[dir] | file.d[dir + 1] << 8 |
 				file.d[dir + 2] << 16 |
 				(size_t)file.d[dir + 3] << 24);
@@ -1157,7 +1227,26 @@ out:
 	return hr;
 }
 
-/* The library as it stands, loaded as a type library (kept). */
+WINFN(HRESULT) ctl_QueryInterface(ICreateTypeLib2 *self, REFIID riid,
+				  void **ppv);
+WINFN(HRESULT) cti_QueryInterface(ICreateTypeInfo2 *self, REFIID riid,
+				  void **ppv);
+
+/* What a snapshot asks its creator: the library's or a type's interfaces. */
+static HRESULT outer_qi(IUnknown *outer, int index, REFIID riid, void **ppv)
+{
+	struct ctl *lib = (struct ctl *)outer;
+
+	if (index < 0)
+		return ctl_QueryInterface(&lib->iface, riid, ppv);
+	if ((UINT)index >= lib->ntypes) {	/* deleted since */
+		*ppv = NULL;
+		return E_NOINTERFACE;
+	}
+	return cti_QueryInterface(&lib->types[index]->iface, riid, ppv);
+}
+
+/* The library as it stands, loaded as a type library: a view of lib. */
 static HRESULT snapshot(struct ctl *lib, ITypeLib **out)
 {
 	BYTE *d;
@@ -1166,18 +1255,9 @@ static HRESULT snapshot(struct ctl *lib, ITypeLib **out)
 
 	if (hr != S_OK)
 		return hr;
-	hr = oa_typelib_from_bytes(d, len, out);
+	hr = oa_typelib_view(d, len, (IUnknown *)&lib->iface, outer_qi, out);
 	free(d);
-	if (hr != S_OK)
-		return hr;
-	ITypeLib **n = realloc(lib->snapshots,
-			       (lib->nsnapshots + 1) * sizeof(*n));
-	if (n) {
-		lib->snapshots = n;
-		n[lib->nsnapshots++] = *out;
-		(*out)->lpVtbl->AddRef(*out);
-	}
-	return S_OK;
+	return hr;
 }
 
 /* ---- ICreateTypeLib2 ---- */
@@ -1330,17 +1410,35 @@ WINFN(HRESULT) ctl_SaveAllChanges(ICreateTypeLib2 *self)
 
 	if (hr != S_OK)
 		return hr;
+	/* Through a temporary file beside it: a failed save leaves the
+	 * library that was there. */
 	char *unix_path = path_to_unix(lib->path);
-	FILE *f = unix_path ? fopen(unix_path, "wb") : NULL;
+	char *tmp = unix_path ? malloc(strlen(unix_path) + 16) : NULL;
+	int fd = -1;
+	if (tmp) {
+		sprintf(tmp, "%s.XXXXXX", unix_path);
+		fd = mkstemp(tmp);
+	}
+	FILE *f = fd >= 0 ? fdopen(fd, "wb") : NULL;
 	if (!f) {
 		TRACE("SaveAllChanges: can't write %s", lib->path);
 		hr = STG_E_ACCESSDENIED;
+		if (fd >= 0) {
+			close(fd);
+			unlink(tmp);
+		}
 	} else {
+		fchmod(fd, 0644);
 		if (fwrite(d, 1, len, f) != len)
 			hr = STG_E_MEDIUMFULL;
 		if (fclose(f) && hr == S_OK)
 			hr = STG_E_MEDIUMFULL;
+		if (hr == S_OK && rename(tmp, unix_path))
+			hr = STG_E_ACCESSDENIED;
+		if (hr != S_OK)
+			unlink(tmp);
 	}
+	free(tmp);
 	free(unix_path);
 	free(d);
 	return hr;
@@ -1471,9 +1569,14 @@ static int is_ours(struct ctl *lib, ITypeLib *other)
 	TLIBATTR *a;
 	int ours = 0;
 
-	for (UINT i = 0; i < lib->nsnapshots; i++)
-		if (lib->snapshots[i] == other)
+	ICreateTypeLib2 *maker = NULL;
+	if (SUCCEEDED(other->lpVtbl->QueryInterface(other, &IID_ICreateTypeLib2,
+						    (void **)&maker))) {
+		ours = maker == &lib->iface;
+		maker->lpVtbl->Release(maker);
+		if (ours)
 			return 1;
+	}
 	if (SUCCEEDED(other->lpVtbl->GetLibAttr(other, &a))) {
 		ours = !guid_eq(&lib->guid, &null_guid) &&
 		       guid_eq(&a->guid, &lib->guid) &&
@@ -1560,6 +1663,8 @@ WINFN(HRESULT) cti_AddRefTypeInfo(ICreateTypeInfo2 *self, ITypeInfo *info,
 	for (UINT i = 0; i < lib->nrefs; i++) {
 		struct c_ref *r = &lib->refs_out[i];
 		if (guid_eq(&r->libid, &la->guid) &&
+		    r->major == la->wMajorVerNum &&
+		    r->minor == la->wMinorVerNum && r->lcid == la->lcid &&
 		    (guid_eq(&guid, &null_guid) ? r->index == index :
 		     guid_eq(&r->guid, &guid))) {
 			other->lpVtbl->ReleaseTLibAttr(other, la);
@@ -1640,9 +1745,14 @@ WINFN(HRESULT) cti_AddFuncDesc(ICreateTypeInfo2 *self, UINT index,
 	if (t->kind != TKIND_INTERFACE && t->kind != TKIND_DISPATCH &&
 	    t->kind != TKIND_MODULE)
 		return TYPE_E_BADMODULEKIND;
-	if (desc->cParams < 0 || desc->cParamsOpt < 0 ||
+	/* cParamsOpt -1: the last parameter takes the rest (vararg). */
+	if (desc->cParams < 0 ||
+	    (desc->cParamsOpt < 0 &&
+	     !(desc->cParamsOpt == -1 && desc->cParams > 0)) ||
 	    desc->cParamsOpt > desc->cParams ||
 	    (desc->cParams && !desc->lprgelemdescParam))
+		return E_INVALIDARG;
+	if (desc->oVft < 0 || desc->oVft % ptr_size(t->lib))
 		return E_INVALIDARG;
 	if ((t->kind == TKIND_DISPATCH) != (desc->funckind == FUNC_DISPATCH))
 		return TYPE_E_BADMODULEKIND;
@@ -1653,8 +1763,15 @@ WINFN(HRESULT) cti_AddFuncDesc(ICreateTypeInfo2 *self, UINT index,
 
 	memset(&f, 0, sizeof(f));
 	f.memid = desc->memid;
-	if (f.memid == MEMBERID_NIL && t->kind != TKIND_DISPATCH)
+	if (f.memid == MEMBERID_NIL && t->kind != TKIND_DISPATCH) {
+		/* The first free one from 0x60000000 + the count. */
 		f.memid = (MEMBERID)(0x60000000 + t->nfuncs);
+		for (UINT i = 0; i < t->nfuncs; i++)
+			if (t->funcs[i].memid == f.memid) {
+				f.memid++;
+				i = (UINT)-1;
+			}
+	}
 	for (UINT i = 0; i < t->nfuncs; i++)
 		if (t->funcs[i].memid == f.memid &&
 		    t->funcs[i].invkind == desc->invkind)
@@ -1665,6 +1782,8 @@ WINFN(HRESULT) cti_AddFuncDesc(ICreateTypeInfo2 *self, UINT index,
 	f.nparams = desc->cParams;
 	f.nopt = desc->cParamsOpt;
 	f.flags = desc->wFuncFlags;
+	if (t->kind == TKIND_INTERFACE)
+		f.given_vft = desc->oVft;
 	f.ordinal = -1;
 	if ((hr = td_copy(&f.ret, &desc->elemdescFunc.tdesc, 0)) != S_OK ||
 	    (hr = check_tdesc(t->lib, &f.ret)) != S_OK)
@@ -1773,8 +1892,14 @@ WINFN(HRESULT) cti_AddVarDesc(ICreateTypeInfo2 *self, UINT index,
 		return E_INVALIDARG;
 	memset(&v, 0, sizeof(v));
 	v.memid = desc->memid;
-	if (v.memid == MEMBERID_NIL)
+	if (v.memid == MEMBERID_NIL) {
 		v.memid = (MEMBERID)(0x40000000 + t->nvars);
+		for (UINT i = 0; i < t->nvars; i++)
+			if (t->vars[i].memid == v.memid) {
+				v.memid++;
+				i = (UINT)-1;
+			}
+	}
 	for (UINT i = 0; i < t->nvars; i++)
 		if (t->vars[i].memid == v.memid)
 			return TYPE_E_DUPLICATEID;

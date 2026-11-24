@@ -78,6 +78,17 @@ HRESULT STUB_WINAPI oa_DispCallFunc(void *instance, ULONG_PTR offset,
 /* A library parsed from an MSFT image in memory, not cached. */
 HRESULT oa_typelib_from_bytes(const void *d, size_t len, ITypeLib **out);
 
+/*
+ * The same, as a view of another object (ICreateTypeLib2's): the library
+ * holds outer, and asks it, through qi, for IUnknown and any interface it
+ * has not got itself, with index -1 for the library or a type's index.
+ * So the view and its maker are one COM object.
+ */
+typedef HRESULT (*oa_outer_qi)(IUnknown *outer, int index, REFIID riid,
+			       void **ppv);
+HRESULT oa_typelib_view(const void *d, size_t len, IUnknown *outer,
+			oa_outer_qi qi, ITypeLib **out);
+
 /* Type library registration (oleaut_typereg.c). */
 HRESULT STUB_WINAPI oa_QueryPathOfRegTypeLib(REFGUID guid, WORD major,
 					     WORD minor, LCID lcid,
