@@ -346,16 +346,69 @@ WINFN(BOOL) user_PtInRect(const RECT *rc, POINT pt)
 	       pt.y < rc->bottom;
 }
 
-/* Keyboard and mouse: nothing is pressed, the cursor rests mid-screen. */
+/*
+ * Keyboard and mouse: no device, the cursor rests mid-screen. Each
+ * thread's key state follows the keyboard messages it takes from its
+ * queue (and SetKeyboardState), as Windows' does; the asynchronous state
+ * of the (absent) hardware is always up.
+ */
 
-WINFN(SHORT) user_GetKeyState(int key) { return 0; }
+static __thread BYTE key_state[256];	/* 0x80 down, 0x01 toggled */
+
+static void key_set(int vk, int down)
+{
+	if (down && !(key_state[vk] & 0x80))
+		key_state[vk] ^= 0x01;
+	key_state[vk] = (BYTE)((key_state[vk] & 0x01) | (down ? 0x80 : 0));
+}
+
+void user_key_message(const MSG *m)
+{
+	int down;
+	switch (m->message) {
+	case WM_KEYDOWN:
+	case WM_SYSKEYDOWN:
+		down = 1;
+		break;
+	case WM_KEYUP:
+	case WM_SYSKEYUP:
+		down = 0;
+		break;
+	default:
+		return;
+	}
+	int vk = (int)(m->wParam & 0xff);
+	key_set(vk, down);
+	/* The left and right keys move the generic one too. */
+	if (vk == 0xa0 || vk == 0xa1)
+		key_set(VK_SHIFT, down);
+	else if (vk == 0xa2 || vk == 0xa3)
+		key_set(VK_CONTROL, down);
+	else if (vk == 0xa4 || vk == 0xa5)
+		key_set(VK_MENU, down);
+}
+
+WINFN(SHORT) user_GetKeyState(int key)
+{
+	BYTE s = key_state[key & 0xff];
+	return (SHORT)(((s & 0x80) ? 0xff80 : 0) | (s & 0x01));
+}
+
 WINFN(SHORT) user_GetAsyncKeyState(int key) { return 0; }
 
 WINFN(BOOL) user_GetKeyboardState(PBYTE keys)
 {
 	if (keys)
-		memset(keys, 0, 256);
+		memcpy(keys, key_state, 256);
 	return keys != NULL;
+}
+
+WINFN(BOOL) user_SetKeyboardState(PBYTE keys)
+{
+	if (!keys)
+		return FALSE;
+	memcpy(key_state, keys, 256);
+	return TRUE;
 }
 
 /* An enhanced 101/102-key keyboard: Delphi's start-up code asks, to see
@@ -976,9 +1029,14 @@ void user_clipboard_owner_destroyed(HWND hwnd)
 		clip_send(hwnd, WM_RENDERALLFORMATS, 0);
 	pthread_mutex_lock(&clip_lock);
 	if (clip_owner == hwnd) {
+		int gone = 0;
 		for (int i = 0; i < CLIP_FORMATS; i++)
-			if (clip[i].format && !clip[i].data)
+			if (clip[i].format && !clip[i].data) {
 				clip[i].format = 0;
+				gone = 1;
+			}
+		if (gone)	/* the contents changed */
+			clip_sequence++;
 		clip_owner = NULL;
 	}
 	pthread_mutex_unlock(&clip_lock);
@@ -1115,11 +1173,14 @@ struct accel_table {
 static pthread_mutex_t accel_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct accel_table *accels;
 
+/* Windows' largest accelerator table. */
+#define ACCEL_MAX 32767
+
 static HACCEL accel_new(const ACCEL *e, int n)
 {
 	struct accel_table *t;
 
-	if (n <= 0 || !e) {
+	if (n <= 0 || n > ACCEL_MAX || !e) {
 		win_set_error(ERROR_INVALID_PARAMETER);
 		return NULL;
 	}
@@ -1174,7 +1235,7 @@ WINFN(HACCEL) user_CreateAcceleratorTableW(LPACCEL e, int n)
 
 WINFN(HACCEL) user_CreateAcceleratorTableA(LPACCEL e, int n)
 {
-	if (n <= 0 || !e) {
+	if (n <= 0 || n > ACCEL_MAX || !e) {
 		win_set_error(ERROR_INVALID_PARAMETER);
 		return NULL;
 	}
@@ -1379,6 +1440,7 @@ static const struct builtin_export exports[] = {
 	E(GetKeyboardLayout),
 	E(GetKeyboardLayoutList),
 	E(GetKeyboardState),
+	E(SetKeyboardState),
 	E(GetKeyboardType),
 	E(EnumDisplaySettingsA),
 	E(EnumDisplaySettingsExA),

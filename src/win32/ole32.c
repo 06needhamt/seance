@@ -92,6 +92,7 @@ WINFN(void) ole_CoUninitialize(void)
 {
 	if (!apt_count || --apt_count)
 		return;
+	ole_message_filter_drop();
 	TRACE("CoUninitialize: thread %lu leaves the %s", (unsigned long)
 	      thread_current_id(), apt_sta ? "STA" : "MTA");
 	if (!apt_sta) {

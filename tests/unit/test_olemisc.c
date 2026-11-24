@@ -245,6 +245,8 @@ WINAPI static HRESULT do_get(IDataObject *self, FORMATETC *f, STGMEDIUM *m)
 {
 	if (f->cfFormat != CF_TEXT)
 		return DV_E_FORMATETC;
+	if (((struct data *)self)->text[0] == '!')	/* "can't render" */
+		return E_FAIL;
 	if (!(f->tymed & TYMED_HGLOBAL))
 		return DV_E_TYMED;
 	m->tymed = TYMED_HGLOBAL;
@@ -435,7 +437,33 @@ static void test_advise(void)
 	CHECK_EQ(dh->lpVtbl->Unadvise(dh, cb), OLE_E_NOCONNECTION);
 	CHECK_EQ(dh->lpVtbl->SendOnDataChange(dh, &src.iface, 0, 0), S_OK);
 	CHECK(a.changes == 3 && b.changes == 1);
+
+	/* A one-shot sink whose data could not be had is kept for the next
+	 * change; one that asked for data on stop gets it then. */
+	struct sink c;
+	memset(&c, 0, sizeof(c));
+	memset(&b, 0, sizeof(b));
+	b.iface.lpVtbl = c.iface.lpVtbl = &sink_vtbl;
+	DWORD cc;
+	CHECK_EQ(dh->lpVtbl->Advise(dh, &src.iface, &f, ADVF_ONLYONCE,
+				    &b.iface, &cb), S_OK);
+	CHECK_EQ(dh->lpVtbl->Advise(dh, &src.iface, &f,
+				    ADVF_NODATA | ADVF_DATAONSTOP, &c.iface,
+				    &cc), S_OK);
+	strcpy(src.text, "!fail");
+	CHECK_EQ(dh->lpVtbl->SendOnDataChange(dh, &src.iface, 0, 0), S_OK);
+	CHECK_EQ(b.changes, 0);
+	CHECK_EQ(b.refs, 1);
+	CHECK(c.changes == 1 && c.last_tymed == TYMED_NULL);
+	strcpy(src.text, "third");
+	CHECK_EQ(dh->lpVtbl->SendOnDataChange(dh, &src.iface, 0,
+					      ADVF_DATAONSTOP), S_OK);
+	CHECK(b.changes == 1 && !strcmp(b.last_text, "third"));
+	CHECK_EQ(b.refs, 0);
+	CHECK(c.changes == 2 && c.last_tymed == TYMED_HGLOBAL &&
+	      !strcmp(c.last_text, "third"));
 	dh->lpVtbl->Release(dh);
+	CHECK_EQ(c.refs, 0);
 	CHECK_EQ(a.refs, 0);
 	CHECK_EQ(src.refs, 1);
 }
@@ -493,6 +521,23 @@ static void test_clipboard(void)
 	CHECK_EQ(got->lpVtbl->QueryGetData(got, &f), DV_E_FORMATETC);
 	CHECK_EQ(got->lpVtbl->GetData(got, &f, &m), DV_E_FORMATETC);
 	got->lpVtbl->Release(got);
+
+	/* OleGetClipboard's object set back is not its own source. */
+	CHECK_EQ(OleSetClipboard(&src.iface), S_OK);
+	CHECK_EQ(OleGetClipboard(&got), S_OK);
+	CHECK_EQ(OleSetClipboard(got), S_OK);
+	CHECK_EQ(got->lpVtbl->QueryGetData(got, &f), S_OK);
+	CHECK_EQ(OleIsCurrentClipboard(&src.iface), S_OK);
+	/* A request the wrapper refuses leaves the source's count alone. */
+	IEnumFORMATETC *bad = NULL;
+	CHECK_EQ(got->lpVtbl->EnumFormatEtc(got, DATADIR_SET, &bad), E_NOTIMPL);
+	CHECK_EQ(src.refs, 2);
+	got->lpVtbl->Release(got);
+	/* Taken over by a native EmptyClipboard: the source is let go. */
+	CHECK(OpenClipboard(NULL) && EmptyClipboard());
+	CloseClipboard();
+	CHECK_EQ(OleIsCurrentClipboard(&src.iface), S_FALSE);
+	CHECK_EQ(src.refs, 1);
 
 	/* Set, then replaced by nothing. */
 	CHECK_EQ(OleSetClipboard(&src.iface), S_OK);
@@ -712,8 +757,9 @@ static void test_drag_drop(void)
 	CHECK_EQ(target.refs, 1);
 	CHECK_EQ(RevokeDragDrop(w), DRAGDROP_E_NOTREGISTERED);
 
+	/* A drop with no target under it is a cancel. */
 	CHECK_EQ(DoDragDrop(&src.iface, &ds.iface, DROPEFFECT_COPY, &effect),
-		 DRAGDROP_S_DROP);
+		 DRAGDROP_S_CANCEL);
 	CHECK_EQ(effect, DROPEFFECT_NONE);
 	CHECK(ds.queries == 1 && ds.feedback == 1);
 	ds.answer = DRAGDROP_S_CANCEL;
@@ -868,6 +914,15 @@ static void test_treat_as(void)
 
 	CHECK_EQ(CoTreatAsClass(&clsid_a, &null_clsid), S_OK);
 	CHECK_EQ(CoGetTreatAsClass(&clsid_a, &c), S_FALSE);
+	/* With an AutoTreatAs: the class itself goes back to it, but
+	 * CLSID_NULL removes emulation all the same. */
+	set_value("HKEY_LOCAL_MACHINE\\Software\\Classes\\CLSID\\" CLSID_A
+		  "\\AutoTreatAs", "{0B0B0B0B-0001-0002-0304-05060708090A}");
+	CHECK_EQ(CoTreatAsClass(&clsid_a, &clsid_a), S_OK);
+	CHECK_EQ(CoGetTreatAsClass(&clsid_a, &c), S_OK);
+	CHECK(!memcmp(&c, &clsid_b, sizeof(c)));
+	CHECK_EQ(CoTreatAsClass(&clsid_a, &null_clsid), S_OK);
+	CHECK_EQ(CoGetTreatAsClass(&clsid_a, &c), S_FALSE);
 	CHECK_EQ(CoTreatAsClass(&clsid_b, &clsid_a), REGDB_E_CLASSNOTREG);
 	CHECK_EQ(CoRevokeClassObject(cookie), S_OK);
 }
@@ -883,6 +938,11 @@ static void test_accelerators(void)
 	U32(int, CopyAcceleratorTableA, HACCEL, LPACCEL, int);
 	U32(BOOL, DestroyAcceleratorTable, HACCEL);
 	U32(int, TranslateAcceleratorW, HWND, HACCEL, LPMSG);
+	U32(BOOL, SetKeyboardState, PBYTE);
+	U32(SHORT, GetKeyState, int);
+	U32(BOOL, PostThreadMessageA, DWORD, UINT, WPARAM, LPARAM);
+	U32(BOOL, PeekMessageA, LPMSG, HWND, UINT, UINT, UINT);
+	K32(DWORD, GetCurrentThreadId, void);
 	ACCEL table[] = {
 		{ FVIRTKEY | FCONTROL, 'S', 100 },
 		{ 0, 'x', 101 },
@@ -910,6 +970,25 @@ static void test_accelerators(void)
 	CHECK(IsAccelerator(h, 4, &m, &cmd) && cmd == 102);
 	CHECK(!IsAccelerator(h, 2, &m, &cmd));	/* past what's searched */
 	m.wParam = 'S';				/* without CTRL down */
+	CHECK(!IsAccelerator(h, 4, &m, &cmd));
+	/* With CTRL down, as the thread's key state says. */
+	BYTE keys[256] = { 0 };
+	keys[0x11] = 0x80;
+	CHECK(SetKeyboardState(keys));
+	CHECK(GetKeyState(0x11) < 0);
+	CHECK(IsAccelerator(h, 4, &m, &cmd) && cmd == 100);
+	keys[0x11] = 0;
+	SetKeyboardState(keys);
+	CHECK(!IsAccelerator(h, 4, &m, &cmd));
+	/* Key state follows the keyboard messages the thread takes. */
+	MSG got;
+	CHECK(PostThreadMessageA(GetCurrentThreadId(), WM_KEYDOWN, 0x11, 0));
+	CHECK(PeekMessageA(&got, NULL, 0, 0, PM_REMOVE));
+	CHECK(GetKeyState(0x11) < 0);
+	CHECK(IsAccelerator(h, 4, &m, &cmd) && cmd == 100);
+	CHECK(PostThreadMessageA(GetCurrentThreadId(), WM_KEYUP, 0x11, 0));
+	CHECK(PeekMessageA(&got, NULL, 0, 0, PM_REMOVE));
+	CHECK(GetKeyState(0x11) >= 0);
 	CHECK(!IsAccelerator(h, 4, &m, &cmd));
 	m.message = WM_SYSKEYDOWN;
 	m.wParam = 'A';

@@ -319,7 +319,10 @@ static const IEnumSTATDATAVtbl ensd_vtbl = {
 /* The connections of a holder: slot i is connection i + 1. */
 struct conns {
 	STATDATA *v;
+	unsigned *gen;	/* per slot: which registration holds it */
+	BYTE *busy;	/* per slot: a one-shot callback is under way */
 	DWORD n;
+	unsigned next_gen;
 };
 
 static HRESULT conn_add(struct conns *c, const FORMATETC *fmt, DWORD advf,
@@ -333,8 +336,19 @@ static HRESULT conn_add(struct conns *c, const FORMATETC *fmt, DWORD advf,
 		if (!v)
 			return E_OUTOFMEMORY;
 		c->v = v;
+		unsigned *g = realloc(c->gen, (c->n + 1) * sizeof(*g));
+		if (!g)
+			return E_OUTOFMEMORY;
+		c->gen = g;
+		BYTE *b = realloc(c->busy, c->n + 1);
+		if (!b)
+			return E_OUTOFMEMORY;
+		c->busy = b;
 		c->n++;
+		memset(&c->v[i], 0, sizeof(c->v[i]));
 	}
+	c->gen[i] = ++c->next_gen;
+	c->busy[i] = 0;
 	STATDATA *s = &c->v[i];
 	memset(s, 0, sizeof(*s));
 	if (fmt && !fmt_copy(&s->formatetc, fmt))
@@ -379,6 +393,8 @@ static void conn_free(struct conns *c)
 		if (c->v[i].pAdvSink)
 			conn_remove(c, i + 1);
 	free(c->v);
+	free(c->gen);
+	free(c->busy);
 }
 
 struct holder {
@@ -415,14 +431,14 @@ static ULONG holder_release(struct holder *h)
 }
 
 /* Calls fn on each sink, holding a reference, as the list may change. */
-static void each_sink(struct conns *c, void (*fn)(IAdviseSink *, void *),
-		      void *ctx)
+static HRESULT each_sink(struct conns *c,
+			 void (*fn)(IAdviseSink *, void *), void *ctx)
 {
 	DWORD n = c->n;
 	IAdviseSink **v = calloc(n + 1, sizeof(*v));
 	DWORD k = 0;
 	if (!v)
-		return;
+		return E_OUTOFMEMORY;
 	for (DWORD i = 0; i < n; i++)
 		if ((v[k] = c->v[i].pAdvSink))
 			v[k++]->lpVtbl->AddRef(c->v[i].pAdvSink);
@@ -431,6 +447,7 @@ static void each_sink(struct conns *c, void (*fn)(IAdviseSink *, void *),
 		v[i]->lpVtbl->Release(v[i]);
 	}
 	free(v);
+	return S_OK;
 }
 
 WINFN(HRESULT) oah_QueryInterface(IOleAdviseHolder *self, REFIID riid,
@@ -493,20 +510,17 @@ WINFN(HRESULT) oah_SendOnRename(IOleAdviseHolder *self, IMoniker *mk)
 {
 	if (!mk)
 		return E_INVALIDARG;
-	each_sink(&((struct holder *)self)->c, send_rename, mk);
-	return S_OK;
+	return each_sink(&((struct holder *)self)->c, send_rename, mk);
 }
 
 WINFN(HRESULT) oah_SendOnSave(IOleAdviseHolder *self)
 {
-	each_sink(&((struct holder *)self)->c, send_save, NULL);
-	return S_OK;
+	return each_sink(&((struct holder *)self)->c, send_save, NULL);
 }
 
 WINFN(HRESULT) oah_SendOnClose(IOleAdviseHolder *self)
 {
-	each_sink(&((struct holder *)self)->c, send_close, NULL);
-	return S_OK;
+	return each_sink(&((struct holder *)self)->c, send_close, NULL);
 }
 
 static const IOleAdviseHolderVtbl oah_vtbl = {
@@ -547,18 +561,48 @@ WINFN(ULONG) dah_Release(IDataAdviseHolder *self)
 	return holder_release((struct holder *)self);
 }
 
-/* One data change to one sink: with the data, unless ADVF_NODATA. */
-static void notify(IDataObject *data, STATDATA *s)
+/* One data change to one sink: with the data, unless ADVF_NODATA (the
+ * last change before a stop carries it for ADVF_DATAONSTOP). Returns
+ * whether the sink was called. */
+static int notify(IDataObject *data, STATDATA *s, int stopping)
 {
 	STGMEDIUM med;
 	FORMATETC fmt = s->formatetc;
+	int want = !(s->advf & ADVF_NODATA) ||
+		   (stopping && (s->advf & ADVF_DATAONSTOP));
 
 	memset(&med, 0, sizeof(med));
-	if (!(s->advf & ADVF_NODATA) && data &&
-	    FAILED(data->lpVtbl->GetData(data, &fmt, &med)))
-		return;
+	if (want && data && FAILED(data->lpVtbl->GetData(data, &fmt, &med)))
+		return 0;
 	s->pAdvSink->lpVtbl->OnDataChange(s->pAdvSink, &fmt, &med);
 	ole_ReleaseStgMedium(&med);
+	return 1;
+}
+
+/* Notifies slot i. A one-shot registration is marked busy while its
+ * callback runs, so a nested send skips it; once delivered it goes, but
+ * only if the slot still holds that registration (the sink may have
+ * unadvised and a new one taken the slot). An undelivered one stays. */
+static HRESULT notify_slot(struct conns *c, DWORD i, IDataObject *data,
+			   int stopping)
+{
+	STATDATA s;
+	if (!c->v[i].pAdvSink || c->busy[i])
+		return S_OK;
+	if (!statdata_copy(&s, &c->v[i]))
+		return E_OUTOFMEMORY;
+	unsigned gen = c->gen[i];
+	int once = !!(s.advf & ADVF_ONLYONCE);
+	if (once)
+		c->busy[i] = 1;
+	int done = notify(data, &s, stopping);
+	statdata_free(&s);
+	if (i < c->n && c->gen[i] == gen && c->v[i].pAdvSink) {
+		c->busy[i] = 0;
+		if (once && done)
+			conn_remove(c, i + 1);
+	}
+	return S_OK;
 }
 
 WINFN(HRESULT) dah_Advise(IDataAdviseHolder *self, IDataObject *data,
@@ -577,15 +621,8 @@ WINFN(HRESULT) dah_Advise(IDataAdviseHolder *self, IDataObject *data,
 		return hr;
 	if (conn)
 		*conn = c;
-	if ((advf & ADVF_PRIMEFIRST) && data) {
-		STATDATA s;
-		if (statdata_copy(&s, &h->c.v[c - 1])) {
-			notify(data, &s);
-			statdata_free(&s);
-		}
-		if (advf & ADVF_ONLYONCE)
-			conn_remove(&h->c, c);
-	}
+	if ((advf & ADVF_PRIMEFIRST) && data)
+		notify_slot(&h->c, c - 1, data, 0);
 	return S_OK;
 }
 
@@ -609,18 +646,11 @@ WINFN(HRESULT) dah_SendOnDataChange(IDataAdviseHolder *self,
 
 	if (!data)
 		return E_INVALIDARG;
+	int stopping = !!(advf & ADVF_DATAONSTOP);
 	for (DWORD i = 0; i < h->c.n; i++) {
-		if (!h->c.v[i].pAdvSink)
-			continue;
-		STATDATA s;
-		if (!statdata_copy(&s, &h->c.v[i]))
-			return E_OUTOFMEMORY;
-		DWORD conn = s.dwConnection;
-		notify(data, &s);
-		statdata_free(&s);
-		if ((s.advf & ADVF_ONLYONCE) && conn <= h->c.n &&
-		    h->c.v[conn - 1].pAdvSink)
-			conn_remove(&h->c, conn);
+		HRESULT hr = notify_slot(&h->c, i, data, stopping);
+		if (FAILED(hr))
+			return hr;
 	}
 	return S_OK;
 }
@@ -765,20 +795,38 @@ static const IEnumFORMATETCVtbl enf_vtbl = {
 static pthread_mutex_t clip_lock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
 static IDataObject *clip_source;	/* what OleSetClipboard was given */
 static DWORD clip_seq;			/* the clipboard's, when it was set */
+static int clip_pending;		/* a format not yet rendered */
+static const IDataObjectVtbl cd_vtbl;
 
-/* The source, if the clipboard still holds what it put there. */
+/* The source, if the clipboard still holds what it put there. Once
+ * something else has taken the clipboard, the source is let go. */
 static IDataObject *current_source(void)
 {
 	DWORD (WINAPI *seq)(void) = u32("GetClipboardSequenceNumber");
-	IDataObject *d = NULL;
+	IDataObject *d = NULL, *lost = NULL;
 
 	pthread_mutex_lock(&clip_lock);
 	if (clip_source && seq && seq() == clip_seq) {
 		d = clip_source;
 		d->lpVtbl->AddRef(d);
+	} else if (clip_source) {
+		lost = clip_source;
+		clip_source = NULL;
+		clip_pending = 0;
 	}
 	pthread_mutex_unlock(&clip_lock);
+	if (lost)
+		lost->lpVtbl->Release(lost);
 	return d;
+}
+
+/* Clipboard formats whose handle is a GDI object, not global memory. */
+static int gdi_format(UINT f)
+{
+	/* CF_BITMAP, CF_METAFILEPICT, CF_PALETTE, CF_ENHMETAFILE and their
+	 * CF_DSP* forms */
+	return f == 2 || f == 3 || f == 9 || f == 14 || f == 0x82 ||
+	       f == 0x83 || f == 0x8e;
 }
 
 static HRESULT clip_open(void)
@@ -794,15 +842,17 @@ static void clip_close(void)
 		close();
 }
 
-/* Puts the global memory formats of data on the user32 clipboard. */
-static void render(IDataObject *data)
+/* Puts the global memory formats of data on the user32 clipboard;
+ * FALSE if one of them could not be put there. */
+static int render(IDataObject *data)
 {
 	HANDLE (WINAPI *set)(UINT, HANDLE) = u32("SetClipboardData");
 	IEnumFORMATETC *e;
 	FORMATETC f;
+	int all = 1;
 
 	if (!set || FAILED(data->lpVtbl->EnumFormatEtc(data, DATADIR_GET, &e)))
-		return;
+		return 0;
 	while (e->lpVtbl->Next(e, 1, &f, NULL) == S_OK) {
 		STGMEDIUM med;
 		memset(&med, 0, sizeof(med));
@@ -813,14 +863,21 @@ static void render(IDataObject *data)
 			if (SUCCEEDED(data->lpVtbl->GetData(data, &want, &med))) {
 				HGLOBAL copy = med.tymed == TYMED_HGLOBAL ?
 					global_copy(med.hGlobal, 0) : NULL;
-				if (copy && !set(f.cfFormat, copy))
+				if (!copy && med.tymed == TYMED_HGLOBAL)
+					all = 0;
+				if (copy && !set(f.cfFormat, copy)) {
 					global_free(copy);
+					all = 0;
+				}
 				ole_ReleaseStgMedium(&med);
+			} else {
+				all = 0;
 			}
 		}
 		ole_taskmem_free(f.ptd);
 	}
 	e->lpVtbl->Release(e);
+	return all;
 }
 
 WINFN(HRESULT) ole_OleSetClipboard(IDataObject *data)
@@ -829,6 +886,17 @@ WINFN(HRESULT) ole_OleSetClipboard(IDataObject *data)
 	DWORD (WINAPI *seq)(void) = u32("GetClipboardSequenceNumber");
 	HRESULT hr;
 
+	if (data && data->lpVtbl == &cd_vtbl) {
+		/* OleGetClipboard's own object: what it shows is already
+		 * there. Setting it would make it its own source. */
+		IDataObject *src = current_source();
+		if (!src)
+			return S_OK;
+		data = src;	/* the source behind it, set again */
+		hr = ole_OleSetClipboard(data);
+		src->lpVtbl->Release(src);
+		return hr;
+	}
 	if (FAILED(hr = clip_open()))
 		return hr;
 	if (!empty || !empty()) {
@@ -838,9 +906,10 @@ WINFN(HRESULT) ole_OleSetClipboard(IDataObject *data)
 	pthread_mutex_lock(&clip_lock);
 	IDataObject *old = clip_source;
 	clip_source = data;
+	clip_pending = 0;
 	if (data) {
 		data->lpVtbl->AddRef(data);
-		render(data);
+		clip_pending = !render(data);
 	}
 	clip_seq = seq ? seq() : 0;
 	pthread_mutex_unlock(&clip_lock);
@@ -860,14 +929,37 @@ WINFN(HRESULT) ole_OleIsCurrentClipboard(IDataObject *data)
 
 WINFN(HRESULT) ole_OleFlushClipboard(void)
 {
-	/* Everything there is to render was rendered when set. */
+	DWORD (WINAPI *seq)(void) = u32("GetClipboardSequenceNumber");
+	IDataObject *src = current_source();
+	HRESULT hr = S_OK;
+
+	if (!src)
+		return S_OK;
+	/* Formats were rendered when set; one that failed then is tried
+	 * again, and while one is missing the source is kept. */
 	pthread_mutex_lock(&clip_lock);
-	IDataObject *old = clip_source;
-	clip_source = NULL;
+	if (clip_pending && clip_source == src) {
+		if (FAILED(hr = clip_open())) {
+			pthread_mutex_unlock(&clip_lock);
+			src->lpVtbl->Release(src);
+			return hr;
+		}
+		clip_pending = !render(src);
+		clip_seq = seq ? seq() : 0;
+		clip_close();
+		if (clip_pending)
+			hr = CLIPBRD_E_CANT_SET;
+	}
+	IDataObject *old = NULL;
+	if (SUCCEEDED(hr) && clip_source == src) {
+		old = clip_source;
+		clip_source = NULL;
+	}
 	pthread_mutex_unlock(&clip_lock);
+	src->lpVtbl->Release(src);
 	if (old)
 		old->lpVtbl->Release(old);
-	return S_OK;
+	return hr;
 }
 
 /*
@@ -910,12 +1002,12 @@ WINFN(ULONG) cd_Release(IDataObject *self)
 
 WINFN(HRESULT) cd_GetData(IDataObject *self, FORMATETC *fmt, STGMEDIUM *med)
 {
-	IDataObject *src = current_source();
 	HRESULT hr;
 
 	if (!fmt || !med)
 		return E_INVALIDARG;
 	memset(med, 0, sizeof(*med));
+	IDataObject *src = current_source();
 	if (src) {
 		hr = src->lpVtbl->GetData(src, fmt, med);
 		src->lpVtbl->Release(src);
@@ -923,6 +1015,8 @@ WINFN(HRESULT) cd_GetData(IDataObject *self, FORMATETC *fmt, STGMEDIUM *med)
 	}
 	if (fmt->dwAspect && fmt->dwAspect != DVASPECT_CONTENT)
 		return DV_E_FORMATETC;
+	if (gdi_format(fmt->cfFormat))
+		return DV_E_FORMATETC;	/* not global memory */
 	if (!(fmt->tymed & TYMED_HGLOBAL))
 		return DV_E_TYMED;
 	HANDLE (WINAPI *get)(UINT) = u32("GetClipboardData");
@@ -954,17 +1048,19 @@ WINFN(HRESULT) cd_GetDataHere(IDataObject *self, FORMATETC *fmt,
 
 WINFN(HRESULT) cd_QueryGetData(IDataObject *self, FORMATETC *fmt)
 {
-	IDataObject *src = current_source();
 	HRESULT hr;
 
 	if (!fmt)
 		return E_INVALIDARG;
+	IDataObject *src = current_source();
 	if (src) {
 		hr = src->lpVtbl->QueryGetData(src, fmt);
 		src->lpVtbl->Release(src);
 		return hr;
 	}
 	if (fmt->dwAspect && fmt->dwAspect != DVASPECT_CONTENT)
+		return DV_E_FORMATETC;
+	if (gdi_format(fmt->cfFormat))
 		return DV_E_FORMATETC;
 	if (!(fmt->tymed & TYMED_HGLOBAL))
 		return DV_E_TYMED;
@@ -991,7 +1087,6 @@ WINFN(HRESULT) cd_SetData(IDataObject *self, FORMATETC *fmt, STGMEDIUM *med,
 WINFN(HRESULT) cd_EnumFormatEtc(IDataObject *self, DWORD dir,
 				IEnumFORMATETC **out)
 {
-	IDataObject *src = current_source();
 	HRESULT hr;
 
 	if (!out)
@@ -999,6 +1094,7 @@ WINFN(HRESULT) cd_EnumFormatEtc(IDataObject *self, DWORD dir,
 	*out = NULL;
 	if (dir != DATADIR_GET)
 		return E_NOTIMPL;
+	IDataObject *src = current_source();
 	if (src) {
 		hr = src->lpVtbl->EnumFormatEtc(src, dir, out);
 		src->lpVtbl->Release(src);
@@ -1010,6 +1106,8 @@ WINFN(HRESULT) cd_EnumFormatEtc(IDataObject *self, DWORD dir,
 	if (FAILED(hr = clip_open()))
 		return hr;
 	for (UINT f = next ? next(0) : 0; f; f = next(f)) {
+		if (gdi_format(f))
+			continue;	/* only global memory is offered */
 		FORMATETC *nv = realloc(v, (n + 1) * sizeof(*v));
 		if (!nv)
 			break;
@@ -1131,7 +1229,7 @@ struct lock_entry {
 	DWORD count;
 };
 
-static pthread_mutex_t lock_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t lock_lock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
 static struct lock_entry *locks;
 static size_t nlocks;
 
@@ -1184,8 +1282,11 @@ WINFN(HRESULT) ole_CoLockObjectExternal(IUnknown *u, BOOL lock,
 	int last = !--locks[i].count;
 	if (last)
 		locks[i] = locks[--nlocks];
-	pthread_mutex_unlock(&lock_lock);
+	/* Released with the table locked (the lock is recursive, so the
+	 * object may lock or unlock again from ReleaseConnection), so no
+	 * other thread can lock it between deciding "last" and saying so. */
 	connection(u, 0, last && last_unlock_releases);
+	pthread_mutex_unlock(&lock_lock);
 	u->lpVtbl->Release(u);
 	return S_OK;
 }
@@ -1198,16 +1299,25 @@ WINFN(HRESULT) ole_CoDisconnectObject(IUnknown *u, DWORD reserved)
 
 /* ---- message filters and security ---- */
 
-static IMessageFilter *message_filter;
+/* Each thread (each STA) has its own filter, as on Windows. */
+static __thread IMessageFilter *message_filter;
 static int security_done;
+
+void ole_message_filter_drop(void)
+{
+	IMessageFilter *f = message_filter;
+	message_filter = NULL;
+	if (f)
+		f->lpVtbl->Release(f);
+}
 
 WINFN(HRESULT) ole_CoRegisterMessageFilter(IMessageFilter *filter,
 					   IMessageFilter **old)
 {
 	if (filter)
 		filter->lpVtbl->AddRef(filter);
-	IMessageFilter *prev = __atomic_exchange_n(&message_filter, filter,
-						   __ATOMIC_SEQ_CST);
+	IMessageFilter *prev = message_filter;
+	message_filter = filter;
 	if (old)
 		*old = prev;
 	else if (prev)
@@ -1331,7 +1441,8 @@ WINFN(HRESULT) ole_RevokeDragDrop(HWND hwnd)
 
 /*
  * No mouse button is ever down, so the source is told so at once; it
- * normally answers with a drop, which lands on no target.
+ * normally answers with a drop, but with no target under the cursor
+ * nothing receives it, which Windows reports as cancelled.
  */
 WINFN(HRESULT) ole_DoDragDrop(IDataObject *data, IDropSource *source,
 			      DWORD ok_effects, DWORD *effect)
@@ -1340,8 +1451,8 @@ WINFN(HRESULT) ole_DoDragDrop(IDataObject *data, IDropSource *source,
 		return E_INVALIDARG;
 	*effect = DROPEFFECT_NONE;
 	source->lpVtbl->GiveFeedback(source, DROPEFFECT_NONE);
-	HRESULT hr = source->lpVtbl->QueryContinueDrag(source, FALSE, 0);
-	return hr == DRAGDROP_S_DROP ? DRAGDROP_S_DROP : DRAGDROP_S_CANCEL;
+	source->lpVtbl->QueryContinueDrag(source, FALSE, 0);
+	return DRAGDROP_S_CANCEL;
 }
 
 /* ---- the registry's OLE keys ---- */
@@ -1705,7 +1816,12 @@ WINFN(HRESULT) ole_CoTreatAsClass(REFCLSID old, REFCLSID newc)
 	char path[300];
 	snprintf(path, sizeof(path), "%s\\%s\\TreatAs", class_roots[1], key);
 	reg_lock();
-	if (guid_eq(newc, &null_clsid) || guid_eq(newc, old)) {
+	if (guid_eq(newc, &null_clsid)) {
+		/* No emulation at all. */
+		struct reg_key *k = reg_open(path);
+		if (k)
+			err = reg_delete_tree(k, 0);
+	} else if (guid_eq(newc, old)) {
 		/* Back to AutoTreatAs, or to the class itself. */
 		char auto_path[300];
 		snprintf(auto_path, sizeof(auto_path), "%s\\%s\\AutoTreatAs",
@@ -1716,9 +1832,12 @@ WINFN(HRESULT) ole_CoTreatAsClass(REFCLSID old, REFCLSID newc)
 		if (av && av->type == REG_SZ) {
 			k = k ? k : reg_create(path, 0, NULL, &err);
 			if (k)
-				reg_set(k, "", REG_SZ, av->data, av->size);
+				err = reg_set(k, "", REG_SZ, av->data,
+					      av->size);
+			else if (!err)
+				err = ERROR_CANTWRITE;
 		} else if (k) {
-			reg_delete(k);
+			err = reg_delete_tree(k, 0);
 		}
 	} else {
 		struct reg_key *k = reg_create(path, 0, NULL, &err);
@@ -1727,11 +1846,14 @@ WINFN(HRESULT) ole_CoTreatAsClass(REFCLSID old, REFCLSID newc)
 		for (int i = 0; i < OLE_GUID_CHARS; i++)
 			w[i] = (BYTE)g[i];
 		if (k)
-			reg_set(k, "", REG_SZ, w, sizeof(w));
-		else
-			err = err ? err : 1;
+			err = reg_set(k, "", REG_SZ, w, sizeof(w));
+		else if (!err)
+			err = ERROR_CANTWRITE;
 	}
-	reg_save();
+	/* A change that cannot be saved stays in this process's registry
+	 * (later saves write it out) but is reported as not written. */
+	if (!err)
+		err = reg_save();
 	reg_unlock();
 	return err ? REGDB_E_WRITEREGDB : S_OK;
 }

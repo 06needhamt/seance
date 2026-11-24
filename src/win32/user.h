@@ -29,4 +29,7 @@ DWORD user_ticks(void);
 /* The command of the accelerator in e[0..n) a keyboard message is, or -1. */
 int user_accel_match(const ACCEL *e, int n, const MSG *msg);
 
+/* Updates the calling thread's key state for a keyboard message it takes. */
+void user_key_message(const MSG *m);
+
 #endif /* VFW_WIN32_USER_H */

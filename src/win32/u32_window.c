@@ -2092,6 +2092,7 @@ static int take(struct queue *q, HWND hwnd, UINT min, UINT max, int remove,
 		*out = (*p)->msg;
 		if (remove) {
 			struct msg_node *n = *p;
+			user_key_message(out);
 			*p = n->next;
 			if (q->tail == n)
 				q->tail = prev;

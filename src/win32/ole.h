@@ -57,6 +57,8 @@ HRESULT ole_moniker_class_object(REFCLSID clsid, REFIID riid, void **ppv);
 extern const struct builtin_export ole_misc_exports[];
 /* The class TreatAs names in place of clsid (itself if none). */
 void ole_treat_as(REFCLSID clsid, CLSID *out);
+/* Lets go of the calling thread's message filter (its last CoUninitialize). */
+void ole_message_filter_drop(void);
 
 /* Structured storage (ole_storage.c). */
 extern const struct builtin_export ole_storage_exports[];
