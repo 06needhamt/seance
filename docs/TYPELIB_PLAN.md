@@ -201,8 +201,8 @@ Re-sweep the affected DLLs with `--compare`, then update
 
 - `SLTG` libraries: four files in the zip, and the one codec among them
   (`ir41_32.ax`) uses its library only for `IDispatch`.
-- Creating type libraries (`CreateTypeLib2`, `ICreateTypeLib2`): no codec
-  builds one.
+- Creating type libraries was left out at first (no codec builds one);
+  it is now done, in `oleaut_create.c` (see `IMPLEMENTATION_PLAN.md`).
 - `ITypeComp` binding and `ITypeInfo::CreateInstance`, until a codec
   needs them.
 - Marshalling: seance runs everything in one process, so the proxy entry

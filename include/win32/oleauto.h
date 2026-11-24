@@ -750,6 +750,128 @@ struct ITypeLib2 {
 	const ITypeLib2Vtbl *lpVtbl;
 };
 
+/*
+ * ICreateTypeInfo2 and ICreateTypeLib2, of which ICreateTypeInfo and
+ * ICreateTypeLib are the first parts.
+ */
+typedef struct ICreateTypeInfo2 ICreateTypeInfo;
+typedef struct ICreateTypeInfo2 ICreateTypeInfo2;
+typedef struct ICreateTypeLib2 ICreateTypeLib;
+typedef struct ICreateTypeLib2 ICreateTypeLib2;
+
+typedef struct ICreateTypeInfo2Vtbl {
+	HRESULT (WINAPI *QueryInterface)(ICreateTypeInfo2 *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(ICreateTypeInfo2 *This);
+	ULONG (WINAPI *Release)(ICreateTypeInfo2 *This);
+	HRESULT (WINAPI *SetGuid)(ICreateTypeInfo2 *This, REFGUID guid);
+	HRESULT (WINAPI *SetTypeFlags)(ICreateTypeInfo2 *This, UINT flags);
+	HRESULT (WINAPI *SetDocString)(ICreateTypeInfo2 *This, LPOLESTR doc);
+	HRESULT (WINAPI *SetHelpContext)(ICreateTypeInfo2 *This, DWORD ctx);
+	HRESULT (WINAPI *SetVersion)(ICreateTypeInfo2 *This, WORD major,
+				     WORD minor);
+	HRESULT (WINAPI *AddRefTypeInfo)(ICreateTypeInfo2 *This,
+					 ITypeInfo *info, HREFTYPE *href);
+	HRESULT (WINAPI *AddFuncDesc)(ICreateTypeInfo2 *This, UINT index,
+				      FUNCDESC *desc);
+	HRESULT (WINAPI *AddImplType)(ICreateTypeInfo2 *This, UINT index,
+				      HREFTYPE href);
+	HRESULT (WINAPI *SetImplTypeFlags)(ICreateTypeInfo2 *This, UINT index,
+					   INT flags);
+	HRESULT (WINAPI *SetAlignment)(ICreateTypeInfo2 *This, WORD align);
+	HRESULT (WINAPI *SetSchema)(ICreateTypeInfo2 *This, LPOLESTR schema);
+	HRESULT (WINAPI *AddVarDesc)(ICreateTypeInfo2 *This, UINT index,
+				     VARDESC *desc);
+	HRESULT (WINAPI *SetFuncAndParamNames)(ICreateTypeInfo2 *This,
+					       UINT index, LPOLESTR *names,
+					       UINT count);
+	HRESULT (WINAPI *SetVarName)(ICreateTypeInfo2 *This, UINT index,
+				     LPOLESTR name);
+	HRESULT (WINAPI *SetTypeDescAlias)(ICreateTypeInfo2 *This,
+					   TYPEDESC *alias);
+	HRESULT (WINAPI *DefineFuncAsDllEntry)(ICreateTypeInfo2 *This,
+					       UINT index, LPOLESTR dll,
+					       LPOLESTR proc);
+	HRESULT (WINAPI *SetFuncDocString)(ICreateTypeInfo2 *This, UINT index,
+					   LPOLESTR doc);
+	HRESULT (WINAPI *SetVarDocString)(ICreateTypeInfo2 *This, UINT index,
+					  LPOLESTR doc);
+	HRESULT (WINAPI *SetFuncHelpContext)(ICreateTypeInfo2 *This,
+					     UINT index, DWORD ctx);
+	HRESULT (WINAPI *SetVarHelpContext)(ICreateTypeInfo2 *This,
+					    UINT index, DWORD ctx);
+	HRESULT (WINAPI *SetMops)(ICreateTypeInfo2 *This, UINT index,
+				  BSTR mops);
+	HRESULT (WINAPI *SetTypeIdldesc)(ICreateTypeInfo2 *This,
+					 IDLDESC *desc);
+	HRESULT (WINAPI *LayOut)(ICreateTypeInfo2 *This);
+	/* ICreateTypeInfo2 */
+	HRESULT (WINAPI *DeleteFuncDesc)(ICreateTypeInfo2 *This, UINT index);
+	HRESULT (WINAPI *DeleteFuncDescByMemId)(ICreateTypeInfo2 *This,
+						MEMBERID memid,
+						INVOKEKIND kind);
+	HRESULT (WINAPI *DeleteVarDesc)(ICreateTypeInfo2 *This, UINT index);
+	HRESULT (WINAPI *DeleteVarDescByMemId)(ICreateTypeInfo2 *This,
+					       MEMBERID memid);
+	HRESULT (WINAPI *DeleteImplType)(ICreateTypeInfo2 *This, UINT index);
+	HRESULT (WINAPI *SetCustData)(ICreateTypeInfo2 *This, REFGUID guid,
+				      VARIANT *value);
+	HRESULT (WINAPI *SetFuncCustData)(ICreateTypeInfo2 *This, UINT index,
+					  REFGUID guid, VARIANT *value);
+	HRESULT (WINAPI *SetParamCustData)(ICreateTypeInfo2 *This, UINT func,
+					   UINT param, REFGUID guid,
+					   VARIANT *value);
+	HRESULT (WINAPI *SetVarCustData)(ICreateTypeInfo2 *This, UINT index,
+					 REFGUID guid, VARIANT *value);
+	HRESULT (WINAPI *SetImplTypeCustData)(ICreateTypeInfo2 *This,
+					      UINT index, REFGUID guid,
+					      VARIANT *value);
+	HRESULT (WINAPI *SetHelpStringContext)(ICreateTypeInfo2 *This,
+					       ULONG ctx);
+	HRESULT (WINAPI *SetFuncHelpStringContext)(ICreateTypeInfo2 *This,
+						   UINT index, ULONG ctx);
+	HRESULT (WINAPI *SetVarHelpStringContext)(ICreateTypeInfo2 *This,
+						  UINT index, ULONG ctx);
+	HRESULT (WINAPI *Invalidate)(ICreateTypeInfo2 *This);
+	HRESULT (WINAPI *SetName)(ICreateTypeInfo2 *This, LPOLESTR name);
+} ICreateTypeInfo2Vtbl;
+struct ICreateTypeInfo2 {
+	const ICreateTypeInfo2Vtbl *lpVtbl;
+};
+
+typedef struct ICreateTypeLib2Vtbl {
+	HRESULT (WINAPI *QueryInterface)(ICreateTypeLib2 *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(ICreateTypeLib2 *This);
+	ULONG (WINAPI *Release)(ICreateTypeLib2 *This);
+	HRESULT (WINAPI *CreateTypeInfo)(ICreateTypeLib2 *This, LPOLESTR name,
+					 TYPEKIND kind,
+					 ICreateTypeInfo **info);
+	HRESULT (WINAPI *SetName)(ICreateTypeLib2 *This, LPOLESTR name);
+	HRESULT (WINAPI *SetVersion)(ICreateTypeLib2 *This, WORD major,
+				     WORD minor);
+	HRESULT (WINAPI *SetGuid)(ICreateTypeLib2 *This, REFGUID guid);
+	HRESULT (WINAPI *SetDocString)(ICreateTypeLib2 *This, LPOLESTR doc);
+	HRESULT (WINAPI *SetHelpFileName)(ICreateTypeLib2 *This,
+					  LPOLESTR file);
+	HRESULT (WINAPI *SetHelpContext)(ICreateTypeLib2 *This, DWORD ctx);
+	HRESULT (WINAPI *SetLcid)(ICreateTypeLib2 *This, LCID lcid);
+	HRESULT (WINAPI *SetLibFlags)(ICreateTypeLib2 *This, UINT flags);
+	HRESULT (WINAPI *SaveAllChanges)(ICreateTypeLib2 *This);
+	/* ICreateTypeLib2 */
+	HRESULT (WINAPI *DeleteTypeInfo)(ICreateTypeLib2 *This,
+					 LPOLESTR name);
+	HRESULT (WINAPI *SetCustData)(ICreateTypeLib2 *This, REFGUID guid,
+				      VARIANT *value);
+	HRESULT (WINAPI *SetHelpStringContext)(ICreateTypeLib2 *This,
+					       ULONG ctx);
+	HRESULT (WINAPI *SetHelpStringDll)(ICreateTypeLib2 *This,
+					   LPOLESTR dll);
+} ICreateTypeLib2Vtbl;
+struct ICreateTypeLib2 {
+	const ICreateTypeLib2Vtbl *lpVtbl;
+};
+
 /* Errors. */
 #define DISP_E_UNKNOWNINTERFACE ((HRESULT)0x80020001)
 #define DISP_E_MEMBERNOTFOUND   ((HRESULT)0x80020003)
@@ -846,6 +968,14 @@ struct IPropertyBag {
 	G(IID_ITypeLib2, 0x00020411, 0x0000, 0x0000, \
 	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
 	G(IID_ITypeInfo2, 0x00020412, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_ICreateTypeInfo, 0x00020405, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_ICreateTypeLib, 0x00020406, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_ICreateTypeInfo2, 0x0002040e, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_ICreateTypeLib2, 0x0002040f, 0x0000, 0x0000, \
 	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46)
 
 VFW_OLEAUTO_GUIDS(VFW_GUID_DECLARE)

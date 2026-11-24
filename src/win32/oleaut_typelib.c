@@ -1401,6 +1401,17 @@ static HRESULT lib_from_bytes(const BYTE *d, size_t len, const char *what,
 	return S_OK;
 }
 
+/* A library from bytes in memory, outside the cache (ICreateTypeLib's). */
+HRESULT oa_typelib_from_bytes(const void *d, size_t len, ITypeLib **out)
+{
+	struct typelib *lib;
+	HRESULT hr = lib_from_bytes(d, len, "memory", &lib);
+
+	if (hr == S_OK)
+		*out = (ITypeLib *)&lib->iface;
+	return hr;
+}
+
 /*
  * The library in the file at path (a Unix path): the file itself, or its
  * TYPELIB resource res.
@@ -3202,14 +3213,6 @@ HRESULT STUB_WINAPI oa_LoadRegTypeLib(REFGUID guid, WORD major, WORD minor,
 	return hr;
 }
 
-WINFN(HRESULT) oa_CreateTypeLib2(SYSKIND kind, LPCOLESTR file, void **out)
-{
-	if (out)
-		*out = NULL;
-	TRACE("CreateTypeLib2: not implemented");
-	return E_NOTIMPL;
-}
-
 WINFN(void) oa_ClearCustData(CUSTDATA *data)
 {
 	if (!data)
@@ -3348,7 +3351,6 @@ const struct builtin_export oa_typelib_exports[] = {
 	E(LoadTypeLib, 161),
 	E(LoadRegTypeLib, 162),
 	E(ClearCustData, 171),
-	E(CreateTypeLib2, 180),
 	E(LoadTypeLibEx, 183),
 	BUILTIN_END
 };

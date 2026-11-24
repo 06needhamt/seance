@@ -75,6 +75,9 @@ HRESULT STUB_WINAPI oa_DispCallFunc(void *instance, ULONG_PTR offset,
 				    VARTYPE *types, VARIANTARG **args,
 				    VARIANT *result);
 
+/* A library parsed from an MSFT image in memory, not cached. */
+HRESULT oa_typelib_from_bytes(const void *d, size_t len, ITypeLib **out);
+
 /* Type library registration (oleaut_typereg.c). */
 HRESULT STUB_WINAPI oa_QueryPathOfRegTypeLib(REFGUID guid, WORD major,
 					     WORD minor, LCID lcid,
@@ -100,6 +103,7 @@ extern const struct builtin_export oa_typereg_exports[];
 extern const struct builtin_export oa_dispatch_exports[];
 extern const struct builtin_export oa_var_exports[];
 extern const struct builtin_export oa_format_exports[];
+extern const struct builtin_export oa_create_exports[];
 extern const struct builtin_export oa_errinfo_ole32_exports[];
 
 #endif /* VFW_WIN32_OLEAUT_H */

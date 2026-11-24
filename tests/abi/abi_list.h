@@ -797,6 +797,14 @@
 	O(ITypeLib2Vtbl, GetTypeInfoCount) O(ITypeLib2Vtbl, FindName) \
 	O(ITypeLib2Vtbl, ReleaseTLibAttr) O(ITypeLib2Vtbl, GetCustData) \
 	O(ITypeLib2Vtbl, GetAllCustData) S(ITypeLib2Vtbl) \
+	O(ICreateTypeInfo2Vtbl, AddRefTypeInfo) \
+	O(ICreateTypeInfo2Vtbl, SetTypeIdldesc) \
+	O(ICreateTypeInfo2Vtbl, DeleteFuncDesc) \
+	O(ICreateTypeInfo2Vtbl, SetVarHelpStringContext) \
+	O(ICreateTypeInfo2Vtbl, SetName) S(ICreateTypeInfo2Vtbl) \
+	O(ICreateTypeLib2Vtbl, CreateTypeInfo) \
+	O(ICreateTypeLib2Vtbl, SaveAllChanges) \
+	O(ICreateTypeLib2Vtbl, SetHelpStringDll) S(ICreateTypeLib2Vtbl) \
 	C(TKIND_ENUM) C(TKIND_INTERFACE) C(TKIND_DISPATCH) C(TKIND_COCLASS) \
 	C(TKIND_ALIAS) C(TKIND_UNION) C(TKIND_MAX) C(SYS_WIN32) C(SYS_WIN64) \
 	C(FUNC_PUREVIRTUAL) C(FUNC_DISPATCH) C(INVOKE_PROPERTYPUTREF) \
