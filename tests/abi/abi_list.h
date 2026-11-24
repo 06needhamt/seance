@@ -1013,6 +1013,37 @@
 	O(IStorageVtbl, EnumElements) O(IStorageVtbl, SetElementTimes) \
 	O(IStorageVtbl, Stat) \
 	S(IPersistStorageVtbl) O(IPersistStorageVtbl, HandsOffStorage) \
+	S(BIND_OPTS) O(BIND_OPTS, dwTickCountDeadline) \
+	S(MULTI_QI) O(MULTI_QI, pItf) O(MULTI_QI, hr) C(CO_S_NOTALLINTERFACES) \
+	S(BIND_OPTS2) O(BIND_OPTS2, dwClassContext) O(BIND_OPTS2, locale) \
+	O(BIND_OPTS2, pServerInfo) \
+	S(IMonikerVtbl) O(IMonikerVtbl, GetClassID) O(IMonikerVtbl, Load) \
+	O(IMonikerVtbl, BindToObject) O(IMonikerVtbl, Reduce) \
+	O(IMonikerVtbl, Enum) O(IMonikerVtbl, IsRunning) \
+	O(IMonikerVtbl, Inverse) O(IMonikerVtbl, GetDisplayName) \
+	O(IMonikerVtbl, IsSystemMoniker) \
+	S(IBindCtxVtbl) O(IBindCtxVtbl, RegisterObjectBound) \
+	O(IBindCtxVtbl, SetBindOptions) O(IBindCtxVtbl, GetRunningObjectTable) \
+	O(IBindCtxVtbl, RevokeObjectParam) \
+	S(IRunningObjectTableVtbl) O(IRunningObjectTableVtbl, Register) \
+	O(IRunningObjectTableVtbl, GetObject) \
+	O(IRunningObjectTableVtbl, EnumRunning) \
+	S(IEnumStringVtbl) O(IEnumStringVtbl, Next) O(IEnumStringVtbl, Clone) \
+	S(IOleItemContainerVtbl) O(IOleItemContainerVtbl, ParseDisplayName) \
+	O(IOleItemContainerVtbl, LockContainer) \
+	O(IOleItemContainerVtbl, GetObject) O(IOleItemContainerVtbl, IsRunning) \
+	S(IParseDisplayNameVtbl) O(IParseDisplayNameVtbl, ParseDisplayName) \
+	S(IROTDataVtbl) O(IROTDataVtbl, GetComparisonData) \
+	C(MK_E_CONNECTMANUALLY) C(MK_E_NEEDGENERIC) C(MK_E_UNAVAILABLE) \
+	C(MK_E_SYNTAX) C(MK_E_NOOBJECT) C(MK_E_INVALIDEXTENSION) \
+	C(MK_E_NOTBINDABLE) C(MK_E_CANTOPENFILE) C(MK_E_NOINVERSE) \
+	C(MK_E_NOSTORAGE) C(MK_E_NOPREFIX) C(MK_S_REDUCED_TO_SELF) \
+	C(MK_S_ME) C(MK_S_HIM) C(MK_S_US) C(MK_S_MONIKERALREADYREGISTERED) \
+	C(MKSYS_GENERICCOMPOSITE) C(MKSYS_FILEMONIKER) C(MKSYS_ANTIMONIKER) \
+	C(MKSYS_ITEMMONIKER) C(MKSYS_POINTERMONIKER) C(MKSYS_CLASSMONIKER) \
+	C(MKRREDUCE_ONE) C(MKRREDUCE_TOUSER) C(MKRREDUCE_THROUGHUSER) \
+	C(BINDSPEED_INDEFINITE) C(BINDSPEED_IMMEDIATE) \
+	C(ROTFLAGS_REGISTRATIONKEEPSALIVE) C(ROTFLAGS_ALLOWANYCLIENT) \
 	S(IPersistStreamVtbl) O(IPersistStreamVtbl, GetClassID) \
 	O(IPersistStreamVtbl, IsDirty) O(IPersistStreamVtbl, Load) \
 	O(IPersistStreamVtbl, Save) O(IPersistStreamVtbl, GetSizeMax) \

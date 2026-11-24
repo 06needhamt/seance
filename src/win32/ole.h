@@ -42,6 +42,17 @@ void ole_host_leave(void);
 /* The streams and in-process marshalling (ole_stream.c). */
 extern const struct builtin_export ole_stream_exports[];
 
+/*
+ * A string value under HKEY_CLASSES_ROOT (per-user classes first), as
+ * UTF-8, malloc()ed; NULL if there is none. name "" is the default value.
+ */
+char *ole_classes_value(const char *sub, const char *name);
+
+/* Monikers and the running object table (ole_moniker.c). */
+extern const struct builtin_export ole_moniker_exports[];
+/* The class objects of the system monikers, REGDB_E_CLASSNOTREG else. */
+HRESULT ole_moniker_class_object(REFCLSID clsid, REFIID riid, void **ppv);
+
 /* Structured storage (ole_storage.c). */
 extern const struct builtin_export ole_storage_exports[];
 

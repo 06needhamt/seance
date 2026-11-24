@@ -164,7 +164,21 @@ typedef HRESULT (WINAPI *LPFNGETCLASSOBJECT)(REFCLSID, REFIID, LPVOID *);
 	G(IID_IEnumSTATSTG, 0x0000000d, 0x0000, 0x0000, \
 	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
 	G(IID_IPersistStorage, 0x0000010a, 0x0000, 0x0000, \
-	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46)
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IBindCtx, 0x0000000e, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IRunningObjectTable, 0x00000010, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IEnumString, 0x00000101, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IParseDisplayName, 0x0000011a, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IOleContainer, 0x0000011b, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IOleItemContainer, 0x0000011c, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IROTData, 0xf29f6bc0, 0x5021, 0x11ce, \
+	  0xaa, 0x15, 0x00, 0x00, 0x69, 0x01, 0x29, 0x3f)
 
 VFW_OBJBASE_GUIDS(VFW_GUID_DECLARE)
 
@@ -458,12 +472,242 @@ struct IPersistStorage {
 	const IPersistStorageVtbl *lpVtbl;
 };
 
-/*
- * Monikers (objidl.h) only appear as what an enumerator hands out, so
- * IMoniker is left opaque.
- */
+/* Monikers, bind contexts and the running object table (objidl.h). */
 typedef struct IMoniker IMoniker;
 typedef struct IEnumMoniker IEnumMoniker;
+typedef struct IBindCtx IBindCtx;
+typedef struct IRunningObjectTable IRunningObjectTable;
+typedef struct IEnumString IEnumString;
+
+#define MK_E_CONNECTMANUALLY    ((HRESULT)0x800401e0)
+#define MK_E_EXCEEDEDDEADLINE   ((HRESULT)0x800401e1)
+#define MK_E_NEEDGENERIC        ((HRESULT)0x800401e2)
+#define MK_E_UNAVAILABLE        ((HRESULT)0x800401e3)
+#define MK_E_SYNTAX             ((HRESULT)0x800401e4)
+#define MK_E_NOOBJECT           ((HRESULT)0x800401e5)
+#define MK_E_INVALIDEXTENSION   ((HRESULT)0x800401e6)
+#define MK_E_INTERMEDIATEINTERFACENOTSUPPORTED ((HRESULT)0x800401e7)
+#define MK_E_NOTBINDABLE        ((HRESULT)0x800401e8)
+#define MK_E_NOTBOUND           ((HRESULT)0x800401e9)
+#define MK_E_CANTOPENFILE       ((HRESULT)0x800401ea)
+#define MK_E_MUSTBOTHERUSER     ((HRESULT)0x800401eb)
+#define MK_E_NOINVERSE          ((HRESULT)0x800401ec)
+#define MK_E_NOSTORAGE          ((HRESULT)0x800401ed)
+#define MK_E_NOPREFIX           ((HRESULT)0x800401ee)
+#define MK_E_ENUMERATION_FAILED ((HRESULT)0x800401ef)
+#define MK_S_REDUCED_TO_SELF    ((HRESULT)0x000401e2)
+#define MK_S_ME                 ((HRESULT)0x000401e4)
+#define MK_S_HIM                ((HRESULT)0x000401e5)
+#define MK_S_US                 ((HRESULT)0x000401e6)
+#define MK_S_MONIKERALREADYREGISTERED ((HRESULT)0x000401e7)
+
+#define MKSYS_NONE             0
+#define MKSYS_GENERICCOMPOSITE 1
+#define MKSYS_FILEMONIKER      2
+#define MKSYS_ANTIMONIKER      3
+#define MKSYS_ITEMMONIKER      4
+#define MKSYS_POINTERMONIKER   5
+#define MKSYS_CLASSMONIKER     7
+#define MKSYS_OBJREFMONIKER    8
+
+#define MKRREDUCE_ONE         (3 << 16)
+#define MKRREDUCE_TOUSER      (2 << 16)
+#define MKRREDUCE_THROUGHUSER (1 << 16)
+#define MKRREDUCE_ALL         0
+
+#define BINDSPEED_INDEFINITE 1
+#define BINDSPEED_MODERATE   2
+#define BINDSPEED_IMMEDIATE  3
+
+#define BIND_MAYBOTHERUSER     1
+#define BIND_JUSTTESTEXISTENCE 2
+
+#define ROTFLAGS_REGISTRATIONKEEPSALIVE 0x1
+#define ROTFLAGS_ALLOWANYCLIENT         0x2
+
+/* CoCreateInstanceEx and CoGetInstanceFrom*: one interface asked for. */
+typedef struct tagMULTI_QI {
+	const IID *pIID;
+	IUnknown *pItf;
+	HRESULT hr;
+} MULTI_QI;
+#define CO_S_NOTALLINTERFACES ((HRESULT)0x00080012)
+
+typedef struct tagBIND_OPTS {
+	DWORD cbStruct;
+	DWORD grfFlags;
+	DWORD grfMode;
+	DWORD dwTickCountDeadline;
+} BIND_OPTS, *LPBIND_OPTS;
+
+typedef struct tagBIND_OPTS2 {
+	DWORD cbStruct;
+	DWORD grfFlags;
+	DWORD grfMode;
+	DWORD dwTickCountDeadline;
+	DWORD dwTrackFlags;
+	DWORD dwClassContext;
+	LCID locale;
+	void *pServerInfo;	/* COSERVERINFO * */
+} BIND_OPTS2, *LPBIND_OPTS2;
+
+typedef struct IMonikerVtbl {
+	HRESULT (WINAPI *QueryInterface)(IMoniker *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IMoniker *This);
+	ULONG (WINAPI *Release)(IMoniker *This);
+	HRESULT (WINAPI *GetClassID)(IMoniker *This, CLSID *clsid);
+	HRESULT (WINAPI *IsDirty)(IMoniker *This);
+	HRESULT (WINAPI *Load)(IMoniker *This, IStream *stm);
+	HRESULT (WINAPI *Save)(IMoniker *This, IStream *stm, BOOL clear_dirty);
+	HRESULT (WINAPI *GetSizeMax)(IMoniker *This, ULARGE_INTEGER *size);
+	HRESULT (WINAPI *BindToObject)(IMoniker *This, IBindCtx *bc,
+				       IMoniker *left, REFIID riid, void **ppv);
+	HRESULT (WINAPI *BindToStorage)(IMoniker *This, IBindCtx *bc,
+					IMoniker *left, REFIID riid, void **ppv);
+	HRESULT (WINAPI *Reduce)(IMoniker *This, IBindCtx *bc, DWORD how_far,
+				 IMoniker **left_reduced, IMoniker **reduced);
+	HRESULT (WINAPI *ComposeWith)(IMoniker *This, IMoniker *right,
+				      BOOL only_if_not_generic,
+				      IMoniker **composite);
+	HRESULT (WINAPI *Enum)(IMoniker *This, BOOL forward,
+			       IEnumMoniker **e);
+	HRESULT (WINAPI *IsEqual)(IMoniker *This, IMoniker *other);
+	HRESULT (WINAPI *Hash)(IMoniker *This, DWORD *hash);
+	HRESULT (WINAPI *IsRunning)(IMoniker *This, IBindCtx *bc,
+				    IMoniker *left, IMoniker *newly_running);
+	HRESULT (WINAPI *GetTimeOfLastChange)(IMoniker *This, IBindCtx *bc,
+					      IMoniker *left, FILETIME *time);
+	HRESULT (WINAPI *Inverse)(IMoniker *This, IMoniker **inverse);
+	HRESULT (WINAPI *CommonPrefixWith)(IMoniker *This, IMoniker *other,
+					   IMoniker **prefix);
+	HRESULT (WINAPI *RelativePathTo)(IMoniker *This, IMoniker *other,
+					 IMoniker **rel);
+	HRESULT (WINAPI *GetDisplayName)(IMoniker *This, IBindCtx *bc,
+					 IMoniker *left, LPOLESTR *name);
+	HRESULT (WINAPI *ParseDisplayName)(IMoniker *This, IBindCtx *bc,
+					   IMoniker *left, LPOLESTR name,
+					   ULONG *eaten, IMoniker **out);
+	HRESULT (WINAPI *IsSystemMoniker)(IMoniker *This, DWORD *mksys);
+} IMonikerVtbl;
+struct IMoniker {
+	const IMonikerVtbl *lpVtbl;
+};
+
+typedef struct IBindCtxVtbl {
+	HRESULT (WINAPI *QueryInterface)(IBindCtx *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IBindCtx *This);
+	ULONG (WINAPI *Release)(IBindCtx *This);
+	HRESULT (WINAPI *RegisterObjectBound)(IBindCtx *This, IUnknown *obj);
+	HRESULT (WINAPI *RevokeObjectBound)(IBindCtx *This, IUnknown *obj);
+	HRESULT (WINAPI *ReleaseBoundObjects)(IBindCtx *This);
+	HRESULT (WINAPI *SetBindOptions)(IBindCtx *This, BIND_OPTS *opts);
+	HRESULT (WINAPI *GetBindOptions)(IBindCtx *This, BIND_OPTS *opts);
+	HRESULT (WINAPI *GetRunningObjectTable)(IBindCtx *This,
+						IRunningObjectTable **rot);
+	HRESULT (WINAPI *RegisterObjectParam)(IBindCtx *This, LPOLESTR key,
+					      IUnknown *obj);
+	HRESULT (WINAPI *GetObjectParam)(IBindCtx *This, LPOLESTR key,
+					 IUnknown **obj);
+	HRESULT (WINAPI *EnumObjectParam)(IBindCtx *This, IEnumString **e);
+	HRESULT (WINAPI *RevokeObjectParam)(IBindCtx *This, LPOLESTR key);
+} IBindCtxVtbl;
+struct IBindCtx {
+	const IBindCtxVtbl *lpVtbl;
+};
+
+typedef struct IRunningObjectTableVtbl {
+	HRESULT (WINAPI *QueryInterface)(IRunningObjectTable *This,
+					 REFIID riid, void **ppv);
+	ULONG (WINAPI *AddRef)(IRunningObjectTable *This);
+	ULONG (WINAPI *Release)(IRunningObjectTable *This);
+	HRESULT (WINAPI *Register)(IRunningObjectTable *This, DWORD flags,
+				   IUnknown *obj, IMoniker *name,
+				   DWORD *cookie);
+	HRESULT (WINAPI *Revoke)(IRunningObjectTable *This, DWORD cookie);
+	HRESULT (WINAPI *IsRunning)(IRunningObjectTable *This,
+				    IMoniker *name);
+	HRESULT (WINAPI *GetObject)(IRunningObjectTable *This, IMoniker *name,
+				    IUnknown **obj);
+	HRESULT (WINAPI *NoteChangeTime)(IRunningObjectTable *This,
+					 DWORD cookie, FILETIME *time);
+	HRESULT (WINAPI *GetTimeOfLastChange)(IRunningObjectTable *This,
+					      IMoniker *name, FILETIME *time);
+	HRESULT (WINAPI *EnumRunning)(IRunningObjectTable *This,
+				      IEnumMoniker **e);
+} IRunningObjectTableVtbl;
+struct IRunningObjectTable {
+	const IRunningObjectTableVtbl *lpVtbl;
+};
+
+typedef struct IEnumStringVtbl {
+	HRESULT (WINAPI *QueryInterface)(IEnumString *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IEnumString *This);
+	ULONG (WINAPI *Release)(IEnumString *This);
+	HRESULT (WINAPI *Next)(IEnumString *This, ULONG count,
+			       LPOLESTR *strings, ULONG *fetched);
+	HRESULT (WINAPI *Skip)(IEnumString *This, ULONG count);
+	HRESULT (WINAPI *Reset)(IEnumString *This);
+	HRESULT (WINAPI *Clone)(IEnumString *This, IEnumString **clone);
+} IEnumStringVtbl;
+struct IEnumString {
+	const IEnumStringVtbl *lpVtbl;
+};
+
+/* oleidl.h: what an item moniker binds through. */
+typedef struct IOleItemContainer IOleItemContainer;
+typedef struct IOleItemContainerVtbl {
+	HRESULT (WINAPI *QueryInterface)(IOleItemContainer *This,
+					 REFIID riid, void **ppv);
+	ULONG (WINAPI *AddRef)(IOleItemContainer *This);
+	ULONG (WINAPI *Release)(IOleItemContainer *This);
+	HRESULT (WINAPI *ParseDisplayName)(IOleItemContainer *This,
+					   IBindCtx *bc, LPOLESTR name,
+					   ULONG *eaten, IMoniker **out);
+	HRESULT (WINAPI *EnumObjects)(IOleItemContainer *This, DWORD flags,
+				      void **e);	/* IEnumUnknown ** */
+	HRESULT (WINAPI *LockContainer)(IOleItemContainer *This, BOOL lock);
+	HRESULT (WINAPI *GetObject)(IOleItemContainer *This, LPOLESTR item,
+				    DWORD speed, IBindCtx *bc, REFIID riid,
+				    void **ppv);
+	HRESULT (WINAPI *GetObjectStorage)(IOleItemContainer *This,
+					   LPOLESTR item, IBindCtx *bc,
+					   REFIID riid, void **ppv);
+	HRESULT (WINAPI *IsRunning)(IOleItemContainer *This, LPOLESTR item);
+} IOleItemContainerVtbl;
+struct IOleItemContainer {
+	const IOleItemContainerVtbl *lpVtbl;
+};
+
+/* IParseDisplayName is the first method of IOleItemContainer. */
+typedef struct IParseDisplayName IParseDisplayName;
+typedef struct IParseDisplayNameVtbl {
+	HRESULT (WINAPI *QueryInterface)(IParseDisplayName *This,
+					 REFIID riid, void **ppv);
+	ULONG (WINAPI *AddRef)(IParseDisplayName *This);
+	ULONG (WINAPI *Release)(IParseDisplayName *This);
+	HRESULT (WINAPI *ParseDisplayName)(IParseDisplayName *This,
+					   IBindCtx *bc, LPOLESTR name,
+					   ULONG *eaten, IMoniker **out);
+} IParseDisplayNameVtbl;
+struct IParseDisplayName {
+	const IParseDisplayNameVtbl *lpVtbl;
+};
+
+typedef struct IROTData IROTData;
+typedef struct IROTDataVtbl {
+	HRESULT (WINAPI *QueryInterface)(IROTData *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IROTData *This);
+	ULONG (WINAPI *Release)(IROTData *This);
+	HRESULT (WINAPI *GetComparisonData)(IROTData *This, BYTE *data,
+					    ULONG max, ULONG *size);
+} IROTDataVtbl;
+struct IROTData {
+	const IROTDataVtbl *lpVtbl;
+};
 typedef struct IEnumMonikerVtbl {
 	HRESULT (WINAPI *QueryInterface)(IEnumMoniker *This, REFIID riid,
 					 void **ppv);
