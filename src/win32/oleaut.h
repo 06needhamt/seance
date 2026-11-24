@@ -33,6 +33,22 @@ HRESULT STUB_WINAPI oa_VariantChangeTypeEx(VARIANTARG *dst,
 /* S_OK, or DISP_E_BADVARTYPE for a type no VARIANT may have. */
 HRESULT oa_validate_vt(VARTYPE vt);
 
+/* DECIMAL arithmetic (oleaut_conv.c). */
+HRESULT STUB_WINAPI oa_VarDecAbs(const DECIMAL *in, DECIMAL *out);
+HRESULT STUB_WINAPI oa_VarDecNeg(const DECIMAL *in, DECIMAL *out);
+HRESULT STUB_WINAPI oa_VarDecRound(const DECIMAL *in, int dp, DECIMAL *out);
+HRESULT STUB_WINAPI oa_VarDecFix(const DECIMAL *in, DECIMAL *out);
+HRESULT STUB_WINAPI oa_VarDecInt(const DECIMAL *in, DECIMAL *out);
+HRESULT STUB_WINAPI oa_VarDecCmp(const DECIMAL *a, const DECIMAL *b);
+HRESULT STUB_WINAPI oa_VarDecAdd(const DECIMAL *a, const DECIMAL *b,
+				 DECIMAL *out);
+HRESULT STUB_WINAPI oa_VarDecSub(const DECIMAL *a, const DECIMAL *b,
+				 DECIMAL *out);
+HRESULT STUB_WINAPI oa_VarDecMul(const DECIMAL *a, const DECIMAL *b,
+				 DECIMAL *out);
+HRESULT STUB_WINAPI oa_VarDecDiv(const DECIMAL *a, const DECIMAL *b,
+				 DECIMAL *out);
+
 /* SAFEARRAYs. */
 SAFEARRAY *STUB_WINAPI oa_SafeArrayCreateVector(VARTYPE vt, LONG lbound,
 					    ULONG count);
@@ -82,6 +98,8 @@ extern const struct builtin_export oa_array_exports[];
 extern const struct builtin_export oa_typelib_exports[];
 extern const struct builtin_export oa_typereg_exports[];
 extern const struct builtin_export oa_dispatch_exports[];
+extern const struct builtin_export oa_var_exports[];
+extern const struct builtin_export oa_format_exports[];
 extern const struct builtin_export oa_errinfo_ole32_exports[];
 
 #endif /* VFW_WIN32_OLEAUT_H */

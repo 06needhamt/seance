@@ -215,6 +215,46 @@ struct tagVARIANT {
 #define VARCMP_GT   2
 #define VARCMP_NULL 3
 
+/* VarParseNumFromStr and VarNumFromParseNum. */
+typedef struct tagNUMPARSE {
+	INT cDig;
+	ULONG dwInFlags;
+	ULONG dwOutFlags;
+	INT cchUsed;
+	INT nBaseShift;
+	INT nPwr10;
+} NUMPARSE;
+
+#define NUMPRS_LEADING_WHITE  0x00001
+#define NUMPRS_TRAILING_WHITE 0x00002
+#define NUMPRS_LEADING_PLUS   0x00004
+#define NUMPRS_TRAILING_PLUS  0x00008
+#define NUMPRS_LEADING_MINUS  0x00010
+#define NUMPRS_TRAILING_MINUS 0x00020
+#define NUMPRS_HEX_OCT        0x00040
+#define NUMPRS_PARENS         0x00080
+#define NUMPRS_DECIMAL        0x00100
+#define NUMPRS_THOUSANDS      0x00200
+#define NUMPRS_CURRENCY       0x00400
+#define NUMPRS_EXPONENT       0x00800
+#define NUMPRS_USE_ALL        0x01000
+#define NUMPRS_STD            0x01fff
+#define NUMPRS_NEG            0x10000
+#define NUMPRS_INEXACT        0x20000
+
+#define VTBIT_I1      (1 << VT_I1)
+#define VTBIT_UI1     (1 << VT_UI1)
+#define VTBIT_I2      (1 << VT_I2)
+#define VTBIT_UI2     (1 << VT_UI2)
+#define VTBIT_I4      (1 << VT_I4)
+#define VTBIT_UI4     (1 << VT_UI4)
+#define VTBIT_I8      (1 << VT_I8)
+#define VTBIT_UI8     (1 << VT_UI8)
+#define VTBIT_R4      (1 << VT_R4)
+#define VTBIT_R8      (1 << VT_R8)
+#define VTBIT_CY      (1 << VT_CY)
+#define VTBIT_DECIMAL (1 << VT_DECIMAL)
+
 /* IDispatch. */
 #define DISPID_UNKNOWN     (-1)
 #define DISPID_VALUE       0

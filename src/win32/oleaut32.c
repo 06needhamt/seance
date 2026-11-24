@@ -571,7 +571,8 @@ static const struct builtin_export exports[] = {
 
 static const struct builtin_export *const tables[] = {
 	exports, oa_conv_exports, oa_array_exports, oa_typelib_exports,
-	oa_typereg_exports, oa_dispatch_exports, NULL
+	oa_typereg_exports, oa_dispatch_exports, oa_var_exports,
+	oa_format_exports, NULL
 };
 
 const struct builtin_dll builtin_oleaut32 = { "oleaut32.dll", NULL, tables, 0 };
