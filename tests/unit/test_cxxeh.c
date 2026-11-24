@@ -548,6 +548,44 @@ static void test_subclasses(void)
 		CHECK(rt_assign(&c.e, &a.e) == &c.e && c.e.vtable == rt_vt);
 		CHECK_STR(what(&c.e), "index 7");
 		CHECK(c.str.ptr && c.str.ptr != a.str.ptr && c.str.len == 7);
+		/*
+		 * exception's own copy and assignment touch only its members:
+		 * into a bare exception nothing is written past it, and a VC6
+		 * left side keeps its string.
+		 */
+		{
+			copy_fn base_copy = get("??0exception@std@@QAE@ABV01@@Z");
+			struct { struct exception e; unsigned char guard[16]; } bare;
+			memset(&bare, 0x5a, sizeof(bare));
+			CHECK(base_copy(&bare.e, &a.e) == &bare.e);
+			CHECK_STR(what(&bare.e), "index 7");
+			int intact = 1;
+			for (size_t i = 0; i < sizeof(bare.guard); i++)
+				intact &= bare.guard[i] == 0x5a;
+			CHECK(intact);
+			memset(bare.guard, 0x5a, sizeof(bare.guard));
+			CHECK(assign(&bare.e, &a.e) == &bare.e);
+			intact = 1;
+			for (size_t i = 0; i < sizeof(bare.guard); i++)
+				intact &= bare.guard[i] == 0x5a;
+			CHECK(intact);
+			vector_dtor(&bare.e, 0);
+			char *kept = c.str.ptr;
+			CHECK(assign(&c.e, &b.e) == &c.e && c.str.ptr == kept);
+		}
+		/* delete[] of VC6 objects steps over each one's string. */
+		{
+			INT_PTR *blk = malloc(sizeof(INT_PTR) +
+					      2 * sizeof(struct vc6_error));
+			CHECK(blk != NULL);
+			if (blk) {
+				struct vc6_error *arr = (struct vc6_error *)(blk + 1);
+				blk[0] = 2;
+				oor_str(&arr[0].e, &arg);
+				oor_str(&arr[1].e, &arg);
+				CHECK(vector_dtor(&arr[0].e, 3) == &arr[0].e);
+			}
+		}
 		vector_dtor(&a.e, 0);
 		CHECK(!a.str.ptr && !a.e.name && !a.e.do_free);
 		vector_dtor(&b.e, 0);

@@ -1171,8 +1171,8 @@ static void vc6_copy(struct exception *e, const struct exception *rhs)
 static THISCALL struct exception *crt_exc_copy(struct exception *e,
 					       const struct exception *rhs)
 {
+	/* Only the base's members: e may be just an exception. */
 	exception_init(e, &exception_vtable, rhs->name, rhs->do_free & 1);
-	vc6_copy(e, rhs);
 	return e;
 }
 
@@ -1186,17 +1186,43 @@ static THISCALL void crt_exc_dtor(struct exception *e)
 	e->do_free = 0;
 }
 
-/* The left side keeps its own class. */
+/*
+ * The left side keeps its own class. Only the base's members are
+ * assigned: a VC6 string after them, if the left side has one, is left
+ * as it is (it belongs to the subclass's own assignment).
+ */
 static THISCALL struct exception *crt_exc_assign(struct exception *e,
 						 const struct exception *rhs)
 {
 	if (e != rhs) {
 		const void *vtable = e->vtable;
-		crt_exc_dtor(e);
+		int vc6 = e->do_free & VC6_STR;
+		if (e->do_free & 1)
+			free(e->name);
 		exception_init(e, &exception_vtable, rhs->name,
 			       rhs->do_free & 1);
-		vc6_copy(e, rhs);
+		e->do_free |= vc6;
 		e->vtable = vtable;
+	}
+	return e;
+}
+
+/*
+ * The logic_error family's assignment: also the VC6 string, but only into
+ * an object built with one (the others are only exception-sized).
+ */
+static THISCALL struct exception *crt_vc6_assign(struct exception *e,
+						 const struct exception *rhs)
+{
+	if (e != rhs) {
+		int vc6 = e->do_free & VC6_STR;
+		crt_exc_assign(e, rhs);
+		if (vc6) {
+			vc6_free(e);
+			if (rhs->do_free & VC6_STR)
+				vc6_copy(e, rhs);
+			e->do_free |= VC6_STR;
+		}
 	}
 	return e;
 }
@@ -1220,16 +1246,23 @@ static THISCALL void *crt_exc_vector_dtor(struct exception *e, unsigned flags)
 {
 	if (flags & 2) {
 		INT_PTR *count = (INT_PTR *)e - 1;
+		/* VC6 objects are larger: the string follows each one. */
+		size_t size = *count > 0 && (e->do_free & VC6_STR) ?
+			sizeof(*e) + sizeof(struct vc6_string) : sizeof(*e);
 		for (INT_PTR i = *count - 1; i >= 0; i--)
-			crt_exc_dtor(e + i);
+			crt_exc_dtor((struct exception *)((char *)e + i * size));
 		free(count);
 		return e;
 	}
 	return crt_exc_scalar_dtor(e, flags);
 }
 
-/* A subclass's constructor from a name (copied), and copy constructor. */
-#define SUBCLASS(cls)							\
+/*
+ * A subclass's constructor from a name (copied), and copy constructor;
+ * those of the logic_error family (vc6 1) also copy a VC6 string, as a
+ * copy is of the same class, so as large as what it copies.
+ */
+#define SUBCLASS(cls, vc6)						\
 	static THISCALL struct exception *crt_##cls##_ctor(		\
 		struct exception *e, const char *name)			\
 	{								\
@@ -1241,7 +1274,8 @@ static THISCALL void *crt_exc_vector_dtor(struct exception *e, unsigned flags)
 	{								\
 		exception_init(e, &cls##_vtable, rhs->name,		\
 			       rhs->do_free & 1);			\
-		vc6_copy(e, rhs);					\
+		if (vc6)						\
+			vc6_copy(e, rhs);				\
 		return e;						\
 	}
 
@@ -1263,20 +1297,20 @@ static THISCALL void *crt_exc_vector_dtor(struct exception *e, unsigned flags)
 		return e;						\
 	}
 
-SUBCLASS(bad_typeid)
-SUBCLASS(bad_cast)
-SUBCLASS(non_rtti)
-SUBCLASS(logic_error)
-SUBCLASS(domain_error)
-SUBCLASS(invalid_argument)
-SUBCLASS(length_error)
-SUBCLASS(out_of_range)
-SUBCLASS(runtime_error)
-SUBCLASS(overflow_error)
-SUBCLASS(underflow_error)
-SUBCLASS(range_error)
-SUBCLASS(bad_alloc)
-SUBCLASS(bad_function_call)
+SUBCLASS(bad_typeid, 0)
+SUBCLASS(bad_cast, 0)
+SUBCLASS(non_rtti, 0)
+SUBCLASS(logic_error, 1)
+SUBCLASS(domain_error, 1)
+SUBCLASS(invalid_argument, 1)
+SUBCLASS(length_error, 1)
+SUBCLASS(out_of_range, 1)
+SUBCLASS(runtime_error, 1)
+SUBCLASS(overflow_error, 1)
+SUBCLASS(underflow_error, 1)
+SUBCLASS(range_error, 1)
+SUBCLASS(bad_alloc, 0)
+SUBCLASS(bad_function_call, 0)
 
 SUBCLASS_VC6(logic_error)
 SUBCLASS_VC6(domain_error)
@@ -1947,7 +1981,7 @@ const struct builtin_export crt_cxx_exports[] = {
 	M("??0" #cls "@std@@QAE@PBD@Z", crt_##cls##_ctor),		\
 	M("??0" #cls "@std@@QAE@ABV01@@Z", crt_##cls##_copy),		\
 	M("??1" #cls "@std@@UAE@XZ", crt_exc_dtor),			\
-	M("??4" #cls "@std@@QAEAAV01@ABV01@@Z", crt_exc_assign),	\
+	M("??4" #cls "@std@@QAEAAV01@ABV01@@Z", crt_vc6_assign),	\
 	M("??_E" #cls "@std@@UAEPAXI@Z", crt_exc_vector_dtor),		\
 	M("??_G" #cls "@std@@UAEPAXI@Z", crt_exc_scalar_dtor)
 	/* msvcp60's, from a std::string (VC6's layout, after the object). */
