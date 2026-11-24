@@ -42,4 +42,7 @@ void ole_host_leave(void);
 /* The streams and in-process marshalling (ole_stream.c). */
 extern const struct builtin_export ole_stream_exports[];
 
+/* Structured storage (ole_storage.c). */
+extern const struct builtin_export ole_storage_exports[];
+
 #endif /* VFW_WIN32_OLE_H */

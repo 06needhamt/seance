@@ -992,6 +992,13 @@
 	O(IStreamVtbl, Commit) O(IStreamVtbl, Revert) \
 	O(IStreamVtbl, LockRegion) O(IStreamVtbl, UnlockRegion) \
 	O(IStreamVtbl, Stat) O(IStreamVtbl, Clone) \
+	S(ILockBytesVtbl) O(ILockBytesVtbl, ReadAt) O(ILockBytesVtbl, Stat) \
+	S(IEnumSTATSTGVtbl) O(IEnumSTATSTGVtbl, Clone) \
+	S(IStorageVtbl) O(IStorageVtbl, CreateStream) \
+	O(IStorageVtbl, OpenStorage) O(IStorageVtbl, MoveElementTo) \
+	O(IStorageVtbl, EnumElements) O(IStorageVtbl, SetElementTimes) \
+	O(IStorageVtbl, Stat) \
+	S(IPersistStorageVtbl) O(IPersistStorageVtbl, HandsOffStorage) \
 	S(IPersistStreamVtbl) O(IPersistStreamVtbl, GetClassID) \
 	O(IPersistStreamVtbl, IsDirty) O(IPersistStreamVtbl, Load) \
 	O(IPersistStreamVtbl, Save) O(IPersistStreamVtbl, GetSizeMax) \

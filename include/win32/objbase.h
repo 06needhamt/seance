@@ -156,7 +156,15 @@ typedef HRESULT (WINAPI *LPFNGETCLASSOBJECT)(REFCLSID, REFIID, LPVOID *);
 	G(IID_IPersistStream, 0x00000109, 0x0000, 0x0000, \
 	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
 	G(IID_ISequentialStream, 0x0c733a30, 0x2a1c, 0x11ce, \
-	  0xad, 0xe5, 0x00, 0xaa, 0x00, 0x44, 0x77, 0x3d)
+	  0xad, 0xe5, 0x00, 0xaa, 0x00, 0x44, 0x77, 0x3d) \
+	G(IID_ILockBytes, 0x0000000a, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IStorage, 0x0000000b, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IEnumSTATSTG, 0x0000000d, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IPersistStorage, 0x0000010a, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46)
 
 VFW_OBJBASE_GUIDS(VFW_GUID_DECLARE)
 
@@ -189,9 +197,39 @@ struct IPersist {
 
 #define STGC_DEFAULT 0
 
-#define STGM_READ      0x00000000
-#define STGM_WRITE     0x00000001
-#define STGM_READWRITE 0x00000002
+#define STGC_OVERWRITE                          1
+#define STGC_ONLYIFCURRENT                      2
+#define STGC_DANGEROUSLYCOMMITMERELYTODISKCACHE 4
+
+#define STGM_DIRECT           0x00000000
+#define STGM_READ             0x00000000
+#define STGM_WRITE            0x00000001
+#define STGM_READWRITE        0x00000002
+#define STGM_SHARE_DENY_NONE  0x00000040
+#define STGM_SHARE_DENY_READ  0x00000030
+#define STGM_SHARE_DENY_WRITE 0x00000020
+#define STGM_SHARE_EXCLUSIVE  0x00000010
+#define STGM_PRIORITY         0x00040000
+#define STGM_CREATE           0x00001000
+#define STGM_CONVERT          0x00020000
+#define STGM_FAILIFTHERE      0x00000000
+#define STGM_TRANSACTED       0x00010000
+#define STGM_NOSCRATCH        0x00100000
+#define STGM_NOSNAPSHOT       0x00200000
+#define STGM_DIRECT_SWMR      0x00400000
+#define STGM_DELETEONRELEASE  0x04000000
+#define STGM_SIMPLE           0x08000000
+
+#define STGMOVE_MOVE 0
+#define STGMOVE_COPY 1
+
+#define STGFMT_STORAGE  0
+#define STGFMT_FILE     3
+#define STGFMT_ANY      4
+#define STGFMT_DOCFILE  5
+
+/* A clipboard format (wtypes.h). */
+typedef WORD CLIPFORMAT;
 
 #define STG_E_INVALIDFUNCTION ((HRESULT)0x80030001)
 #define STG_E_INVALIDPOINTER  ((HRESULT)0x80030009)
@@ -199,6 +237,23 @@ struct IPersist {
 #define STG_E_SEEKERROR       ((HRESULT)0x80030019)
 #define STG_E_READFAULT       ((HRESULT)0x8003001E)
 #define STG_E_WRITEFAULT      ((HRESULT)0x8003001D)
+#define STG_E_FILENOTFOUND       ((HRESULT)0x80030002)
+#define STG_E_PATHNOTFOUND       ((HRESULT)0x80030003)
+#define STG_E_ACCESSDENIED       ((HRESULT)0x80030005)
+#define STG_E_INVALIDHANDLE      ((HRESULT)0x80030006)
+#define STG_E_INSUFFICIENTMEMORY ((HRESULT)0x80030008)
+#define STG_E_NOMOREFILES        ((HRESULT)0x80030012)
+#define STG_E_SHAREVIOLATION     ((HRESULT)0x80030020)
+#define STG_E_LOCKVIOLATION      ((HRESULT)0x80030021)
+#define STG_E_FILEALREADYEXISTS  ((HRESULT)0x80030050)
+#define STG_E_INVALIDPARAMETER   ((HRESULT)0x80030057)
+#define STG_E_INVALIDHEADER      ((HRESULT)0x800300FB)
+#define STG_E_INVALIDNAME        ((HRESULT)0x800300FC)
+#define STG_E_UNIMPLEMENTEDFUNCTION ((HRESULT)0x800300FE)
+#define STG_E_INVALIDFLAG        ((HRESULT)0x800300FF)
+#define STG_E_REVERTED           ((HRESULT)0x80030102)
+#define STG_E_DOCFILECORRUPT     ((HRESULT)0x80030109)
+#define STG_S_CONVERTED          ((HRESULT)0x00030200)
 
 typedef struct tagSTATSTG {
 	LPOLESTR pwcsName;
@@ -295,6 +350,112 @@ typedef struct IPersistFileVtbl {
 } IPersistFileVtbl;
 struct IPersistFile {
 	const IPersistFileVtbl *lpVtbl;
+};
+
+/* Structured storage (objidl.h). */
+typedef struct ILockBytes ILockBytes;
+typedef struct ILockBytesVtbl {
+	HRESULT (WINAPI *QueryInterface)(ILockBytes *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(ILockBytes *This);
+	ULONG (WINAPI *Release)(ILockBytes *This);
+	HRESULT (WINAPI *ReadAt)(ILockBytes *This, ULARGE_INTEGER offset,
+				 void *pv, ULONG cb, ULONG *read);
+	HRESULT (WINAPI *WriteAt)(ILockBytes *This, ULARGE_INTEGER offset,
+				  const void *pv, ULONG cb, ULONG *written);
+	HRESULT (WINAPI *Flush)(ILockBytes *This);
+	HRESULT (WINAPI *SetSize)(ILockBytes *This, ULARGE_INTEGER size);
+	HRESULT (WINAPI *LockRegion)(ILockBytes *This, ULARGE_INTEGER offset,
+				     ULARGE_INTEGER cb, DWORD type);
+	HRESULT (WINAPI *UnlockRegion)(ILockBytes *This, ULARGE_INTEGER offset,
+				       ULARGE_INTEGER cb, DWORD type);
+	HRESULT (WINAPI *Stat)(ILockBytes *This, STATSTG *stat, DWORD flags);
+} ILockBytesVtbl;
+struct ILockBytes {
+	const ILockBytesVtbl *lpVtbl;
+};
+
+typedef struct IEnumSTATSTG IEnumSTATSTG;
+typedef struct IEnumSTATSTGVtbl {
+	HRESULT (WINAPI *QueryInterface)(IEnumSTATSTG *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IEnumSTATSTG *This);
+	ULONG (WINAPI *Release)(IEnumSTATSTG *This);
+	HRESULT (WINAPI *Next)(IEnumSTATSTG *This, ULONG count, STATSTG *out,
+			       ULONG *fetched);
+	HRESULT (WINAPI *Skip)(IEnumSTATSTG *This, ULONG count);
+	HRESULT (WINAPI *Reset)(IEnumSTATSTG *This);
+	HRESULT (WINAPI *Clone)(IEnumSTATSTG *This, IEnumSTATSTG **clone);
+} IEnumSTATSTGVtbl;
+struct IEnumSTATSTG {
+	const IEnumSTATSTGVtbl *lpVtbl;
+};
+
+typedef LPOLESTR *SNB;
+typedef struct IStorage IStorage;
+typedef IStorage *LPSTORAGE;
+typedef struct IStorageVtbl {
+	HRESULT (WINAPI *QueryInterface)(IStorage *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IStorage *This);
+	ULONG (WINAPI *Release)(IStorage *This);
+	HRESULT (WINAPI *CreateStream)(IStorage *This, LPCOLESTR name,
+				       DWORD mode, DWORD reserved1,
+				       DWORD reserved2, IStream **stream);
+	HRESULT (WINAPI *OpenStream)(IStorage *This, LPCOLESTR name,
+				     void *reserved1, DWORD mode,
+				     DWORD reserved2, IStream **stream);
+	HRESULT (WINAPI *CreateStorage)(IStorage *This, LPCOLESTR name,
+					DWORD mode, DWORD reserved1,
+					DWORD reserved2, IStorage **stg);
+	HRESULT (WINAPI *OpenStorage)(IStorage *This, LPCOLESTR name,
+				      IStorage *priority, DWORD mode,
+				      SNB exclude, DWORD reserved,
+				      IStorage **stg);
+	HRESULT (WINAPI *CopyTo)(IStorage *This, DWORD n_iid_exclude,
+				 const IID *iid_exclude, SNB exclude,
+				 IStorage *dest);
+	HRESULT (WINAPI *MoveElementTo)(IStorage *This, LPCOLESTR name,
+					IStorage *dest, LPCOLESTR new_name,
+					DWORD flags);
+	HRESULT (WINAPI *Commit)(IStorage *This, DWORD flags);
+	HRESULT (WINAPI *Revert)(IStorage *This);
+	HRESULT (WINAPI *EnumElements)(IStorage *This, DWORD reserved1,
+				       void *reserved2, DWORD reserved3,
+				       IEnumSTATSTG **en);
+	HRESULT (WINAPI *DestroyElement)(IStorage *This, LPCOLESTR name);
+	HRESULT (WINAPI *RenameElement)(IStorage *This, LPCOLESTR old_name,
+					LPCOLESTR new_name);
+	HRESULT (WINAPI *SetElementTimes)(IStorage *This, LPCOLESTR name,
+					  const FILETIME *ctime,
+					  const FILETIME *atime,
+					  const FILETIME *mtime);
+	HRESULT (WINAPI *SetClass)(IStorage *This, REFCLSID clsid);
+	HRESULT (WINAPI *SetStateBits)(IStorage *This, DWORD bits, DWORD mask);
+	HRESULT (WINAPI *Stat)(IStorage *This, STATSTG *stat, DWORD flags);
+} IStorageVtbl;
+struct IStorage {
+	const IStorageVtbl *lpVtbl;
+};
+
+/* IPersistStorage (objidl.h): an object that saves itself to a storage. */
+typedef struct IPersistStorage IPersistStorage;
+typedef struct IPersistStorageVtbl {
+	HRESULT (WINAPI *QueryInterface)(IPersistStorage *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IPersistStorage *This);
+	ULONG (WINAPI *Release)(IPersistStorage *This);
+	HRESULT (WINAPI *GetClassID)(IPersistStorage *This, CLSID *clsid);
+	HRESULT (WINAPI *IsDirty)(IPersistStorage *This);
+	HRESULT (WINAPI *InitNew)(IPersistStorage *This, IStorage *stg);
+	HRESULT (WINAPI *Load)(IPersistStorage *This, IStorage *stg);
+	HRESULT (WINAPI *Save)(IPersistStorage *This, IStorage *stg,
+			       BOOL same_as_load);
+	HRESULT (WINAPI *SaveCompleted)(IPersistStorage *This, IStorage *stg);
+	HRESULT (WINAPI *HandsOffStorage)(IPersistStorage *This);
+} IPersistStorageVtbl;
+struct IPersistStorage {
+	const IPersistStorageVtbl *lpVtbl;
 };
 
 /*

@@ -888,7 +888,8 @@ static const struct builtin_export exports[] = {
 };
 
 static const struct builtin_export *const tables[] = {
-	exports, oa_errinfo_ole32_exports, ole_stream_exports, NULL
+	exports, oa_errinfo_ole32_exports, ole_stream_exports,
+	ole_storage_exports, NULL
 };
 
 const struct builtin_dll builtin_ole32 = { "ole32.dll", NULL, tables, 0 };
