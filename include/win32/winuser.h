@@ -68,6 +68,23 @@ typedef struct tagWNDCLASSEXW {
 	HICON hIconSm;
 } WNDCLASSEXW, *PWNDCLASSEXW, *LPWNDCLASSEXW;
 
+/* Accelerator tables. */
+DECLARE_HANDLE(HACCEL);
+typedef struct tagACCEL {
+	BYTE fVirt;
+	WORD key;
+	WORD cmd;
+} ACCEL, *LPACCEL;
+#define FVIRTKEY  0x01
+#define FNOINVERT 0x02
+#define FSHIFT    0x04
+#define FCONTROL  0x08
+#define FALT      0x10
+
+#define VK_SHIFT   0x10
+#define VK_CONTROL 0x11
+#define VK_MENU    0x12
+
 typedef struct tagMSG {
 	HWND hwnd;
 	UINT message;
@@ -263,6 +280,15 @@ typedef struct tagMONITORINFO {
 #define WM_NCCALCSIZE        0x0083
 #define WM_INITDIALOG        0x0110
 #define WM_COMMAND           0x0111
+#define WM_KEYDOWN           0x0100
+#define WM_KEYUP             0x0101
+#define WM_CHAR              0x0102
+#define WM_SYSKEYDOWN        0x0104
+#define WM_SYSKEYUP          0x0105
+#define WM_SYSCHAR           0x0106
+#define WM_SYSCOMMAND        0x0112
+#define WM_RENDERFORMAT      0x0305
+#define WM_RENDERALLFORMATS  0x0306
 #define WM_TIMER             0x0113
 #define WM_USER              0x0400
 #define WM_APP               0x8000
