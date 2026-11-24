@@ -263,7 +263,9 @@ static void test_parse(void)
 		 S_OK);
 	CHECK(v.vt == VT_DECIMAL && v.decVal.scale == 2 &&
 	      v.decVal.Lo64 == 125);
-	CHECK_EQ(VarNumFromParseNum(&np, dig, VTBIT_I4, &v), DISP_E_OVERFLOW);
+	/* No real allowed: rounded (to even) into the integer. */
+	CHECK_EQ(VarNumFromParseNum(&np, dig, VTBIT_I4, &v), S_OK);
+	CHECK(v.vt == VT_I4 && v.lVal == 1);
 	/* 20 digits: past a double's exactness, so a decimal. */
 	np.cDig = 32;
 	np.dwInFlags = NUMPRS_STD;
@@ -280,6 +282,20 @@ static void test_parse(void)
 	free(w);
 	CHECK_EQ(VarNumFromParseNum(&np, dig, VTBIT_R8 | VTBIT_DECIMAL, &v),
 		 DISP_E_OVERFLOW);
+	/* Only integers allowed: a fraction rounds into one. */
+	CHECK_EQ(PARSE("1.5", NUMPRS_STD), S_OK);
+	free(w);
+	CHECK_EQ(VarNumFromParseNum(&np, dig, VTBIT_I2, &v), S_OK);
+	CHECK(v.vt == VT_I2 && v.iVal == 2);
+	/* Hex into a decimal only. */
+	CHECK_EQ(PARSE("&H7F", NUMPRS_STD | NUMPRS_HEX_OCT), S_OK);
+	free(w);
+	CHECK_EQ(VarNumFromParseNum(&np, dig, VTBIT_DECIMAL, &v), S_OK);
+	CHECK_EQ(v.vt, VT_DECIMAL);
+	CHECK(!strcmp(text(&v), "127"));
+	/* A base shift other than octal's or hex's is refused. */
+	np.nBaseShift = 64;
+	CHECK_EQ(VarNumFromParseNum(&np, dig, VTBIT_I4, &v), E_INVALIDARG);
 #undef PARSE
 }
 
@@ -407,6 +423,22 @@ static void test_unary(void)
 	expect("round cy", VarRound(&a, 2, &r), &r, VT_CY, "1.23");
 	a = CYV(12350);
 	expect("round cy even", VarRound(&a, 2, &r), &r, VT_CY, "1.24");
+	a = CYV(10001);		/* 1.0001: four places keep it */
+	expect("round cy 4", VarRound(&a, 4, &r), &r, VT_CY, "1.0001");
+	a = CYV(10001);
+	expect("round cy 6", VarRound(&a, 6, &r), &r, VT_CY, "1.0001");
+	a.vt = VT_CY;
+	a.cyVal.int64 = INT64_MIN;	/* floors past the CY range */
+	CHECK_EQ(VarInt(&a, &r), DISP_E_OVERFLOW);
+	a.cyVal.int64 = INT64_MAX;	/* rounds past it */
+	CHECK_EQ(VarRound(&a, 0, &r), DISP_E_OVERFLOW);
+	/* A by-reference operand. */
+	LONG seven = -7;
+	a.vt = VT_I4 | VT_BYREF;
+	a.plVal = &seven;
+	r.vt = VT_EMPTY;
+	CHECK_EQ(VarAbs(&a, &r), S_OK);
+	CHECK(r.vt == VT_I4 && r.lVal == 7);
 	a = DEC("2.345");
 	expect("round dec", VarRound(&a, 2, &r), &r, VT_DECIMAL, "2.34");
 	a = R8(1);

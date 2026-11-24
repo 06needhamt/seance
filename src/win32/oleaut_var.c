@@ -282,6 +282,8 @@ WINFN(HRESULT) oa_VarNumFromParseNum(NUMPARSE *np, BYTE *dig, ULONG bits,
 	if (!np || !dig || !out || np->cDig < 0)
 		return E_INVALIDARG;
 
+	if (np->nBaseShift != 0 && np->nBaseShift != 3 && np->nBaseShift != 4)
+		return E_INVALIDARG;	/* decimal, octal or hex only */
 	if (np->nBaseShift) {
 		/* Hex and octal fill the type: &HFFFF is -1 as an I2. */
 		uint64_t v = 0;
@@ -311,8 +313,21 @@ WINFN(HRESULT) oa_VarNumFromParseNum(NUMPARSE *np, BYTE *dig, ULONG bits,
 			out->dblVal = (double)v;
 			return S_OK;
 		}
-		if (!(np->dwOutFlags & NUMPRS_NEG))
-			return DISP_E_OVERFLOW;
+		if (!(np->dwOutFlags & NUMPRS_NEG)) {
+			/* Then the other reals, from its decimal digits. */
+			char t[32];
+			snprintf(t, sizeof(t), "%llu", (unsigned long long)v);
+			BSTR b = oa_bstr_utf8(t);
+			if (!b)
+				return E_OUTOFMEMORY;
+			for (size_t i = 0; i < 4 && hr != S_OK &&
+					   hr != E_OUTOFMEMORY; i++)
+				if (bits & (1u << reals[i]))
+					hr = text_to(out, b, reals[i]);
+			oa_SysFreeString(b);
+			return hr == S_OK || hr == E_OUTOFMEMORY ?
+				hr : DISP_E_OVERFLOW;
+		}
 		/* A negative one reads as a decimal number. */
 		char t[32];
 		snprintf(t, sizeof(t), "%lld", (long long)(int64_t)v);
@@ -320,14 +335,15 @@ WINFN(HRESULT) oa_VarNumFromParseNum(NUMPARSE *np, BYTE *dig, ULONG bits,
 		if (!b)
 			return E_OUTOFMEMORY;
 		for (size_t i = 0; i < sizeof(int_order) / sizeof(*int_order) &&
-				   hr != S_OK; i++)
+				   hr != S_OK && hr != E_OUTOFMEMORY; i++)
 			if (bits & (1u << int_order[i]))
 				hr = text_to(out, b, int_order[i]);
-		for (size_t i = 0; i < 4 && hr != S_OK; i++)
+		for (size_t i = 0; i < 4 && hr != S_OK && hr != E_OUTOFMEMORY;
+		     i++)
 			if (bits & (1u << reals[i]))
 				hr = text_to(out, b, reals[i]);
 		oa_SysFreeString(b);
-		return hr == S_OK ? S_OK : DISP_E_OVERFLOW;
+		return hr == S_OK || hr == E_OUTOFMEMORY ? hr : DISP_E_OVERFLOW;
 	}
 
 	BSTR text = number_text(np, dig);
@@ -338,12 +354,14 @@ WINFN(HRESULT) oa_VarNumFromParseNum(NUMPARSE *np, BYTE *dig, ULONG bits,
 	/* The smallest integer that holds it. */
 	if (pwr >= 0)
 		for (size_t i = 0; i < sizeof(int_order) / sizeof(*int_order) &&
-				   hr != S_OK; i++)
+				   hr != S_OK && hr != E_OUTOFMEMORY; i++)
 			if (bits & (1u << int_order[i]))
 				hr = text_to(out, text, int_order[i]);
 	/* Then a real that holds it exactly, then one that holds it. */
-	for (int pass = 0; pass < 2 && hr != S_OK; pass++)
-		for (int i = 0; i < 4 && hr != S_OK; i++) {
+	for (int pass = 0; pass < 2 && hr != S_OK && hr != E_OUTOFMEMORY;
+	     pass++)
+		for (int i = 0; i < 4 && hr != S_OK && hr != E_OUTOFMEMORY;
+		     i++) {
 			VARTYPE vt = reals[i];
 			int exact = vt == VT_R4 ? n <= 7 :
 				    vt == VT_R8 ? n <= 15 :
@@ -352,8 +370,14 @@ WINFN(HRESULT) oa_VarNumFromParseNum(NUMPARSE *np, BYTE *dig, ULONG bits,
 			if ((bits & (1u << vt)) && (exact || pass))
 				hr = text_to(out, text, vt);
 		}
+	/* With only integers allowed, a fraction is rounded into one. */
+	if (pwr < 0)
+		for (size_t i = 0; i < sizeof(int_order) / sizeof(*int_order) &&
+				   hr != S_OK && hr != E_OUTOFMEMORY; i++)
+			if (bits & (1u << int_order[i]))
+				hr = text_to(out, text, int_order[i]);
 	oa_SysFreeString(text);
-	return hr == S_OK ? S_OK : DISP_E_OVERFLOW;
+	return hr == S_OK || hr == E_OUTOFMEMORY ? hr : DISP_E_OVERFLOW;
 }
 
 /* ---- operands ---- */
@@ -846,22 +870,30 @@ static double round_places(double d, int places)
 	return isfinite(r) ? r : d;
 }
 
-static int64_t cy_round_to(int64_t v, int places, int how)
+/* v (a CY's scaled value) cut to places decimals; DISP_E_OVERFLOW if
+ * the result leaves the CY range. */
+static HRESULT cy_round_to(int64_t *v, int places, int how)
 {
+	if (places >= 4)	/* nothing to take off */
+		return S_OK;
 	int64_t unit = 1;
 	for (int i = places; i < 4; i++)
 		unit *= 10;
-	int64_t q = v / unit, rem = v % unit;
-	if (how == UN_FIX)
-		return q * unit;
-	if (how == UN_INT)
-		return (rem < 0 ? q - 1 : q) * unit;
-	int64_t half = unit / 2;
-	if (rem > half || (rem == half && (q & 1)))
-		q++;
-	else if (rem < -half || (rem == -half && (q & 1)))
-		q--;
-	return q * unit;
+	int64_t q = *v / unit, rem = *v % unit;
+	if (how == UN_INT) {
+		if (rem < 0)
+			q--;
+	} else if (how == UN_ROUND) {
+		int64_t half = unit / 2;
+		if (rem > half || (rem == half && (q & 1)))
+			q++;
+		else if (rem < -half || (rem == -half && (q & 1)))
+			q--;
+	}
+	if (q > INT64_MAX / unit || q < INT64_MIN / unit)
+		return DISP_E_OVERFLOW;
+	*v = q * unit;
+	return S_OK;
 }
 
 static HRESULT unary(enum un how, int places, const VARIANT *v, VARIANT *out)
@@ -906,7 +938,9 @@ static HRESULT unary(enum un how, int places, const VARIANT *v, VARIANT *out)
 				return DISP_E_OVERFLOW;
 			i = -i;
 		} else {
-			i = cy_round_to(i, how == UN_ROUND ? places : 0, how);
+			hr = cy_round_to(&i, how == UN_ROUND ? places : 0, how);
+			if (hr != S_OK)
+				return hr;
 		}
 		out->vt = VT_CY;
 		out->cyVal.int64 = i;

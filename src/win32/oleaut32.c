@@ -309,6 +309,7 @@ HRESULT STUB_WINAPI oa_VariantCopyInd(VARIANTARG *dst, const VARIANTARG *src)
 	if (!src->byref)
 		return E_INVALIDARG;
 
+	hr = S_OK;	/* the copies below set it only when they can fail */
 	VARTYPE vt = src->vt & ~VT_BYREF;
 	oa_VariantInit(&v);
 	if (vt & VT_ARRAY) {
