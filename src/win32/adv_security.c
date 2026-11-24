@@ -3442,12 +3442,14 @@ static int token_has_sid(const void *sid, int deny)
 	return 0;
 }
 
-static int token_priv_on(struct token *t, int i)
+/* Whether privileges a and b are held and enabled, read together. */
+static void token_privs_on(struct token *t, int a, int b, int *on_a,
+			   int *on_b)
 {
 	pthread_mutex_lock(&token_lock);
-	int on = t->held[i] && (t->attrs[i] & SE_PRIVILEGE_ENABLED);
+	*on_a = t->held[a] && (t->attrs[a] & SE_PRIVILEGE_ENABLED);
+	*on_b = t->held[b] && (t->attrs[b] & SE_PRIVILEGE_ENABLED);
 	pthread_mutex_unlock(&token_lock);
-	return on;
 }
 
 #define SE_SECURITY_PRIVILEGE        8
@@ -3494,8 +3496,9 @@ WINFN(BOOL) adv_AccessCheck(PSECURITY_DESCRIPTOR sd, HANDLE token,
 	}
 	int max = (desired & MAXIMUM_ALLOWED) != 0;
 	DWORD want = desired & ~MAXIMUM_ALLOWED;
-	int sec_on = token_priv_on(t, SE_SECURITY_PRIVILEGE);
-	int take_on = token_priv_on(t, SE_TAKE_OWNERSHIP_PRIVILEGE);
+	int sec_on, take_on;
+	token_privs_on(t, SE_SECURITY_PRIVILEGE, SE_TAKE_OWNERSHIP_PRIVILEGE,
+		       &sec_on, &take_on);
 	kobj_unref(&t->obj);
 
 	/* The privileges this check uses, which the caller is told of. */
@@ -3585,6 +3588,8 @@ WINFN(BOOL) adv_AccessCheck(PSECURITY_DESCRIPTOR sd, HANDLE token,
 			DWORD m;
 			memcpy(&m, p + sizeof(*h), 4);
 			adv_MapGenericMask(&m, map);
+			/* Only the privilege gives ACCESS_SYSTEM_SECURITY. */
+			m &= ~ACCESS_SYSTEM_SECURITY;
 			int deny = h->AceType == ACCESS_DENIED_ACE_TYPE;
 			int applies = sid_eq(sid, &owner_rights) ? is_owner :
 				      token_has_sid(sid, deny);

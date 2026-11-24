@@ -903,6 +903,25 @@ static int win_exists(const char *dir, const char *name)
 	return r;
 }
 
+/* Whether Unix paths a and b name one directory entry: same parent
+ * directory (by identity) and the same name. */
+static int same_entry(const char *a, const char *b)
+{
+	if (!strcmp(a, b))
+		return 1;
+	const char *sa = strrchr(a, '/'), *sb = strrchr(b, '/');
+	if (!sa || !sb || strcasecmp(sa + 1, sb + 1))
+		return 0;
+	char *da = strndup(a, (size_t)(sa - a) + (sa == a));
+	char *db = strndup(b, (size_t)(sb - b) + (sb == b));
+	struct stat x, y;
+	int r = da && db && !stat(da, &x) && !stat(db, &y) &&
+		x.st_dev == y.st_dev && x.st_ino == y.st_ino;
+	free(da);
+	free(db);
+	return r;
+}
+
 static int same_dir(const char *a, const char *b)
 {
 	size_t na = strlen(a), nb = strlen(b);
@@ -1024,16 +1043,21 @@ WINFN(DWORD) ver_VerFindFileW(DWORD flags, LPCWSTR name, LPCWSTR windir,
  * whose bits (low first) say literal (1) or a 12-bit position and a
  * 4-bit length less 3.
  */
+/* Whether in starts with the SZDD signature (the header may still be
+ * short, or name a method other than 'A'). */
 static int is_szdd(const BYTE *in, size_t n)
 {
 	static const BYTE magic[8] = { 'S', 'Z', 'D', 'D', 0x88, 0xf0, 0x27,
 				       0x33 };
-	return n >= 14 && !memcmp(in, magic, 8) && in[8] == 'A';
+	return n >= 8 && !memcmp(in, magic, 8);
 }
 
-/* The expansion of an SZDD file (is_szdd), or NULL if it can't be made. */
+/* The expansion of an SZDD file (is_szdd), or NULL if it can't be made:
+ * a short header or another method included. */
 static BYTE *szdd_expand(const BYTE *in, size_t n, size_t *out_n)
 {
+	if (n < 14 || in[8] != 'A')
+		return NULL;
 	size_t size = in[10] | in[11] << 8 | (size_t)in[12] << 16 |
 		      (size_t)in[13] << 24;
 	if (size > 256u * 1024 * 1024)
@@ -1251,13 +1275,12 @@ static DWORD install_file(DWORD flags, const char *srcname,
 	}
 
 	/*
-	 * Whether the copy in cur is the one being replaced: the same file,
-	 * however its directory was spelt.
+	 * Whether the copy in cur is the entry being replaced: the same
+	 * name in the same directory, however the directory was spelt
+	 * (through a symlink, or before the file exists). A hard link in
+	 * another directory is another entry.
 	 */
-	struct stat cs, ds;
-	int same = !strcmp(cur_u, dst_u) ||
-		   (!stat(cur_u, &cs) && !stat(dst_u, &ds) &&
-		    cs.st_dev == ds.st_dev && cs.st_ino == ds.st_ino);
+	int same = same_entry(cur_u, dst_u);
 	if (!access(dst_u, F_OK) && unlink(dst_u)) {
 		r = errno == EACCES || errno == EPERM ? VIF_ACCESSVIOLATION :
 		    VIF_CANNOTDELETE;

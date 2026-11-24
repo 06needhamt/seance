@@ -1010,6 +1010,17 @@ static void test_access_check(void)
 	CHECK(last_error() == ERROR_INSUFFICIENT_BUFFER && small == 8);
 	local_free(sd);
 
+	/* An ACE can't give ACCESS_SYSTEM_SECURITY (0x1000000): only the
+	 * privilege does, and it is off here. */
+	sd = NULL;
+	CHECK(ConvertStringSecurityDescriptorToSecurityDescriptorA(
+		"O:SYG:SYD:(A;;0x11f01ff;;;WD)", 1, &sd, NULL));
+	plen = sizeof(privbuf);
+	CHECK(AccessCheck(sd, tok, MAXIMUM_ALLOWED, &map, privs, &plen,
+			  &granted, &status));
+	CHECK(status && granted == 0x1f01ff);
+	local_free(sd);
+
 	/* No DACL: anything. The owner may read and change the DACL. */
 	sd = NULL;
 	BOOL converted = ConvertStringSecurityDescriptorToSecurityDescriptorA(

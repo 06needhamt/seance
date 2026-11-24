@@ -325,17 +325,23 @@ static void service_destroy(struct kobject *obj)
 }
 
 /* The computer's name, as GetComputerName gives it. */
+static char machine[64];
+static pthread_once_t machine_once = PTHREAD_ONCE_INIT;
+
+static void machine_init(void)
+{
+	BOOL (WINAPI *get)(LPSTR, LPDWORD) =
+		builtin_export(&builtin_kernel32, "GetComputerNameA");
+	DWORD n = sizeof(machine);
+	if (!get || !get(machine, &n))
+		strcpy(machine, "SEANCE");
+}
+
+/* Made once, before any thread reads it. */
 static const char *machine_name(void)
 {
-	static char name[64];
-	if (!name[0]) {
-		BOOL (WINAPI *get)(LPSTR, LPDWORD) =
-			builtin_export(&builtin_kernel32, "GetComputerNameA");
-		DWORD n = sizeof(name);
-		if (!get || !get(name, &n))
-			strcpy(name, "SEANCE");
-	}
-	return name;
+	pthread_once(&machine_once, machine_init);
+	return machine;
 }
 
 /*

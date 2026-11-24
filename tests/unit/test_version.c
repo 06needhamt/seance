@@ -617,6 +617,26 @@ static void test_install(void)
 		free(w);
 	}
 
+	/* An SZDD header cut short is unreadable too, not copied raw. */
+	{
+		static const BYTE head[] = { 'S', 'Z', 'D', 'D', 0x88, 0xf0,
+					     0x27, 0x33, 'A', 'L', 9, 0, 0 };
+		snprintf(p, sizeof(p), "%s/HEAD.TX_", src);
+		FILE *f = fopen(p, "wb");
+		if (f) {
+			fwrite(head, 1, sizeof(head), f);
+			fclose(f);
+		}
+		tmp[0] = '\0';
+		tl = sizeof(tmp);
+		CHECK_EQ(VerInstallFileA(1, "HEAD.TX_", "HEAD.TXT", wsrc, wdst,
+					 NULL, tmp, &tl),
+			 0x10000);	/* VIF_CANNOTREADSRC */
+		unlink(p);
+		snprintf(p, sizeof(p), "%s/HEAD.TXT", dst);
+		CHECK(access(p, F_OK));
+	}
+
 	/* Compressed data cut short is unreadable, and replaces nothing. */
 	{
 		static const BYTE cut[] = { 'S', 'Z', 'D', 'D', 0x88, 0xf0,
@@ -669,6 +689,13 @@ static void test_install(void)
 			CHECK_EQ(VerInstallFileA(1, "APP.DLL", "APP.DLL", wsrc,
 						 wdst, wlink, tmp, &tl), 0);
 			snprintf(p, sizeof(p), "%s/APP.DLL", dst);
+			CHECK(!access(p, F_OK));
+			/* Also when nothing was installed there before. */
+			unlink(p);
+			tmp[0] = '\0';
+			tl = sizeof(tmp);
+			CHECK_EQ(VerInstallFileA(1, "APP.DLL", "APP.DLL", wsrc,
+						 wdst, wlink, tmp, &tl), 0);
 			CHECK(!access(p, F_OK));
 			free(wlink);
 			unlink(link);
