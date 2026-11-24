@@ -1015,6 +1015,47 @@
 	S(IPersistStorageVtbl) O(IPersistStorageVtbl, HandsOffStorage) \
 	S(BIND_OPTS) O(BIND_OPTS, dwTickCountDeadline) \
 	S(MULTI_QI) O(MULTI_QI, pItf) O(MULTI_QI, hr) C(CO_S_NOTALLINTERFACES) \
+	S(DVTARGETDEVICE) O(DVTARGETDEVICE, tdData) \
+	S(FORMATETC) O(FORMATETC, ptd) O(FORMATETC, dwAspect) \
+	O(FORMATETC, lindex) O(FORMATETC, tymed) \
+	S(STGMEDIUM) O(STGMEDIUM, hGlobal) O(STGMEDIUM, pUnkForRelease) \
+	S(STATDATA) O(STATDATA, advf) O(STATDATA, pAdvSink) \
+	O(STATDATA, dwConnection) \
+	S(OLEVERB) O(OLEVERB, lpszVerbName) O(OLEVERB, grfAttribs) \
+	S(INTERFACEINFO) O(INTERFACEINFO, iid) O(INTERFACEINFO, wMethod) \
+	S(OLEMENUGROUPWIDTHS) \
+	S(IAdviseSinkVtbl) O(IAdviseSinkVtbl, OnDataChange) \
+	O(IAdviseSinkVtbl, OnClose) \
+	S(IDataObjectVtbl) O(IDataObjectVtbl, GetData) \
+	O(IDataObjectVtbl, EnumFormatEtc) O(IDataObjectVtbl, EnumDAdvise) \
+	S(IEnumFORMATETCVtbl) O(IEnumFORMATETCVtbl, Clone) \
+	S(IEnumSTATDATAVtbl) O(IEnumSTATDATAVtbl, Clone) \
+	S(IEnumOLEVERBVtbl) O(IEnumOLEVERBVtbl, Clone) \
+	S(IOleAdviseHolderVtbl) O(IOleAdviseHolderVtbl, SendOnClose) \
+	S(IDataAdviseHolderVtbl) O(IDataAdviseHolderVtbl, SendOnDataChange) \
+	S(IRunnableObjectVtbl) O(IRunnableObjectVtbl, IsRunning) \
+	O(IRunnableObjectVtbl, SetContainedObject) \
+	S(IMessageFilterVtbl) O(IMessageFilterVtbl, MessagePending) \
+	S(IExternalConnectionVtbl) O(IExternalConnectionVtbl, ReleaseConnection) \
+	S(IDropTargetVtbl) O(IDropTargetVtbl, DragOver) O(IDropTargetVtbl, Drop) \
+	S(IDropSourceVtbl) O(IDropSourceVtbl, GiveFeedback) \
+	C(TYMED_HGLOBAL) C(TYMED_FILE) C(TYMED_ISTREAM) C(TYMED_ISTORAGE) \
+	C(TYMED_GDI) C(TYMED_MFPICT) C(TYMED_ENHMF) C(TYMED_NULL) \
+	C(DVASPECT_CONTENT) C(DVASPECT_ICON) C(DATADIR_GET) C(DATADIR_SET) \
+	C(ADVF_NODATA) C(ADVF_PRIMEFIRST) C(ADVF_ONLYONCE) \
+	C(ADVF_DATAONSTOP) C(USERCLASSTYPE_FULL) C(USERCLASSTYPE_SHORT) \
+	C(USERCLASSTYPE_APPNAME) C(DROPEFFECT_COPY) C(DROPEFFECT_LINK) \
+	C(COWAIT_WAITALL) C(COWAIT_ALERTABLE) C(EXTCONN_STRONG) \
+	C(DV_E_FORMATETC) C(DV_E_TYMED) C(OLE_E_ADVISENOTSUPPORTED) \
+	C(OLE_E_NOCONNECTION) C(OLEOBJ_E_NOVERBS) C(REGDB_E_READREGDB) \
+	C(REGDB_E_WRITEREGDB) C(REGDB_E_KEYMISSING) C(CLIPBRD_E_CANT_OPEN) \
+	C(CLIPBRD_E_CANT_EMPTY) C(DRAGDROP_E_NOTREGISTERED) \
+	C(DRAGDROP_E_ALREADYREGISTERED) C(DRAGDROP_E_INVALIDHWND) \
+	C(DRAGDROP_S_DROP) C(DRAGDROP_S_CANCEL) C(RPC_E_TOO_LATE) \
+	C(RPC_E_CALL_COMPLETE) C(RPC_S_CALLPENDING) \
+	S(ACCEL) O(ACCEL, key) O(ACCEL, cmd) C(FVIRTKEY) C(FSHIFT) \
+	C(FCONTROL) C(FALT) C(VK_SHIFT) C(VK_CONTROL) C(VK_MENU) \
+	C(WM_KEYDOWN) C(WM_CHAR) C(WM_SYSKEYDOWN) C(WM_SYSCHAR) \
 	S(BIND_OPTS2) O(BIND_OPTS2, dwClassContext) O(BIND_OPTS2, locale) \
 	O(BIND_OPTS2, pServerInfo) \
 	S(IMonikerVtbl) O(IMonikerVtbl, GetClassID) O(IMonikerVtbl, Load) \

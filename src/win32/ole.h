@@ -53,6 +53,11 @@ extern const struct builtin_export ole_moniker_exports[];
 /* The class objects of the system monikers, REGDB_E_CLASSNOTREG else. */
 HRESULT ole_moniker_class_object(REFCLSID clsid, REFIID riid, void **ppv);
 
+/* The rest of OLE (ole_misc.c). */
+extern const struct builtin_export ole_misc_exports[];
+/* The class TreatAs names in place of clsid (itself if none). */
+void ole_treat_as(REFCLSID clsid, CLSID *out);
+
 /* Structured storage (ole_storage.c). */
 extern const struct builtin_export ole_storage_exports[];
 

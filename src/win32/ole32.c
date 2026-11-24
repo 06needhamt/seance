@@ -667,6 +667,9 @@ static HRESULT get_class_object(REFCLSID clsid, DWORD context, REFIID riid,
 		return CO_E_NOTINITIALIZED;
 	}
 
+	CLSID treat;
+	ole_treat_as(clsid, &treat);
+	clsid = &treat;
 	IUnknown *obj = registered(clsid, context);
 	if (obj) {
 		HRESULT hr = obj->lpVtbl->QueryInterface(obj, riid, ppv);
@@ -893,7 +896,7 @@ static const struct builtin_export exports[] = {
 
 static const struct builtin_export *const tables[] = {
 	exports, oa_errinfo_ole32_exports, ole_stream_exports,
-	ole_storage_exports, ole_moniker_exports, NULL
+	ole_storage_exports, ole_moniker_exports, ole_misc_exports, NULL
 };
 
 const struct builtin_dll builtin_ole32 = { "ole32.dll", NULL, tables, 0 };

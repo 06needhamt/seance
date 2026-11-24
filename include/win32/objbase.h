@@ -10,6 +10,7 @@
 #define VFW_WIN32_OBJBASE_H
 
 #include "types.h"
+#include "wingdi.h"
 
 typedef struct _GUID {
 	DWORD Data1;
@@ -178,7 +179,35 @@ typedef HRESULT (WINAPI *LPFNGETCLASSOBJECT)(REFCLSID, REFIID, LPVOID *);
 	G(IID_IOleItemContainer, 0x0000011c, 0x0000, 0x0000, \
 	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
 	G(IID_IROTData, 0xf29f6bc0, 0x5021, 0x11ce, \
-	  0xaa, 0x15, 0x00, 0x00, 0x69, 0x01, 0x29, 0x3f)
+	  0xaa, 0x15, 0x00, 0x00, 0x69, 0x01, 0x29, 0x3f) \
+	G(IID_IEnumFORMATETC, 0x00000103, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IEnumOLEVERB, 0x00000104, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IEnumSTATDATA, 0x00000105, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IDataObject, 0x0000010e, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IAdviseSink, 0x0000010f, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IDataAdviseHolder, 0x00000110, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IOleAdviseHolder, 0x00000111, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IOleObject, 0x00000112, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IDropSource, 0x00000121, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IDropTarget, 0x00000122, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IRunnableObject, 0x00000126, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IMessageFilter, 0x00000016, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IExternalConnection, 0x00000019, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IClientSecurity, 0x0000013d, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46)
 
 VFW_OBJBASE_GUIDS(VFW_GUID_DECLARE)
 
@@ -722,5 +751,347 @@ typedef struct IEnumMonikerVtbl {
 struct IEnumMoniker {
 	const IEnumMonikerVtbl *lpVtbl;
 };
+
+/* ---- uniform data transfer (objidl.h) ---- */
+
+typedef HANDLE HMETAFILEPICT;
+
+#define TYMED_HGLOBAL  1
+#define TYMED_FILE     2
+#define TYMED_ISTREAM  4
+#define TYMED_ISTORAGE 8
+#define TYMED_GDI      16
+#define TYMED_MFPICT   32
+#define TYMED_ENHMF    64
+#define TYMED_NULL     0
+
+#define DVASPECT_CONTENT   1
+#define DVASPECT_THUMBNAIL 2
+#define DVASPECT_ICON      4
+#define DVASPECT_DOCPRINT  8
+
+#define DATADIR_GET 1
+#define DATADIR_SET 2
+
+#define ADVF_NODATA            1
+#define ADVF_PRIMEFIRST        2
+#define ADVF_ONLYONCE          4
+#define ADVF_DATAONSTOP        64
+#define ADVFCACHE_NOHANDLER    8
+#define ADVFCACHE_FORCEBUILTIN 16
+#define ADVFCACHE_ONSAVE       32
+
+#define USERCLASSTYPE_FULL    1
+#define USERCLASSTYPE_SHORT   2
+#define USERCLASSTYPE_APPNAME 3
+
+#define DROPEFFECT_NONE   0
+#define DROPEFFECT_COPY   1
+#define DROPEFFECT_MOVE   2
+#define DROPEFFECT_LINK   4
+
+#define COWAIT_WAITALL   1
+#define COWAIT_ALERTABLE 2
+
+#define DV_E_FORMATETC          ((HRESULT)0x80040064)
+#define DV_E_TYMED              ((HRESULT)0x80040069)
+#define OLE_E_ADVISENOTSUPPORTED ((HRESULT)0x80040003)
+#define OLE_E_NOCONNECTION      ((HRESULT)0x80040004)
+#define OLE_E_NOTRUNNING        ((HRESULT)0x80040005)
+#define OLE_S_USEREG            ((HRESULT)0x00040000)
+#define OLEOBJ_E_NOVERBS        ((HRESULT)0x80040180)
+#define REGDB_E_KEYMISSING      ((HRESULT)0x80040152)
+#define REGDB_E_READREGDB       ((HRESULT)0x80040150)
+#define REGDB_E_WRITEREGDB      ((HRESULT)0x80040151)
+#define CLIPBRD_E_CANT_OPEN     ((HRESULT)0x800401d0)
+#define CLIPBRD_E_CANT_EMPTY    ((HRESULT)0x800401d1)
+#define CLIPBRD_E_CANT_SET      ((HRESULT)0x800401d2)
+#define CLIPBRD_E_BAD_DATA      ((HRESULT)0x800401d3)
+#define CLIPBRD_E_CANT_CLOSE    ((HRESULT)0x800401d4)
+#define DRAGDROP_E_NOTREGISTERED     ((HRESULT)0x80040100)
+#define DRAGDROP_E_ALREADYREGISTERED ((HRESULT)0x80040101)
+#define DRAGDROP_E_INVALIDHWND       ((HRESULT)0x80040102)
+#define DRAGDROP_S_DROP         ((HRESULT)0x00040100)
+#define DRAGDROP_S_CANCEL       ((HRESULT)0x00040101)
+#define DRAGDROP_S_USEDEFAULTCURSORS ((HRESULT)0x00040102)
+#define RPC_E_TOO_LATE          ((HRESULT)0x80010119)
+#define RPC_E_CALL_COMPLETE     ((HRESULT)0x80010117)
+#define RPC_S_CALLPENDING       ((HRESULT)0x80010115)
+
+typedef struct tagDVTARGETDEVICE {
+	DWORD tdSize;
+	WORD tdDriverNameOffset;
+	WORD tdDeviceNameOffset;
+	WORD tdPortNameOffset;
+	WORD tdExtDevmodeOffset;
+	BYTE tdData[1];
+} DVTARGETDEVICE;
+
+typedef struct tagFORMATETC {
+	CLIPFORMAT cfFormat;
+	DVTARGETDEVICE *ptd;
+	DWORD dwAspect;
+	LONG lindex;
+	DWORD tymed;
+} FORMATETC, *LPFORMATETC;
+
+typedef struct tagSTGMEDIUM {
+	DWORD tymed;
+	union {
+		HBITMAP hBitmap;
+		HMETAFILEPICT hMetaFilePict;
+		HANDLE hEnhMetaFile;
+		HGLOBAL hGlobal;
+		LPOLESTR lpszFileName;
+		IStream *pstm;
+		IStorage *pstg;
+	};
+	IUnknown *pUnkForRelease;
+} STGMEDIUM, *LPSTGMEDIUM;
+
+typedef struct IAdviseSink IAdviseSink;
+typedef struct IDataObject IDataObject;
+typedef struct IEnumFORMATETC IEnumFORMATETC;
+typedef struct IEnumSTATDATA IEnumSTATDATA;
+
+typedef struct tagSTATDATA {
+	FORMATETC formatetc;
+	DWORD advf;
+	IAdviseSink *pAdvSink;
+	DWORD dwConnection;
+} STATDATA;
+
+typedef struct IAdviseSinkVtbl {
+	HRESULT (WINAPI *QueryInterface)(IAdviseSink *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IAdviseSink *This);
+	ULONG (WINAPI *Release)(IAdviseSink *This);
+	void (WINAPI *OnDataChange)(IAdviseSink *This, FORMATETC *fmt,
+				    STGMEDIUM *med);
+	void (WINAPI *OnViewChange)(IAdviseSink *This, DWORD aspect,
+				    LONG index);
+	void (WINAPI *OnRename)(IAdviseSink *This, IMoniker *mk);
+	void (WINAPI *OnSave)(IAdviseSink *This);
+	void (WINAPI *OnClose)(IAdviseSink *This);
+} IAdviseSinkVtbl;
+struct IAdviseSink {
+	const IAdviseSinkVtbl *lpVtbl;
+};
+
+typedef struct IEnumFORMATETCVtbl {
+	HRESULT (WINAPI *QueryInterface)(IEnumFORMATETC *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IEnumFORMATETC *This);
+	ULONG (WINAPI *Release)(IEnumFORMATETC *This);
+	HRESULT (WINAPI *Next)(IEnumFORMATETC *This, ULONG count,
+			       FORMATETC *out, ULONG *fetched);
+	HRESULT (WINAPI *Skip)(IEnumFORMATETC *This, ULONG count);
+	HRESULT (WINAPI *Reset)(IEnumFORMATETC *This);
+	HRESULT (WINAPI *Clone)(IEnumFORMATETC *This, IEnumFORMATETC **clone);
+} IEnumFORMATETCVtbl;
+struct IEnumFORMATETC {
+	const IEnumFORMATETCVtbl *lpVtbl;
+};
+
+typedef struct IEnumSTATDATAVtbl {
+	HRESULT (WINAPI *QueryInterface)(IEnumSTATDATA *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IEnumSTATDATA *This);
+	ULONG (WINAPI *Release)(IEnumSTATDATA *This);
+	HRESULT (WINAPI *Next)(IEnumSTATDATA *This, ULONG count,
+			       STATDATA *out, ULONG *fetched);
+	HRESULT (WINAPI *Skip)(IEnumSTATDATA *This, ULONG count);
+	HRESULT (WINAPI *Reset)(IEnumSTATDATA *This);
+	HRESULT (WINAPI *Clone)(IEnumSTATDATA *This, IEnumSTATDATA **clone);
+} IEnumSTATDATAVtbl;
+struct IEnumSTATDATA {
+	const IEnumSTATDATAVtbl *lpVtbl;
+};
+
+typedef struct IDataObjectVtbl {
+	HRESULT (WINAPI *QueryInterface)(IDataObject *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IDataObject *This);
+	ULONG (WINAPI *Release)(IDataObject *This);
+	HRESULT (WINAPI *GetData)(IDataObject *This, FORMATETC *fmt,
+				  STGMEDIUM *med);
+	HRESULT (WINAPI *GetDataHere)(IDataObject *This, FORMATETC *fmt,
+				      STGMEDIUM *med);
+	HRESULT (WINAPI *QueryGetData)(IDataObject *This, FORMATETC *fmt);
+	HRESULT (WINAPI *GetCanonicalFormatEtc)(IDataObject *This,
+						FORMATETC *in, FORMATETC *out);
+	HRESULT (WINAPI *SetData)(IDataObject *This, FORMATETC *fmt,
+				  STGMEDIUM *med, BOOL release);
+	HRESULT (WINAPI *EnumFormatEtc)(IDataObject *This, DWORD dir,
+					IEnumFORMATETC **e);
+	HRESULT (WINAPI *DAdvise)(IDataObject *This, FORMATETC *fmt,
+				  DWORD advf, IAdviseSink *sink, DWORD *conn);
+	HRESULT (WINAPI *DUnadvise)(IDataObject *This, DWORD conn);
+	HRESULT (WINAPI *EnumDAdvise)(IDataObject *This, IEnumSTATDATA **e);
+} IDataObjectVtbl;
+struct IDataObject {
+	const IDataObjectVtbl *lpVtbl;
+};
+
+/* ---- OLE documents (oleidl.h), as far as ole32 itself calls them ---- */
+
+typedef struct IOleAdviseHolder IOleAdviseHolder;
+typedef struct IOleAdviseHolderVtbl {
+	HRESULT (WINAPI *QueryInterface)(IOleAdviseHolder *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IOleAdviseHolder *This);
+	ULONG (WINAPI *Release)(IOleAdviseHolder *This);
+	HRESULT (WINAPI *Advise)(IOleAdviseHolder *This, IAdviseSink *sink,
+				 DWORD *conn);
+	HRESULT (WINAPI *Unadvise)(IOleAdviseHolder *This, DWORD conn);
+	HRESULT (WINAPI *EnumAdvise)(IOleAdviseHolder *This,
+				     IEnumSTATDATA **e);
+	HRESULT (WINAPI *SendOnRename)(IOleAdviseHolder *This, IMoniker *mk);
+	HRESULT (WINAPI *SendOnSave)(IOleAdviseHolder *This);
+	HRESULT (WINAPI *SendOnClose)(IOleAdviseHolder *This);
+} IOleAdviseHolderVtbl;
+struct IOleAdviseHolder {
+	const IOleAdviseHolderVtbl *lpVtbl;
+};
+
+typedef struct IDataAdviseHolder IDataAdviseHolder;
+typedef struct IDataAdviseHolderVtbl {
+	HRESULT (WINAPI *QueryInterface)(IDataAdviseHolder *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IDataAdviseHolder *This);
+	ULONG (WINAPI *Release)(IDataAdviseHolder *This);
+	HRESULT (WINAPI *Advise)(IDataAdviseHolder *This, IDataObject *data,
+				 FORMATETC *fmt, DWORD advf,
+				 IAdviseSink *sink, DWORD *conn);
+	HRESULT (WINAPI *Unadvise)(IDataAdviseHolder *This, DWORD conn);
+	HRESULT (WINAPI *EnumAdvise)(IDataAdviseHolder *This,
+				     IEnumSTATDATA **e);
+	HRESULT (WINAPI *SendOnDataChange)(IDataAdviseHolder *This,
+					   IDataObject *data, DWORD reserved,
+					   DWORD advf);
+} IDataAdviseHolderVtbl;
+struct IDataAdviseHolder {
+	const IDataAdviseHolderVtbl *lpVtbl;
+};
+
+typedef struct IRunnableObject IRunnableObject;
+typedef struct IRunnableObjectVtbl {
+	HRESULT (WINAPI *QueryInterface)(IRunnableObject *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IRunnableObject *This);
+	ULONG (WINAPI *Release)(IRunnableObject *This);
+	HRESULT (WINAPI *GetRunningClass)(IRunnableObject *This, CLSID *clsid);
+	HRESULT (WINAPI *Run)(IRunnableObject *This, IBindCtx *bc);
+	BOOL (WINAPI *IsRunning)(IRunnableObject *This);
+	HRESULT (WINAPI *LockRunning)(IRunnableObject *This, BOOL lock,
+				      BOOL last_unlock_closes);
+	HRESULT (WINAPI *SetContainedObject)(IRunnableObject *This,
+					     BOOL contained);
+} IRunnableObjectVtbl;
+struct IRunnableObject {
+	const IRunnableObjectVtbl *lpVtbl;
+};
+
+typedef struct tagINTERFACEINFO {
+	IUnknown *pUnk;
+	IID iid;
+	WORD wMethod;
+} INTERFACEINFO, *LPINTERFACEINFO;
+
+typedef struct IMessageFilter IMessageFilter;
+typedef struct IMessageFilterVtbl {
+	HRESULT (WINAPI *QueryInterface)(IMessageFilter *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IMessageFilter *This);
+	ULONG (WINAPI *Release)(IMessageFilter *This);
+	DWORD (WINAPI *HandleInComingCall)(IMessageFilter *This, DWORD type,
+					   HANDLE caller, DWORD tick,
+					   LPINTERFACEINFO info);
+	DWORD (WINAPI *RetryRejectedCall)(IMessageFilter *This, HANDLE callee,
+					  DWORD elapsed, DWORD reject);
+	DWORD (WINAPI *MessagePending)(IMessageFilter *This, HANDLE callee,
+				       DWORD elapsed, DWORD pending);
+} IMessageFilterVtbl;
+struct IMessageFilter {
+	const IMessageFilterVtbl *lpVtbl;
+};
+
+#define EXTCONN_STRONG 1
+
+typedef struct IExternalConnection IExternalConnection;
+typedef struct IExternalConnectionVtbl {
+	HRESULT (WINAPI *QueryInterface)(IExternalConnection *This,
+					 REFIID riid, void **ppv);
+	ULONG (WINAPI *AddRef)(IExternalConnection *This);
+	ULONG (WINAPI *Release)(IExternalConnection *This);
+	DWORD (WINAPI *AddConnection)(IExternalConnection *This, DWORD type,
+				      DWORD reserved);
+	DWORD (WINAPI *ReleaseConnection)(IExternalConnection *This,
+					  DWORD type, DWORD reserved,
+					  BOOL last_release_closes);
+} IExternalConnectionVtbl;
+struct IExternalConnection {
+	const IExternalConnectionVtbl *lpVtbl;
+};
+
+typedef struct IDropTarget IDropTarget;
+typedef struct IDropTargetVtbl {
+	HRESULT (WINAPI *QueryInterface)(IDropTarget *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IDropTarget *This);
+	ULONG (WINAPI *Release)(IDropTarget *This);
+	HRESULT (WINAPI *DragEnter)(IDropTarget *This, IDataObject *data,
+				    DWORD keys, POINTL pt, DWORD *effect);
+	HRESULT (WINAPI *DragOver)(IDropTarget *This, DWORD keys, POINTL pt,
+				   DWORD *effect);
+	HRESULT (WINAPI *DragLeave)(IDropTarget *This);
+	HRESULT (WINAPI *Drop)(IDropTarget *This, IDataObject *data,
+			       DWORD keys, POINTL pt, DWORD *effect);
+} IDropTargetVtbl;
+struct IDropTarget {
+	const IDropTargetVtbl *lpVtbl;
+};
+
+typedef struct IDropSource IDropSource;
+typedef struct IDropSourceVtbl {
+	HRESULT (WINAPI *QueryInterface)(IDropSource *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IDropSource *This);
+	ULONG (WINAPI *Release)(IDropSource *This);
+	HRESULT (WINAPI *QueryContinueDrag)(IDropSource *This, BOOL escape,
+					    DWORD keys);
+	HRESULT (WINAPI *GiveFeedback)(IDropSource *This, DWORD effect);
+} IDropSourceVtbl;
+struct IDropSource {
+	const IDropSourceVtbl *lpVtbl;
+};
+
+typedef struct tagOLEVERB {
+	LONG lVerb;
+	LPOLESTR lpszVerbName;
+	DWORD fuFlags;
+	DWORD grfAttribs;
+} OLEVERB, *LPOLEVERB;
+
+typedef struct IEnumOLEVERB IEnumOLEVERB;
+typedef struct IEnumOLEVERBVtbl {
+	HRESULT (WINAPI *QueryInterface)(IEnumOLEVERB *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IEnumOLEVERB *This);
+	ULONG (WINAPI *Release)(IEnumOLEVERB *This);
+	HRESULT (WINAPI *Next)(IEnumOLEVERB *This, ULONG count, OLEVERB *out,
+			       ULONG *fetched);
+	HRESULT (WINAPI *Skip)(IEnumOLEVERB *This, ULONG count);
+	HRESULT (WINAPI *Reset)(IEnumOLEVERB *This);
+	HRESULT (WINAPI *Clone)(IEnumOLEVERB *This, IEnumOLEVERB **clone);
+} IEnumOLEVERBVtbl;
+struct IEnumOLEVERB {
+	const IEnumOLEVERBVtbl *lpVtbl;
+};
+
+typedef struct tagOleMenuGroupWidths {
+	LONG width[6];
+} OLEMENUGROUPWIDTHS, *LPOLEMENUGROUPWIDTHS;
+typedef HGLOBAL HOLEMENU;
 
 #endif /* VFW_WIN32_OBJBASE_H */
