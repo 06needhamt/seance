@@ -797,6 +797,7 @@
 	O(ITypeLib2Vtbl, GetTypeInfoCount) O(ITypeLib2Vtbl, FindName) \
 	O(ITypeLib2Vtbl, ReleaseTLibAttr) O(ITypeLib2Vtbl, GetCustData) \
 	O(ITypeLib2Vtbl, GetAllCustData) S(ITypeLib2Vtbl) \
+	C(VARFLAG_FREADONLY) C(VARFLAG_FHIDDEN) C(VARFLAG_FIMMEDIATEBIND) \
 	O(ICreateTypeInfo2Vtbl, AddRefTypeInfo) \
 	O(ICreateTypeInfo2Vtbl, SetTypeIdldesc) \
 	O(ICreateTypeInfo2Vtbl, DeleteFuncDesc) \

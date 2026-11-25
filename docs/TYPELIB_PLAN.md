@@ -18,7 +18,8 @@ The codec zip's sweep shows what that costs:
 
 233 files in the zip carry a type library. All but four are in the
 current format (`MSFT`); `ILog`, `OLEAUT32`, `OLEPRO32` and `ir41_32.ax`
-are in the older `SLTG` one. About 60 DirectShow filters import
+are in the older `SLTG` one (`OLEAUT32` only names the format in its
+code: it has no library of its own). About 60 DirectShow filters import
 `LoadTypeLib` through the base classes, but only use it for `IDispatch`
 on their property interfaces. What needs real type libraries:
 
@@ -35,6 +36,7 @@ Status: `src/win32/oleaut_typelib.c`, `seance info --typelib` and
 every reference resolved, on both architectures and under ASan. The
 others are the three `SLTG` libraries (`ILog`, `OLEPRO32`, `ir41_32.ax`)
 and `QTOControl.dll`, which imports `QTOLibrary.tlb`, not in the zip.
+(The `SLTG` ones load too now; see "Not included".)
 Changes from the plan below:
 
 - The built-in stdole2 has `GUID`, `IUnknown`, `IDispatch`,
@@ -199,8 +201,10 @@ Re-sweep the affected DLLs with `--compare`, then update
 
 ## Not included
 
-- `SLTG` libraries: four files in the zip, and the one codec among them
-  (`ir41_32.ax`) uses its library only for `IDispatch`.
+- `SLTG` libraries were left out at first: three files in the zip, and
+  the one codec among them (`ir41_32.ax`) uses its library only for
+  `IDispatch`. They are now read (`oleaut_sltg.c`, converted to `MSFT`
+  through the creator; `test_typelib_sltg`), and all three load.
 - Creating type libraries was left out at first (no codec builds one);
   it is now done, in `oleaut_create.c` (see `IMPLEMENTATION_PLAN.md`).
 - `ITypeComp` binding and `ITypeInfo::CreateInstance`, until a codec

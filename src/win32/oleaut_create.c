@@ -27,6 +27,10 @@
  *   dispatch interface, and its interface half by GetRefTypeOfImplType(-1).
  * - Dispatch interfaces derive from IDispatch: when no type here refers
  *   to it already, an import of stdole2's IDispatch is written for them.
+ * - The oa_ctl_* functions at the end let other readers (oleaut_sltg.c)
+ *   build a library here: references to other libraries' types by GUID or
+ *   index without loading them, layouts given rather than worked out, and
+ *   the MSFT bytes without a file.
  */
 #include <errno.h>
 #include <stdio.h>
@@ -156,15 +160,16 @@ struct c_type {
 	UINT nvars;
 	struct c_impl *impls;
 	UINT nimpls;
-	/* LayOut's results */
+	/* LayOut's results, or given (fixed) */
 	ULONG size;
 	WORD align, vft;
+	int fixed;
 	int laying;		/* to catch a record that contains itself */
 };
 
 /* A type of another library that a type here refers to. */
 struct c_ref {
-	ITypeInfo *info;	/* held */
+	ITypeInfo *info;	/* held; NULL for one oa_ctl_import made */
 	GUID libid, guid;
 	LCID lcid;
 	WORD major, minor;
@@ -363,7 +368,9 @@ static void ctl_free(struct ctl *lib)
 	for (UINT i = 0; i < lib->ntypes; i++)
 		type_free(lib->types[i]);
 	for (UINT i = 0; i < lib->nrefs; i++) {
-		lib->refs_out[i].info->lpVtbl->Release(lib->refs_out[i].info);
+		if (lib->refs_out[i].info)
+			lib->refs_out[i].info->lpVtbl->Release(
+				lib->refs_out[i].info);
 		free(lib->refs_out[i].file);
 	}
 	free(lib->refs_out);
@@ -408,10 +415,12 @@ static HRESULT ref_attr(struct ctl *lib, struct c_ref *r, ULONG *size,
 			WORD *align, WORD *vft)
 {
 	TYPEATTR *a;
-	HRESULT hr = r->info->lpVtbl->GetTypeAttr(r->info, &a);
+	HRESULT hr;
 	int p = ptr_size(lib);
 
-	if (FAILED(hr))
+	if (!r->info)
+		return TYPE_E_CANTLOADLIBRARY;
+	if (FAILED(hr = r->info->lpVtbl->GetTypeAttr(r->info, &a)))
 		return hr;
 	*vft = (WORD)(a->cbSizeVft / sizeof(void *) * p);
 	*size = a->typekind == TKIND_INTERFACE ||
@@ -493,6 +502,8 @@ static HRESULT type_layout(struct c_type *t)
 	int p = ptr_size(lib);
 	HRESULT hr = S_OK;
 
+	if (t->fixed)
+		return S_OK;
 	if (t->laying)
 		return TYPE_E_CIRCULARTYPE;
 	t->laying = 1;
@@ -1412,7 +1423,7 @@ WINFN(HRESULT) ctl_SaveAllChanges(ICreateTypeLib2 *self)
 		return hr;
 	/* Through a temporary file beside it: a failed save leaves the
 	 * library that was there. */
-	char *unix_path = path_to_unix(lib->path);
+	char *unix_path = lib->path ? path_to_unix(lib->path) : NULL;
 	char *tmp = unix_path ? malloc(strlen(unix_path) + 16) : NULL;
 	int fd = -1;
 	if (tmp) {
@@ -1421,7 +1432,8 @@ WINFN(HRESULT) ctl_SaveAllChanges(ICreateTypeLib2 *self)
 	}
 	FILE *f = fd >= 0 ? fdopen(fd, "wb") : NULL;
 	if (!f) {
-		TRACE("SaveAllChanges: can't write %s", lib->path);
+		TRACE("SaveAllChanges: can't write %s",
+		      lib->path ? lib->path : "(no file)");
 		hr = STG_E_ACCESSDENIED;
 		if (fd >= 0) {
 			close(fd);
@@ -1781,6 +1793,7 @@ WINFN(HRESULT) cti_AddFuncDesc(ICreateTypeInfo2 *self, UINT index,
 	f.callconv = desc->callconv;
 	f.nparams = desc->cParams;
 	f.nopt = desc->cParamsOpt;
+	f.oVft = desc->oVft;	/* kept only by a fixed layout */
 	f.flags = desc->wFuncFlags;
 	if (t->kind == TKIND_INTERFACE)
 		f.given_vft = desc->oVft;
@@ -2284,6 +2297,85 @@ WINFN(HRESULT) oa_CreateTypeLib(SYSKIND sys, LPCOLESTR file,
 				ICreateTypeLib **out)
 {
 	return oa_CreateTypeLib2(sys, file, out);
+}
+
+/* ---- for other readers (oleaut_sltg.c) ---- */
+
+/* A library with no file: oa_ctl_serialize gives its bytes. */
+HRESULT oa_ctl_new(SYSKIND sys, ICreateTypeLib2 **out)
+{
+	struct ctl *lib = calloc(1, sizeof(*lib));
+
+	*out = NULL;
+	if (!lib)
+		return E_OUTOFMEMORY;
+	lib->iface.lpVtbl = &ctl_vtbl;
+	lib->refs = 1;
+	lib->sys = sys;
+	*out = &lib->iface;
+	return S_OK;
+}
+
+/*
+ * A reference to type index (or guid, if not NULL) of another library,
+ * named by its GUID, version, LCID and file, without loading it. The
+ * href is the same for the same type.
+ */
+HRESULT oa_ctl_import(ICreateTypeLib2 *self, const GUID *libid, WORD major,
+		      WORD minor, LCID lcid, const char *file,
+		      const GUID *guid, UINT index, HREFTYPE *out)
+{
+	struct ctl *lib = ctl_of(self);
+	GUID g = guid ? *guid : null_guid;
+
+	for (UINT i = 0; i < lib->nrefs; i++) {
+		struct c_ref *r = &lib->refs_out[i];
+		if (guid_eq(&r->libid, libid) && guid_eq(&r->guid, &g) &&
+		    (guid || r->index == index)) {
+			*out = ext_href(i);
+			return S_OK;
+		}
+	}
+	struct c_ref *n = realloc(lib->refs_out,
+				  (lib->nrefs + 1) * sizeof(*n));
+	if (!n)
+		return E_OUTOFMEMORY;
+	lib->refs_out = n;
+	struct c_ref *r = &n[lib->nrefs];
+	memset(r, 0, sizeof(*r));
+	r->libid = *libid;
+	r->guid = g;
+	r->lcid = lcid;
+	r->major = major;
+	r->minor = minor;
+	r->kind = TKIND_INTERFACE;
+	r->index = index;
+	if (!(r->file = strdup(file ? file : "")))
+		return E_OUTOFMEMORY;
+	*out = ext_href(lib->nrefs++);
+	return S_OK;
+}
+
+/*
+ * The type's layout as given, not worked out: its size, alignment and
+ * vtable size here, its functions' vtable offsets and its variables'
+ * offsets as AddFuncDesc and AddVarDesc were given them.
+ */
+void oa_cti_fix_layout(ICreateTypeInfo2 *self, ULONG size, WORD align,
+		       WORD vft)
+{
+	struct c_type *t = cti_of(self);
+
+	t->fixed = 1;
+	t->size = size;
+	t->align = align ? align : 1;
+	t->vft = vft;
+}
+
+/* The library as an MSFT file, in *out (malloc'd). */
+HRESULT oa_ctl_serialize(ICreateTypeLib2 *self, BYTE **out, size_t *len)
+{
+	return serialize(ctl_of(self), out, len);
 }
 
 #define E(name, ord) { #name, ord, (void *)oa_##name }

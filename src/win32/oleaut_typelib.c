@@ -4,8 +4,8 @@
  * ITypeInfo2 objects over them.
  *
  * - Libraries come from a .tlb file, or from a PE file's TYPELIB resource
- *   (1, or N given as "path\N"), in the current "MSFT" format. The older
- *   "SLTG" format is not read.
+ *   (1, or N given as "path\N"), in the current "MSFT" format, or the
+ *   older "SLTG" one, which oleaut_sltg.c turns into MSFT first.
  * - The file is read into one model (struct typelib, struct tl_type and
  *   their functions and variables), which everything else reads. The
  *   reader is written from the format's layout: a header, offsets of the
@@ -1389,9 +1389,18 @@ static HRESULT lib_from_bytes(const BYTE *d, size_t len, const char *what,
 	HRESULT hr;
 
 	if (len >= 4 && rd32(d) == SLTG_MAGIC) {
-		TRACE("LoadTypeLib(%s): an SLTG library, which isn't read",
-		      what);
-		return TYPE_E_UNSUPFORMAT;
+		/* Read as the MSFT library it converts to. */
+		BYTE *m;
+		size_t mlen;
+
+		if (FAILED(hr = oa_sltg_to_msft(d, len, &m, &mlen))) {
+			TRACE("LoadTypeLib(%s): a bad SLTG library (%#x)", what,
+			      (unsigned)hr);
+			return hr;
+		}
+		hr = lib_from_bytes(m, mlen, what, out);
+		free(m);
+		return hr;
 	}
 	if (len < 4 || rd32(d) != MSFT_MAGIC)
 		return TYPE_E_CANTLOADLIBRARY;

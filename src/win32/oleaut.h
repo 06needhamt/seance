@@ -89,6 +89,19 @@ typedef HRESULT (*oa_outer_qi)(IUnknown *outer, int index, REFIID riid,
 HRESULT oa_typelib_view(const void *d, size_t len, IUnknown *outer,
 			oa_outer_qi qi, ITypeLib **out);
 
+/* Building a library for another reader (oleaut_create.c). */
+HRESULT oa_ctl_new(SYSKIND sys, ICreateTypeLib2 **out);
+HRESULT oa_ctl_import(ICreateTypeLib2 *self, const GUID *libid, WORD major,
+		      WORD minor, LCID lcid, const char *file,
+		      const GUID *guid, UINT index, HREFTYPE *out);
+void oa_cti_fix_layout(ICreateTypeInfo2 *self, ULONG size, WORD align,
+		       WORD vft);
+HRESULT oa_ctl_serialize(ICreateTypeLib2 *self, BYTE **out, size_t *len);
+
+/* An SLTG library as an MSFT one (oleaut_sltg.c). */
+HRESULT oa_sltg_to_msft(const BYTE *d, size_t len, BYTE **out,
+			size_t *out_len);
+
 /* Type library registration (oleaut_typereg.c). */
 HRESULT STUB_WINAPI oa_QueryPathOfRegTypeLib(REFGUID guid, WORD major,
 					     WORD minor, LCID lcid,
