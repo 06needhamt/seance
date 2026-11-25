@@ -603,6 +603,8 @@ static void check(SYSKIND sys, const WCHAR *path)
 /* Review cases: identity, IDispatch bases, duals, slots, member IDs. */
 static void test_more(ITypeLib *std)
 {
+	/* The reader gives slots in this process's pointer size. */
+	const int P = (int)sizeof(void *);
 	char path[512];
 	snprintf(path, sizeof(path), "%s/more.tlb", dir);
 	char *win = path_to_windows(path);
@@ -729,7 +731,7 @@ static void test_more(ITypeLib *std)
 			CHECK_EQ(half->lpVtbl->GetTypeAttr(half, &ta), S_OK);
 			CHECK_EQ(ta->typekind, TKIND_INTERFACE);
 			CHECK_EQ(ta->cFuncs, 1);
-			CHECK_EQ(ta->cbSizeVft, 8 * 4);	/* IDispatch's 7 + 1 */
+			CHECK_EQ(ta->cbSizeVft, 8 * P);	/* IDispatch's 7 + 1 */
 			half->lpVtbl->ReleaseTypeAttr(half, ta);
 			half->lpVtbl->Release(half);
 		}
@@ -739,7 +741,7 @@ static void test_more(ITypeLib *std)
 	if (ti) {
 		FUNCDESC *f;
 		CHECK_EQ(ti->lpVtbl->GetFuncDesc(ti, 0, &f), S_OK);
-		CHECK_EQ(f->oVft, 12);		/* after IUnknown's 3 */
+		CHECK_EQ(f->oVft, 3 * P);	/* after IUnknown's 3 */
 		CHECK_EQ(f->memid, 0x60000001);
 		ti->lpVtbl->ReleaseFuncDesc(ti, f);
 		CHECK_EQ(ti->lpVtbl->GetFuncDesc(ti, 1, &f), S_OK);
@@ -749,10 +751,10 @@ static void test_more(ITypeLib *std)
 		CHECK_EQ(f->cParamsOpt, -1);
 		ti->lpVtbl->ReleaseFuncDesc(ti, f);
 		CHECK_EQ(ti->lpVtbl->GetFuncDesc(ti, 3, &f), S_OK);
-		CHECK_EQ(f->oVft, 32);
+		CHECK_EQ(f->oVft, 8 * P);
 		ti->lpVtbl->ReleaseFuncDesc(ti, f);
 		CHECK_EQ(ti->lpVtbl->GetTypeAttr(ti, &ta), S_OK);
-		CHECK_EQ(ta->cbSizeVft, 36);
+		CHECK_EQ(ta->cbSizeVft, 9 * P);
 		ti->lpVtbl->ReleaseTypeAttr(ti, ta);
 		ti->lpVtbl->Release(ti);
 	}
