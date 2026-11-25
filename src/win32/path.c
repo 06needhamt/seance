@@ -315,9 +315,42 @@ int path_rename_noreplace(const char *from, const char *to)
 		}
 		return 0;
 	}
-	if (!lstat(to, &st)) {
-		errno = EEXIST;
+	/* A directory: claim the name with an empty one, which nothing
+	 * else can then take, and rename over it; rename() replaces only
+	 * an empty directory, so one that gains entries meanwhile stays. */
+	if (mkdir(to, 0700))
+		return -1;
+	if (rename(from, to)) {
+		int e = errno;
+		rmdir(to);
+		errno = e == ENOTEMPTY ? EEXIST : e;
 		return -1;
 	}
-	return rename(from, to);
+	return 0;
+}
+
+/* The process's umask, without changing it. */
+static mode_t current_umask(void)
+{
+	FILE *f = fopen("/proc/self/status", "r");
+	char line[128];
+	unsigned m;
+
+	if (f) {
+		while (fgets(line, sizeof(line), f))
+			if (sscanf(line, "Umask: %o", &m) == 1) {
+				fclose(f);
+				return (mode_t)m;
+			}
+		fclose(f);
+	}
+	return 022;
+}
+
+int path_replace_mode(int fd, const char *dest)
+{
+	struct stat st;
+	mode_t mode = !stat(dest, &st) ? st.st_mode & 07777 :
+		      0666 & ~current_umask();
+	return fchmod(fd, mode);
 }

@@ -1231,7 +1231,52 @@ static void test_storage_share(void)
 		 S_OK);
 	if (r1) {
 		CHECK(got_stream(r1, "Second", 8, 3));
-		CHECK(!got_stream(r1, "First", 8, 2));
+		/* First is gone, not left behind damaged. */
+		WCHAR *fn = wide("First");
+		IStream *fs = NULL;
+		CHECK_EQ(r1->lpVtbl->OpenStream(r1, fn, NULL, STGM_READ | EXCL,
+						0, &fs), STG_E_FILENOTFOUND);
+		if (fs)
+			fs->lpVtbl->Release(fs);
+		free(fn);
+		r1->lpVtbl->Release(r1);
+		r1 = NULL;
+	}
+	/* A transacted create over it, released uncommitted, leaves it;
+	 * committed, replaces it. */
+	CHECK_EQ(StgCreateDocfile(file, RW | STGM_CREATE | STGM_TRANSACTED, 0,
+				  &r1), S_OK);
+	if (r1) {
+		CHECK(!got_stream(r1, "Second", 8, 3));
+		put_stream(r1, "New", 8, 4);
+		r1->lpVtbl->Release(r1);
+		r1 = NULL;
+	}
+	CHECK_EQ(StgOpenStorage(file, NULL, STGM_READ | EXCL, NULL, 0, &r1),
+		 S_OK);
+	if (r1) {
+		CHECK(got_stream(r1, "Second", 8, 3));
+		CHECK(!got_stream(r1, "New", 8, 4));
+		r1->lpVtbl->Release(r1);
+		r1 = NULL;
+	}
+	CHECK_EQ(StgCreateDocfile(file, RW | STGM_CREATE | STGM_TRANSACTED, 0,
+				  &r1), S_OK);
+	if (r1) {
+		put_stream(r1, "New", 8, 4);
+		CHECK_EQ(r1->lpVtbl->Revert(r1), S_OK);
+		CHECK(!got_stream(r1, "New", 8, 4));
+		CHECK(!got_stream(r1, "Second", 8, 3));
+		put_stream(r1, "New", 8, 4);
+		CHECK_EQ(r1->lpVtbl->Commit(r1, STGC_DEFAULT), S_OK);
+		r1->lpVtbl->Release(r1);
+		r1 = NULL;
+	}
+	CHECK_EQ(StgOpenStorage(file, NULL, STGM_READ | EXCL, NULL, 0, &r1),
+		 S_OK);
+	if (r1) {
+		CHECK(!got_stream(r1, "Second", 8, 3));
+		CHECK(got_stream(r1, "New", 8, 4));
 		r1->lpVtbl->Release(r1);
 	}
 	free(file);
@@ -1262,6 +1307,36 @@ static void test_storage_share(void)
 		free(cn);
 		stg->lpVtbl->Release(stg);
 	}
+	lb->lpVtbl->Release(lb);
+
+	/* A transacted conversion reverts to the converted tree, and
+	 * released uncommitted leaves the bytes as they were. */
+	lb = NULL;
+	stg = NULL;
+	CHECK_EQ(CreateILockBytesOnHGlobal(NULL, TRUE, &lb), S_OK);
+	if (!lb)
+		return;
+	CHECK_EQ(lb->lpVtbl->WriteAt(lb, zero, "plain text", 10, NULL), S_OK);
+	CHECK_EQ(StgCreateDocfileOnILockBytes(lb, RW | STGM_CONVERT |
+					      STGM_TRANSACTED, 0, &stg),
+		 STG_S_CONVERTED);
+	if (stg) {
+		WCHAR *cn = wide("\x03" "CONTENTS");
+		put_stream(stg, "Added", 8, 5);
+		CHECK_EQ(stg->lpVtbl->Revert(stg), S_OK);
+		CHECK(!got_stream(stg, "Added", 8, 5));
+		IStream *s = NULL;
+		CHECK_EQ(stg->lpVtbl->OpenStream(stg, cn, NULL, STGM_READ | EXCL,
+						 0, &s), S_OK);
+		if (s)
+			s->lpVtbl->Release(s);
+		free(cn);
+		stg->lpVtbl->Release(stg);
+	}
+	char head[10] = { 0 };
+	ULONG got = 0;
+	CHECK_EQ(lb->lpVtbl->ReadAt(lb, zero, head, 10, &got), S_OK);
+	CHECK(got == 10 && !memcmp(head, "plain text", 10));
 	lb->lpVtbl->Release(lb);
 }
 

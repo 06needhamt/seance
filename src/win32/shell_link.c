@@ -351,6 +351,10 @@ static HRESULT resolve(struct link *l, DWORD flags)
 	/* The relative path, from where the link was loaded, may find it. */
 	if (l->rel && l->cur) {
 		char *dir = strdup(l->cur);
+		/* Loaded as C:/x/y.lnk is loaded from C:\\x. */
+		for (char *c = dir; c && *c; c++)
+			if (*c == '/')
+				*c = '\\';
 		char *slash = dir ? strrchr(dir, '\\') : NULL;
 		if (slash) {
 			*slash = 0;
@@ -370,6 +374,14 @@ static HRESULT resolve(struct link *l, DWORD flags)
 				sprintf(p, "%s\\%s", dir, r);
 				char *pu = path_to_unix(p);
 				if (pu && !access(pu, F_OK)) {
+					/* The ID list, if any, names the old
+					 * place: it goes, so neither GetIDList
+					 * nor a save says that place. */
+					if (l->pidl) {
+						heap_free(heap_process(), 0,
+							  l->pidl);
+						l->pidl = NULL;
+					}
 					set_str(&l->path, p);
 					p = NULL;
 					there = 1;
@@ -852,12 +864,13 @@ static int id_list_ok(const BYTE *p, size_t n)
 	}
 }
 
-/* Base path and suffix, joined (either may be NULL). */
-static char *join_base(char *base, char *suffix)
+/* Base path and suffix, joined; NULL without a base, or without a suffix
+ * the link has (one that wouldn't decode): not the base alone. */
+static char *join_base(char *base, char *suffix, int has_suffix)
 {
 	char *path = NULL;
 
-	if (base) {
+	if (base && (suffix || !has_suffix)) {
 		size_t bl = strlen(base);
 		path = malloc(bl + (suffix ? strlen(suffix) : 0) + 2);
 		if (path)
@@ -933,10 +946,16 @@ static HRESULT parse(struct link *l, const BYTE *p, size_t n)
 				path = join_base(wide_at(li, size, wbase_at),
 						 wsuffix_at ?
 						 wide_at(li, size, wsuffix_at) :
-						 NULL);
+						 NULL, wsuffix_at != 0);
 			if (!path)
 				path = join_base(ansi_at(li, size, base_at),
-						 ansi_at(li, size, suffix_at));
+						 suffix_at ?
+						 ansi_at(li, size, suffix_at) :
+						 NULL, suffix_at != 0);
+			/* A local path that won't read whole is an error,
+			 * not some other target. */
+			if (!path)
+				goto bad;
 		}
 		at += size;
 	}
@@ -1086,15 +1105,17 @@ static HRESULT write_file(const char *u, const BYTE *data, size_t n)
 		free(tmp);
 		return hr;
 	}
-	fchmod(fd, 0644);
 	FILE *f = fdopen(fd, "wb");
 	HRESULT hr = S_OK;
 	if (!f) {
 		close(fd);
 		hr = E_OUTOFMEMORY;
 	} else {
-		if (fwrite(data, 1, n, f) != n)
+		/* Private while written; then the old one's permissions. */
+		if (fwrite(data, 1, n, f) != n || fflush(f))
 			hr = STG_E_WRITEFAULT;
+		if (hr == S_OK && path_replace_mode(fd, u))
+			hr = STG_E_ACCESSDENIED;
 		if (fclose(f) && hr == S_OK)
 			hr = STG_E_WRITEFAULT;
 	}

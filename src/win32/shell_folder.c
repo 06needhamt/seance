@@ -579,6 +579,19 @@ static HRESULT WINAPI f_GetDisplayNameOf(IShellFolder *This,
 	return hr;
 }
 
+
+/* Do two Unix paths name one entry (a rename that changes only case)?
+ * Two that differ only in case can be two files. */
+static int same_entry(const char *a, const char *b)
+{
+	struct stat sa, sb;
+
+	if (!strcmp(a, b))
+		return 1;
+	return !lstat(a, &sa) && !lstat(b, &sb) && sa.st_dev == sb.st_dev &&
+	       sa.st_ino == sb.st_ino;
+}
+
 static HRESULT WINAPI f_SetNameOf(IShellFolder *This, HWND hwnd,
 				  LPCITEMIDLIST pidl, LPCWSTR name,
 				  DWORD flags, LPITEMIDLIST *out)
@@ -608,7 +621,7 @@ static HRESULT WINAPI f_SetNameOf(IShellFolder *This, HWND hwnd,
 		LPITEMIDLIST np = out && to ? shell_pidl_from_path(to) : NULL;
 		if (!uf || !ut || (out && !np))
 			hr = E_OUTOFMEMORY;
-		else if (!strcasecmp(uf, ut) ? rename(uf, ut) :
+		else if (same_entry(uf, ut) ? rename(uf, ut) :
 			 path_rename_noreplace(uf, ut))
 			hr = HRESULT_FROM_WIN32(errno == EEXIST ?
 						ERROR_ALREADY_EXISTS :

@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "loader/modules.h"
@@ -742,10 +743,10 @@ static void test_more(ITypeLib *std)
 		FUNCDESC *f;
 		CHECK_EQ(ti->lpVtbl->GetFuncDesc(ti, 0, &f), S_OK);
 		CHECK_EQ(f->oVft, 3 * P);	/* after IUnknown's 3 */
-		CHECK_EQ(f->memid, 0x60000001);
+		CHECK_EQ(f->memid, 0x60010001);	/* one base */
 		ti->lpVtbl->ReleaseFuncDesc(ti, f);
 		CHECK_EQ(ti->lpVtbl->GetFuncDesc(ti, 1, &f), S_OK);
-		CHECK_EQ(f->memid, 0x60000002);	/* the next free one */
+		CHECK_EQ(f->memid, 0x60010002);	/* the next free one */
 		ti->lpVtbl->ReleaseFuncDesc(ti, f);
 		CHECK_EQ(ti->lpVtbl->GetFuncDesc(ti, 2, &f), S_OK);
 		CHECK_EQ(f->cParamsOpt, -1);
@@ -859,6 +860,198 @@ static void test_delete(void)
 	lib->lpVtbl->Release(lib);
 }
 
+static ICreateTypeLib2 *new_lib(const char *file, const char *name)
+{
+	char path[512];
+	snprintf(path, sizeof(path), "%s/%s", dir, file);
+	char *win = path_to_windows(path);
+	WCHAR *wpath = utf8_to_utf16_dup(win);
+	ICreateTypeLib2 *ctl = NULL;
+	CHECK_EQ(pCreateTypeLib2(SYS_WIN32, wpath, &ctl), S_OK);
+	free(wpath);
+	free(win);
+	if (ctl)
+		CHECK_EQ(ctl->lpVtbl->SetName(ctl, w(name)), S_OK);
+	return ctl;
+}
+
+/* Fixes from review: slots, IDs, sizes, views, references, saving. */
+static void test_review(ITypeLib *std)
+{
+	const int P = (int)sizeof(void *);
+	ITypeInfo *unk = NULL;
+	HREFTYPE h;
+	FUNCDESC fd, *f;
+	TYPEATTR *ta;
+	ITypeInfo *ti;
+
+	std->lpVtbl->GetTypeInfoOfGuid(std, &iid_unknown, &unk);
+	ICreateTypeLib2 *ctl = new_lib("review.tlb", "Review");
+	if (!ctl || !unk)
+		goto out;
+	memset(&fd, 0, sizeof(fd));
+	fd.funckind = FUNC_PUREVIRTUAL;
+	fd.invkind = INVOKE_FUNC;
+	fd.callconv = CC_STDCALL;
+	fd.elemdescFunc.tdesc.vt = VT_HRESULT;
+	fd.memid = MEMBERID_NIL;
+
+	/* A slot given is kept from the others; -1 is "work it out". */
+	ICreateTypeInfo *a = make(ctl, "IA", TKIND_INTERFACE);
+	CHECK_EQ(a->lpVtbl->AddRefTypeInfo(a, unk, &h), S_OK);
+	CHECK_EQ(a->lpVtbl->AddImplType(a, 0, h), S_OK);
+	fd.oVft = 12;			/* IUnknown's 3, SYS_WIN32 */
+	CHECK_EQ(a->lpVtbl->AddFuncDesc(a, 0, &fd), S_OK);
+	fd.oVft = -1;
+	CHECK_EQ(a->lpVtbl->AddFuncDesc(a, 1, &fd), S_OK);
+	CHECK_EQ(a->lpVtbl->LayOut(a), S_OK);
+
+	/* Two at one slot, or one in the base's, won't lay out. */
+	ICreateTypeInfo *b = make(ctl, "IB", TKIND_INTERFACE);
+	CHECK_EQ(b->lpVtbl->AddRefTypeInfo(b, unk, &h), S_OK);
+	CHECK_EQ(b->lpVtbl->AddImplType(b, 0, h), S_OK);
+	fd.oVft = 16;
+	CHECK_EQ(b->lpVtbl->AddFuncDesc(b, 0, &fd), S_OK);
+	CHECK_EQ(b->lpVtbl->AddFuncDesc(b, 1, &fd), S_OK);
+	CHECK(FAILED(b->lpVtbl->LayOut(b)));
+	CHECK_EQ(b->lpVtbl->DeleteFuncDesc(b, 1), S_OK);
+	fd.oVft = 4;
+	CHECK_EQ(b->lpVtbl->AddFuncDesc(b, 1, &fd), S_OK);
+	CHECK(FAILED(b->lpVtbl->LayOut(b)));
+	CHECK_EQ(b->lpVtbl->DeleteFuncDesc(b, 1), S_OK);
+	CHECK_EQ(b->lpVtbl->LayOut(b), S_OK);
+
+	/* A dual interface with no base given derives from IDispatch. */
+	ICreateTypeInfo *d = make(ctl, "IDualBare", TKIND_INTERFACE);
+	CHECK_EQ(d->lpVtbl->SetTypeFlags(d, TYPEFLAG_FDUAL |
+					 TYPEFLAG_FOLEAUTOMATION), S_OK);
+	fd.oVft = 0;
+	CHECK_EQ(d->lpVtbl->AddFuncDesc(d, 0, &fd), S_OK);
+	CHECK_EQ(d->lpVtbl->LayOut(d), S_OK);
+
+	ITypeLib *tl = NULL;
+	CHECK_EQ(ctl->lpVtbl->QueryInterface(ctl, &IID_ITypeLib, (void **)&tl),
+		 S_OK);
+	if (tl && tl->lpVtbl->GetTypeInfo(tl, 0, &ti) == S_OK) {
+		CHECK_EQ(ti->lpVtbl->GetFuncDesc(ti, 0, &f), S_OK);
+		CHECK_EQ(f->oVft, 3 * P);
+		/* One base: MIDL's 0x60010000, not IUnknown's own IDs. */
+		CHECK_EQ(f->memid, 0x60010000);
+		ti->lpVtbl->ReleaseFuncDesc(ti, f);
+		CHECK_EQ(ti->lpVtbl->GetFuncDesc(ti, 1, &f), S_OK);
+		CHECK_EQ(f->oVft, 4 * P);
+		ti->lpVtbl->ReleaseFuncDesc(ti, f);
+		ti->lpVtbl->Release(ti);
+	}
+	if (tl && tl->lpVtbl->GetTypeInfo(tl, 2, &ti) == S_OK) {
+		ITypeInfo *half = NULL, *base = NULL;
+		CHECK_EQ(ti->lpVtbl->GetRefTypeOfImplType(ti, (UINT)-1, &h),
+			 S_OK);
+		CHECK_EQ(ti->lpVtbl->GetRefTypeInfo(ti, h, &half), S_OK);
+		if (half) {
+			CHECK_EQ(half->lpVtbl->GetTypeAttr(half, &ta), S_OK);
+			CHECK_EQ(ta->cbSizeVft, 8 * P);
+			CHECK_EQ(ta->cImplTypes, 1);
+			half->lpVtbl->ReleaseTypeAttr(half, ta);
+			CHECK_EQ(half->lpVtbl->GetRefTypeOfImplType(half, 0, &h),
+				 S_OK);
+			CHECK(ref_name_is(half, h, "IDispatch"));
+			CHECK_EQ(half->lpVtbl->GetFuncDesc(half, 0, &f), S_OK);
+			CHECK_EQ(f->oVft, 7 * P);
+			CHECK_EQ(f->memid, 0x60020000);
+			half->lpVtbl->ReleaseFuncDesc(half, f);
+			half->lpVtbl->Release(half);
+		}
+		if (base)
+			base->lpVtbl->Release(base);
+		ti->lpVtbl->Release(ti);
+	}
+
+	/* An array past a ULONG is too big; and a draft that won't lay
+	 * out still gives the ITypeLib it gave. */
+	ICreateTypeInfo *r = make(ctl, "RBig", TKIND_RECORD);
+	VARDESC vd;
+	memset(&vd, 0, sizeof(vd));
+	vd.memid = MEMBERID_NIL;
+	vd.varkind = VAR_PERINSTANCE;
+	ARRAYDESC ad = { .tdescElem = { .vt = VT_I4 }, .cDims = 1 };
+	ad.rgbounds[0].cElements = 0x40000000;
+	vd.elemdescVar.tdesc.vt = VT_CARRAY;
+	vd.elemdescVar.tdesc.lpadesc = &ad;
+	CHECK_EQ(r->lpVtbl->AddVarDesc(r, 0, &vd), S_OK);
+	CHECK_EQ(r->lpVtbl->LayOut(r), TYPE_E_SIZETOOBIG);
+	ITypeLib *tl2 = NULL;
+	CHECK_EQ(ctl->lpVtbl->QueryInterface(ctl, &IID_ITypeLib,
+					     (void **)&tl2), S_OK);
+	if (tl2)
+		tl2->lpVtbl->Release(tl2);
+	CHECK(FAILED(ctl->lpVtbl->SaveAllChanges(ctl)));
+	CHECK_EQ(ctl->lpVtbl->DeleteTypeInfo(ctl, w("RBig")), S_OK);
+	r->lpVtbl->Release(r);
+	if (tl)
+		tl->lpVtbl->Release(tl);
+
+	/* Saving over a private file keeps it private. */
+	char path[512];
+	struct stat st;
+	snprintf(path, sizeof(path), "%s/review.tlb", dir);
+	FILE *pf = fopen(path, "w");
+	if (pf)
+		fclose(pf);
+	CHECK_EQ(chmod(path, 0600), 0);
+	CHECK_EQ(ctl->lpVtbl->SaveAllChanges(ctl), S_OK);
+	CHECK(!stat(path, &st) && (st.st_mode & 0777) == 0600 &&
+	      st.st_size > 0);
+
+	a->lpVtbl->Release(a);
+	b->lpVtbl->Release(b);
+	d->lpVtbl->Release(d);
+	CHECK_EQ(ctl->lpVtbl->Release(ctl), 0);
+
+	/* Two creators of one library in two locales are two libraries;
+	 * and creators referring to each other still go when released
+	 * (ASan's leak check sees one that doesn't). */
+	static const GUID g = { 0x1c0ffee0, 0x1234, 0x5678,
+				{ 1, 2, 3, 4, 5, 6, 7, 8 } };
+	ICreateTypeLib2 *l1 = new_lib("l1.tlb", "L"),
+			*l2 = new_lib("l2.tlb", "L");
+	if (!l1 || !l2)
+		goto two;
+	CHECK_EQ(l1->lpVtbl->SetGuid(l1, &g), S_OK);
+	CHECK_EQ(l2->lpVtbl->SetGuid(l2, &g), S_OK);
+	CHECK_EQ(l1->lpVtbl->SetLcid(l1, 0x409), S_OK);
+	CHECK_EQ(l2->lpVtbl->SetLcid(l2, 0x407), S_OK);
+	ICreateTypeInfo *e1 = make(l1, "E1", TKIND_RECORD);
+	ICreateTypeInfo *e2 = make(l2, "E2", TKIND_RECORD);
+	ITypeInfo *t1 = NULL, *t2 = NULL;
+	if (e1 && e2 &&
+	    e1->lpVtbl->QueryInterface(e1, &IID_ITypeInfo, (void **)&t1) ==
+	    S_OK &&
+	    e2->lpVtbl->QueryInterface(e2, &IID_ITypeInfo, (void **)&t2) ==
+	    S_OK) {
+		CHECK_EQ(e1->lpVtbl->AddRefTypeInfo(e1, t2, &h), S_OK);
+		CHECK_EQ(h & 3, 1);	/* an import, not E1's own */
+		CHECK_EQ(e2->lpVtbl->AddRefTypeInfo(e2, t1, &h), S_OK);
+		CHECK_EQ(h & 3, 1);
+	}
+	if (t1)
+		t1->lpVtbl->Release(t1);
+	if (t2)
+		t2->lpVtbl->Release(t2);
+	if (e1)
+		e1->lpVtbl->Release(e1);
+	if (e2)
+		e2->lpVtbl->Release(e2);
+two:
+	if (l1)
+		CHECK_EQ(l1->lpVtbl->Release(l1), 0);
+	if (l2)
+		CHECK_EQ(l2->lpVtbl->Release(l2), 0);
+out:
+	if (unk)
+		unk->lpVtbl->Release(unk);
+}
+
 int main(void)
 {
 	char cleanup[64];
@@ -900,6 +1093,7 @@ int main(void)
 
 	test_more(std);
 	test_delete();
+	test_review(std);
 
 	/* Nowhere to write. */
 	ICreateTypeLib2 *ctl = NULL;

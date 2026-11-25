@@ -409,6 +409,34 @@ static void test_file_operation(void)
 		 ERROR_ALREADY_EXISTS);
 	CHECK_EQ(OP(FO_DELETE, "C:\\copy\0C:\\a.txt\0", NULL, FOF_ALLOWUNDO), 0);
 	CHECK(!exists("copy") && !exists("a.txt"));
+	/* One on another file system than the bin can't be recycled:
+	 * with no one to ask it stays, and goes for good only without
+	 * confirmation. */
+	char shm[] = "/dev/shm/vfw-rb-XXXXXX";
+	struct stat sr, ss;
+	if (!stat(root, &sr) && mkdtemp(shm)) {
+		char fp[64], zp[80];
+		snprintf(fp, sizeof(fp), "%s/x.txt", shm);
+		snprintf(zp, sizeof(zp), "Z:%s\\x.txt", shm);
+		for (char *c = zp; *c; c++)
+			if (*c == '/')
+				*c = '\\';
+		zp[strlen(zp) + 1] = 0;	/* the list's second NUL */
+		FILE *xf = fopen(fp, "w");
+		if (xf)
+			fclose(xf);
+		if (!stat(shm, &ss) && ss.st_dev != sr.st_dev) {
+			CHECK_EQ(OP(FO_DELETE, zp, NULL, FOF_ALLOWUNDO), 0);
+			CHECK(op.fAnyOperationsAborted);
+			CHECK(!access(fp, F_OK));
+			CHECK_EQ(OP(FO_DELETE, zp, NULL,
+				    FOF_ALLOWUNDO | FOF_NOCONFIRMATION), 0);
+			CHECK(!op.fAnyOperationsAborted);
+			CHECK(access(fp, F_OK));
+		}
+		unlink(fp);
+		rmdir(shm);
+	}
 	CHECK_EQ(OP(FO_DELETE, "C:\\no such thing\0", NULL, 0),
 		 ERROR_FILE_NOT_FOUND);
 	CHECK_EQ(OP(FO_DELETE, "C:\\files\\*\0", NULL, 0), 0);
@@ -1038,20 +1066,42 @@ static void test_shell_link_more(void)
 	lw->lpVtbl->Release(lw);
 	lw = NULL;
 	pf = NULL;
+	/* The copy holds what was saved. */
+	copy = w16("C:\\copy.lnk");
+	CHECK(create(&CLSID_ShellLink, NULL, 1, &IID_IPersistFile, (void **)&pf) ==
+	      S_OK && pf);
+	if (pf) {
+		CHECK(pf->lpVtbl->Load(pf, copy, 0) == S_OK);
+		CHECK(pf->lpVtbl->QueryInterface(pf, &IID_IShellLinkW,
+						 (void **)&lw) == S_OK);
+		pf->lpVtbl->Release(pf);
+		pf = NULL;
+	}
+	if (lw) {
+		CHECK(lw->lpVtbl->GetDescription(lw, w, MAX_PATH) == S_OK);
+		char *c = utf16_to_utf8_dup(w);
+		CHECK_STR(c, "edited");
+		free(c);
+		lw->lpVtbl->Release(lw);
+		lw = NULL;
+	}
+	free(copy);
 
 	/* Both moved to C:\new: Resolve finds the target beside the link. */
 	mkdir(on_disk("new"), 0755);
 	CHECK(!rename(on_disk("old/\xe6\x97\xa5.exe"),
 		      on_disk("new/\xe6\x97\xa5.exe")));
 	CHECK(!rename(on_disk("old/run.lnk"), on_disk("new/run.lnk")));
-	WCHAR *nlnk = w16("C:\\new\\run.lnk");
+	/* Loaded by a name with forward slashes; and the link file is
+	 * private, which a save keeps it. */
+	WCHAR *nlnk = w16("C:/new/run.lnk");
+	CHECK(!chmod(on_disk("new/run.lnk"), 0600));
 	CHECK(create(&CLSID_ShellLink, NULL, 1, &IID_IPersistFile, (void **)&pf) ==
 	      S_OK && pf);
 	if (pf) {
 		CHECK(pf->lpVtbl->Load(pf, nlnk, 0) == S_OK);
 		CHECK(pf->lpVtbl->QueryInterface(pf, &IID_IShellLinkW,
 						 (void **)&lw) == S_OK);
-		pf->lpVtbl->Release(pf);
 	}
 	if (lw) {
 		CHECK(lw->lpVtbl->GetPath(lw, w, MAX_PATH, NULL, 0) == S_OK);
@@ -1063,8 +1113,28 @@ static void test_shell_link_more(void)
 		c = utf16_to_utf8_dup(w);
 		CHECK_STR(c, "C:\\new\\\xe6\x97\xa5.exe");
 		free(c);
+		/* The ID list names the new place too. */
+		LPITEMIDLIST pidl = NULL;
+		FN(BOOL, SHGetPathFromIDListW, LPCITEMIDLIST, LPWSTR);
+		FN(void, ILFree, LPITEMIDLIST);
+		CHECK(lw->lpVtbl->GetIDList(lw, &pidl) == S_OK && pidl);
+		if (pidl) {
+			CHECK(SHGetPathFromIDListW(pidl, w));
+			c = utf16_to_utf8_dup(w);
+			CHECK_STR(c, "C:\\new\\\xe6\x97\xa5.exe");
+			free(c);
+			ILFree(pidl);
+		}
+		if (pf) {
+			struct stat st;
+			CHECK(pf->lpVtbl->Save(pf, NULL, TRUE) == S_OK);
+			CHECK(!stat(on_disk("new/run.lnk"), &st) &&
+			      (st.st_mode & 0777) == 0600);
+		}
 		lw->lpVtbl->Release(lw);
 	}
+	if (pf)
+		pf->lpVtbl->Release(pf);
 	free(nlnk);
 	free(t);
 	free(lnk);

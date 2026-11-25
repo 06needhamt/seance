@@ -1065,11 +1065,14 @@ WINFN(HANDLE) user_SetClipboardData(UINT format, HANDLE data)
 		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
 		goto out;
 	}
+	int same = clip[slot].format == format && clip[slot].data == data;
 	if (clip[slot].format == format && clip[slot].data != data)
 		clip_release(format, clip[slot].data);
 	clip[slot].format = format;
 	clip[slot].data = data;
-	if (rendering != format)	/* rendering what was promised: same */
+	/* A change, a delayed format's data arriving included, is a new
+	 * sequence number; the same handle set again isn't. */
+	if (!same)
 		clip_sequence++;
 	ret = data;	/* NULL for delayed rendering, as on Windows */
 	win_set_error(ERROR_SUCCESS);

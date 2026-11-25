@@ -312,7 +312,7 @@ static DWORD transfer(const char *from, const char *to, int move,
 }
 
 static DWORD file_op(UINT func, const struct list *from,
-		     const struct list *to, FILEOP_FLAGS flags)
+		     const struct list *to, FILEOP_FLAGS flags, BOOL *aborted)
 {
 	struct list src = { 0 };
 	DWORD err = 0;
@@ -351,12 +351,27 @@ static DWORD file_op(UINT func, const struct list *from,
 	}
 
 	if (func == FO_DELETE) {
-		for (int i = 0; !err && i < src.n; i++)
-			err = (flags & FOF_ALLOWUNDO) ?
-			      shell_recycle(src.item[i],
-					    !!(flags & FOF_NORECURSION)) :
-			      delete_tree(src.item[i],
+		for (int i = 0; !err && i < src.n; i++) {
+			int recycle = !!(flags & FOF_ALLOWUNDO);
+			if (recycle) {
+				err = shell_recycle(src.item[i],
+						    !!(flags & FOF_NORECURSION));
+				if (err != 17 /* ERROR_NOT_SAME_DEVICE */)
+					continue;
+				/* It can't go in the bin. Windows asks
+				 * whether to delete it for good; with
+				 * FOF_NOCONFIRMATION it does, and here, with
+				 * no one to ask, it otherwise stays and the
+				 * rest go on, as when the user says no. */
+				err = 0;
+				if (!(flags & FOF_NOCONFIRMATION)) {
+					*aborted = TRUE;
+					continue;
+				}
+			}
+			err = delete_tree(src.item[i],
 					  !(flags & FOF_NORECURSION));
+		}
 		list_free(&src);
 		return err;
 	}
@@ -408,6 +423,7 @@ static DWORD file_op(UINT func, const struct list *from,
 WINFN(int) sh_SHFileOperationA(SHFILEOPSTRUCTA *op)
 {
 	struct list from = { 0 }, to = { 0 };
+	BOOL aborted = FALSE;
 
 	if (!op)
 		return ERROR_INVALID_PARAMETER;
@@ -415,15 +431,18 @@ WINFN(int) sh_SHFileOperationA(SHFILEOPSTRUCTA *op)
 	op->hNameMappings = NULL;
 	DWORD err = list_read(&from, op->pFrom, 0) || list_read(&to, op->pTo, 0) ?
 		    ERROR_NOT_ENOUGH_MEMORY : file_op(op->wFunc, &from, &to,
-						      op->fFlags);
+						      op->fFlags, &aborted);
 	list_free(&from);
 	list_free(&to);
+	/* The structure is packed: not a BOOL's alignment. */
+	memcpy(&op->fAnyOperationsAborted, &aborted, sizeof(aborted));
 	return (int)err;
 }
 
 WINFN(int) sh_SHFileOperationW(SHFILEOPSTRUCTW *op)
 {
 	struct list from = { 0 }, to = { 0 };
+	BOOL aborted = FALSE;
 
 	if (!op)
 		return ERROR_INVALID_PARAMETER;
@@ -431,9 +450,11 @@ WINFN(int) sh_SHFileOperationW(SHFILEOPSTRUCTW *op)
 	op->hNameMappings = NULL;
 	DWORD err = list_read(&from, op->pFrom, 1) || list_read(&to, op->pTo, 1) ?
 		    ERROR_NOT_ENOUGH_MEMORY : file_op(op->wFunc, &from, &to,
-						      op->fFlags);
+						      op->fFlags, &aborted);
 	list_free(&from);
 	list_free(&to);
+	/* The structure is packed: not a BOOL's alignment. */
+	memcpy(&op->fAnyOperationsAborted, &aborted, sizeof(aborted));
 	return (int)err;
 }
 

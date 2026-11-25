@@ -798,6 +798,25 @@ static DWORD clip_seq;			/* the clipboard's, when it was set */
 static int clip_pending;		/* a format not yet rendered */
 static const IDataObjectVtbl cd_vtbl;
 
+/* The formats this publication has put on the clipboard already. */
+static UINT *clip_done;
+static size_t clip_ndone;
+
+static int clip_is_done(UINT f)
+{
+	for (size_t i = 0; i < clip_ndone; i++)
+		if (clip_done[i] == f)
+			return 1;
+	return 0;
+}
+
+static void clip_forget(void)
+{
+	free(clip_done);
+	clip_done = NULL;
+	clip_ndone = 0;
+}
+
 /* The source, if the clipboard still holds what it put there. Once
  * something else has taken the clipboard, the source is let go. */
 static IDataObject *current_source(void)
@@ -813,6 +832,7 @@ static IDataObject *current_source(void)
 		lost = clip_source;
 		clip_source = NULL;
 		clip_pending = 0;
+		clip_forget();
 	}
 	pthread_mutex_unlock(&clip_lock);
 	if (lost)
@@ -842,8 +862,63 @@ static void clip_close(void)
 		close();
 }
 
-/* Puts the global memory formats of data on the user32 clipboard;
- * FALSE if one of them could not be put there. */
+/* One format of data as global memory: its HGLOBAL copied, its stream's
+ * bytes, or its storage as a compound file, as the clipboard keeps them;
+ * NULL if it couldn't be had (*tried 0 if it isn't one of those). */
+static HGLOBAL render_one(IDataObject *data, const FORMATETC *f, int *tried)
+{
+	static const DWORD kinds[] = { TYMED_HGLOBAL, TYMED_ISTREAM,
+				       TYMED_ISTORAGE };
+	*tried = 0;
+	for (int k = 0; k < 3; k++) {
+		if (!(f->tymed & kinds[k]))
+			continue;
+		STGMEDIUM med;
+		FORMATETC want = *f;
+		HGLOBAL h = NULL;
+		*tried = 1;
+		memset(&med, 0, sizeof(med));
+		want.tymed = kinds[k];
+		if (FAILED(data->lpVtbl->GetData(data, &want, &med)))
+			continue;
+		if (med.tymed == TYMED_HGLOBAL) {
+			h = global_copy(med.hGlobal, 0);
+		} else if (med.tymed == TYMED_ISTREAM && med.pstm) {
+			IStream *copy = NULL;
+			LARGE_INTEGER zero = { 0 };
+			ULARGE_INTEGER all;
+			all.QuadPart = ~0ull;
+			if (SUCCEEDED(ole_stream_on_hglobal(NULL, FALSE,
+							    &copy))) {
+				if (SUCCEEDED(med.pstm->lpVtbl->Seek(
+					    med.pstm, zero, STREAM_SEEK_SET,
+					    NULL)) &&
+				    SUCCEEDED(med.pstm->lpVtbl->CopyTo(
+					    med.pstm, copy, all, NULL, NULL)) &&
+				    SUCCEEDED(ole_hglobal_from_stream(copy,
+								      &h))) {
+					copy->lpVtbl->Release(copy);
+				} else {
+					HGLOBAL lost = NULL;
+					ole_hglobal_from_stream(copy, &lost);
+					copy->lpVtbl->Release(copy);
+					global_free(lost);
+					h = NULL;
+				}
+			}
+		} else if (med.tymed == TYMED_ISTORAGE && med.pstg) {
+			ole_storage_to_hglobal(med.pstg, &h);
+		}
+		ole_ReleaseStgMedium(&med);
+		if (h)
+			return h;
+	}
+	return NULL;
+}
+
+/* Puts the content formats of data that it hasn't yet on the user32
+ * clipboard, as global memory; FALSE if one of them could not be put
+ * there. GDI and file media aren't. */
 static int render(IDataObject *data)
 {
 	HANDLE (WINAPI *set)(UINT, HANDLE) = u32("SetClipboardData");
@@ -854,23 +929,18 @@ static int render(IDataObject *data)
 	if (!set || FAILED(data->lpVtbl->EnumFormatEtc(data, DATADIR_GET, &e)))
 		return 0;
 	while (e->lpVtbl->Next(e, 1, &f, NULL) == S_OK) {
-		STGMEDIUM med;
-		memset(&med, 0, sizeof(med));
-		if (!f.ptd && (f.tymed & TYMED_HGLOBAL) &&
+		int tried;
+		if (!f.ptd && !clip_is_done(f.cfFormat) &&
 		    (f.dwAspect == DVASPECT_CONTENT || !f.dwAspect)) {
-			FORMATETC want = f;
-			want.tymed = TYMED_HGLOBAL;
-			if (SUCCEEDED(data->lpVtbl->GetData(data, &want, &med))) {
-				HGLOBAL copy = med.tymed == TYMED_HGLOBAL ?
-					global_copy(med.hGlobal, 0) : NULL;
-				if (!copy && med.tymed == TYMED_HGLOBAL)
-					all = 0;
-				if (copy && !set(f.cfFormat, copy)) {
-					global_free(copy);
-					all = 0;
-				}
-				ole_ReleaseStgMedium(&med);
-			} else {
+			HGLOBAL h = render_one(data, &f, &tried);
+			UINT *nd = h ? realloc(clip_done, (clip_ndone + 1) *
+					       sizeof(*nd)) : NULL;
+			if (nd)
+				clip_done = nd;
+			if (h && nd && set(f.cfFormat, h)) {
+				clip_done[clip_ndone++] = f.cfFormat;
+			} else if (tried) {
+				global_free(h);
 				all = 0;
 			}
 		}
@@ -907,6 +977,7 @@ WINFN(HRESULT) ole_OleSetClipboard(IDataObject *data)
 	IDataObject *old = clip_source;
 	clip_source = data;
 	clip_pending = 0;
+	clip_forget();
 	if (data) {
 		data->lpVtbl->AddRef(data);
 		clip_pending = !render(data);
@@ -944,8 +1015,14 @@ WINFN(HRESULT) ole_OleFlushClipboard(void)
 			src->lpVtbl->Release(src);
 			return hr;
 		}
-		clip_pending = !render(src);
-		clip_seq = seq ? seq() : 0;
+		/* Another writer may have taken the clipboard since: then
+		 * nothing here is ours to add to, and the source goes. */
+		if (seq && seq() != clip_seq) {
+			clip_pending = 0;
+		} else {
+			clip_pending = !render(src);
+			clip_seq = seq ? seq() : 0;
+		}
 		clip_close();
 		if (clip_pending)
 			hr = CLIPBRD_E_CANT_SET;
@@ -954,6 +1031,7 @@ WINFN(HRESULT) ole_OleFlushClipboard(void)
 	if (SUCCEEDED(hr) && clip_source == src) {
 		old = clip_source;
 		clip_source = NULL;
+		clip_forget();
 	}
 	pthread_mutex_unlock(&clip_lock);
 	src->lpVtbl->Release(src);
@@ -1017,7 +1095,7 @@ WINFN(HRESULT) cd_GetData(IDataObject *self, FORMATETC *fmt, STGMEDIUM *med)
 		return DV_E_FORMATETC;
 	if (gdi_format(fmt->cfFormat))
 		return DV_E_FORMATETC;	/* not global memory */
-	if (!(fmt->tymed & TYMED_HGLOBAL))
+	if (!(fmt->tymed & (TYMED_HGLOBAL | TYMED_ISTREAM | TYMED_ISTORAGE)))
 		return DV_E_TYMED;
 	HANDLE (WINAPI *get)(UINT) = u32("GetClipboardData");
 	if (FAILED(hr = clip_open()))
@@ -1029,8 +1107,31 @@ WINFN(HRESULT) cd_GetData(IDataObject *self, FORMATETC *fmt, STGMEDIUM *med)
 		return DV_E_FORMATETC;
 	if (!copy)
 		return E_OUTOFMEMORY;
-	med->tymed = TYMED_HGLOBAL;
-	med->hGlobal = copy;
+	/* As asked: the memory itself, a stream over it, or the storage
+	 * it holds (a flushed storage format). */
+	if (fmt->tymed & TYMED_HGLOBAL) {
+		med->tymed = TYMED_HGLOBAL;
+		med->hGlobal = copy;
+		return S_OK;
+	}
+	if (fmt->tymed & TYMED_ISTORAGE) {
+		hr = ole_storage_on_hglobal(copy, &med->pstg);
+		if (SUCCEEDED(hr)) {
+			med->tymed = TYMED_ISTORAGE;
+			return S_OK;
+		}
+		if (!(fmt->tymed & TYMED_ISTREAM))
+			return DV_E_TYMED;	/* it freed copy */
+		copy = global_copy(h, 0);
+		if (!copy)
+			return E_OUTOFMEMORY;
+	}
+	hr = ole_stream_on_hglobal(copy, TRUE, &med->pstm);
+	if (FAILED(hr)) {
+		global_free(copy);
+		return hr;
+	}
+	med->tymed = TYMED_ISTREAM;
 	return S_OK;
 }
 
@@ -1062,7 +1163,7 @@ WINFN(HRESULT) cd_QueryGetData(IDataObject *self, FORMATETC *fmt)
 		return DV_E_FORMATETC;
 	if (gdi_format(fmt->cfFormat))
 		return DV_E_FORMATETC;
-	if (!(fmt->tymed & TYMED_HGLOBAL))
+	if (!(fmt->tymed & (TYMED_HGLOBAL | TYMED_ISTREAM | TYMED_ISTORAGE)))
 		return DV_E_TYMED;
 	BOOL (WINAPI *avail)(UINT) = u32("IsClipboardFormatAvailable");
 	return avail && avail(fmt->cfFormat) ? S_OK : DV_E_FORMATETC;
@@ -1116,7 +1217,7 @@ WINFN(HRESULT) cd_EnumFormatEtc(IDataObject *self, DWORD dir,
 		v[n].ptd = NULL;
 		v[n].dwAspect = DVASPECT_CONTENT;
 		v[n].lindex = -1;
-		v[n].tymed = TYMED_HGLOBAL;
+		v[n].tymed = TYMED_HGLOBAL | TYMED_ISTREAM;
 		n++;
 	}
 	clip_close();
@@ -1223,13 +1324,24 @@ WINFN(HRESULT) ole_OleSetContainedObject(IUnknown *u, BOOL contained)
 	return hr;
 }
 
-/* CoLockObjectExternal's strong locks: a reference and a connection. */
+/*
+ * CoLockObjectExternal's strong locks: a reference and a connection. The
+ * table is changed under lock_lock, but the object is told (Add- or
+ * ReleaseConnection) with it let go, so a callback that waits on another
+ * thread can't deadlock it. Meanwhile the entry is busy: another thread
+ * locking or unlocking that object waits until it is told, so the object
+ * hears of the locks in the order they were counted; the telling thread
+ * may lock and unlock it again from the callback.
+ */
 struct lock_entry {
 	IUnknown *obj;
 	DWORD count;
+	int busy;		/* calls telling the object, on owner */
+	pthread_t owner;
 };
 
-static pthread_mutex_t lock_lock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+static pthread_mutex_t lock_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t lock_idle = PTHREAD_COND_INITIALIZER;
 static struct lock_entry *locks;
 static size_t nlocks;
 
@@ -1246,48 +1358,74 @@ static void connection(IUnknown *u, int add, BOOL last_closes)
 	c->lpVtbl->Release(c);
 }
 
+/* u's entry, waiting while another thread is telling it (lock_lock held);
+ * nlocks if it has none. */
+static size_t lock_find(IUnknown *u)
+{
+	for (;;) {
+		size_t i;
+		for (i = 0; i < nlocks && locks[i].obj != u; i++)
+			;
+		if (i == nlocks || !locks[i].busy ||
+		    pthread_equal(locks[i].owner, pthread_self()))
+			return i;
+		pthread_cond_wait(&lock_idle, &lock_lock);
+	}
+}
+
+/* Done telling u: the entry is let go once nothing holds it. */
+static void lock_done(IUnknown *u)
+{
+	pthread_mutex_lock(&lock_lock);
+	for (size_t i = 0; i < nlocks; i++)
+		if (locks[i].obj == u) {
+			if (!--locks[i].busy && !locks[i].count)
+				locks[i] = locks[--nlocks];
+			break;
+		}
+	pthread_cond_broadcast(&lock_idle);
+	pthread_mutex_unlock(&lock_lock);
+}
+
 WINFN(HRESULT) ole_CoLockObjectExternal(IUnknown *u, BOOL lock,
 					BOOL last_unlock_releases)
 {
-	size_t i;
-
 	if (!u)
 		return E_INVALIDARG;
 	pthread_mutex_lock(&lock_lock);
-	for (i = 0; i < nlocks && locks[i].obj != u; i++)
-		;
-	if (lock) {
-		if (i == nlocks) {
-			struct lock_entry *v =
-				realloc(locks, (nlocks + 1) * sizeof(*v));
-			if (!v) {
-				pthread_mutex_unlock(&lock_lock);
-				return E_OUTOFMEMORY;
-			}
-			locks = v;
-			locks[nlocks].obj = u;
-			locks[nlocks].count = 0;
-			nlocks++;
-		}
-		locks[i].count++;
-		pthread_mutex_unlock(&lock_lock);
-		u->lpVtbl->AddRef(u);
-		connection(u, 1, FALSE);
-		return S_OK;
-	}
-	if (i == nlocks) {
+	size_t i = lock_find(u);
+	if (!lock && (i == nlocks || !locks[i].count)) {
 		pthread_mutex_unlock(&lock_lock);
 		return S_OK;	/* nothing locked: nothing to do */
 	}
-	int last = !--locks[i].count;
-	if (last)
-		locks[i] = locks[--nlocks];
-	/* Released with the table locked (the lock is recursive, so the
-	 * object may lock or unlock again from ReleaseConnection), so no
-	 * other thread can lock it between deciding "last" and saying so. */
-	connection(u, 0, last && last_unlock_releases);
+	if (i == nlocks) {
+		struct lock_entry *v = realloc(locks, (nlocks + 1) * sizeof(*v));
+		if (!v) {
+			pthread_mutex_unlock(&lock_lock);
+			return E_OUTOFMEMORY;
+		}
+		locks = v;
+		memset(&locks[nlocks], 0, sizeof(*locks));
+		locks[nlocks].obj = u;
+		nlocks++;
+	}
+	int last = 0;
+	if (lock)
+		locks[i].count++;
+	else
+		last = !--locks[i].count;
+	locks[i].busy++;
+	locks[i].owner = pthread_self();
 	pthread_mutex_unlock(&lock_lock);
-	u->lpVtbl->Release(u);
+	if (lock) {
+		u->lpVtbl->AddRef(u);
+		connection(u, 1, FALSE);
+	} else {
+		connection(u, 0, last && last_unlock_releases);
+	}
+	lock_done(u);
+	if (!lock)
+		u->lpVtbl->Release(u);
 	return S_OK;
 }
 
@@ -1816,7 +1954,19 @@ WINFN(HRESULT) ole_CoTreatAsClass(REFCLSID old, REFCLSID newc)
 	char path[300];
 	snprintf(path, sizeof(path), "%s\\%s\\TreatAs", class_roots[1], key);
 	reg_lock();
-	if (guid_eq(newc, &null_clsid)) {
+	/* A clear clears what resolution sees: the per-user redirect, which
+	 * comes first, as well as the machine's. */
+	if (guid_eq(newc, &null_clsid) || guid_eq(newc, old)) {
+		char user[300];
+		snprintf(user, sizeof(user), "%s\\%s\\TreatAs", class_roots[0],
+			 key);
+		struct reg_key *u = reg_open(user);
+		if (u)
+			err = reg_delete_tree(u, 0);
+	}
+	if (err) {
+		/* not cleared: below, nothing more is changed */
+	} else if (guid_eq(newc, &null_clsid)) {
 		/* No emulation at all. */
 		struct reg_key *k = reg_open(path);
 		if (k)

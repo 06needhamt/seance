@@ -170,7 +170,11 @@ struct c_type {
 
 /* A type of another library that a type here refers to. */
 struct c_ref {
-	ITypeInfo *info;	/* held; NULL for one oa_ctl_import made */
+	ITypeInfo *info;	/* held; NULL for one oa_ctl_import made, or
+				 * for one from another creator (see attr) */
+	int have_attr;		/* attr and depth are set */
+	TYPEATTR attr;		/* its attributes when it was added */
+	int depth;		/* its count of base interfaces */
 	GUID libid, guid;
 	LCID lcid;
 	WORD major, minor;
@@ -196,6 +200,8 @@ struct ctl {
 	UINT ndead;
 	struct c_ref *refs_out;
 	UINT nrefs;
+	BYTE *last;		/* the last view's image, or NULL */
+	size_t last_len;
 };
 
 static const ICreateTypeLib2Vtbl ctl_vtbl;
@@ -381,6 +387,7 @@ static void ctl_free(struct ctl *lib)
 	}
 	free(lib->refs_out);
 	free(lib->types);
+	free(lib->last);
 	free(lib->path);
 	free(lib->name);
 	free(lib->doc);
@@ -424,9 +431,11 @@ static HRESULT ref_attr(struct ctl *lib, struct c_ref *r, ULONG *size,
 	HRESULT hr;
 	int p = ptr_size(lib);
 
-	if (!r->info)
+	if (r->have_attr)
+		a = &r->attr;
+	else if (!r->info)
 		return TYPE_E_CANTLOADLIBRARY;
-	if (FAILED(hr = r->info->lpVtbl->GetTypeAttr(r->info, &a)))
+	else if (FAILED(hr = r->info->lpVtbl->GetTypeAttr(r->info, &a)))
 		return hr;
 	*vft = (WORD)(a->cbSizeVft / sizeof(void *) * p);
 	*size = a->typekind == TKIND_INTERFACE ||
@@ -436,8 +445,50 @@ static HRESULT ref_attr(struct ctl *lib, struct c_ref *r, ULONG *size,
 	if (*align > p && a->typekind != TKIND_RECORD &&
 	    a->typekind != TKIND_UNION)
 		*align = (WORD)p;
-	r->info->lpVtbl->ReleaseTypeAttr(r->info, a);
+	if (a != &r->attr)
+		r->info->lpVtbl->ReleaseTypeAttr(r->info, a);
 	return S_OK;
+}
+
+/* The count of base interfaces of an interface another library holds. */
+static int info_depth(ITypeInfo *ti, int n)
+{
+	TYPEATTR *a;
+	HREFTYPE href;
+	ITypeInfo *b;
+	int d = 0;
+
+	if (n > 64 || FAILED(ti->lpVtbl->GetTypeAttr(ti, &a)))
+		return 0;
+	int bases = a->cImplTypes && a->typekind != TKIND_COCLASS;
+	ti->lpVtbl->ReleaseTypeAttr(ti, a);
+	if (bases &&
+	    SUCCEEDED(ti->lpVtbl->GetRefTypeOfImplType(ti, 0, &href)) &&
+	    SUCCEEDED(ti->lpVtbl->GetRefTypeInfo(ti, href, &b))) {
+		d = 1 + info_depth(b, n + 1);
+		b->lpVtbl->Release(b);
+	}
+	return d;
+}
+
+/* The count of base interfaces of a type here: a dual interface with
+ * none given has IDispatch and IUnknown. */
+static int type_depth(struct c_type *t, int n)
+{
+	struct c_type *b;
+	struct c_ref *r;
+
+	if (n > 64)
+		return 0;
+	if (!t->nimpls)
+		return t->kind == TKIND_INTERFACE &&
+		       (t->flags & TYPEFLAG_FDUAL) ? 2 : 0;
+	if ((b = internal_type(t->lib, t->impls[0].href)))
+		return 1 + type_depth(b, n + 1);
+	if ((r = external_ref(t->lib, t->impls[0].href)))
+		return 1 + (r->have_attr ? r->depth :
+			    r->info ? info_depth(r->info, 0) : 0);
+	return 0;
 }
 
 /* The size and alignment of a member of a type. */
@@ -475,12 +526,16 @@ static HRESULT td_size(struct ctl *lib, const TYPEDESC *td, ULONG *size,
 		return S_OK;
 	case VT_CARRAY: {
 		const ARRAYDESC *a = td->lpadesc;
-		ULONG n = 1;
+		uint64_t n;
 		if ((hr = td_size(lib, &a->tdescElem, size, align)) != S_OK)
 			return hr;
-		for (USHORT i = 0; i < a->cDims; i++)
+		n = *size;
+		for (USHORT i = 0; i < a->cDims; i++) {
 			n *= a->rgbounds[i].cElements;
-		*size *= n;
+			if (n > 0xffffffffu)	/* past a ULONG */
+				return TYPE_E_SIZETOOBIG;
+		}
+		*size = (ULONG)n;
 		return S_OK;
 	}
 	case VT_USERDEFINED: {
@@ -533,16 +588,48 @@ static HRESULT type_layout(struct c_type *t)
 				hr = TYPE_E_ELEMENTNOTFOUND;
 				break;
 			}
-		}
-		/* Slots in order after the base's, except where the caller
-		 * gave one; the table reaches past the last of either. */
-		ULONG end = base + t->nfuncs * p;
+		} else if (t->flags & TYPEFLAG_FDUAL)
+			base = (WORD)(7 * p);	/* IDispatch, implied */
+		/* The slots the caller gave first, each past the base's and
+		 * none twice; then the others in order in the free slots
+		 * after the base's. The table reaches past the last. */
+		ULONG end = base;
 		for (UINT i = 0; i < t->nfuncs; i++) {
 			struct c_func *f = &t->funcs[i];
-			f->oVft = f->given_vft ? f->given_vft :
-				  (SHORT)(base + i * p);
+			if (!f->given_vft)
+				continue;
+			if (f->given_vft < base) {
+				hr = E_INVALIDARG;
+				goto out;
+			}
+			for (UINT k = 0; k < i; k++)
+				if (t->funcs[k].given_vft == f->given_vft) {
+					hr = TYPE_E_DUPLICATEID;
+					goto out;
+				}
+			f->oVft = f->given_vft;
 			if ((ULONG)f->oVft + p > end)
 				end = (ULONG)f->oVft + p;
+		}
+		ULONG next = base;
+		for (UINT i = 0; i < t->nfuncs; i++) {
+			struct c_func *f = &t->funcs[i];
+			if (f->given_vft)
+				continue;
+			for (UINT k = 0; k < t->nfuncs; k++)
+				if (t->funcs[k].given_vft &&
+				    (ULONG)t->funcs[k].given_vft == next) {
+					next += p;
+					k = (UINT)-1;
+				}
+			if (next + p > 0x7fff) {
+				hr = TYPE_E_SIZETOOBIG;
+				goto out;
+			}
+			f->oVft = (SHORT)next;
+			next += p;
+			if (next > end)
+				end = next;
 		}
 		if (end > 0x7fff) {
 			hr = TYPE_E_SIZETOOBIG;
@@ -1115,6 +1202,12 @@ static HRESULT serialize(struct ctl *lib, BYTE **out, size_t *out_len)
 			data1 = (INT)first;
 		} else if (t->nimpls)
 			data1 = (INT)t->impls[0].href;
+		/* A dual interface with no base given derives from
+		 * IDispatch, as its layout took it to. */
+		int implied = !t->nimpls && t->kind == TKIND_INTERFACE &&
+			      (t->flags & TYPEFLAG_FDUAL);
+		if (implied)
+			data1 = (INT)w.dispatch_href;
 
 		TYPEKIND stored = t->kind == TKIND_INTERFACE &&
 				  (t->flags & TYPEFLAG_FDUAL) ?
@@ -1140,7 +1233,7 @@ static HRESULT serialize(struct ctl *lib, BYTE **out, size_t *out_len)
 		put32(ti, (INT)t->help_ctx);
 		put32(ti, add_cust(&w, t->cust));
 		put16(ti, t->kind == TKIND_COCLASS ? (int)t->nimpls :
-			  t->nimpls ? 1 : 0);
+			  t->nimpls || implied ? 1 : 0);
 		put16(ti, t->vft);
 		put32(ti, (INT)t->size);
 		put32(ti, data1);
@@ -1270,11 +1363,17 @@ static HRESULT snapshot(struct ctl *lib, ITypeLib **out)
 	size_t len;
 	HRESULT hr = serialize(lib, &d, &len);
 
-	if (hr != S_OK)
+	if (hr == S_OK) {
+		free(lib->last);
+		lib->last = d;
+		lib->last_len = len;
+	} else if (!lib->last) {
 		return hr;
-	hr = oa_typelib_view(d, len, (IUnknown *)&lib->iface, outer_qi, out);
-	free(d);
-	return hr;
+	}
+	/* A draft that won't lay out still answers QueryInterface, as
+	 * it did: with the last view that did. LayOut and saving refuse it. */
+	return oa_typelib_view(lib->last, lib->last_len,
+			       (IUnknown *)&lib->iface, outer_qi, out);
 }
 
 /* ---- ICreateTypeLib2 ---- */
@@ -1446,9 +1545,11 @@ WINFN(HRESULT) ctl_SaveAllChanges(ICreateTypeLib2 *self)
 			unlink(tmp);
 		}
 	} else {
-		fchmod(fd, 0644);
-		if (fwrite(d, 1, len, f) != len)
+		/* Private while written; then the old one's permissions. */
+		if (fwrite(d, 1, len, f) != len || fflush(f))
 			hr = STG_E_MEDIUMFULL;
+		if (hr == S_OK && path_replace_mode(fd, unix_path))
+			hr = STG_E_ACCESSDENIED;
 		if (fclose(f) && hr == S_OK)
 			hr = STG_E_MEDIUMFULL;
 		if (hr == S_OK && rename(tmp, unix_path))
@@ -1686,16 +1787,16 @@ static int is_ours(struct ctl *lib, ITypeLib *other)
 	ICreateTypeLib2 *maker = NULL;
 	if (SUCCEEDED(other->lpVtbl->QueryInterface(other, &IID_ICreateTypeLib2,
 						    (void **)&maker))) {
+		/* A creator's view: ours only if this creator's. */
 		ours = maker == &lib->iface;
 		maker->lpVtbl->Release(maker);
-		if (ours)
-			return 1;
+		return ours;
 	}
 	if (SUCCEEDED(other->lpVtbl->GetLibAttr(other, &a))) {
 		ours = !guid_eq(&lib->guid, &null_guid) &&
 		       guid_eq(&a->guid, &lib->guid) &&
 		       a->wMajorVerNum == lib->major &&
-		       a->wMinorVerNum == lib->minor;
+		       a->wMinorVerNum == lib->minor && a->lcid == lib->lcid;
 		other->lpVtbl->ReleaseTLibAttr(other, a);
 	}
 	return ours;
@@ -1769,6 +1870,8 @@ WINFN(HRESULT) cti_AddRefTypeInfo(ICreateTypeInfo2 *self, ITypeInfo *info,
 	}
 	GUID guid = ta->guid;
 	TYPEKIND kind = ta->typekind;
+	TYPEATTR attr = *ta;
+	memset(&attr.tdescAlias, 0, sizeof(attr.tdescAlias));
 	info->lpVtbl->ReleaseTypeAttr(info, ta);
 	if (FAILED(hr = other->lpVtbl->GetLibAttr(other, &la))) {
 		other->lpVtbl->Release(other);
@@ -1797,7 +1900,19 @@ WINFN(HRESULT) cti_AddRefTypeInfo(ICreateTypeInfo2 *self, ITypeInfo *info,
 	lib->refs_out = n;
 	struct c_ref *r = &n[lib->nrefs];
 	memset(r, 0, sizeof(*r));
-	r->info = info;
+	/* Another creator's type: its attributes as they are now, which is
+	 * all its view gives, without holding the view; it holds that
+	 * creator, and two creators referring to each other would keep
+	 * each other alive. Any other library's type is held. */
+	ICreateTypeLib2 *maker = NULL;
+	int creator = SUCCEEDED(other->lpVtbl->QueryInterface(
+		other, &IID_ICreateTypeLib2, (void **)&maker));
+	if (creator)
+		maker->lpVtbl->Release(maker);
+	r->info = creator ? NULL : info;
+	r->attr = attr;
+	r->have_attr = 1;
+	r->depth = info_depth(info, 0);
 	r->libid = la->guid;
 	r->guid = guid;
 	r->lcid = la->lcid;
@@ -1810,7 +1925,8 @@ WINFN(HRESULT) cti_AddRefTypeInfo(ICreateTypeInfo2 *self, ITypeInfo *info,
 	other->lpVtbl->Release(other);
 	if (!r->file)
 		return E_OUTOFMEMORY;
-	info->lpVtbl->AddRef(info);
+	if (r->info)
+		info->lpVtbl->AddRef(info);
 	*href = ext_href(lib->nrefs);
 	lib->nrefs++;
 	return S_OK;
@@ -1866,7 +1982,10 @@ WINFN(HRESULT) cti_AddFuncDesc(ICreateTypeInfo2 *self, UINT index,
 	    desc->cParamsOpt > desc->cParams ||
 	    (desc->cParams && !desc->lprgelemdescParam))
 		return E_INVALIDARG;
-	if (desc->oVft < 0 || desc->oVft % ptr_size(t->lib))
+	/* oVft 0 or -1: worked out by the layout; ignored for a module. */
+	SHORT given = desc->oVft == -1 ? 0 : desc->oVft;
+	if (t->kind != TKIND_MODULE &&
+	    (given < 0 || given % ptr_size(t->lib)))
 		return E_INVALIDARG;
 	if ((t->kind == TKIND_DISPATCH) != (desc->funckind == FUNC_DISPATCH))
 		return TYPE_E_BADMODULEKIND;
@@ -1878,8 +1997,12 @@ WINFN(HRESULT) cti_AddFuncDesc(ICreateTypeInfo2 *self, UINT index,
 	memset(&f, 0, sizeof(f));
 	f.memid = desc->memid;
 	if (f.memid == MEMBERID_NIL && t->kind != TKIND_DISPATCH) {
-		/* The first free one from 0x60000000 + the count. */
-		f.memid = (MEMBERID)(0x60000000 + t->nfuncs);
+		/* As MIDL numbers them: 0x60000000, the count of base
+		 * interfaces in bits 16-23, then the index; so none is an
+		 * inherited one's. The first free one from there. */
+		f.memid = (MEMBERID)(0x60000000 |
+				     (type_depth(t, 0) & 0xff) << 16) +
+			  (MEMBERID)t->nfuncs;
 		for (UINT i = 0; i < t->nfuncs; i++)
 			if (t->funcs[i].memid == f.memid) {
 				f.memid++;
@@ -1895,10 +2018,10 @@ WINFN(HRESULT) cti_AddFuncDesc(ICreateTypeInfo2 *self, UINT index,
 	f.callconv = desc->callconv;
 	f.nparams = desc->cParams;
 	f.nopt = desc->cParamsOpt;
-	f.oVft = desc->oVft;	/* kept only by a fixed layout */
+	f.oVft = given;		/* kept only by a fixed layout */
 	f.flags = desc->wFuncFlags;
 	if (t->kind == TKIND_INTERFACE)
-		f.given_vft = desc->oVft;
+		f.given_vft = given;
 	f.ordinal = -1;
 	if ((hr = td_copy(&f.ret, &desc->elemdescFunc.tdesc, 0)) != S_OK ||
 	    (hr = check_tdesc(t->lib, &f.ret)) != S_OK)

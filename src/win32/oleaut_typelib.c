@@ -734,8 +734,12 @@ static int msft_members(struct msft *m, struct tl_type *t, INT memoffset)
 			d->callconv = (fkccic >> 8) & 0xf;
 			d->cParams = nargs;
 			d->cParamsOpt = rd16(p + 22);
-			d->oVft = (SHORT)((rd16(p + 12) & ~1) * PTR_SIZE /
-					  lib->ptr_size);
+			/* In this host's pointers, which must fit a SHORT. */
+			long vft = (long)(rd16(p + 12) & ~1) * PTR_SIZE /
+				   lib->ptr_size;
+			if (vft > 0x7fff)
+				return -1;
+			d->oVft = (SHORT)vft;
 			d->wFuncFlags = (WORD)rd32(p + 8);
 			if (msft_tdesc(m, rd32(p + 4), &d->elemdescFunc.tdesc))
 				return -1;
@@ -1607,22 +1611,47 @@ static ITypeLib *tl_iface(struct typelib *lib)
  * A loaded library with this GUID and major version, and at least this
  * minor version (the newest), with a reference; stdole2 for stdole.
  */
+/*
+ * How well a library's locale serves one asked for, as LoadRegTypeLib
+ * falls back: 3 the same, 2 its language's neutral one, 1 the neutral
+ * one (or any, for an import of no locale), 0 not at all.
+ */
+static int lcid_rank(LCID want, LCID have)
+{
+	WORD w = (WORD)want, h = (WORD)have;
+
+	if (w == h)
+		return 3;
+	if (h == (w & 0x3ff))		/* PRIMARYLANGID, SUBLANG_NEUTRAL */
+		return 2;
+	/* LANG_NEUTRAL; an import that names no locale takes any. */
+	return h == 0 || w == 0 ? 1 : 0;
+}
+
 static struct typelib *find_loaded(const GUID *libid, WORD major,
-				   WORD minor, int exact)
+				   WORD minor, int exact, LCID lcid)
 {
 	struct typelib *best = NULL, *std = stdole2_lib();
+	int best_rank = 0;
 
-	/* stdole32 (1.0) has the same GUID: the built-in one stands in. */
+	/* stdole32 (1.0) has the same GUID: the built-in one stands in,
+	 * whatever the locale asked for. */
 	if (std && guid_eq(libid, &std->attr.guid))
 		return std;
 	pthread_mutex_lock(&cache_lock);
-	for (struct typelib *l = cache; l; l = l->next)
+	for (struct typelib *l = cache; l; l = l->next) {
+		int rank = lcid_rank(lcid, l->attr.lcid);
 		if (guid_eq(&l->attr.guid, libid) &&
 		    l->attr.wMajorVerNum == major &&
 		    l->attr.wMinorVerNum >= minor &&
-		    (!exact || l->attr.wMinorVerNum == minor) &&
-		    (!best || l->attr.wMinorVerNum > best->attr.wMinorVerNum))
+		    (!exact || l->attr.wMinorVerNum == minor) && rank &&
+		    (!best || l->attr.wMinorVerNum > best->attr.wMinorVerNum ||
+		     (l->attr.wMinorVerNum == best->attr.wMinorVerNum &&
+		      rank > best_rank))) {
 			best = l;
+			best_rank = rank;
+		}
+	}
 	if (best)
 		lib_addref(best);
 	pthread_mutex_unlock(&cache_lock);
@@ -1699,7 +1728,8 @@ static int import_matches(const struct tl_import *imp,
 	return lib->builtin ||
 	       (lib->attr.wMajorVerNum == imp->major &&
 		(imp->exact ? lib->attr.wMinorVerNum == imp->minor
-			    : lib->attr.wMinorVerNum >= imp->minor));
+			    : lib->attr.wMinorVerNum >= imp->minor) &&
+		lcid_rank(imp->lcid, lib->attr.lcid));
 }
 
 /* The library an import names, with a reference, or NULL. */
@@ -1707,7 +1737,7 @@ static struct typelib *import_load(struct typelib *lib,
 				   const struct tl_import *imp)
 {
 	struct typelib *l = find_loaded(&imp->libid, imp->major, imp->minor,
-					imp->exact);
+					imp->exact, imp->lcid);
 	ITypeLib *tl = NULL;
 
 	if (l)

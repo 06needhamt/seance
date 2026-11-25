@@ -26,6 +26,13 @@ HRESULT ole_stream_on_hglobal(HGLOBAL h, BOOL delete_on_release,
 			      IStream **out);
 HRESULT ole_hglobal_from_stream(IStream *stream, HGLOBAL *out);
 
+/*
+ * A storage as global memory (a compound file in a new block) and back
+ * (a storage over h, which it frees), as the clipboard keeps one.
+ */
+HRESULT ole_storage_to_hglobal(IStorage *src, HGLOBAL *out);
+HRESULT ole_storage_on_hglobal(HGLOBAL h, IStorage **out);
+
 /* Host-side users that must return memory compatible with CoTaskMemFree. */
 void *ole_taskmem_alloc(SIZE_T size);
 void ole_taskmem_free(void *p);

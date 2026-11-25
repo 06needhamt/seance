@@ -96,11 +96,15 @@ struct file {
 	WCHAR *name;
 	BYTE *saved;		/* the image last committed to (or read from) lb */
 	size_t saved_len;
+	int raw;		/* saved is lb's bytes before a create (1) or a
+				 * conversion (2) not yet committed, not a
+				 * compound file: Revert goes back to the new
+				 * tree, not to them */
 	struct backing *bk;
 	ULONG gen;		/* bk's generation when saved was current */
 };
 
-extern const struct builtin_dll builtin_user32, builtin_ole32;
+extern const struct builtin_dll builtin_user32, builtin_ole32, builtin_kernel32;
 
 static WCHAR *acp_to_utf16_dup(const char *s)
 {
@@ -863,19 +867,61 @@ static HRESULT file_load(struct file *f, int empty_ok)
 	return hr;
 }
 
-/* Rebuilds the tree from the last committed image, for Revert. */
+static const WCHAR contents_name[] = {
+	3, 'C', 'O', 'N', 'T', 'E', 'N', 'T', 'S', 0
+};
+
+/* A new root, holding old in a CONTENTS stream if old (a conversion). */
+static HRESULT new_tree(const BYTE *old, size_t old_len, struct node **out)
+{
+	static const WCHAR rn[] = { 'R','o','o','t',' ','E','n','t','r','y' };
+	struct node *root = node_new(rn, 10, STGTY_STORAGE);
+	HRESULT hr = root ? S_OK : E_OUTOFMEMORY;
+
+	if (SUCCEEDED(hr)) {
+		now(&root->ctime);
+		root->mtime = root->ctime;
+	}
+	if (SUCCEEDED(hr) && old) {
+		struct node *c = node_new(contents_name,
+					  (int)wstrlen(contents_name),
+					  STGTY_STREAM);
+		hr = c ? S_OK : E_OUTOFMEMORY;
+		if (SUCCEEDED(hr) && old_len > 0x7fffffff)
+			hr = STG_E_MEDIUMFULL;
+		if (SUCCEEDED(hr))
+			hr = node_resize(c, (ULONG)old_len);
+		if (SUCCEEDED(hr)) {
+			if (old_len)
+				memcpy(c->data, old, old_len);
+			c->ctime = c->mtime = root->ctime;
+			node_add(root, c);
+		} else if (c) {
+			node_unref(c);
+		}
+	}
+	if (FAILED(hr) && root) {
+		node_detach(root);
+		root = NULL;
+	}
+	*out = root;
+	return hr;
+}
+
+/* Rebuilds the tree from the last committed image, for Revert: before the
+ * first commit of a create or a conversion, the tree it began with. */
 static HRESULT file_reload(struct file *f)
 {
 	struct node *root = NULL;
 	HRESULT hr;
 
-	if (!f->saved_len) {
-		static const WCHAR rn[] = { 'R','o','o','t',' ','E','n','t','r','y' };
-		root = node_new(rn, 10, STGTY_STORAGE);
-		hr = root ? S_OK : E_OUTOFMEMORY;
-	} else {
+	if (f->raw)
+		hr = new_tree(f->raw == 2 ? f->saved : NULL, f->saved_len,
+			      &root);
+	else if (!f->saved_len)
+		hr = new_tree(NULL, 0, &root);
+	else
 		hr = parse(f->saved, f->saved_len, &root);
-	}
 	if (SUCCEEDED(hr)) {
 		if (f->root)
 			node_detach(f->root);
@@ -916,15 +962,32 @@ static HRESULT file_flush(struct file *f)
 	HRESULT hr = serialise(f->root, &buf, &len);
 	if (FAILED(hr))
 		return hr;
-	hr = lb_put_all(f->lb, buf, len);
-	if (FAILED(hr)) {
-		lb_put_all(f->lb, f->saved, f->saved_len);
+	/* What lb holds now, to put back if the write fails: saved, unless
+	 * another root has committed since (a default commit of a stale
+	 * root), when it is that root's image. */
+	BYTE *pre = f->saved;
+	size_t pre_len = f->saved_len;
+	if (f->bk && f->bk->gen != f->gen &&
+	    FAILED(hr = lb_read_all(f->lb, &pre, &pre_len))) {
 		free(buf);
 		return hr;
 	}
+	hr = lb_put_all(f->lb, buf, len);
+	if (FAILED(hr)) {
+		/* If even that fails, what lb holds is no one's commit. */
+		if (FAILED(lb_put_all(f->lb, pre, pre_len)) && f->bk)
+			++f->bk->gen;
+		if (pre != f->saved)
+			free(pre);
+		free(buf);
+		return hr;
+	}
+	if (pre != f->saved)
+		free(pre);
 	free(f->saved);
 	f->saved = buf;
 	f->saved_len = len;
+	f->raw = 0;
 	if (f->bk)
 		f->gen = ++f->bk->gen;
 	f->dirty = 0;
@@ -1551,6 +1614,10 @@ static HRESULT copy_node_to(struct node *n, IStorage *dest, const WCHAR *as,
 		if (SUCCEEDED(hr) && n->size)
 			hr = out->lpVtbl->Write(out, n->data, n->size, &put);
 		out->lpVtbl->Release(out);
+		/* A move that fails leaves no part of itself behind: what it
+		 * made (nothing was there before) goes. */
+		if (FAILED(hr) && how == COPY_NOREPLACE)
+			dest->lpVtbl->DestroyElement(dest, as);
 		return hr;
 	}
 	IStorage *sub = NULL;
@@ -1565,6 +1632,8 @@ static HRESULT copy_node_to(struct node *n, IStorage *dest, const WCHAR *as,
 		return hr;
 	hr = copy_children(n, sub, 1, 1, NULL);
 	sub->lpVtbl->Release(sub);
+	if (FAILED(hr) && how == COPY_NOREPLACE)
+		dest->lpVtbl->DestroyElement(dest, as);
 	return hr;
 }
 
@@ -2408,8 +2477,9 @@ static HRESULT file_lockbytes(const WCHAR *name, DWORD mode, int create,
 		}
 		pthread_mutex_unlock(&lock);
 	}
+	/* A transacted root replaces what is there when it commits. */
 	if (SUCCEEDED(hr) && create && (mode & STGM_CREATE) &&
-	    ftruncate(fd, 0))
+	    !(mode & STGM_TRANSACTED) && ftruncate(fd, 0))
 		hr = STG_E_ACCESSDENIED;
 	if (FAILED(hr)) {
 		if (l && l->bk) {
@@ -2441,21 +2511,20 @@ static HRESULT file_lockbytes(const WCHAR *name, DWORD mode, int create,
 /* ---- creating and opening ---- */
 
 /*
- * Opens a root on lb, reading its tree or (create) starting a new one. With
- * old (STGM_CONVERT), the new tree holds old in a CONTENTS stream and lb's
- * bytes are only replaced once that tree is written whole: at once in
- * direct mode, at Commit in transacted mode.
+ * Opens a root on lb: reading its tree (how 0), starting a new one (1), or
+ * (2, STGM_CONVERT) starting one that holds what lb held in a CONTENTS
+ * stream, read here under the lock so that its generation is the one it
+ * was read at. A new tree replaces lb's bytes only once written whole: at
+ * once in direct mode or when lb is empty, at Commit in transacted mode,
+ * so a transacted create or conversion released uncommitted leaves them.
+ * STG_S_CONVERTED if it converted.
  */
-static const WCHAR contents_name[] = {
-	3, 'C', 'O', 'N', 'T', 'E', 'N', 'T', 'S', 0
-};
-
-static HRESULT open_root(ILockBytes *lb, DWORD mode, int create,
-			 const WCHAR *name, BYTE *old, size_t old_len,
-			 IStorage **out)
+static HRESULT open_root(ILockBytes *lb, DWORD mode, int how,
+			 const WCHAR *name, IStorage **out)
 {
 	struct file *f = calloc(1, sizeof(*f));
 	HRESULT hr;
+	int converted = 0;
 
 	if (!f)
 		return E_OUTOFMEMORY;
@@ -2471,45 +2540,33 @@ static HRESULT open_root(ILockBytes *lb, DWORD mode, int create,
 	f->bk = backing_get(lb);
 	if (!f->bk) {
 		hr = E_OUTOFMEMORY;
-	} else if (create) {
-		static const WCHAR rn[] = { 'R','o','o','t',' ','E','n','t','r','y' };
+	} else if (how) {
+		BYTE *old = NULL;
+		size_t old_len = 0;
 		f->gen = f->bk->gen;
-		f->root = node_new(rn, 10, STGTY_STORAGE);
-		hr = f->root ? S_OK : E_OUTOFMEMORY;
-		if (SUCCEEDED(hr)) {
-			now(&f->root->ctime);
-			f->root->mtime = f->root->ctime;
-		}
-		if (SUCCEEDED(hr) && old) {
-			struct node *c = node_new(contents_name,
-						  (int)wstrlen(contents_name),
-						  STGTY_STREAM);
-			hr = c ? S_OK : E_OUTOFMEMORY;
-			if (SUCCEEDED(hr) && old_len > 0x7fffffff)
-				hr = STG_E_MEDIUMFULL;
-			if (SUCCEEDED(hr))
-				hr = node_resize(c, (ULONG)old_len);
-			if (SUCCEEDED(hr)) {
-				if (old_len)
-					memcpy(c->data, old, old_len);
-				c->ctime = c->mtime = f->root->ctime;
-				node_add(f->root, c);
-			} else if (c) {
-				node_unref(c);
-			}
-			/* Until the converted tree is committed, what lb
-			 * holds is the old bytes. */
+		/* What lb holds: a conversion's contents, or what a
+		 * transacted create leaves until it commits. */
+		hr = how == 2 || (mode & STGM_TRANSACTED) ?
+		     lb_read_all(lb, &old, &old_len) : S_OK;
+		converted = how == 2 && old_len;
+		if (SUCCEEDED(hr))
+			hr = new_tree(converted ? old : NULL, old_len,
+				      &f->root);
+		if (SUCCEEDED(hr) && old_len) {
 			f->saved = old;
 			f->saved_len = old_len;
+			f->raw = converted ? 2 : 1;
+			old = NULL;
 		}
+		free(old);
 		if (SUCCEEDED(hr)) {
 			f->dirty = 1;
 			/* The header is there from the start, as on Windows,
-			 * except that a transacted conversion waits for
-			 * Commit. */
-			if (!old || !(mode & STGM_TRANSACTED))
+			 * except where a transacted root has bytes to keep
+			 * until Commit. */
+			if (!f->raw || !(mode & STGM_TRANSACTED))
 				hr = file_flush(f);
-			if (!old)
+			if (!converted && !f->raw)
 				f->dirty = 0;
 		}
 	} else {
@@ -2529,7 +2586,7 @@ static HRESULT open_root(ILockBytes *lb, DWORD mode, int create,
 		free(f);
 	}
 	pthread_mutex_unlock(&lock);
-	return hr;
+	return SUCCEEDED(hr) && converted ? STG_S_CONVERTED : hr;
 }
 
 static HRESULT check_root_mode(DWORD mode)
@@ -2546,8 +2603,7 @@ WINFN(HRESULT) ole_StgCreateDocfile(LPCOLESTR name, DWORD mode, DWORD reserved,
 {
 	ILockBytes *lb = NULL;
 	HRESULT hr;
-	BYTE *old = NULL;
-	size_t old_len = 0;
+	int how = 1;
 
 	if (!out)
 		return STG_E_INVALIDPOINTER;
@@ -2565,7 +2621,7 @@ WINFN(HRESULT) ole_StgCreateDocfile(LPCOLESTR name, DWORD mode, DWORD reserved,
 		/* What the file held goes into a CONTENTS stream. */
 		hr = file_lockbytes(name, mode, 0, &lb);
 		if (SUCCEEDED(hr))
-			hr = lb_read_all(lb, &old, &old_len);
+			how = 2;
 		if (hr == STG_E_FILENOTFOUND) {
 			hr = file_lockbytes(name, mode | STGM_CREATE, 1, &lb);
 		}
@@ -2577,11 +2633,8 @@ WINFN(HRESULT) ole_StgCreateDocfile(LPCOLESTR name, DWORD mode, DWORD reserved,
 			lb->lpVtbl->Release(lb);
 		return hr;
 	}
-	/* open_root owns old from here. */
-	hr = open_root(lb, mode, 1, name, old, old_len, out);
+	hr = open_root(lb, mode, how, name, out);
 	lb->lpVtbl->Release(lb);
-	if (SUCCEEDED(hr) && old)
-		hr = STG_S_CONVERTED;
 	return hr;
 }
 
@@ -2597,19 +2650,8 @@ WINFN(HRESULT) ole_StgCreateDocfileOnILockBytes(ILockBytes *lb, DWORD mode,
 		return STG_E_INVALIDPARAMETER;
 	if (FAILED(hr = check_root_mode(mode)))
 		return hr;
-	if (mode & STGM_CONVERT) {
-		/* What the array held goes into a CONTENTS stream. */
-		BYTE *old = NULL;
-		size_t old_len = 0;
-		if (FAILED(hr = lb_read_all(lb, &old, &old_len)))
-			return hr;
-		if (!old_len) {
-			free(old);
-			return open_root(lb, mode, 1, NULL, NULL, 0, out);
-		}
-		hr = open_root(lb, mode, 1, NULL, old, old_len, out);
-		return SUCCEEDED(hr) ? STG_S_CONVERTED : hr;
-	}
+	if (mode & STGM_CONVERT)	/* what it held goes into CONTENTS */
+		return open_root(lb, mode, 2, NULL, out);
 	if (!(mode & STGM_CREATE)) {
 		/* Without STGM_CREATE, a storage already there isn't replaced. */
 		ULONGLONG size = 0;
@@ -2621,7 +2663,7 @@ WINFN(HRESULT) ole_StgCreateDocfileOnILockBytes(ILockBytes *lb, DWORD mode,
 		    got == 8 && !memcmp(head, signature, 8))
 			return STG_E_FILEALREADYEXISTS;
 	}
-	return open_root(lb, mode, 1, NULL, NULL, 0, out);
+	return open_root(lb, mode, 1, NULL, out);
 }
 
 WINFN(HRESULT) ole_StgOpenStorageOnILockBytes(ILockBytes *lb, IStorage *prio,
@@ -2635,7 +2677,7 @@ WINFN(HRESULT) ole_StgOpenStorageOnILockBytes(ILockBytes *lb, IStorage *prio,
 	*out = NULL;
 	if (FAILED(hr = check_root_mode(mode)))
 		return hr;
-	return open_root(lb, mode, 0, NULL, NULL, 0, out);
+	return open_root(lb, mode, 0, NULL, out);
 }
 
 WINFN(HRESULT) ole_StgOpenStorage(LPCOLESTR name, IStorage *prio, DWORD mode,
@@ -2653,7 +2695,7 @@ WINFN(HRESULT) ole_StgOpenStorage(LPCOLESTR name, IStorage *prio, DWORD mode,
 		return hr;
 	if (FAILED(hr = file_lockbytes(name, mode, 0, &lb)))
 		return hr;
-	hr = open_root(lb, mode, 0, name, NULL, 0, out);
+	hr = open_root(lb, mode, 0, name, out);
 	lb->lpVtbl->Release(lb);
 	return hr;
 }
@@ -3217,3 +3259,61 @@ const struct builtin_export ole_storage_exports[] = {
 	E(WriteFmtUserTypeStg),
 	BUILTIN_END
 };
+
+/* ---- for the OLE clipboard (ole_misc.c) ---- */
+
+HRESULT ole_storage_to_hglobal(IStorage *src, HGLOBAL *out)
+{
+	ILockBytes *lb = NULL;
+	IStorage *dst = NULL;
+	HRESULT hr;
+
+	*out = NULL;
+	if (FAILED(hr = ole_CreateILockBytesOnHGlobal(NULL, FALSE, &lb)))
+		return hr;
+	hr = ole_StgCreateDocfileOnILockBytes(lb, STGM_CREATE |
+					      STGM_READWRITE |
+					      STGM_SHARE_EXCLUSIVE, 0, &dst);
+	if (SUCCEEDED(hr))
+		hr = src->lpVtbl->CopyTo(src, 0, NULL, NULL, dst);
+	if (SUCCEEDED(hr))
+		hr = dst->lpVtbl->Commit(dst, STGC_DEFAULT);
+	if (dst)
+		dst->lpVtbl->Release(dst);
+	if (SUCCEEDED(hr))
+		hr = ole_GetHGlobalFromILockBytes(lb, out);
+	if (FAILED(hr)) {
+		HGLOBAL h = NULL;
+		/* Not handed on: the block goes with the array. */
+		if (SUCCEEDED(ole_GetHGlobalFromILockBytes(lb, &h)) && h) {
+			lb->lpVtbl->Release(lb);
+			HGLOBAL (WINAPI *gfree)(HGLOBAL) =
+				builtin_export(&builtin_kernel32, "GlobalFree");
+			if (gfree)
+				gfree(h);
+			return hr;
+		}
+	}
+	lb->lpVtbl->Release(lb);
+	return hr;
+}
+
+HRESULT ole_storage_on_hglobal(HGLOBAL h, IStorage **out)
+{
+	ILockBytes *lb = NULL;
+	HRESULT hr;
+
+	*out = NULL;
+	if (FAILED(hr = ole_CreateILockBytesOnHGlobal(h, TRUE, &lb))) {
+		HGLOBAL (WINAPI *gfree)(HGLOBAL) =
+			builtin_export(&builtin_kernel32, "GlobalFree");
+		if (gfree)
+			gfree(h);
+		return hr;
+	}
+	hr = ole_StgOpenStorageOnILockBytes(lb, NULL, STGM_READWRITE |
+					    STGM_SHARE_EXCLUSIVE, NULL, 0,
+					    out);
+	lb->lpVtbl->Release(lb);
+	return hr;
+}

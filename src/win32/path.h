@@ -40,4 +40,11 @@ int path_chdir(const char *win);
  */
 int path_rename_noreplace(const char *from, const char *to);
 
+/*
+ * For a private temporary file (mkstemp's) about to be renamed over dest,
+ * once it is written: dest's permissions if it exists, else a new file's
+ * under the umask.
+ */
+int path_replace_mode(int fd, const char *dest);
+
 #endif /* VFW_WIN32_PATH_H */

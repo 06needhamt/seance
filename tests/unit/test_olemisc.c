@@ -309,6 +309,137 @@ static const IDataObjectVtbl data_vtbl = {
 	do_set, do_enum, do_dadvise, do_dunadvise, do_enumadvise,
 };
 
+
+/* A source of three formats: X (CF_TEXT) that may be rendered once, Y
+ * (CF_OEMTEXT) that can't be until y_ok, and Z, a storage only. */
+struct multi {
+	IDataObject iface;
+	LONG refs;
+	int x_gets, y_ok;
+};
+
+static const FORMATETC multi_fmts[3] = {
+	{ CF_TEXT, NULL, DVASPECT_CONTENT, -1, TYMED_HGLOBAL },
+	{ 7 /* CF_OEMTEXT */, NULL, DVASPECT_CONTENT, -1, TYMED_HGLOBAL },
+	{ 0xc0f0, NULL, DVASPECT_CONTENT, -1, TYMED_ISTORAGE },
+};
+
+struct fenum {
+	IEnumFORMATETC iface;
+	LONG refs;
+	ULONG pos;
+};
+
+WINAPI static HRESULT fe_qi(IEnumFORMATETC *self, REFIID riid, void **ppv)
+{
+	*ppv = NULL;
+	return E_NOINTERFACE;
+}
+WINAPI static ULONG fe_addref(IEnumFORMATETC *self)
+{
+	return ++((struct fenum *)self)->refs;
+}
+WINAPI static ULONG fe_release(IEnumFORMATETC *self)
+{
+	struct fenum *e = (struct fenum *)self;
+	ULONG r = --e->refs;
+	if (!r)
+		free(e);
+	return r;
+}
+WINAPI static HRESULT fe_next(IEnumFORMATETC *self, ULONG n, FORMATETC *out,
+			      ULONG *got)
+{
+	struct fenum *e = (struct fenum *)self;
+	ULONG k = 0;
+	while (k < n && e->pos < 3)
+		out[k++] = multi_fmts[e->pos++];
+	if (got)
+		*got = k;
+	return k == n ? S_OK : S_FALSE;
+}
+WINAPI static HRESULT fe_skip(IEnumFORMATETC *self, ULONG n)
+{
+	return E_NOTIMPL;
+}
+WINAPI static HRESULT fe_reset(IEnumFORMATETC *self)
+{
+	((struct fenum *)self)->pos = 0;
+	return S_OK;
+}
+WINAPI static HRESULT fe_clone(IEnumFORMATETC *self, IEnumFORMATETC **out)
+{
+	return E_NOTIMPL;
+}
+static const IEnumFORMATETCVtbl fenum_vtbl = {
+	fe_qi, fe_addref, fe_release, fe_next, fe_skip, fe_reset, fe_clone,
+};
+
+static HRESULT (WINAPI *p_StgCreateDocfile)(LPCOLESTR, DWORD, DWORD,
+					    IStorage **);
+
+WINAPI static HRESULT mu_get(IDataObject *self, FORMATETC *f, STGMEDIUM *m)
+{
+	struct multi *d = (struct multi *)self;
+	m->pUnkForRelease = NULL;
+	if (f->cfFormat == CF_TEXT && (f->tymed & TYMED_HGLOBAL)) {
+		if (d->x_gets++)
+			return E_FAIL;		/* asked twice */
+		m->tymed = TYMED_HGLOBAL;
+		m->hGlobal = global_text("ex");
+		return S_OK;
+	}
+	if (f->cfFormat == 7 /* CF_OEMTEXT */ && (f->tymed & TYMED_HGLOBAL)) {
+		if (!d->y_ok)
+			return E_FAIL;
+		m->tymed = TYMED_HGLOBAL;
+		m->hGlobal = global_text("why");
+		return S_OK;
+	}
+	if (f->cfFormat == 0xc0f0 && (f->tymed & TYMED_ISTORAGE)) {
+		IStorage *stg = NULL;
+		IStream *st = NULL;
+		WCHAR sn[] = { 'S', 0 };
+		if (FAILED(p_StgCreateDocfile(NULL, STGM_CREATE |
+					      STGM_READWRITE |
+					      STGM_SHARE_EXCLUSIVE |
+					      STGM_DELETEONRELEASE, 0, &stg)))
+			return E_FAIL;
+		if (SUCCEEDED(stg->lpVtbl->CreateStream(
+			    stg, sn, STGM_CREATE | STGM_READWRITE |
+			    STGM_SHARE_EXCLUSIVE, 0, 0, &st))) {
+			st->lpVtbl->Write(st, "zed", 3, NULL);
+			st->lpVtbl->Release(st);
+		}
+		m->tymed = TYMED_ISTORAGE;
+		m->pstg = stg;
+		return S_OK;
+	}
+	return DV_E_FORMATETC;
+}
+
+WINAPI static HRESULT mu_enum(IDataObject *self, DWORD dir,
+			      IEnumFORMATETC **e)
+{
+	struct fenum *n = calloc(1, sizeof(*n));
+	if (!n)
+		return E_OUTOFMEMORY;
+	n->iface.lpVtbl = &fenum_vtbl;
+	n->refs = 1;
+	*e = &n->iface;
+	return S_OK;
+}
+
+WINAPI static HRESULT mu_query(IDataObject *self, FORMATETC *f)
+{
+	return S_OK;
+}
+
+static const IDataObjectVtbl multi_vtbl = {
+	do_qi, do_addref, do_release, mu_get, do_gethere, mu_query, do_canon,
+	do_set, mu_enum, do_dadvise, do_dunadvise, do_enumadvise,
+};
+
 static void test_media(const char *dir)
 {
 	FN(void, ReleaseStgMedium, STGMEDIUM *);
@@ -544,6 +675,48 @@ static void test_clipboard(void)
 	CHECK_EQ(OleSetClipboard(NULL), S_OK);
 	CHECK_EQ(src.refs, 1);
 	CHECK_EQ(OleIsCurrentClipboard(&src.iface), S_FALSE);
+
+	/* A flush renders only what is still missing, and a storage
+	 * format is kept, as a compound file, to be read back as one. */
+	FN(HRESULT, StgCreateDocfile, LPCOLESTR, DWORD, DWORD, IStorage **);
+	p_StgCreateDocfile = StgCreateDocfile;
+	struct multi mu = { { &multi_vtbl }, 1, 0, 0 };
+	CHECK_EQ(OleSetClipboard(&mu.iface), S_OK);
+	CHECK_EQ(mu.x_gets, 1);
+	CHECK_EQ(OleFlushClipboard(), CLIPBRD_E_CANT_SET);	/* Y still not */
+	CHECK_EQ(mu.refs, 2);
+	mu.y_ok = 1;
+	CHECK_EQ(OleFlushClipboard(), S_OK);
+	CHECK_EQ(mu.x_gets, 1);		/* X wasn't asked for again */
+	CHECK_EQ(mu.refs, 1);
+	CHECK(OpenClipboard(NULL));
+	CHECK(global_is(GetClipboardData(CF_TEXT), "ex"));
+	CHECK(global_is(GetClipboardData(7 /* CF_OEMTEXT */), "why"));
+	CloseClipboard();
+	FORMATETC zf = { 0xc0f0, NULL, DVASPECT_CONTENT, -1, TYMED_ISTORAGE };
+	CHECK_EQ(OleGetClipboard(&got), S_OK);
+	memset(&m, 0, sizeof(m));
+	CHECK_EQ(got->lpVtbl->GetData(got, &zf, &m), S_OK);
+	if (m.tymed == TYMED_ISTORAGE && m.pstg) {
+		WCHAR sn[] = { 'S', 0 };
+		IStream *st = NULL;
+		char buf[4] = { 0 };
+		CHECK_EQ(m.pstg->lpVtbl->OpenStream(m.pstg, sn, NULL,
+						    STGM_READ |
+						    STGM_SHARE_EXCLUSIVE, 0,
+						    &st), S_OK);
+		if (st) {
+			st->lpVtbl->Read(st, buf, 3, NULL);
+			st->lpVtbl->Release(st);
+		}
+		CHECK(!strcmp(buf, "zed"));
+	} else {
+		CHECK(0);
+	}
+	ReleaseStgMedium(&m);
+	got->lpVtbl->Release(got);
+	CHECK(OpenClipboard(NULL) && EmptyClipboard());
+	CloseClipboard();
 }
 
 /* ---- running objects and external locks ---- */
@@ -921,6 +1094,13 @@ static void test_treat_as(void)
 	CHECK_EQ(CoTreatAsClass(&clsid_a, &clsid_a), S_OK);
 	CHECK_EQ(CoGetTreatAsClass(&clsid_a, &c), S_OK);
 	CHECK(!memcmp(&c, &clsid_b, sizeof(c)));
+	CHECK_EQ(CoTreatAsClass(&clsid_a, &null_clsid), S_OK);
+	CHECK_EQ(CoGetTreatAsClass(&clsid_a, &c), S_FALSE);
+	/* A per-user redirect, which resolution sees first, is cleared
+	 * too. */
+	set_value("HKEY_CURRENT_USER\\Software\\Classes\\CLSID\\" CLSID_A
+		  "\\TreatAs", "{0B0B0B0B-0001-0002-0304-05060708090A}");
+	CHECK_EQ(CoGetTreatAsClass(&clsid_a, &c), S_OK);
 	CHECK_EQ(CoTreatAsClass(&clsid_a, &null_clsid), S_OK);
 	CHECK_EQ(CoGetTreatAsClass(&clsid_a, &c), S_FALSE);
 	CHECK_EQ(CoTreatAsClass(&clsid_b, &clsid_a), REGDB_E_CLASSNOTREG);

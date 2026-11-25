@@ -155,14 +155,23 @@ DWORD shell_recycle(const char *unix_path, int norecurse)
 			break;
 		}
 		if (errno != EEXIST && errno != ENOTEMPTY) {
-			err = win_error_from_errno(errno);
+			/* On another file system than the bin: the caller
+			 * decides whether it goes for good. */
+			err = errno == EXDEV ? 17 /* ERROR_NOT_SAME_DEVICE */ :
+			      win_error_from_errno(errno);
 			break;
 		}
 	}
 	if (!err && (err = index_add(dir, name, orig)) != 0) {
 		/* Unrecorded, it couldn't be told apart in the bin: put it
-		 * back, unless something has taken its place. */
-		path_rename_noreplace(dest, unix_path);
+		 * back, unless something has taken its place. Where it can't
+		 * go back, its record is tried once more, and failing that
+		 * the user is told where it is and what it was. */
+		if (path_rename_noreplace(dest, unix_path) &&
+		    index_add(dir, name, orig))
+			fprintf(stderr, "seance: recycle bin: %s is %s, and "
+				"could not be recorded or put back\n", dest,
+				orig);
 	}
 	pthread_mutex_unlock(&bin_lock);
 	free(dest);
