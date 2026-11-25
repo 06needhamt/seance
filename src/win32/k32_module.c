@@ -59,6 +59,11 @@ static HMODULE load(const char *name, const void *ret)
 	return (HMODULE)m->base;
 }
 
+HMODULE k32_load_library(const char *name, const void *caller)
+{
+	return load(name, caller);
+}
+
 WINFN(HMODULE) k32_LoadLibraryA(LPCSTR name)
 {
 	char *u = acp_to_utf8(name);

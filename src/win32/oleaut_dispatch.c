@@ -27,6 +27,7 @@
 #include <string.h>
 
 #include "common/log.h"
+#include "win32/codepage.h"
 #include "win32/internal.h"
 #include "win32/k32.h"
 #include "win32/oleaut.h"
@@ -191,21 +192,33 @@ static size_t vt_result_size(VARTYPE vt)
 
 #define VARIANT_WORDS (sizeof(VARIANT) / sizeof(uintptr_t))
 
-HRESULT STUB_WINAPI oa_DispCallFunc(void *instance, ULONG_PTR offset,
-				    CALLCONV cc, VARTYPE ret, UINT count,
-				    VARTYPE *types, VARIANTARG **args,
-				    VARIANT *result)
+/* A record argument's size, from its IRecordInfo; 0 if it has none. */
+static ULONG record_size(const VARIANTARG *a)
 {
-	const void *fn;
+	ULONG size = 0;
+
+	if (!a->pRecInfo || !a->pvRecord ||
+	    FAILED(a->pRecInfo->lpVtbl->GetSize(a->pRecInfo, &size)))
+		return 0;
+	return size;
+}
+
+/*
+ * Calls fn with the arguments, after self if it isn't NULL (a method's
+ * object, or a non-virtual member function's).
+ */
+static HRESULT dispcall(void *self, const void *fn, CALLCONV cc, VARTYPE ret,
+			UINT count, VARTYPE *types, VARIANTARG **args,
+			VARIANT *result)
+{
 	uintptr_t *words;
 	VARIANT *copies = NULL;
-	size_t n = 0;
+	void **records = NULL;
+	size_t n = 0, extra = 0;
 	uint64_t out[2] = { 0, 0 };
 	int fp = 0;
 	HRESULT hr = S_OK;
 
-	TRACE("DispCallFunc(%p, %#lx, %d, %#x, %u)", instance,
-	      (unsigned long)offset, cc, ret, count);
 	if (count && (!types || !args))
 		return E_INVALIDARG;
 #if defined(__x86_64__)
@@ -218,15 +231,18 @@ HRESULT STUB_WINAPI oa_DispCallFunc(void *instance, ULONG_PTR offset,
 		return E_INVALIDARG;
 	}
 #endif
-	if (instance) {
-		if (offset % sizeof(void *))
-			return E_INVALIDARG;
-		fn = (*(void *const *const *)instance)[offset / sizeof(void *)];
-	} else {
-		fn = (const void *)offset;
-	}
 	if (!fn)
 		return E_INVALIDARG;
+	/* Records by value: their size, which on i386 they take whole. */
+	for (UINT i = 0; i < count; i++) {
+		if (types[i] != VT_RECORD)
+			continue;
+		ULONG size;
+		if (!args[i] || !(size = record_size(args[i])) ||
+		    size > 0x10000)
+			return DISP_E_BADVARTYPE;
+		extra += (size + sizeof(uintptr_t) - 1) / sizeof(uintptr_t);
+	}
 	switch (ret) {
 	case VT_VARIANT:
 	case VT_DECIMAL:
@@ -243,17 +259,19 @@ HRESULT STUB_WINAPI oa_DispCallFunc(void *instance, ULONG_PTR offset,
 		fp = 8;
 		break;
 	}
-	if (!(words = calloc(2 + (size_t)count * VARIANT_WORDS,
+	if (!(words = calloc(2 + (size_t)count * VARIANT_WORDS + extra,
 			     sizeof(*words))))
 		return E_OUTOFMEMORY;
 #if defined(__x86_64__)
-	if (count && !(copies = calloc(count, sizeof(*copies)))) {
+	if (count && (!(copies = calloc(count, sizeof(*copies))) ||
+		      !(records = calloc(count, sizeof(*records))))) {
+		free(copies);
 		free(words);
 		return E_OUTOFMEMORY;
 	}
 #endif
-	if (instance)
-		words[n++] = (uintptr_t)instance;
+	if (self)
+		words[n++] = (uintptr_t)self;
 	if (ret == VT_VARIANT || ret == VT_DECIMAL)
 		words[n++] = (uintptr_t)result;
 	for (UINT i = 0; i < count; i++) {
@@ -317,9 +335,31 @@ HRESULT STUB_WINAPI oa_DispCallFunc(void *instance, ULONG_PTR offset,
 			n += VARIANT_WORDS;
 #endif
 			break;
-		case VT_RECORD:
-			hr = DISP_E_BADVARTYPE;
-			goto done;
+		case VT_RECORD: {
+			ULONG size = record_size(a);
+#if defined(__x86_64__)
+			/*
+			 * 1, 2, 4 or 8 bytes go in the argument's word; any
+			 * other size as a pointer to a copy the callee may
+			 * change.
+			 */
+			if (size == 1 || size == 2 || size == 4 || size == 8) {
+				memcpy(&words[n++], a->pvRecord, size);
+				break;
+			}
+			if (!(records[i] = malloc(size))) {
+				hr = E_OUTOFMEMORY;
+				goto done;
+			}
+			memcpy(records[i], a->pvRecord, size);
+			words[n++] = (uintptr_t)records[i];
+#else
+			/* Pushed whole, padded to a whole word. */
+			memcpy(&words[n], a->pvRecord, size);
+			n += (size + 3) / 4;
+#endif
+			break;
+		}
 		default:
 			words[n++] = (uintptr_t)a->byref;
 			break;
@@ -336,9 +376,32 @@ HRESULT STUB_WINAPI oa_DispCallFunc(void *instance, ULONG_PTR offset,
 		memcpy(&result->llVal, out, vt_result_size(ret));
 	}
 done:
+	if (records)
+		for (UINT i = 0; i < count; i++)
+			free(records[i]);
+	free(records);
 	free(copies);
 	free(words);
 	return hr;
+}
+
+HRESULT STUB_WINAPI oa_DispCallFunc(void *instance, ULONG_PTR offset,
+				    CALLCONV cc, VARTYPE ret, UINT count,
+				    VARTYPE *types, VARIANTARG **args,
+				    VARIANT *result)
+{
+	const void *fn;
+
+	TRACE("DispCallFunc(%p, %#lx, %d, %#x, %u)", instance,
+	      (unsigned long)offset, cc, ret, count);
+	if (instance) {
+		if (offset % sizeof(void *))
+			return E_INVALIDARG;
+		fn = (*(void *const *const *)instance)[offset / sizeof(void *)];
+	} else {
+		fn = (const void *)offset;
+	}
+	return dispcall(instance, fn, cc, ret, count, types, args, result);
 }
 
 /* ----------------------------------------------------------------------
@@ -414,7 +477,8 @@ static HRESULT tdesc_vt(ITypeInfo *ti, const TYPEDESC *td, VARTYPE *out,
 			*out = vt;
 			return S_OK;
 		}
-		if (vt & VT_BYREF)
+		/* (a string the callee would hand back: not supported) */
+		if ((vt & VT_BYREF) || vt == VT_LPSTR || vt == VT_LPWSTR)
 			return DISP_E_BADVARTYPE;
 		*out = vt | VT_BYREF;
 		return S_OK;
@@ -423,7 +487,8 @@ static HRESULT tdesc_vt(ITypeInfo *ti, const TYPEDESC *td, VARTYPE *out,
 			return DISP_E_BADVARTYPE;
 		if (FAILED(hr = tdesc_vt(ti, td->lptdesc, &vt, depth + 1)))
 			return hr;
-		if (vt & (VT_BYREF | VT_ARRAY))
+		if ((vt & (VT_BYREF | VT_ARRAY)) || vt == VT_LPSTR ||
+		    vt == VT_LPWSTR)
 			return DISP_E_BADVARTYPE;
 		*out = VT_ARRAY | vt;
 		return S_OK;
@@ -443,6 +508,7 @@ static HRESULT tdesc_vt(ITypeInfo *ti, const TYPEDESC *td, VARTYPE *out,
 	case VT_BOOL: case VT_VARIANT: case VT_UNKNOWN: case VT_DECIMAL:
 	case VT_I1: case VT_UI1: case VT_UI2: case VT_UI4: case VT_I8:
 	case VT_UI8: case VT_INT: case VT_UINT:
+	case VT_LPSTR: case VT_LPWSTR:	/* passed as BSTRs, converted */
 		*out = td->vt;
 		return S_OK;
 	default:
@@ -587,6 +653,8 @@ struct slot {
 	VARIANT *writeback;	/* the caller's VARIANT temp goes back to */
 	VARIANT *in_place;	/* the caller's VARIANT, passed by reference */
 	int temp_used;
+	VARIANT str;		/* an LPSTR or LPWSTR argument's pointer */
+	char *ansi;		/* an LPSTR's characters, freed after */
 	VARIANTARG *arg;
 	VARTYPE vt;
 };
@@ -608,6 +676,19 @@ static HRESULT bind_arg(struct slot *s, VARTYPE vt, VARIANTARG *src)
 
 	if (src->vt == (VT_BYREF | VT_VARIANT) && src->pvarVal)
 		in = src->pvarVal;
+	if (base == VT_RECORD) {
+		/* A record, by value or by reference: its data. */
+		if ((in->vt & ~VT_BYREF) != VT_RECORD || !in->pvRecord ||
+		    (!in->pRecInfo && !(vt & VT_BYREF)))
+			return DISP_E_TYPEMISMATCH;
+		if (vt & VT_BYREF) {
+			set_ref(s, vt, in->pvRecord);
+		} else {
+			s->arg = in;
+			s->vt = vt;
+		}
+		return S_OK;
+	}
 	if (vt == VT_VARIANT) {
 		s->arg = in;
 		s->vt = vt;
@@ -670,6 +751,52 @@ static HRESULT bind_arg(struct slot *s, VARTYPE vt, VARIANTARG *src)
 	return S_OK;
 }
 
+/*
+ * Whether the record a slot was bound to is of the type td (a record, or
+ * a pointer to one) names.
+ */
+static int record_matches(ITypeInfo *owner, const TYPEDESC *td,
+			  const VARIANTARG *arg)
+{
+	ITypeInfo *r;
+	IRecordInfo *ri;
+	int ok = 0;
+
+	while (td->vt == VT_PTR && td->lptdesc)
+		td = td->lptdesc;
+	if (td->vt != VT_USERDEFINED ||
+	    FAILED(owner->lpVtbl->GetRefTypeInfo(owner, td->hreftype, &r)))
+		return 0;
+	if (SUCCEEDED(oa_GetRecordInfoFromTypeInfo(r, &ri))) {
+		ok = ri->lpVtbl->IsMatchingType(ri, arg->pRecInfo);
+		ri->lpVtbl->Release(ri);
+	}
+	r->lpVtbl->Release(r);
+	return ok;
+}
+
+/* An LPSTR or LPWSTR parameter: the bound BSTR, as the callee takes it. */
+static HRESULT bind_string(struct slot *s, VARTYPE vt)
+{
+	BSTR b = s->arg->bstrVal;
+
+	memset(&s->str, 0, sizeof(s->str));
+	s->str.vt = vt;
+	if (vt == VT_LPWSTR) {
+		s->str.byref = b;	/* a BSTR is one */
+	} else if (b) {
+		char *u = utf16_to_utf8_dup(b);
+		s->ansi = u ? utf8_to_acp_dup(u) : NULL;
+		free(u);
+		if (!s->ansi)
+			return E_OUTOFMEMORY;
+		s->str.byref = s->ansi;
+	}
+	s->arg = &s->str;
+	s->vt = vt;
+	return S_OK;
+}
+
 /* A failed HRESULT as EXCEPINFO, with the thread's error information. */
 static void fill_excep(EXCEPINFO *e, HRESULT code)
 {
@@ -722,10 +849,13 @@ static HRESULT bind_vararg(struct slot *s, VARTYPE vt, DISPPARAMS *dp,
 	return S_OK;
 }
 
-/* Calls fd, a vtable function of owner, on instance. */
+/*
+ * Calls fd, a function of owner: with fn NULL, its vtable slot on
+ * instance; else fn, after instance if that isn't NULL.
+ */
 static HRESULT call_func(ITypeInfo *owner, FUNCDESC *fd, void *instance,
-			 DISPPARAMS *dp, VARIANT *result, EXCEPINFO *excep,
-			 UINT *arg_err)
+			 const void *fn, DISPPARAMS *dp, VARIANT *result,
+			 EXCEPINFO *excep, UINT *arg_err)
 {
 	UINT cargs = dp->cArgs, cnamed = dp->cNamedArgs;
 	UINT cpos = cargs - cnamed, npos = cpos, k = 0;
@@ -818,7 +948,7 @@ static HRESULT call_func(ITypeInfo *owner, FUNCDESC *fd, void *instance,
 		if (FAILED(hr = tdesc_vt(owner, &e->tdesc, &vt, 0)))
 			goto out;
 		if (p == retval) {
-			if (!(vt & VT_BYREF)) {
+			if (!(vt & VT_BYREF) || vt == (VT_BYREF | VT_RECORD)) {
 				hr = DISP_E_BADVARTYPE;
 				goto out;
 			}
@@ -873,7 +1003,29 @@ static HRESULT call_func(ITypeInfo *owner, FUNCDESC *fd, void *instance,
 			hr = DISP_E_PARAMNOTOPTIONAL;
 			goto out;
 		}
-		if (FAILED(hr = bind_arg(sl, vt, src))) {
+		if ((vt & ~VT_BYREF) == VT_RECORD) {
+			const VARIANTARG *in = src;
+			if (src->vt == (VT_BYREF | VT_VARIANT) && src->pvarVal)
+				in = src->pvarVal;
+			/*
+			 * By value it needs its IRecordInfo (for its size);
+			 * by reference only its pointer. One given must be
+			 * of the parameter's type.
+			 */
+			if ((in->vt & ~VT_BYREF) != VT_RECORD ||
+			    (!in->pRecInfo && !(vt & VT_BYREF)) ||
+			    (in->pRecInfo &&
+			     !record_matches(owner, &e->tdesc, in))) {
+				if (src_pos != (UINT)-1)
+					*arg_err = src_pos;
+				hr = DISP_E_TYPEMISMATCH;
+				goto out;
+			}
+		}
+		if (FAILED(hr = bind_arg(sl, vt == VT_LPSTR || vt == VT_LPWSTR ?
+					 VT_BSTR : vt, src)) ||
+		    ((vt == VT_LPSTR || vt == VT_LPWSTR) &&
+		     FAILED(hr = bind_string(sl, vt)))) {
 			if (src_pos != (UINT)-1)
 				*arg_err = src_pos;
 			goto out;
@@ -901,10 +1053,34 @@ bound:
 			goto out;
 		break;
 	}
-	hr = oa_DispCallFunc(instance, fd->oVft, fd->callconv, rvt, n,
-			     types, args, &rv);
+	if (fn)
+		hr = dispcall(instance, fn, fd->callconv, rvt, n, types, args,
+			      &rv);
+	else
+		hr = oa_DispCallFunc(instance, fd->oVft, fd->callconv, rvt, n,
+				     types, args, &rv);
 	if (FAILED(hr))
 		goto out;
+	/* A string returned is the caller's as a BSTR; the callee keeps its
+	 * own. */
+	if (rvt == VT_LPWSTR || rvt == VT_LPSTR) {
+		const void *str = rv.byref;
+		BSTR b = NULL;
+		if (str && rvt == VT_LPWSTR) {
+			b = oa_SysAllocString(str);
+		} else if (str) {
+			char *u = acp_to_utf8(str);
+			b = u ? oa_bstr_utf8(u) : NULL;
+			free(u);
+		}
+		if (str && !b) {
+			hr = E_OUTOFMEMORY;
+			goto out;
+		}
+		oa_VariantInit(&rv);
+		rv.vt = VT_BSTR;
+		rv.bstrVal = b;
+	}
 	/* A DECIMAL written by reference over a VARIANT also wrote its vt. */
 	for (int p = 0; p < n; p++)
 		if (s[p].vt == (VT_BYREF | VT_DECIMAL)) {
@@ -944,9 +1120,11 @@ bound:
 	hr = S_OK;
 out:
 	if (s)
-		for (int p = 0; p < n; p++)
+		for (int p = 0; p < n; p++) {
 			if (s[p].temp_used)
 				oa_VariantClear(&s[p].temp);
+			free(s[p].ansi);
+		}
 	free(s);
 	free(types);
 	free(args);
@@ -967,7 +1145,7 @@ HRESULT oa_typeinfo_invoke(ITypeInfo *ti, PVOID instance, MEMBERID memid,
 	TRACE("ITypeInfo::Invoke(%#x, %#x)", (unsigned)memid, flags);
 	if (!arg_err)
 		arg_err = &dummy;
-	if (!ti || !instance || !params ||
+	if (!ti || !params ||
 	    params->cNamedArgs > params->cArgs ||
 	    (params->cArgs && !params->rgvarg) ||
 	    (params->cNamedArgs && !params->rgdispidNamedArgs))
@@ -985,6 +1163,10 @@ HRESULT oa_typeinfo_invoke(ITypeInfo *ti, PVOID instance, MEMBERID memid,
 		IUnknown *u = instance;
 		IDispatch *d;
 
+		if (!instance) {
+			hr = E_INVALIDARG;
+			goto done;
+		}
 		if (!dispatch_has(t, memid, flags)) {
 			hr = DISP_E_MEMBERNOTFOUND;
 			goto done;
@@ -998,21 +1180,49 @@ HRESULT oa_typeinfo_invoke(ITypeInfo *ti, PVOID instance, MEMBERID memid,
 		d->lpVtbl->Release(d);
 		goto done;
 	}
-	if (kind != TKIND_INTERFACE) {
+	if (kind != TKIND_INTERFACE && kind != TKIND_MODULE) {
 		hr = DISP_E_MEMBERNOTFOUND;
+		goto done;
+	}
+	/* (only a module's static functions need no object) */
+	if (!instance && kind != TKIND_MODULE) {
+		hr = E_INVALIDARG;
 		goto done;
 	}
 	if (FAILED(hr = find_func(t, memid, flags, &owner, &fd, 0))) {
 		hr = DISP_E_MEMBERNOTFOUND;
 		goto done;
 	}
-	if (fd->funckind == FUNC_VIRTUAL || fd->funckind == FUNC_PUREVIRTUAL) {
-		hr = call_func(owner, fd, instance, params, result, excep,
-			       arg_err);
-	} else {
-		TRACE("ITypeInfo::Invoke: function kind %d isn't supported",
-		      fd->funckind);
+	switch (fd->funckind) {
+	case FUNC_VIRTUAL:
+	case FUNC_PUREVIRTUAL:
+		hr = instance ? call_func(owner, fd, instance, NULL, params,
+					  result, excep, arg_err) :
+				E_INVALIDARG;
+		break;
+	case FUNC_STATIC:
+	case FUNC_NONVIRTUAL: {
+		/* By address: a DLL entry of the module. */
+		void *fn = NULL;
+		if (fd->funckind == FUNC_NONVIRTUAL && !instance) {
+			hr = E_INVALIDARG;
+			break;
+		}
+		hr = owner->lpVtbl->AddressOfMember(owner, fd->memid,
+						    fd->invkind, &fn);
+		if (FAILED(hr) || !fn) {
+			TRACE("ITypeInfo::Invoke: no address for %#x: %#x",
+			      (unsigned)fd->memid, (unsigned)hr);
+			hr = DISP_E_MEMBERNOTFOUND;
+			break;
+		}
+		hr = call_func(owner, fd, fd->funckind == FUNC_STATIC ? NULL :
+			       instance, fn, params, result, excep, arg_err);
+		break;
+	}
+	default:
 		hr = DISP_E_MEMBERNOTFOUND;
+		break;
 	}
 	owner->lpVtbl->ReleaseFuncDesc(owner, fd);
 	owner->lpVtbl->Release(owner);

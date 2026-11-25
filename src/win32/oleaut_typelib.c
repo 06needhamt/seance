@@ -31,7 +31,8 @@
  * - ITypeInfo::Invoke is oa_typeinfo_invoke (oleaut_dispatch.c).
  *   CreateDispTypeInfo builds a library of two types: the interface it
  *   describes, and a coclass whose default interface it is.
- * - Not here yet: ITypeComp, CreateInstance, AddressOfMember.
+ * - Not here yet: ITypeComp, CreateInstance. AddressOfMember finds a
+ *   module function's DLL entry.
  *   Registration is in oleaut_typereg.c. A dual interface's functions
  *   inherited from a dual interface in a third library (rather than
  *   stdole2's IDispatch) keep that library's hrefs, which this one's
@@ -2573,13 +2574,39 @@ WINFN(HRESULT) ti_GetRefTypeInfo(ITypeInfo2 *self, HREFTYPE href,
 	return S_OK;
 }
 
+/*
+ * A module's function's address: its DLL loaded (and kept loaded, as
+ * Windows keeps it while the type library is), and its entry looked up by
+ * name or ordinal.
+ */
 WINFN(HRESULT) ti_AddressOfMember(ITypeInfo2 *self, MEMBERID memid,
 				  INVOKEKIND kind, PVOID *addr)
 {
-	if (addr)
-		*addr = NULL;
-	TRACE("ITypeInfo::AddressOfMember: not implemented");
-	return E_NOTIMPL;
+	BSTR dll = NULL, name = NULL;
+	WORD ordinal = 0;
+	HRESULT hr;
+
+	if (!addr)
+		return E_INVALIDARG;
+	*addr = NULL;
+	if (FAILED(hr = ti_GetDllEntry(self, memid, kind, &dll, &name,
+				       &ordinal)))
+		return hr;
+	char *d = dll ? utf16_to_utf8_dup(dll) : NULL;
+	char *n = name ? utf16_to_utf8_dup(name) : NULL;
+	oa_SysFreeString(dll);
+	oa_SysFreeString(name);
+	HMODULE h = d && *d ? k32_load_library(d, NULL) : NULL;
+	struct module *m = h ? mod_from_base(h) : NULL;
+	if (m)
+		*addr = n ? mod_get_proc(m, n) : mod_get_ordinal(m, ordinal);
+	TRACE("ITypeInfo::AddressOfMember(%#x): %s!%s = %p", (unsigned)memid,
+	      d ? d : "?", n ? n : "(ordinal)", *addr);
+	free(d);
+	free(n);
+	if (!m)
+		return TYPE_E_CANTLOADLIBRARY;
+	return *addr ? S_OK : TYPE_E_DLLFUNCTIONNOTFOUND;
 }
 
 WINFN(HRESULT) ti_CreateInstance(ITypeInfo2 *self, IUnknown *outer,

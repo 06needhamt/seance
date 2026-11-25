@@ -126,4 +126,10 @@ void thread_exit(DWORD code) __attribute__((noreturn));
  */
 void thread_wake_check(void);
 
+/*
+ * LoadLibrary from C: name in UTF-8, searched for as a caller at the
+ * address caller (NULL: none) would have it.
+ */
+HMODULE k32_load_library(const char *name, const void *caller);
+
 #endif /* VFW_WIN32_K32_H */

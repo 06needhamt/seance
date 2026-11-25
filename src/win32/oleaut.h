@@ -135,6 +135,10 @@ extern const struct builtin_export oa_var_exports[];
 extern const struct builtin_export oa_format_exports[];
 extern const struct builtin_export oa_create_exports[];
 extern const struct builtin_export oa_marshal_exports[];
+extern const struct builtin_export oa_record_exports[];
+/* GetRecordInfoFromTypeInfo (oleaut_record.c). */
+HRESULT STUB_WINAPI oa_GetRecordInfoFromTypeInfo(ITypeInfo *ti,
+						 IRecordInfo **out);
 extern const struct builtin_export oa_errinfo_ole32_exports[];
 
 #endif /* VFW_WIN32_OLEAUT_H */

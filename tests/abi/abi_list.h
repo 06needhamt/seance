@@ -759,7 +759,12 @@
 	S(IErrorInfoVtbl) O(IErrorInfoVtbl, GetHelpContext) \
 	S(ICreateErrorInfoVtbl) O(ICreateErrorInfoVtbl, SetHelpContext) \
 	O(IRecordInfoVtbl, RecordClear) O(IRecordInfoVtbl, RecordCopy) \
-	O(IRecordInfoVtbl, GetSize) \
+	O(IRecordInfoVtbl, GetSize) O(IRecordInfoVtbl, GetTypeInfo) \
+	O(IRecordInfoVtbl, GetField) O(IRecordInfoVtbl, GetFieldNoCopy) \
+	O(IRecordInfoVtbl, PutField) O(IRecordInfoVtbl, PutFieldNoCopy) \
+	O(IRecordInfoVtbl, GetFieldNames) O(IRecordInfoVtbl, IsMatchingType) \
+	O(IRecordInfoVtbl, RecordCreate) O(IRecordInfoVtbl, RecordCreateCopy) \
+	O(IRecordInfoVtbl, RecordDestroy) \
 	S(HREFTYPE) S(TYPEKIND) S(SYSKIND) S(FUNCKIND) S(INVOKEKIND) \
 	S(CALLCONV) S(VARKIND) S(DESCKIND) \
 	S(TYPEDESC) A(TYPEDESC) O(TYPEDESC, lptdesc) O(TYPEDESC, vt) \

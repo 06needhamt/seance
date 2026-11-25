@@ -305,6 +305,7 @@ struct IDispatch {
 };
 
 /* IRecordInfo, as far as copying and clearing records needs it. */
+typedef struct ITypeInfo2 ITypeInfo;	/* (declared below) */
 typedef struct IRecordInfoVtbl {
 	HRESULT (WINAPI *QueryInterface)(IRecordInfo *This, REFIID riid,
 					 void **ppv);
@@ -316,6 +317,24 @@ typedef struct IRecordInfoVtbl {
 	HRESULT (WINAPI *GetGuid)(IRecordInfo *This, GUID *guid);
 	HRESULT (WINAPI *GetName)(IRecordInfo *This, BSTR *name);
 	HRESULT (WINAPI *GetSize)(IRecordInfo *This, ULONG *size);
+	HRESULT (WINAPI *GetTypeInfo)(IRecordInfo *This, ITypeInfo **ti);
+	HRESULT (WINAPI *GetField)(IRecordInfo *This, PVOID data,
+				   LPCOLESTR name, VARIANT *field);
+	HRESULT (WINAPI *GetFieldNoCopy)(IRecordInfo *This, PVOID data,
+					 LPCOLESTR name, VARIANT *field,
+					 PVOID *carray);
+	HRESULT (WINAPI *PutField)(IRecordInfo *This, ULONG flags, PVOID data,
+				   LPCOLESTR name, VARIANT *field);
+	HRESULT (WINAPI *PutFieldNoCopy)(IRecordInfo *This, ULONG flags,
+					 PVOID data, LPCOLESTR name,
+					 VARIANT *field);
+	HRESULT (WINAPI *GetFieldNames)(IRecordInfo *This, ULONG *count,
+					BSTR *names);
+	BOOL (WINAPI *IsMatchingType)(IRecordInfo *This, IRecordInfo *other);
+	PVOID (WINAPI *RecordCreate)(IRecordInfo *This);
+	HRESULT (WINAPI *RecordCreateCopy)(IRecordInfo *This, PVOID source,
+					   PVOID *dest);
+	HRESULT (WINAPI *RecordDestroy)(IRecordInfo *This, PVOID record);
 } IRecordInfoVtbl;
 struct IRecordInfo {
 	const IRecordInfoVtbl *lpVtbl;

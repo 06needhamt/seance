@@ -129,10 +129,20 @@ Changes from the plan below:
   result is put back in the caller's `VARIANT` as the parameter's type.
 - `CreateDispTypeInfo` gives a coclass whose default interface has the
   methods, as Windows does.
-- Not done: `FUNC_STATIC` and `FUNC_NONVIRTUAL` functions (a module's,
-  which need `AddressOfMember`), records passed by value, and `VT_LPSTR`
-  and `VT_LPWSTR` parameters. `Invoke` returns `DISP_E_MEMBERNOTFOUND` or
-  `DISP_E_BADVARTYPE` for them.
+- A module's `FUNC_STATIC` functions are called through
+  `AddressOfMember`, which loads the module's DLL and finds the entry by
+  name or ordinal; no object is needed for them. `FUNC_NONVIRTUAL` ones go
+  the same way after the object, though only a module's functions have
+  DLL entries to find. `VT_LPSTR` and `VT_LPWSTR` parameters are bound as
+  `BSTR`s and passed as the callee takes them (an ANSI copy for
+  `LPSTR`); a string result comes back as a `BSTR`. A string by reference
+  is still `DISP_E_BADVARTYPE`. Records (`oleaut_record.c`:
+  `GetRecordInfoFromTypeInfo`/`Guids` and a whole `IRecordInfo`) go by
+  value as the ABI has it (pushed whole on i386; in the argument's word if
+  1, 2, 4 or 8 bytes on x86-64, else as a pointer to a copy) or by
+  reference (where its `IRecordInfo` may be left out), and one that
+  names its type must name the parameter's (`DISP_E_TYPEMISMATCH`).
+  A record result is still `DISP_E_BADVARTYPE`.
 
 1. `DispCallFunc`: a vtable slot or a function, called with a
    `VARIANTARG` list. stdcall and cdecl on i386, ms_abi (four register
