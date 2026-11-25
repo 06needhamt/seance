@@ -165,6 +165,7 @@ struct c_type {
 	WORD align, vft;
 	int fixed;
 	int laying;		/* to catch a record that contains itself */
+	int deleted;		/* DeleteTypeInfo took it out of the library */
 };
 
 /* A type of another library that a type here refers to. */
@@ -191,6 +192,8 @@ struct ctl {
 	struct c_cust *cust;
 	struct c_type **types;
 	UINT ntypes;
+	struct c_type **dead;	/* deleted, kept for their interfaces */
+	UINT ndead;
 	struct c_ref *refs_out;
 	UINT nrefs;
 };
@@ -367,6 +370,9 @@ static void ctl_free(struct ctl *lib)
 {
 	for (UINT i = 0; i < lib->ntypes; i++)
 		type_free(lib->types[i]);
+	for (UINT i = 0; i < lib->ndead; i++)
+		type_free(lib->dead[i]);
+	free(lib->dead);
 	for (UINT i = 0; i < lib->nrefs; i++) {
 		if (lib->refs_out[i].info)
 			lib->refs_out[i].info->lpVtbl->Release(
@@ -1456,13 +1462,107 @@ WINFN(HRESULT) ctl_SaveAllChanges(ICreateTypeLib2 *self)
 	return hr;
 }
 
+/*
+ * Calls fn on every internal reference in a type desc; fn returns nonzero
+ * to stop, which this passes on.
+ */
+static int td_each_href(TYPEDESC *td, int (*fn)(HREFTYPE *, void *),
+			void *arg)
+{
+	for (int depth = 0; td && depth < 64; depth++) {
+		switch (td->vt) {
+		case VT_PTR:
+		case VT_SAFEARRAY:
+			td = td->lptdesc;
+			continue;
+		case VT_CARRAY:
+			td = td->lpadesc ? &td->lpadesc->tdescElem : NULL;
+			continue;
+		case VT_USERDEFINED:
+			return !(td->hreftype & 3) && fn(&td->hreftype, arg);
+		default:
+			return 0;
+		}
+	}
+	return 0;
+}
+
+/* Every internal reference a type makes: its bases and its members'. */
+static int type_each_href(struct c_type *t, int (*fn)(HREFTYPE *, void *),
+			  void *arg)
+{
+	for (UINT i = 0; i < t->nimpls; i++)
+		if (!(t->impls[i].href & 3) && fn(&t->impls[i].href, arg))
+			return 1;
+	if (t->has_alias && td_each_href(&t->alias, fn, arg))
+		return 1;
+	for (UINT i = 0; i < t->nvars; i++)
+		if (td_each_href(&t->vars[i].type, fn, arg))
+			return 1;
+	for (UINT i = 0; i < t->nfuncs; i++) {
+		struct c_func *f = &t->funcs[i];
+		if (td_each_href(&f->ret, fn, arg))
+			return 1;
+		for (SHORT k = 0; k < f->nparams; k++)
+			if (td_each_href(&f->params[k].type, fn, arg))
+				return 1;
+	}
+	return 0;
+}
+
+static int href_is(HREFTYPE *h, void *arg)
+{
+	return *h == *(HREFTYPE *)arg;
+}
+
+/* The types after a deleted one move down a slot. */
+static int href_shift(HREFTYPE *h, void *arg)
+{
+	if (*h > *(HREFTYPE *)arg)
+		*h -= MSFT_TYPEINFO_SIZE;
+	return 0;
+}
+
 WINFN(HRESULT) ctl_DeleteTypeInfo(ICreateTypeLib2 *self, LPOLESTR name)
 {
+	struct ctl *lib = ctl_of(self);
+	UINT i;
+
+	if (!name)
+		return E_INVALIDARG;
+	for (i = 0; i < lib->ntypes; i++)
+		if (lib->types[i]->name && name_eq(lib->types[i]->name, name))
+			break;
+	if (i == lib->ntypes)
+		return TYPE_E_ELEMENTNOTFOUND;
+
 	/*
-	 * Other types' references are offsets of type infos, so a type in
-	 * use can't go without them breaking: like Windows, refuse.
+	 * Other types refer to it by its slot: one still in use can't go
+	 * without breaking them, so that is refused.
 	 */
-	return E_NOTIMPL;
+	HREFTYPE h = (HREFTYPE)i * MSFT_TYPEINFO_SIZE;
+	for (UINT k = 0; k < lib->ntypes; k++)
+		if (k != i && type_each_href(lib->types[k], href_is, &h))
+			return TYPE_E_INVALIDSTATE;
+
+	struct c_type **dead = realloc(lib->dead,
+				       (lib->ndead + 1) * sizeof(*dead));
+	if (!dead)
+		return E_OUTOFMEMORY;
+	lib->dead = dead;
+	struct c_type *t = lib->types[i];
+	/*
+	 * Its ICreateTypeInfo may still be held: it stays, out of the
+	 * library, until the library goes.
+	 */
+	t->deleted = 1;
+	dead[lib->ndead++] = t;
+	memmove(&lib->types[i], &lib->types[i + 1],
+		(lib->ntypes - i - 1) * sizeof(*lib->types));
+	lib->ntypes--;
+	for (UINT k = 0; k < lib->ntypes; k++)
+		type_each_href(lib->types[k], href_shift, &h);
+	return S_OK;
 }
 
 WINFN(HRESULT) ctl_SetCustData(ICreateTypeLib2 *self, REFGUID guid,
@@ -1519,6 +1619,8 @@ WINFN(HRESULT) cti_QueryInterface(ICreateTypeInfo2 *self, REFIID riid,
 	}
 	if (guid_eq(riid, &IID_ITypeInfo) || guid_eq(riid, &IID_ITypeInfo2)) {
 		ITypeLib *tl;
+		if (t->deleted)
+			return TYPE_E_ELEMENTNOTFOUND;
 		HRESULT hr = snapshot(t->lib, &tl);
 		if (hr != S_OK)
 			return hr;
@@ -2236,7 +2338,11 @@ WINFN(HRESULT) cti_SetVarHelpStringContext(ICreateTypeInfo2 *self,
 
 WINFN(HRESULT) cti_Invalidate(ICreateTypeInfo2 *self)
 {
-	return E_NOTIMPL;
+	/*
+	 * "Reserved": nothing is cached here to throw away, since LayOut
+	 * and SaveAllChanges work out the layout afresh each time.
+	 */
+	return S_OK;
 }
 
 WINFN(HRESULT) cti_SetName(ICreateTypeInfo2 *self, LPOLESTR name)

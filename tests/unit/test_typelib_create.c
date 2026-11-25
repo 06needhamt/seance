@@ -768,6 +768,97 @@ done:
 	ctl->lpVtbl->Release(ctl);
 }
 
+/* DeleteTypeInfo: unused types go and the later ones move down. */
+static void test_delete(void)
+{
+	char path[512];
+	snprintf(path, sizeof(path), "%s/del.tlb", dir);
+	char *win = path_to_windows(path);
+	WCHAR *wpath = utf8_to_utf16_dup(win);
+	ICreateTypeLib2 *ctl = NULL;
+
+	CHECK_EQ(pCreateTypeLib2(SYS_WIN32, wpath, &ctl), S_OK);
+	if (!ctl) {
+		free(wpath);
+		free(win);
+		return;
+	}
+	CHECK_EQ(ctl->lpVtbl->SetName(ctl, w("Del")), S_OK);
+	ICreateTypeInfo *b = make(ctl, "B", TKIND_ENUM);
+	ICreateTypeInfo *a = make(ctl, "A", TKIND_RECORD);
+	ICreateTypeInfo *c = make(ctl, "C", TKIND_RECORD);
+	VARDESC vd;
+	memset(&vd, 0, sizeof(vd));
+	vd.varkind = VAR_PERINSTANCE;
+	vd.elemdescVar.tdesc.vt = VT_I4;
+	CHECK_EQ(a->lpVtbl->AddVarDesc(a, 0, &vd), S_OK);
+	ITypeInfo *ati = NULL;
+	HREFTYPE h = 0;
+	CHECK_EQ(a->lpVtbl->QueryInterface(a, &IID_ITypeInfo, (void **)&ati),
+		 S_OK);
+	if (ati) {
+		CHECK_EQ(c->lpVtbl->AddRefTypeInfo(c, ati, &h), S_OK);
+		ati->lpVtbl->Release(ati);
+	}
+	vd.memid = 1;
+	vd.elemdescVar.tdesc.vt = VT_USERDEFINED;
+	vd.elemdescVar.tdesc.hreftype = h;
+	CHECK_EQ(c->lpVtbl->AddVarDesc(c, 0, &vd), S_OK);
+	CHECK_EQ(c->lpVtbl->SetVarName(c, 0, w("a")), S_OK);
+
+	CHECK_EQ(ctl->lpVtbl->DeleteTypeInfo(ctl, w("Nope")),
+		 TYPE_E_ELEMENTNOTFOUND);
+	CHECK_EQ(ctl->lpVtbl->DeleteTypeInfo(ctl, NULL), E_INVALIDARG);
+	CHECK_EQ(ctl->lpVtbl->DeleteTypeInfo(ctl, w("A")), TYPE_E_INVALIDSTATE);
+	CHECK_EQ(ctl->lpVtbl->DeleteTypeInfo(ctl, w("b")), S_OK);
+	CHECK_EQ(ctl->lpVtbl->DeleteTypeInfo(ctl, w("B")),
+		 TYPE_E_ELEMENTNOTFOUND);
+	/* The deleted one's interface still works, outside the library. */
+	CHECK_EQ(b->lpVtbl->SetDocString(b, w("gone")), S_OK);
+	ITypeInfo *bti = (ITypeInfo *)1;
+	CHECK_EQ(b->lpVtbl->QueryInterface(b, &IID_ITypeInfo, (void **)&bti),
+		 TYPE_E_ELEMENTNOTFOUND);
+	CHECK(bti == NULL);
+	/* A name freed by the deletion can be used again. */
+	ICreateTypeInfo *b2 = make(ctl, "B", TKIND_ENUM);
+	CHECK_EQ(c->lpVtbl->Invalidate(c), S_OK);
+	CHECK_EQ(c->lpVtbl->LayOut(c), S_OK);
+	CHECK_EQ(ctl->lpVtbl->SaveAllChanges(ctl), S_OK);
+	b->lpVtbl->Release(b);
+	a->lpVtbl->Release(a);
+	c->lpVtbl->Release(c);
+	if (b2)
+		b2->lpVtbl->Release(b2);
+	CHECK_EQ(ctl->lpVtbl->Release(ctl), 0);
+
+	ITypeLib *lib = NULL;
+	CHECK_EQ(pLoadTypeLib(wpath, &lib), S_OK);
+	free(wpath);
+	free(win);
+	if (!lib)
+		return;
+	CHECK_EQ(lib->lpVtbl->GetTypeInfoCount(lib), 3);
+	ITypeInfo *ti = type_named(lib, 1, "C");
+	if (ti) {
+		VARDESC *v = NULL;
+		CHECK_EQ(ti->lpVtbl->GetVarDesc(ti, 0, &v), S_OK);
+		if (v) {
+			CHECK_EQ(v->elemdescVar.tdesc.vt, VT_USERDEFINED);
+			CHECK(ref_name_is(ti, v->elemdescVar.tdesc.hreftype,
+					  "A"));
+			ti->lpVtbl->ReleaseVarDesc(ti, v);
+		}
+		ti->lpVtbl->Release(ti);
+	}
+	ti = type_named(lib, 0, "A");
+	if (ti)
+		ti->lpVtbl->Release(ti);
+	ti = type_named(lib, 2, "B");
+	if (ti)
+		ti->lpVtbl->Release(ti);
+	lib->lpVtbl->Release(lib);
+}
+
 int main(void)
 {
 	char cleanup[64];
@@ -808,6 +899,7 @@ int main(void)
 	}
 
 	test_more(std);
+	test_delete();
 
 	/* Nowhere to write. */
 	ICreateTypeLib2 *ctl = NULL;

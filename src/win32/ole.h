@@ -41,6 +41,17 @@ void ole_host_leave(void);
 
 /* The streams and in-process marshalling (ole_stream.c). */
 extern const struct builtin_export ole_stream_exports[];
+/*
+ * What CoMarshalInterface writes, for marshallers that keep it in their
+ * own buffers: its size; writing it (holding a reference to obj until
+ * it is unmarshalled or released); reading it back; and releasing it
+ * unread.
+ */
+size_t ole_marshal_size(void);
+HRESULT ole_marshal_write(void *buf, REFIID riid, IUnknown *obj);
+HRESULT ole_marshal_read(const void *buf, size_t len, REFIID riid,
+			 void **ppv);
+void ole_marshal_release(const void *buf, size_t len);
 
 /*
  * A string value under HKEY_CLASSES_ROOT (per-user classes first), as

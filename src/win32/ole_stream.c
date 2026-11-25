@@ -343,6 +343,58 @@ static HRESULT marshal_read(IStream *stream, struct marshal_data *m)
 	return S_OK;
 }
 
+size_t ole_marshal_size(void)
+{
+	return sizeof(struct marshal_data);
+}
+
+HRESULT ole_marshal_write(void *buf, REFIID riid, IUnknown *obj)
+{
+	struct marshal_data m = { .magic = MARSHAL_MAGIC };
+	void *iface = NULL;
+
+	if (!buf || !riid || !obj)
+		return E_INVALIDARG;
+	HRESULT hr = obj->lpVtbl->QueryInterface(obj, riid, &iface);
+	if (FAILED(hr))
+		return hr;
+	m.iid = *riid;
+	m.obj = iface;
+	memcpy(buf, &m, sizeof(m));
+	return S_OK;
+}
+
+static HRESULT marshal_from(const void *buf, size_t len,
+			    struct marshal_data *m)
+{
+	if (!buf || len != sizeof(*m))
+		return STG_E_READFAULT;
+	memcpy(m, buf, sizeof(*m));
+	return m->magic == MARSHAL_MAGIC && m->obj ? S_OK : STG_E_READFAULT;
+}
+
+HRESULT ole_marshal_read(const void *buf, size_t len, REFIID riid,
+			 void **ppv)
+{
+	struct marshal_data m;
+
+	*ppv = NULL;
+	HRESULT hr = marshal_from(buf, len, &m);
+	if (FAILED(hr))
+		return hr;
+	hr = m.obj->lpVtbl->QueryInterface(m.obj, riid ? riid : &m.iid, ppv);
+	m.obj->lpVtbl->Release(m.obj);
+	return hr;
+}
+
+void ole_marshal_release(const void *buf, size_t len)
+{
+	struct marshal_data m;
+
+	if (SUCCEEDED(marshal_from(buf, len, &m)))
+		m.obj->lpVtbl->Release(m.obj);
+}
+
 WINFN(HRESULT) ole_CoMarshalInterface(IStream *stream, REFIID riid,
 				      IUnknown *obj, DWORD dest, void *dest_ptr,
 				      DWORD flags)

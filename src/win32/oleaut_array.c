@@ -155,7 +155,7 @@ static USHORT type_features(VARTYPE vt)
 	return 0;
 }
 
-WINFN(HRESULT) oa_SafeArrayAllocDescriptorEx(VARTYPE vt, UINT dims,
+HRESULT STUB_WINAPI oa_SafeArrayAllocDescriptorEx(VARTYPE vt, UINT dims,
 					     SAFEARRAY **out)
 {
 	ULONG size = vt == VT_RECORD ? 0 : vt_size(vt);
@@ -188,7 +188,7 @@ WINFN(HRESULT) oa_SafeArrayAllocDescriptorEx(VARTYPE vt, UINT dims,
 	return S_OK;
 }
 
-WINFN(HRESULT) oa_SafeArrayAllocData(SAFEARRAY *psa)
+HRESULT STUB_WINAPI oa_SafeArrayAllocData(SAFEARRAY *psa)
 {
 	if (!psa)
 		return E_INVALIDARG;
@@ -570,7 +570,7 @@ WINFN(HRESULT) oa_SafeArrayRedim(SAFEARRAY *psa, SAFEARRAYBOUND *nb)
 	return S_OK;
 }
 
-WINFN(HRESULT) oa_SafeArrayGetVartype(SAFEARRAY *psa, VARTYPE *out)
+HRESULT STUB_WINAPI oa_SafeArrayGetVartype(SAFEARRAY *psa, VARTYPE *out)
 {
 	if (!psa || !out)
 		return E_INVALIDARG;
@@ -588,7 +588,7 @@ WINFN(HRESULT) oa_SafeArrayGetVartype(SAFEARRAY *psa, VARTYPE *out)
 	return S_OK;
 }
 
-WINFN(HRESULT) oa_SafeArraySetIID(SAFEARRAY *psa, REFGUID iid)
+HRESULT STUB_WINAPI oa_SafeArraySetIID(SAFEARRAY *psa, REFGUID iid)
 {
 	if (!psa || !iid || !(psa->fFeatures & FADF_HAVEIID))
 		return E_INVALIDARG;
@@ -596,7 +596,7 @@ WINFN(HRESULT) oa_SafeArraySetIID(SAFEARRAY *psa, REFGUID iid)
 	return S_OK;
 }
 
-WINFN(HRESULT) oa_SafeArrayGetIID(SAFEARRAY *psa, GUID *out)
+HRESULT STUB_WINAPI oa_SafeArrayGetIID(SAFEARRAY *psa, GUID *out)
 {
 	if (!psa || !out || !(psa->fFeatures & FADF_HAVEIID))
 		return E_INVALIDARG;

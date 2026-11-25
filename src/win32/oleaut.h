@@ -53,6 +53,12 @@ HRESULT STUB_WINAPI oa_VarDecDiv(const DECIMAL *a, const DECIMAL *b,
 SAFEARRAY *STUB_WINAPI oa_SafeArrayCreateVector(VARTYPE vt, LONG lbound,
 					    ULONG count);
 HRESULT STUB_WINAPI oa_SafeArrayDestroy(SAFEARRAY *psa);
+HRESULT STUB_WINAPI oa_SafeArrayAllocDescriptorEx(VARTYPE vt, UINT dims,
+					      SAFEARRAY **out);
+HRESULT STUB_WINAPI oa_SafeArrayAllocData(SAFEARRAY *psa);
+HRESULT STUB_WINAPI oa_SafeArraySetIID(SAFEARRAY *psa, REFGUID iid);
+HRESULT STUB_WINAPI oa_SafeArrayGetIID(SAFEARRAY *psa, GUID *out);
+HRESULT STUB_WINAPI oa_SafeArrayGetVartype(SAFEARRAY *psa, VARTYPE *out);
 HRESULT STUB_WINAPI oa_SafeArrayCopy(SAFEARRAY *psa, SAFEARRAY **out);
 HRESULT STUB_WINAPI oa_VectorFromBstr(BSTR b, SAFEARRAY **out);
 HRESULT STUB_WINAPI oa_BstrFromVector(SAFEARRAY *psa, BSTR *out);
@@ -128,6 +134,7 @@ extern const struct builtin_export oa_dispatch_exports[];
 extern const struct builtin_export oa_var_exports[];
 extern const struct builtin_export oa_format_exports[];
 extern const struct builtin_export oa_create_exports[];
+extern const struct builtin_export oa_marshal_exports[];
 extern const struct builtin_export oa_errinfo_ole32_exports[];
 
 #endif /* VFW_WIN32_OLEAUT_H */
