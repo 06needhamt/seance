@@ -11,6 +11,7 @@
  */
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -98,19 +99,37 @@ static int dir_empty(const char *path)
 static DWORD index_add(const char *dir, const char *name, const char *orig)
 {
 	char *idx = join2(dir, INDEX);
-	FILE *f = idx ? fopen(idx, "a") : NULL;
+	int fd = idx ? open(idx, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC,
+			    0644) : -1;
 	DWORD err = 0;
+	struct stat st;
 
-	if (!idx)
+	if (!idx) {
 		err = ERROR_NOT_ENOUGH_MEMORY;
-	else if (!f)
+	} else if (fd < 0 || fstat(fd, &st)) {
 		err = win_error_from_errno(errno);
-	else {
-		if (fprintf(f, "%s\t%s\n", name, orig) < 0)
-			err = ERROR_GEN_FAILURE;
-		if (fclose(f) && !err)
-			err = ERROR_GEN_FAILURE;
+	} else {
+		/* One write of the whole record; whatever part of it got
+		 * there is cut off again if it fails. */
+		size_t len = strlen(name) + strlen(orig) + 2;
+		char *line = malloc(len + 1);
+		ssize_t put = -1;
+		int have = line != NULL;
+		if (line) {
+			snprintf(line, len + 1, "%s\t%s\n", name, orig);
+			put = write(fd, line, len);
+		}
+		free(line);
+		if (put != (ssize_t)len) {
+			err = have ? ERROR_GEN_FAILURE :
+				     ERROR_NOT_ENOUGH_MEMORY;
+			if (put > 0 && ftruncate(fd, st.st_size))
+				fprintf(stderr, "seance: recycle bin: %s has a "
+					"partial record\n", idx);
+		}
 	}
+	if (fd >= 0 && close(fd) && !err)
+		err = ERROR_GEN_FAILURE;
 	free(idx);
 	return err;
 }

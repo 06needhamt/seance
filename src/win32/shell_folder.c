@@ -580,16 +580,42 @@ static HRESULT WINAPI f_GetDisplayNameOf(IShellFolder *This,
 }
 
 
-/* Do two Unix paths name one entry (a rename that changes only case)?
- * Two that differ only in case can be two files. */
+/* Does dir hold an entry named exactly base? */
+static int listed(const char *path)
+{
+	const char *slash = strrchr(path, '/');
+	char *dir = slash ? strndup(path, (size_t)(slash - path + 1)) :
+			    strdup(".");
+	DIR *d = dir ? opendir(dir) : NULL;
+	struct dirent *e;
+	int found = 0;
+
+	while (d && !found && (e = readdir(d)))
+		found = !strcmp(e->d_name, slash ? slash + 1 : path);
+	if (d)
+		closedir(d);
+	free(dir);
+	return found;
+}
+
+/*
+ * Is a to b a change of case of one entry (on a filesystem that ignores
+ * case): the same directory, names equal but for case, one inode, and no
+ * entry spelt as b? Hard links to one file are two entries.
+ */
 static int same_entry(const char *a, const char *b)
 {
 	struct stat sa, sb;
+	const char *sla = strrchr(a, '/'), *slb = strrchr(b, '/');
+	size_t da = sla ? (size_t)(sla - a) : 0, db = slb ? (size_t)(slb - b) : 0;
 
 	if (!strcmp(a, b))
 		return 1;
+	if (da != db || strncmp(a, b, da) ||
+	    strcasecmp(sla ? sla + 1 : a, slb ? slb + 1 : b))
+		return 0;
 	return !lstat(a, &sa) && !lstat(b, &sb) && sa.st_dev == sb.st_dev &&
-	       sa.st_ino == sb.st_ino;
+	       sa.st_ino == sb.st_ino && !listed(b);
 }
 
 static HRESULT WINAPI f_SetNameOf(IShellFolder *This, HWND hwnd,

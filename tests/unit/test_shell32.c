@@ -727,6 +727,27 @@ static void test_namespace(void)
 			CHECK(renamed && SHGetPathFromIDListA(renamed, path));
 			CHECK_STR(path, "C:\\ns\\c.txt");
 			ILFree(renamed);
+			/* Not over another link to the same file: both names
+			 * stay, and the rename fails. */
+			char c_path[512];
+			snprintf(c_path, sizeof(c_path), "%s", on_disk("ns/c.txt"));
+			CHECK_EQ(link(c_path, on_disk("ns/d.txt")), 0);
+			LPITEMIDLIST ci = NULL;
+			name = w16("c.txt");
+			CHECK(dir->lpVtbl->ParseDisplayName(dir, NULL, NULL, name,
+							    NULL, &ci, NULL) ==
+			      S_OK);
+			free(name);
+			name = w16("d.txt");
+			renamed = NULL;
+			CHECK(ci && dir->lpVtbl->SetNameOf(dir, NULL, ci, name, 0,
+							   &renamed) ==
+			      HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS));
+			free(name);
+			ILFree(ci);
+			CHECK(!renamed && exists("ns/c.txt") &&
+			      exists("ns/d.txt"));
+			unlink(on_disk("ns/d.txt"));
 			/* A combined list stands for its last item. */
 			LPITEMIDLIST full = ILCombine(ns, item[sub]);
 			CHECK(full && ILGetSize(full) == ILGetSize(ns) +

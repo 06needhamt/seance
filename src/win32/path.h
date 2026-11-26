@@ -43,7 +43,8 @@ int path_rename_noreplace(const char *from, const char *to);
 /*
  * For a private temporary file (mkstemp's) about to be renamed over dest,
  * once it is written: dest's permissions if it exists, else a new file's
- * under the umask.
+ * under the umask. -1 (and errno) if that fails, or the umask can't be
+ * read: then the file stays private and isn't to be published.
  */
 int path_replace_mode(int fd, const char *dest);
 

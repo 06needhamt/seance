@@ -329,8 +329,9 @@ int path_rename_noreplace(const char *from, const char *to)
 	return 0;
 }
 
-/* The process's umask, without changing it. */
-static mode_t current_umask(void)
+/* The process's umask, without changing it, or -1 when it can't be read
+ * (no /proc, or no descriptor to read it with). */
+static int current_umask(void)
 {
 	FILE *f = fopen("/proc/self/status", "r");
 	char line[128];
@@ -340,17 +341,22 @@ static mode_t current_umask(void)
 		while (fgets(line, sizeof(line), f))
 			if (sscanf(line, "Umask: %o", &m) == 1) {
 				fclose(f);
-				return (mode_t)m;
+				return (int)(m & 0777);
 			}
 		fclose(f);
 	}
-	return 022;
+	errno = EACCES;
+	return -1;
 }
 
+/* Fails, rather than guess, when a new file's mask can't be known. */
 int path_replace_mode(int fd, const char *dest)
 {
 	struct stat st;
-	mode_t mode = !stat(dest, &st) ? st.st_mode & 07777 :
-		      0666 & ~current_umask();
-	return fchmod(fd, mode);
+	if (!stat(dest, &st))
+		return fchmod(fd, st.st_mode & 07777);
+	int mask = current_umask();
+	if (mask < 0)
+		return -1;
+	return fchmod(fd, 0666 & ~(mode_t)mask);
 }

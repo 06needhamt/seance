@@ -1737,7 +1737,9 @@ WINFN(HRESULT) stg_Revert(IStorage *self)
 		s->f->root = NULL;
 		hr = file_reload(s->f);
 		if (SUCCEEDED(hr)) {
-			s->f->dirty = 0;
+			/* A create's or a conversion's new image is still
+			 * to be written by Commit. */
+			s->f->dirty = s->f->raw != 0;
 			old->open--;
 			node_detach(old);	/* the tree's reference */
 			s->n = s->f->root;
@@ -2432,8 +2434,8 @@ static const ILockBytesVtbl flb_vtbl = {
 
 /*
  * Opens (or with create, makes) a file as a byte array. The access and
- * share mode are reserved against the file's other openers in this process
- * before STGM_CREATE truncates it.
+ * share mode are reserved against the file's other openers in this process.
+ * STGM_CREATE doesn't truncate: the new image replaces the old whole.
  */
 static HRESULT file_lockbytes(const WCHAR *name, DWORD mode, int create,
 			      ILockBytes **out)
@@ -2477,10 +2479,8 @@ static HRESULT file_lockbytes(const WCHAR *name, DWORD mode, int create,
 		}
 		pthread_mutex_unlock(&lock);
 	}
-	/* A transacted root replaces what is there when it commits. */
-	if (SUCCEEDED(hr) && create && (mode & STGM_CREATE) &&
-	    !(mode & STGM_TRANSACTED) && ftruncate(fd, 0))
-		hr = STG_E_ACCESSDENIED;
+	/* Nothing is truncated here: open_root keeps what the file held
+	 * until the new image replaces it whole. */
 	if (FAILED(hr)) {
 		if (l && l->bk) {
 			pthread_mutex_lock(&lock);
@@ -2544,10 +2544,10 @@ static HRESULT open_root(ILockBytes *lb, DWORD mode, int how,
 		BYTE *old = NULL;
 		size_t old_len = 0;
 		f->gen = f->bk->gen;
-		/* What lb holds: a conversion's contents, or what a
-		 * transacted create leaves until it commits. */
-		hr = how == 2 || (mode & STGM_TRANSACTED) ?
-		     lb_read_all(lb, &old, &old_len) : S_OK;
+		/* What lb holds: a conversion's contents, what a
+		 * transacted create leaves until it commits, or what a
+		 * direct one puts back if its first write fails. */
+		hr = lb_read_all(lb, &old, &old_len);
 		converted = how == 2 && old_len;
 		if (SUCCEEDED(hr))
 			hr = new_tree(converted ? old : NULL, old_len,
@@ -2619,11 +2619,19 @@ WINFN(HRESULT) ole_StgCreateDocfile(LPCOLESTR name, DWORD mode, DWORD reserved,
 		hr = ole_CreateILockBytesOnHGlobal(NULL, TRUE, &lb);
 	} else if (mode & STGM_CONVERT) {
 		/* What the file held goes into a CONTENTS stream. */
-		hr = file_lockbytes(name, mode, 0, &lb);
-		if (SUCCEEDED(hr))
-			how = 2;
-		if (hr == STG_E_FILENOTFOUND) {
-			hr = file_lockbytes(name, mode | STGM_CREATE, 1, &lb);
+		/* A new file only if there is none (O_EXCL): one that
+		 * appears meanwhile is converted, not replaced. */
+		for (int tries = 0; tries < 4; tries++) {
+			hr = file_lockbytes(name, mode, 0, &lb);
+			if (SUCCEEDED(hr)) {
+				how = 2;
+				break;
+			}
+			if (hr != STG_E_FILENOTFOUND)
+				break;
+			hr = file_lockbytes(name, mode, 1, &lb);
+			if (hr != STG_E_FILEALREADYEXISTS)
+				break;
 		}
 	} else {
 		hr = file_lockbytes(name, mode, 1, &lb);

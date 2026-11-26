@@ -12,7 +12,7 @@
  *     importlib("stdole2.tlb");
  *     enum Colors { Red = 0, Green = 5 };
  *     [uuid(IID)] interface IOld : IUnknown {
- *       [id(7)] HRESULT Get([out, retval] long *pv);
+ *       [id(7)] HRESULT Get(long n, [out, retval] long *pv);
  *     };
  *   };
  */
@@ -115,6 +115,8 @@ static WORD name(const char *s)
 {
 	if (!names.n)
 		p8(&names, 0);
+	if (names.n & 1)	/* even: bit 0 of a parameter's is a flag */
+		p8(&names, 0);
 	WORD at = (WORD)names.n;
 	put(&names, s, strlen(s) + 1);
 	return at;
@@ -184,7 +186,8 @@ static void enum_block(struct buf *b)
 	tail(b, 0, 2, 0, 0xffff, 0, 0xffff, 4, 4, 0);
 }
 
-/* interface IOld : IUnknown { HRESULT Get([out, retval] long *pv); } */
+/* interface IOld : IUnknown {
+ *     HRESULT Get(long n, [out, retval] long *pv); } */
 static void iface_block(struct buf *b, WORD stdole)
 {
 	size_t o = type_header(b, TKIND_INTERFACE, 0);
@@ -220,12 +223,15 @@ static void iface_block(struct buf *b, WORD stdole)
 	p16(b, 0);
 	p16(b, 0xffff);			/* +0x0c: no doc string */
 	size_t params_field = p16(b, 0);
-	p8(b, CC_STDCALL | 1 << 3);	/* one parameter */
+	p8(b, CC_STDCALL | 2 << 3);	/* two parameters */
 	p8(b, 0x80);			/* the return type is here */
 	p16(b, VT_HRESULT);
 	p16(b, 12);			/* after IUnknown's three */
-	/* its parameter: a name, then the offset of its type */
+	/* its parameters: a name with bit 0 set and the type inline, then
+	 * a name and the offset of its type */
 	s16(b, params_field, (int)(b->n - items));
+	p16(b, name("n") | 1);
+	p16(b, VT_I4);
 	p16(b, name("pv"));
 	size_t type_field = p16(b, 0);
 	s16(b, type_field, (int)(b->n - items));
@@ -318,8 +324,8 @@ static WCHAR *write_lib(const char *fname, const void *d, size_t len)
 	FILE *fp = fopen(path, "wb");
 	CHECK(fp != NULL);
 	if (fp) {
-		fwrite(d, 1, len, fp);
-		fclose(fp);
+		CHECK_EQ(fwrite(d, 1, len, fp), len);
+		CHECK_EQ(fclose(fp), 0);
 	}
 	char *win = path_to_windows(path);
 	WCHAR *w = win ? utf8_to_utf16_dup(win) : NULL;
@@ -406,18 +412,22 @@ static void check(ITypeLib *lib)
 		CHECK_EQ(fd->callconv, CC_STDCALL);
 		CHECK_EQ(fd->oVft, 3 * P);
 		CHECK_EQ(fd->elemdescFunc.tdesc.vt, VT_HRESULT);
-		CHECK_EQ(fd->cParams, 1);
-		CHECK(fd->lprgelemdescParam[0].tdesc.vt == VT_PTR &&
-		      fd->lprgelemdescParam[0].tdesc.lptdesc->vt == VT_I4);
+		CHECK_EQ(fd->cParams, 2);
+		CHECK_EQ(fd->lprgelemdescParam[0].tdesc.vt, VT_I4);
 		CHECK_EQ(fd->lprgelemdescParam[0].paramdesc.wParamFlags,
+			 PARAMFLAG_FIN);	/* by value: [in] */
+		CHECK(fd->lprgelemdescParam[1].tdesc.vt == VT_PTR &&
+		      fd->lprgelemdescParam[1].tdesc.lptdesc->vt == VT_I4);
+		CHECK_EQ(fd->lprgelemdescParam[1].paramdesc.wParamFlags,
 			 PARAMFLAG_FOUT | PARAMFLAG_FRETVAL);
-		BSTR pn[3] = { 0 };
+		BSTR pn[4] = { 0 };
 		UINT got = 0;
-		CHECK_EQ(ti->lpVtbl->GetNames(ti, 7, pn, 3, &got), S_OK);
-		CHECK_EQ(got, 2);
-		if (got == 2) {
+		CHECK_EQ(ti->lpVtbl->GetNames(ti, 7, pn, 4, &got), S_OK);
+		CHECK_EQ(got, 3);
+		if (got == 3) {
 			CHECK(is(pn[0], "Get"));
-			CHECK(is(pn[1], "pv"));
+			CHECK(is(pn[1], "n"));
+			CHECK(is(pn[2], "pv"));
 		}
 		ti->lpVtbl->ReleaseFuncDesc(ti, fd);
 	}
@@ -459,11 +469,9 @@ int main(void)
 		HRESULT hr = pLoadTypeLib(p, &l);
 		free(p);
 		if (SUCCEEDED(hr) || l) {
-			/* The tail past the name table's last name may go. */
 			if (l)
 				l->lpVtbl->Release(l);
-			if (cut < len - 16)
-				bad++;
+			bad++;
 		}
 	}
 	CHECK_EQ(bad, 0);

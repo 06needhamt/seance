@@ -63,9 +63,9 @@ static HGLOBAL global_copy(HGLOBAL h, UINT flags)
 	if (!h || !size || !alloc || !lock || !unlock || !gfree)
 		return NULL;
 	SIZE_T n = size(h);
-	HGLOBAL d = alloc(flags ? flags : GMEM_MOVEABLE, n ? n : 1);
-	if (!d)
-		return NULL;
+	HGLOBAL d = alloc(flags ? flags : GMEM_MOVEABLE, n);
+	if (!d || !n)
+		return d;	/* empty stays empty, with nothing to lock */
 	void *src = lock(h), *dst = lock(d);
 	if (!src || !dst) {
 		if (src)
@@ -1102,11 +1102,18 @@ WINFN(HRESULT) cd_GetData(IDataObject *self, FORMATETC *fmt, STGMEDIUM *med)
 		return hr;
 	HANDLE h = get ? get(fmt->cfFormat) : NULL;
 	HGLOBAL copy = h ? global_copy(h, 0) : NULL;
+	/* A second copy for a stream, should the bytes not be a storage:
+	 * h is the clipboard's, not to be touched once it is closed. */
+	int both = !(fmt->tymed & TYMED_HGLOBAL) &&
+		   (fmt->tymed & TYMED_ISTORAGE) && (fmt->tymed & TYMED_ISTREAM);
+	HGLOBAL spare = copy && both ? global_copy(h, 0) : NULL;
 	clip_close();
 	if (!h)
 		return DV_E_FORMATETC;
-	if (!copy)
+	if (!copy || (both && !spare)) {
+		global_free(copy);
 		return E_OUTOFMEMORY;
+	}
 	/* As asked: the memory itself, a stream over it, or the storage
 	 * it holds (a flushed storage format). */
 	if (fmt->tymed & TYMED_HGLOBAL) {
@@ -1117,14 +1124,13 @@ WINFN(HRESULT) cd_GetData(IDataObject *self, FORMATETC *fmt, STGMEDIUM *med)
 	if (fmt->tymed & TYMED_ISTORAGE) {
 		hr = ole_storage_on_hglobal(copy, &med->pstg);
 		if (SUCCEEDED(hr)) {
+			global_free(spare);
 			med->tymed = TYMED_ISTORAGE;
 			return S_OK;
 		}
-		if (!(fmt->tymed & TYMED_ISTREAM))
+		if (!both)
 			return DV_E_TYMED;	/* it freed copy */
-		copy = global_copy(h, 0);
-		if (!copy)
-			return E_OUTOFMEMORY;
+		copy = spare;
 	}
 	hr = ole_stream_on_hglobal(copy, TRUE, &med->pstm);
 	if (FAILED(hr)) {
@@ -1954,9 +1960,9 @@ WINFN(HRESULT) ole_CoTreatAsClass(REFCLSID old, REFCLSID newc)
 	char path[300];
 	snprintf(path, sizeof(path), "%s\\%s\\TreatAs", class_roots[1], key);
 	reg_lock();
-	/* A clear clears what resolution sees: the per-user redirect, which
-	 * comes first, as well as the machine's. */
-	if (guid_eq(newc, &null_clsid) || guid_eq(newc, old)) {
+	/* Any change is to what resolution sees: the per-user redirect,
+	 * which comes first, goes, and the machine's is changed. */
+	{
 		char user[300];
 		snprintf(user, sizeof(user), "%s\\%s\\TreatAs", class_roots[0],
 			 key);

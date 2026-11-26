@@ -190,7 +190,10 @@ struct typelib {
 	/* hrefs of other libraries' types that this one's views show */
 	struct tl_foreign *foreign;
 	size_t nforeign;
-	pthread_mutex_t lock;		/* imports[], foreign[] */
+	pthread_mutex_t lock;		/* imports[], foreign[], dlls[] */
+	/* the DLLs AddressOfMember loaded, held while the library is */
+	struct module **dlls;
+	size_t ndlls;
 
 	struct arena_block *arena;
 	BSTR *bstrs;			/* to free with the library */
@@ -198,6 +201,8 @@ struct typelib {
 
 	IUnknown *outer;		/* a view's maker (held), or NULL */
 	oa_outer_qi outer_qi;
+	UINT *outer_ids;		/* the maker's ids of the types */
+	UINT nouter_ids;
 };
 
 static const ITypeLib2Vtbl typelib_vtbl;
@@ -289,10 +294,14 @@ static void lib_free(struct typelib *lib)
 		lib->arena = b->next;
 		win_free(b);
 	}
+	for (size_t i = 0; i < lib->ndlls; i++)
+		mod_free(lib->dlls[i]);
+	free(lib->dlls);
 	pthread_mutex_destroy(&lib->lock);
 	free(lib->bstrs);
 	free(lib->imports);
 	free(lib->foreign);
+	free(lib->outer_ids);
 	free(lib->data);
 	free(lib->key);
 	IUnknown *outer = lib->outer;
@@ -735,8 +744,8 @@ static int msft_members(struct msft *m, struct tl_type *t, INT memoffset)
 			d->cParams = nargs;
 			d->cParamsOpt = rd16(p + 22);
 			/* In this host's pointers, which must fit a SHORT. */
-			long vft = (long)(rd16(p + 12) & ~1) * PTR_SIZE /
-				   lib->ptr_size;
+			long vft = (long)((USHORT)rd16(p + 12) & ~1u) *
+				   PTR_SIZE / lib->ptr_size;
 			if (vft > 0x7fff)
 				return -1;
 			d->oVft = (SHORT)vft;
@@ -1433,13 +1442,22 @@ HRESULT oa_typelib_from_bytes(const void *d, size_t len, ITypeLib **out)
 }
 
 HRESULT oa_typelib_view(const void *d, size_t len, IUnknown *outer,
-			oa_outer_qi qi, ITypeLib **out)
+			oa_outer_qi qi, const UINT *ids, UINT nids,
+			ITypeLib **out)
 {
 	struct typelib *lib;
 	HRESULT hr = lib_from_bytes(d, len, "memory", &lib);
 
 	if (hr != S_OK)
 		return hr;
+	if (ids && nids) {
+		if (!(lib->outer_ids = malloc(nids * sizeof(*ids)))) {
+			lib_release(lib);
+			return E_OUTOFMEMORY;
+		}
+		memcpy(lib->outer_ids, ids, nids * sizeof(*ids));
+		lib->nouter_ids = nids;
+	}
 	outer->lpVtbl->AddRef(outer);
 	lib->outer = outer;
 	lib->outer_qi = qi;
@@ -1997,6 +2015,14 @@ static struct tl_func *view_func(struct tl_type *t, UINT i,
  * ITypeInfo2.
  */
 
+/* The maker's id of the view's type index: -2 (none) past its map. */
+static int outer_id(const struct typelib *lib, UINT index)
+{
+	if (!lib->outer_ids)
+		return (int)index;
+	return index < lib->nouter_ids ? (int)lib->outer_ids[index] : -2;
+}
+
 WINFN(HRESULT) ti_QueryInterface(ITypeInfo2 *self, REFIID riid, void **ppv)
 {
 	struct typelib *lib = type_of(self)->lib;
@@ -2005,8 +2031,8 @@ WINFN(HRESULT) ti_QueryInterface(ITypeInfo2 *self, REFIID riid, void **ppv)
 		return E_POINTER;
 	if (lib->outer && riid && !guid_eq(riid, &IID_ITypeInfo) &&
 	    !guid_eq(riid, &IID_ITypeInfo2))
-		return lib->outer_qi(lib->outer, (int)type_of(self)->index,
-				     riid, ppv);
+		return lib->outer_qi(lib->outer, outer_id(lib,
+					type_of(self)->index), riid, ppv);
 	if (riid && (guid_eq(riid, &oa_IID_IUnknown) ||
 		     guid_eq(riid, &IID_ITypeInfo) ||
 		     guid_eq(riid, &IID_ITypeInfo2))) {
@@ -2088,7 +2114,8 @@ static HREFTYPE foreign_href(struct typelib *lib, struct typelib *other,
 
 		if (f->href == href && guid_eq(&f->lib.libid, &other->attr.guid) &&
 		    f->lib.major == other->attr.wMajorVerNum &&
-		    f->lib.minor == other->attr.wMinorVerNum)
+		    f->lib.minor == other->attr.wMinorVerNum &&
+		    f->lib.lcid == other->attr.lcid)
 			goto found;
 	}
 	if (i < FOREIGN_MAX) {
@@ -2605,9 +2632,9 @@ WINFN(HRESULT) ti_GetRefTypeInfo(ITypeInfo2 *self, HREFTYPE href,
 }
 
 /*
- * A module's function's address: its DLL loaded (and kept loaded, as
- * Windows keeps it while the type library is), and its entry looked up by
- * name or ordinal.
+ * A module's function's address: its DLL loaded (and kept loaded, once,
+ * while the type library is), and its entry looked up by name or
+ * ordinal.
  */
 WINFN(HRESULT) ti_AddressOfMember(ITypeInfo2 *self, MEMBERID memid,
 				  INVOKEKIND kind, PVOID *addr)
@@ -2636,6 +2663,28 @@ WINFN(HRESULT) ti_AddressOfMember(ITypeInfo2 *self, MEMBERID memid,
 	free(n);
 	if (!m)
 		return TYPE_E_CANTLOADLIBRARY;
+	/* The library holds the DLL once; this load's reference goes if it
+	 * already does, or if the entry isn't there. */
+	struct typelib *lib = type_of(self)->lib;
+	int keep = 0;
+	if (*addr) {
+		pthread_mutex_lock(&lib->lock);
+		size_t i = 0;
+		while (i < lib->ndlls && lib->dlls[i] != m)
+			i++;
+		if (i == lib->ndlls) {
+			struct module **g = realloc(lib->dlls,
+						    (i + 1) * sizeof(*g));
+			if (g) {
+				lib->dlls = g;
+				lib->dlls[lib->ndlls++] = m;
+				keep = 1;
+			}
+		}
+		pthread_mutex_unlock(&lib->lock);
+	}
+	if (!keep)
+		mod_free(m);	/* (still held, if found) */
 	return *addr ? S_OK : TYPE_E_DLLFUNCTIONNOTFOUND;
 }
 

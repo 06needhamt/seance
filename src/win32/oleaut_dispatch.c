@@ -214,6 +214,7 @@ static HRESULT dispcall(void *self, const void *fn, CALLCONV cc, VARTYPE ret,
 	uintptr_t *words;
 	VARIANT *copies = NULL;
 	void **records = NULL;
+	ULONG *sizes = NULL;		/* each record's, asked once */
 	size_t n = 0, extra = 0;
 	uint64_t out[2] = { 0, 0 };
 	int fp = 0;
@@ -233,23 +234,31 @@ static HRESULT dispcall(void *self, const void *fn, CALLCONV cc, VARTYPE ret,
 #endif
 	if (!fn)
 		return E_INVALIDARG;
+	if (count && !(sizes = calloc(count, sizeof(*sizes))))
+		return E_OUTOFMEMORY;
 	/* Records by value: their size, which on i386 they take whole. */
 	for (UINT i = 0; i < count; i++) {
 		if (types[i] != VT_RECORD)
 			continue;
 		ULONG size;
 		if (!args[i] || !(size = record_size(args[i])) ||
-		    size > 0x10000)
+		    size > 0x10000) {
+			free(sizes);
 			return DISP_E_BADVARTYPE;
+		}
+		sizes[i] = size;
 		extra += (size + sizeof(uintptr_t) - 1) / sizeof(uintptr_t);
 	}
 	switch (ret) {
 	case VT_VARIANT:
 	case VT_DECIMAL:
-		if (!result)
+		if (!result) {
+			free(sizes);
 			return E_INVALIDARG;
+		}
 		break;
 	case VT_RECORD:
+		free(sizes);
 		return DISP_E_BADVARTYPE;
 	case VT_R4:
 		fp = 4;
@@ -260,13 +269,16 @@ static HRESULT dispcall(void *self, const void *fn, CALLCONV cc, VARTYPE ret,
 		break;
 	}
 	if (!(words = calloc(2 + (size_t)count * VARIANT_WORDS + extra,
-			     sizeof(*words))))
+			     sizeof(*words)))) {
+		free(sizes);
 		return E_OUTOFMEMORY;
+	}
 #if defined(__x86_64__)
 	if (count && (!(copies = calloc(count, sizeof(*copies))) ||
 		      !(records = calloc(count, sizeof(*records))))) {
 		free(copies);
 		free(words);
+		free(sizes);
 		return E_OUTOFMEMORY;
 	}
 #endif
@@ -336,7 +348,7 @@ static HRESULT dispcall(void *self, const void *fn, CALLCONV cc, VARTYPE ret,
 #endif
 			break;
 		case VT_RECORD: {
-			ULONG size = record_size(a);
+			ULONG size = sizes[i];	/* what was laid out */
 #if defined(__x86_64__)
 			/*
 			 * 1, 2, 4 or 8 bytes go in the argument's word; any
@@ -382,6 +394,7 @@ done:
 	free(records);
 	free(copies);
 	free(words);
+	free(sizes);
 	return hr;
 }
 

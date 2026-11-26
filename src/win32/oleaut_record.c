@@ -75,11 +75,13 @@ static HRESULT field_type(ITypeInfo *ti, const TYPEDESC *td, struct field *f,
 		return S_OK;
 	case VT_SAFEARRAY: {
 		struct field e = { 0 };
-		if (!td->lptdesc ||
-		    FAILED(field_type(ti, td->lptdesc, &e, depth + 1)) ||
-		    e.vt == VT_EMPTY || e.vt == VT_RECORD) {
-			if (e.rec)
-				e.rec->lpVtbl->Release(e.rec);
+		HRESULT ehr = td->lptdesc ?
+			      field_type(ti, td->lptdesc, &e, depth + 1) :
+			      E_FAIL;
+		/* An array of records carries its own record info. */
+		if (e.rec)
+			e.rec->lpVtbl->Release(e.rec);
+		if (FAILED(ehr) || e.vt == VT_EMPTY) {
 			f->vt = VT_EMPTY;	/* (only bytes, then) */
 			return S_OK;
 		}
@@ -213,9 +215,11 @@ static HRESULT record_new(ITypeInfo *ti, int depth, IRecordInfo **out)
 		 * A field too small for its type (a record laid out for
 		 * other pointers than this process's) can't be used.
 		 */
-		if (rec->fields[i].vt != VT_EMPTY &&
-		    rec->fields[i].vt != VT_RECORD &&
-		    vt_storage(&rec->fields[i]) > rec->fields[i].size) {
+		ULONG need = rec->fields[i].vt == VT_RECORD ?
+			     rec_of(rec->fields[i].rec)->size :
+			     rec->fields[i].vt != VT_EMPTY ?
+			     vt_storage(&rec->fields[i]) : 0;
+		if (need > rec->fields[i].size) {
 			TRACE("GetRecordInfoFromTypeInfo: field %u is too "
 			      "small for its type", i);
 			hr = E_INVALIDARG;

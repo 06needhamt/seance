@@ -71,6 +71,7 @@ struct sltg {
 	size_t len;
 	int bad;
 	size_t nt;		/* the name table */
+	size_t lo, hi;		/* the block being read (hi 0: the file) */
 	ICreateTypeLib2 *ctl;
 	UINT ntypes;
 	/* TYPEDESCs and ARRAYDESCs for the member being added */
@@ -78,9 +79,17 @@ struct sltg {
 	int ntd;
 };
 
+/* Is [o, o + n) inside the block being read, and the file? */
+static int in_block(struct sltg *s, size_t o, size_t n)
+{
+	size_t lo = s->hi ? s->lo : 0, hi = s->hi ? s->hi : s->len;
+
+	return o >= lo && o <= hi && hi - o >= n;
+}
+
 static WORD w16(struct sltg *s, size_t o)
 {
-	if (o > s->len || s->len - o < 2) {
+	if (!in_block(s, o, 2)) {
 		if (!s->bad)
 			TRACE("SLTG: a WORD past the end (%zu)", o);
 		s->bad = 1;
@@ -96,7 +105,7 @@ static DWORD w32(struct sltg *s, size_t o)
 
 static BYTE b8(struct sltg *s, size_t o)
 {
-	if (o >= s->len) {
+	if (!in_block(s, o, 1)) {
 		s->bad = 1;
 		return 0;
 	}
@@ -105,7 +114,7 @@ static BYTE b8(struct sltg *s, size_t o)
 
 static void get_guid(struct sltg *s, size_t o, GUID *g)
 {
-	if (o > s->len || s->len - o < sizeof(GUID)) {
+	if (!in_block(s, o, sizeof(GUID))) {
 		s->bad = 1;
 		memset(g, 0, sizeof(*g));
 		return;
@@ -154,7 +163,7 @@ static WCHAR *counted(struct sltg *s, size_t *o)
 	*o += 2;
 	if (n == 0xffff)
 		return NULL;
-	if (*o > s->len || s->len - *o < n) {
+	if (!in_block(s, *o, n)) {
 		s->bad = 1;
 		return NULL;
 	}
@@ -179,12 +188,6 @@ static void td_clear(struct sltg *s)
 {
 	while (s->ntd)
 		free(s->td[--s->ntd]);
-}
-
-static int is_ident(BYTE c)
-{
-	return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
-	       (c >= 'a' && c <= 'z') || c == '_';
 }
 
 /* ---- types ---- */
@@ -300,7 +303,7 @@ static int hex_field(const char **p, char stop, unsigned *out)
 static int parse_guid(const char *p, GUID *g)
 {
 	unsigned v[11];
-	int n;
+	int n = -1;	/* stays so unless %n is reached */
 
 	if (sscanf(p, "{%8x-%4x-%4x-%2x%2x-%2x%2x%2x%2x%2x%2x}%n", &v[0],
 		   &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8],
@@ -523,20 +526,12 @@ static void do_funcs(struct sltg *s, ICreateTypeInfo2 *cti, size_t items,
 			int inline_type;
 
 			pa += 2;
-			if (n == 0xffff || n == 0xfffe) {
-				inline_type = n == 0xffff;
-			} else {
-				/*
-				 * Its type follows inline when the offset is
-				 * to the name's second letter, else the next
-				 * WORD is the type's offset.
-				 */
-				size_t at = s->nt + n;
-				inline_type = n && at <= s->len &&
-					      is_ident(b8(s, at - 1));
-				names[k + 1] = name_at(s, inline_type ?
-							      n - 1 : n);
-			}
+			/* Bit 0: the type follows inline, else the next
+			 * WORD is its offset. The rest is the name's
+			 * offset (0xffff and 0xfffe: no name). */
+			inline_type = n & 1;
+			if (n != 0xffff && n != 0xfffe)
+				names[k + 1] = name_at(s, (WORD)(n & ~1));
 			if (inline_type) {
 				do_elem(s, &pa, items, refs, &params[k]);
 			} else {
@@ -569,10 +564,8 @@ static void do_funcs(struct sltg *s, ICreateTypeInfo2 *cti, size_t items,
 							      want) != S_OK)
 				TRACE("SLTG: function %u's names", i);
 		}
-		WCHAR *doc = name_at(s, w16(s, q + 0x0c));
-		if (!s->bad && doc)
-			cti->lpVtbl->SetFuncDocString(cti, i, doc);
-		free(doc);
+		/* +0x0c, the help string, is in the member block, as
+		 * compressed documentation, which isn't read. */
 		for (int k = 0; k <= fd.cParams && k < 33; k++)
 			free(names[k]);
 		if (next == 0xffff)
@@ -595,8 +588,12 @@ static void do_impls(struct sltg *s, ICreateTypeInfo2 *cti, size_t items,
 			break;
 		}
 		if (ref < refs->n && refs->href[ref] != (HREFTYPE)-1) {
-			if (cti->lpVtbl->AddImplType(cti, i, refs->href[ref]) ==
-			    S_OK && flags)
+			if (cti->lpVtbl->AddImplType(cti, i, refs->href[ref]) !=
+			    S_OK) {
+				s->bad = 1;	/* not a partial library */
+				break;
+			}
+			if (flags)
 				cti->lpVtbl->SetImplTypeFlags(cti, i, flags);
 		}
 		if (next == 0xffff)
@@ -605,8 +602,20 @@ static void do_impls(struct sltg *s, ICreateTypeInfo2 *cti, size_t items,
 	}
 }
 
-/* The type at block o, type info index i. */
-static void do_type_block(struct sltg *s, ICreateTypeInfo2 *cti, size_t o)
+static void do_block(struct sltg *s, ICreateTypeInfo2 *cti, size_t o);
+
+/* The type in the block at o, len bytes: what it says is read from the
+ * block only (its names from the name table). */
+static void do_type_block(struct sltg *s, ICreateTypeInfo2 *cti, size_t o,
+			  size_t len)
+{
+	s->lo = o;
+	s->hi = o + len;
+	do_block(s, cti, o);
+	s->lo = s->hi = 0;
+}
+
+static void do_block(struct sltg *s, ICreateTypeInfo2 *cti, size_t o)
 {
 	struct refs refs = { 0 };
 	DWORD href_table = w32(s, o + 2), elem = w32(s, o + 10);
@@ -652,8 +661,9 @@ static void do_type_block(struct sltg *s, ICreateTypeInfo2 *cti, size_t o)
 		HREFTYPE h;
 		if (oa_ctl_import(s->ctl, &stdole_libid, 2, 0, 0,
 				  "stdole2.tlb", &stdole_types[1], 4,
-				  &h) == S_OK)
-			cti->lpVtbl->AddImplType(cti, 0, h);
+				  &h) != S_OK ||
+		    cti->lpVtbl->AddImplType(cti, 0, h) != S_OK)
+			s->bad = 1;
 		break;
 	}
 	case TKIND_INTERFACE:
@@ -695,19 +705,24 @@ static HRESULT convert(struct sltg *s)
 
 	/* The blocks in their chain's order; the last is the library's. */
 	size_t *blk = calloc(nent, sizeof(*blk));
+	size_t *blen = calloc(nent, sizeof(*blen));
 	UINT *ent = calloc(nent, sizeof(*ent));
+	/* the block of each type, found by its index string */
+	size_t *tblk = calloc(nent, sizeof(*tblk));
+	size_t *tlen = calloc(nent, sizeof(*tlen));
 	struct oti *oti = NULL;
 	ICreateTypeInfo2 **ctis = NULL;
 	UINT n = 0;
-	if (!blk || !ent) {
+	if (!blk || !blen || !ent || !tblk || !tlen) {
 		hr = E_OUTOFMEMORY;
 		goto out;
 	}
 	for (UINT e = first - 1; n < nent;) {
 		blk[n] = at;
+		blen[n] = w32(s, 0x24 + 8 * (size_t)e);
 		ent[n++] = e;
 		WORD next = w16(s, 0x24 + 8 * (size_t)e + 6);
-		at += w32(s, 0x24 + 8 * (size_t)e);
+		at += blen[n - 1];
 		if (!next)
 			break;
 		if (next > nent) {
@@ -797,7 +812,7 @@ static HRESULT convert(struct sltg *s)
 		goto out;
 	}
 	for (UINT i = 0; i < s->ntypes && hr == S_OK; i++) {
-		size_t o = blk[i];
+		size_t o = blk[i], olen = blen[i];
 		/* Its block is the one with its index string. */
 		for (UINT b = 0; b + 1 < n; b++) {
 			size_t is = magic_at + w16(s, 0x24 + 8 *
@@ -809,10 +824,12 @@ static HRESULT convert(struct sltg *s)
 			    !memcmp(a, s->d + oti[i].index_name,
 				    oti[i].index_len)) {
 				o = blk[b];
+				olen = blen[b];
 				break;
 			}
 		}
-		blk[i] = o;	/* (the library block is done with) */
+		tblk[i] = o;
+		tlen[i] = olen;
 		if (w16(s, o) != TIHEADER_MAGIC) {
 			hr = TYPE_E_INVDATAREAD;
 			break;
@@ -838,7 +855,7 @@ static HRESULT convert(struct sltg *s)
 		cti->lpVtbl->SetHelpContext(cti, oti[i].help_ctx);
 	}
 	for (UINT i = 0; i < s->ntypes && hr == S_OK; i++) {
-		do_type_block(s, ctis[i], blk[i]);
+		do_type_block(s, ctis[i], tblk[i], tlen[i]);
 		if (s->bad)
 			hr = TYPE_E_INVDATAREAD;
 	}
@@ -850,6 +867,9 @@ out:
 	free(ctis);
 	free(oti);
 	free(blk);
+	free(blen);
+	free(tblk);
+	free(tlen);
 	free(ent);
 	return s->bad && hr == S_OK ? TYPE_E_INVDATAREAD : hr;
 }

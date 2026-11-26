@@ -1066,8 +1066,10 @@ static void test_errors(void)
 	CHECK(!lib);
 	CHECK_EQ(pLoadTypeLib(NULL, &lib), E_INVALIDARG);
 	p = write_lib("sltg.tlb", sltg, sizeof(sltg));
+	CHECK(p != NULL);
 	/* An SLTG header with nothing after it: read, and found bad. */
-	CHECK(FAILED(pLoadTypeLib(p, &lib)));
+	lib = (ITypeLib *)1;
+	CHECK_EQ(pLoadTypeLib(p, &lib), TYPE_E_CANTLOADLIBRARY);
 	CHECK(!lib);
 	free(p);
 	p = write_lib("junk.tlb", "junk", 4);

@@ -1103,6 +1103,13 @@ static void test_treat_as(void)
 	CHECK_EQ(CoGetTreatAsClass(&clsid_a, &c), S_OK);
 	CHECK_EQ(CoTreatAsClass(&clsid_a, &null_clsid), S_OK);
 	CHECK_EQ(CoGetTreatAsClass(&clsid_a, &c), S_FALSE);
+	/* ... and replaced, by a new class. */
+	set_value("HKEY_CURRENT_USER\\Software\\Classes\\CLSID\\" CLSID_A
+		  "\\TreatAs", "{0C0C0C0C-0001-0002-0304-05060708090A}");
+	CHECK_EQ(CoTreatAsClass(&clsid_a, &clsid_b), S_OK);
+	CHECK_EQ(CoGetTreatAsClass(&clsid_a, &c), S_OK);
+	CHECK(!memcmp(&c, &clsid_b, sizeof(c)));
+	CHECK_EQ(CoTreatAsClass(&clsid_a, &null_clsid), S_OK);
 	CHECK_EQ(CoTreatAsClass(&clsid_b, &clsid_a), REGDB_E_CLASSNOTREG);
 	CHECK_EQ(CoRevokeClassObject(cookie), S_OK);
 }

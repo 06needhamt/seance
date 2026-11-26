@@ -146,6 +146,7 @@ struct ctl;
 struct c_type {
 	ICreateTypeInfo2 iface;
 	struct ctl *lib;
+	UINT id;		/* for views: kept as others are deleted */
 	TYPEKIND kind;
 	WCHAR *name, *doc, *dll;
 	GUID guid;
@@ -202,6 +203,9 @@ struct ctl {
 	UINT nrefs;
 	BYTE *last;		/* the last view's image, or NULL */
 	size_t last_len;
+	UINT *last_ids;		/* the ids of its types, in its order */
+	UINT nlast_ids;
+	UINT next_id;
 };
 
 static const ICreateTypeLib2Vtbl ctl_vtbl;
@@ -388,6 +392,7 @@ static void ctl_free(struct ctl *lib)
 	free(lib->refs_out);
 	free(lib->types);
 	free(lib->last);
+	free(lib->last_ids);
 	free(lib->path);
 	free(lib->name);
 	free(lib->doc);
@@ -1342,18 +1347,28 @@ WINFN(HRESULT) ctl_QueryInterface(ICreateTypeLib2 *self, REFIID riid,
 WINFN(HRESULT) cti_QueryInterface(ICreateTypeInfo2 *self, REFIID riid,
 				  void **ppv);
 
-/* What a snapshot asks its creator: the library's or a type's interfaces. */
-static HRESULT outer_qi(IUnknown *outer, int index, REFIID riid, void **ppv)
+static struct c_type *type_by_id(struct ctl *lib, int id)
+{
+	for (UINT i = 0; id >= 0 && i < lib->ntypes; i++)
+		if (lib->types[i]->id == (UINT)id)
+			return lib->types[i];
+	return NULL;
+}
+
+/* What a snapshot asks its creator: the library's or a type's interfaces,
+ * the type by its id, so a view taken before a deletion still finds it. */
+static HRESULT outer_qi(IUnknown *outer, int id, REFIID riid, void **ppv)
 {
 	struct ctl *lib = (struct ctl *)outer;
+	struct c_type *t;
 
-	if (index < 0)
+	if (id == -1)
 		return ctl_QueryInterface(&lib->iface, riid, ppv);
-	if ((UINT)index >= lib->ntypes) {	/* deleted since */
+	if (!(t = type_by_id(lib, id))) {	/* deleted since */
 		*ppv = NULL;
 		return E_NOINTERFACE;
 	}
-	return cti_QueryInterface(&lib->types[index]->iface, riid, ppv);
+	return cti_QueryInterface(&t->iface, riid, ppv);
 }
 
 /* The library as it stands, loaded as a type library: a view of lib. */
@@ -1364,16 +1379,37 @@ static HRESULT snapshot(struct ctl *lib, ITypeLib **out)
 	HRESULT hr = serialize(lib, &d, &len);
 
 	if (hr == S_OK) {
+		UINT *ids = malloc((lib->ntypes ? lib->ntypes : 1) *
+				   sizeof(*ids));
+		if (!ids) {
+			free(d);
+			return E_OUTOFMEMORY;
+		}
+		for (UINT i = 0; i < lib->ntypes; i++)
+			ids[i] = lib->types[i]->id;
 		free(lib->last);
+		free(lib->last_ids);
 		lib->last = d;
 		lib->last_len = len;
+		lib->last_ids = ids;
+		lib->nlast_ids = lib->ntypes;
 	} else if (!lib->last) {
 		return hr;
 	}
 	/* A draft that won't lay out still answers QueryInterface, as
 	 * it did: with the last view that did. LayOut and saving refuse it. */
 	return oa_typelib_view(lib->last, lib->last_len,
-			       (IUnknown *)&lib->iface, outer_qi, out);
+			       (IUnknown *)&lib->iface, outer_qi, lib->last_ids,
+			       lib->nlast_ids, out);
+}
+
+/* t's index in the last view's image, or -1 if it isn't in it. */
+static int last_index(const struct c_type *t)
+{
+	for (UINT i = 0; i < t->lib->nlast_ids; i++)
+		if (t->lib->last_ids[i] == t->id)
+			return (int)i;
+	return -1;
 }
 
 /* ---- ICreateTypeLib2 ---- */
@@ -1456,6 +1492,7 @@ WINFN(HRESULT) ctl_CreateTypeInfo(ICreateTypeLib2 *self, LPOLESTR name,
 	lib->types = n;
 	t->iface.lpVtbl = &cti_vtbl;
 	t->lib = lib;
+	t->id = lib->next_id++;
 	t->kind = kind;
 	n[lib->ntypes++] = t;
 	ctl_AddRef(self);
@@ -1725,8 +1762,11 @@ WINFN(HRESULT) cti_QueryInterface(ICreateTypeInfo2 *self, REFIID riid,
 		HRESULT hr = snapshot(t->lib, &tl);
 		if (hr != S_OK)
 			return hr;
-		hr = tl->lpVtbl->GetTypeInfo(tl, type_index(t),
-					     (ITypeInfo **)ppv);
+		/* Where the image has it: a type added since the last
+		 * image that laid out isn't in it. */
+		int at = last_index(t);
+		hr = at < 0 ? TYPE_E_ELEMENTNOTFOUND :
+		     tl->lpVtbl->GetTypeInfo(tl, (UINT)at, (ITypeInfo **)ppv);
 		tl->lpVtbl->Release(tl);
 		return hr;
 	}
@@ -1856,6 +1896,16 @@ WINFN(HRESULT) cti_AddRefTypeInfo(ICreateTypeInfo2 *self, ITypeInfo *info,
 		return hr;
 	if (is_ours(lib, other)) {
 		other->lpVtbl->Release(other);
+		/* A view's type is the one its id names, wherever it is
+		 * now; another copy of this library's, by its index. */
+		ICreateTypeInfo2 *mine = NULL;
+		if (SUCCEEDED(info->lpVtbl->QueryInterface(
+			    info, &IID_ICreateTypeInfo2, (void **)&mine))) {
+			struct c_type *c = cti_of(mine);
+			int found = c->lib == lib && !c->deleted;
+			index = found ? type_index(c) : lib->ntypes;
+			mine->lpVtbl->Release(mine);
+		}
 		if (index >= lib->ntypes)
 			return TYPE_E_ELEMENTNOTFOUND;
 		*href = index * MSFT_TYPEINFO_SIZE;
@@ -1910,9 +1960,24 @@ WINFN(HRESULT) cti_AddRefTypeInfo(ICreateTypeInfo2 *self, ITypeInfo *info,
 	if (creator)
 		maker->lpVtbl->Release(maker);
 	r->info = creator ? NULL : info;
+	/* A dual interface's dispatch view: what derives from it inherits
+	 * its vtable half's slots, not IDispatch's seven. */
+	ITypeInfo *half = NULL;
+	HREFTYPE hh;
+	if (kind == TKIND_DISPATCH && (attr.wTypeFlags & TYPEFLAG_FDUAL) &&
+	    SUCCEEDED(info->lpVtbl->GetRefTypeOfImplType(info, -1, &hh)) &&
+	    SUCCEEDED(info->lpVtbl->GetRefTypeInfo(info, hh, &half))) {
+		TYPEATTR *ha;
+		if (SUCCEEDED(half->lpVtbl->GetTypeAttr(half, &ha))) {
+			attr.cbSizeVft = ha->cbSizeVft;
+			half->lpVtbl->ReleaseTypeAttr(half, ha);
+		}
+	}
 	r->attr = attr;
 	r->have_attr = 1;
-	r->depth = info_depth(info, 0);
+	r->depth = info_depth(half ? half : info, 0);
+	if (half)
+		half->lpVtbl->Release(half);
 	r->libid = la->guid;
 	r->guid = guid;
 	r->lcid = la->lcid;
@@ -2560,7 +2625,8 @@ HRESULT oa_ctl_import(ICreateTypeLib2 *self, const GUID *libid, WORD major,
 	for (UINT i = 0; i < lib->nrefs; i++) {
 		struct c_ref *r = &lib->refs_out[i];
 		if (guid_eq(&r->libid, libid) && guid_eq(&r->guid, &g) &&
-		    (guid || r->index == index)) {
+		    (guid || r->index == index) && r->major == major &&
+		    r->minor == minor && r->lcid == lcid) {
 			*out = ext_href(i);
 			return S_OK;
 		}

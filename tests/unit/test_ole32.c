@@ -1193,6 +1193,8 @@ static void test_storage_share(void)
 	FN(HRESULT, CreateILockBytesOnHGlobal, HGLOBAL, BOOL, ILockBytes **);
 	FN(HRESULT, StgCreateDocfileOnILockBytes, ILockBytes *, DWORD, DWORD,
 	   IStorage **);
+	FN(HRESULT, StgOpenStorageOnILockBytes, ILockBytes *, IStorage *, DWORD,
+	   SNB, DWORD, IStorage **);
 	WCHAR *file = wide("C:\\shared.stg");
 	IStorage *r1 = NULL, *r2 = NULL;
 	const DWORD TX = STGM_READWRITE | STGM_TRANSACTED |
@@ -1337,6 +1339,39 @@ static void test_storage_share(void)
 	ULONG got = 0;
 	CHECK_EQ(lb->lpVtbl->ReadAt(lb, zero, head, 10, &got), S_OK);
 	CHECK(got == 10 && !memcmp(head, "plain text", 10));
+
+	/* Reverted, then committed with no other change: the converted
+	 * tree is still what Commit writes. */
+	stg = NULL;
+	CHECK_EQ(StgCreateDocfileOnILockBytes(lb, RW | STGM_CONVERT |
+					      STGM_TRANSACTED, 0, &stg),
+		 STG_S_CONVERTED);
+	if (stg) {
+		CHECK_EQ(stg->lpVtbl->Revert(stg), S_OK);
+		CHECK_EQ(stg->lpVtbl->Commit(stg, STGC_DEFAULT), S_OK);
+		stg->lpVtbl->Release(stg);
+	}
+	static const BYTE cf[4] = { 0xd0, 0xcf, 0x11, 0xe0 };
+	CHECK_EQ(lb->lpVtbl->ReadAt(lb, zero, head, 4, &got), S_OK);
+	CHECK(got == 4 && !memcmp(head, cf, 4));
+	stg = NULL;
+	CHECK_EQ(StgOpenStorageOnILockBytes(lb, NULL, RW, NULL, 0, &stg),
+		 S_OK);
+	if (stg) {
+		WCHAR *cn = wide("\x03" "CONTENTS");
+		IStream *s = NULL;
+		CHECK_EQ(stg->lpVtbl->OpenStream(stg, cn, NULL, STGM_READ | EXCL,
+						 0, &s), S_OK);
+		if (s) {
+			char buf[16] = { 0 };
+			CHECK_EQ(s->lpVtbl->Read(s, buf, sizeof(buf), &got),
+				 S_OK);
+			CHECK(got == 10 && !memcmp(buf, "plain text", 10));
+			s->lpVtbl->Release(s);
+		}
+		free(cn);
+		stg->lpVtbl->Release(stg);
+	}
 	lb->lpVtbl->Release(lb);
 }
 

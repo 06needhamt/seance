@@ -807,6 +807,10 @@ static void test_delete(void)
 	CHECK_EQ(c->lpVtbl->AddVarDesc(c, 0, &vd), S_OK);
 	CHECK_EQ(c->lpVtbl->SetVarName(c, 0, w("a")), S_OK);
 
+	/* A's ITypeInfo from a view of [B, A, C], kept over B's deletion. */
+	ITypeInfo *old_a = NULL;
+	CHECK_EQ(a->lpVtbl->QueryInterface(a, &IID_ITypeInfo,
+					   (void **)&old_a), S_OK);
 	CHECK_EQ(ctl->lpVtbl->DeleteTypeInfo(ctl, w("Nope")),
 		 TYPE_E_ELEMENTNOTFOUND);
 	CHECK_EQ(ctl->lpVtbl->DeleteTypeInfo(ctl, NULL), E_INVALIDARG);
@@ -820,6 +824,34 @@ static void test_delete(void)
 	CHECK_EQ(b->lpVtbl->QueryInterface(b, &IID_ITypeInfo, (void **)&bti),
 		 TYPE_E_ELEMENTNOTFOUND);
 	CHECK(bti == NULL);
+	/* It is still A, which is now type 0: its creator is a, and a
+	 * reference to it is to A, not C. */
+	if (old_a) {
+		ICreateTypeInfo *back = NULL;
+		CHECK_EQ(old_a->lpVtbl->QueryInterface(old_a,
+						       &IID_ICreateTypeInfo,
+						       (void **)&back), S_OK);
+		CHECK(back == a);
+		if (back)
+			back->lpVtbl->Release(back);
+		HREFTYPE ha = 1;
+		CHECK_EQ(c->lpVtbl->AddRefTypeInfo(c, old_a, &ha), S_OK);
+		CHECK_EQ(ha, 0);
+		old_a->lpVtbl->Release(old_a);
+	}
+	/* A's own ITypeInfo now, from the new image: named A. */
+	ITypeInfo *now_a = NULL;
+	CHECK_EQ(a->lpVtbl->QueryInterface(a, &IID_ITypeInfo,
+					   (void **)&now_a), S_OK);
+	if (now_a) {
+		BSTR nm = NULL;
+		CHECK_EQ(now_a->lpVtbl->GetDocumentation(now_a, MEMBERID_NIL,
+							 &nm, NULL, NULL, NULL),
+			 S_OK);
+		CHECK(nm && nm[0] == 'A' && !nm[1]);
+		pSysFreeString(nm);
+		now_a->lpVtbl->Release(now_a);
+	}
 	/* A name freed by the deletion can be used again. */
 	ICreateTypeInfo *b2 = make(ctl, "B", TKIND_ENUM);
 	CHECK_EQ(c->lpVtbl->Invalidate(c), S_OK);
@@ -932,7 +964,11 @@ static void test_review(ITypeLib *std)
 	ITypeLib *tl = NULL;
 	CHECK_EQ(ctl->lpVtbl->QueryInterface(ctl, &IID_ITypeLib, (void **)&tl),
 		 S_OK);
-	if (tl && tl->lpVtbl->GetTypeInfo(tl, 0, &ti) == S_OK) {
+	ti = NULL;
+	CHECK(tl != NULL);
+	if (tl)
+		CHECK_EQ(tl->lpVtbl->GetTypeInfo(tl, 0, &ti), S_OK);
+	if (ti) {
 		CHECK_EQ(ti->lpVtbl->GetFuncDesc(ti, 0, &f), S_OK);
 		CHECK_EQ(f->oVft, 3 * P);
 		/* One base: MIDL's 0x60010000, not IUnknown's own IDs. */
@@ -943,7 +979,10 @@ static void test_review(ITypeLib *std)
 		ti->lpVtbl->ReleaseFuncDesc(ti, f);
 		ti->lpVtbl->Release(ti);
 	}
-	if (tl && tl->lpVtbl->GetTypeInfo(tl, 2, &ti) == S_OK) {
+	ti = NULL;
+	if (tl)
+		CHECK_EQ(tl->lpVtbl->GetTypeInfo(tl, 2, &ti), S_OK);
+	if (ti) {
 		ITypeInfo *half = NULL, *base = NULL;
 		CHECK_EQ(ti->lpVtbl->GetRefTypeOfImplType(ti, (UINT)-1, &h),
 			 S_OK);
@@ -985,6 +1024,12 @@ static void test_review(ITypeLib *std)
 					     (void **)&tl2), S_OK);
 	if (tl2)
 		tl2->lpVtbl->Release(tl2);
+	/* The image that view is of hasn't RBig, and no other type stands
+	 * in for it. */
+	ITypeInfo *rti = (ITypeInfo *)1;
+	CHECK_EQ(r->lpVtbl->QueryInterface(r, &IID_ITypeInfo, (void **)&rti),
+		 TYPE_E_ELEMENTNOTFOUND);
+	CHECK(rti == NULL);
 	CHECK(FAILED(ctl->lpVtbl->SaveAllChanges(ctl)));
 	CHECK_EQ(ctl->lpVtbl->DeleteTypeInfo(ctl, w("RBig")), S_OK);
 	r->lpVtbl->Release(r);
@@ -1024,11 +1069,14 @@ static void test_review(ITypeLib *std)
 	ICreateTypeInfo *e1 = make(l1, "E1", TKIND_RECORD);
 	ICreateTypeInfo *e2 = make(l2, "E2", TKIND_RECORD);
 	ITypeInfo *t1 = NULL, *t2 = NULL;
-	if (e1 && e2 &&
-	    e1->lpVtbl->QueryInterface(e1, &IID_ITypeInfo, (void **)&t1) ==
-	    S_OK &&
-	    e2->lpVtbl->QueryInterface(e2, &IID_ITypeInfo, (void **)&t2) ==
-	    S_OK) {
+	CHECK(e1 && e2);
+	if (e1)
+		CHECK_EQ(e1->lpVtbl->QueryInterface(e1, &IID_ITypeInfo,
+						    (void **)&t1), S_OK);
+	if (e2)
+		CHECK_EQ(e2->lpVtbl->QueryInterface(e2, &IID_ITypeInfo,
+						    (void **)&t2), S_OK);
+	if (t1 && t2) {
 		CHECK_EQ(e1->lpVtbl->AddRefTypeInfo(e1, t2, &h), S_OK);
 		CHECK_EQ(h & 3, 1);	/* an import, not E1's own */
 		CHECK_EQ(e2->lpVtbl->AddRefTypeInfo(e2, t1, &h), S_OK);
@@ -1042,6 +1090,50 @@ static void test_review(ITypeLib *std)
 		e1->lpVtbl->Release(e1);
 	if (e2)
 		e2->lpVtbl->Release(e2);
+
+	/* Derived from another library's dual interface (its dispatch view,
+	 * one method after IDispatch's seven): the next slot is the 9th. */
+	ICreateTypeInfo *du = make(l1, "IDu", TKIND_INTERFACE);
+	ICreateTypeInfo *der = make(l2, "IDer", TKIND_INTERFACE);
+	ITypeInfo *dv = NULL;
+	CHECK(du && der);
+	if (du && der) {
+		CHECK_EQ(du->lpVtbl->SetTypeFlags(du, TYPEFLAG_FDUAL |
+						  TYPEFLAG_FOLEAUTOMATION),
+			 S_OK);
+		fd.oVft = -1;
+		CHECK_EQ(du->lpVtbl->AddFuncDesc(du, 0, &fd), S_OK);
+		CHECK_EQ(du->lpVtbl->LayOut(du), S_OK);
+		CHECK_EQ(du->lpVtbl->QueryInterface(du, &IID_ITypeInfo,
+						    (void **)&dv), S_OK);
+	}
+	if (dv) {
+		TYPEATTR *da = NULL;
+		CHECK_EQ(dv->lpVtbl->GetTypeAttr(dv, &da), S_OK);
+		CHECK(da && da->typekind == TKIND_DISPATCH);
+		if (da)
+			dv->lpVtbl->ReleaseTypeAttr(dv, da);
+		CHECK_EQ(der->lpVtbl->AddRefTypeInfo(der, dv, &h), S_OK);
+		CHECK_EQ(der->lpVtbl->AddImplType(der, 0, h), S_OK);
+		CHECK_EQ(der->lpVtbl->AddFuncDesc(der, 0, &fd), S_OK);
+		CHECK_EQ(der->lpVtbl->LayOut(der), S_OK);
+		ITypeInfo *di = NULL;
+		CHECK_EQ(der->lpVtbl->QueryInterface(der, &IID_ITypeInfo,
+						     (void **)&di), S_OK);
+		if (di) {
+			CHECK_EQ(di->lpVtbl->GetFuncDesc(di, 0, &f), S_OK);
+			if (f) {
+				CHECK_EQ(f->oVft, 8 * P);
+				di->lpVtbl->ReleaseFuncDesc(di, f);
+			}
+			di->lpVtbl->Release(di);
+		}
+		dv->lpVtbl->Release(dv);
+	}
+	if (du)
+		du->lpVtbl->Release(du);
+	if (der)
+		der->lpVtbl->Release(der);
 two:
 	if (l1)
 		CHECK_EQ(l1->lpVtbl->Release(l1), 0);
