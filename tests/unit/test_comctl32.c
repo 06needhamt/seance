@@ -11,6 +11,9 @@
 #include "runtime/runtime.h"
 #include "test.h"
 #include "win32/codepage.h"
+#include "win32/commctrl.h"
+#include "win32/objbase.h"
+#include "win32/winreg.h"
 
 static struct module *cc, *u32, *gdi;
 
@@ -173,6 +176,151 @@ static void test_dpa(void)
 	CHECK(DPA_Destroy(d));
 	CHECK(!DPA_Destroy(NULL));
 	CHECK(DPA_GetPtr(NULL, 0) == NULL);
+}
+
+/* DPA_Merge and the stream form. */
+
+static int merged, inserted, deleted;
+
+static int WINAPI cmp_exact(void *x, void *y, LPARAM lp)
+{
+	INT_PTR a = (INT_PTR)x, b = (INT_PTR)y;
+	return (a > b) - (a < b);
+}
+
+static PVOID WINAPI merge_cb(UINT msg, PVOID d, PVOID s, LPARAM lp)
+{
+	switch (msg) {
+	case DPAMM_MERGE:
+		merged++;
+		return (PVOID)((INT_PTR)d + (INT_PTR)lp);	/* marks it */
+	case DPAMM_INSERT:
+		inserted++;
+		return d;
+	case DPAMM_DELETE:
+		deleted++;
+		return NULL;
+	}
+	return NULL;
+}
+
+static HRESULT WINAPI save_item(DPASTREAMINFO *info, IStream *s, void *data)
+{
+	INT_PTR v = (INT_PTR)info->pvItem;
+	DWORD x = (DWORD)v;
+	return s->lpVtbl->Write(s, &x, sizeof(x), NULL);
+}
+
+static HRESULT WINAPI load_item(DPASTREAMINFO *info, IStream *s, void *data)
+{
+	DWORD x = 0;
+	ULONG got = 0;
+	HRESULT hr = s->lpVtbl->Read(s, &x, sizeof(x), &got);
+	if (FAILED(hr) || got != sizeof(x))
+		return E_FAIL;
+	if (data && x == *(DWORD *)data)
+		return S_FALSE;		/* stop here */
+	info->pvItem = (void *)(INT_PTR)x;
+	return S_OK;
+}
+
+static void test_dpa_merge_stream(void)
+{
+	FN(HDPA, DPA_Create, INT);
+	FN(BOOL, DPA_Destroy, HDPA);
+	FN(INT, DPA_InsertPtr, HDPA, INT, LPVOID);
+	FN(LPVOID, DPA_GetPtr, HDPA, INT_PTR);
+	FN(BOOL, DPA_Merge, HDPA, HDPA, DWORD, PFNDACOMPARE, PFNDPAMERGE,
+	   LPARAM);
+	FN(HRESULT, DPA_SaveStream, HDPA, PFNDPASTREAM, IStream *, void *);
+	FN(HRESULT, DPA_LoadStream, HDPA *, PFNDPASTREAM, IStream *, void *);
+	CHECK(DPA_Merge == mod_get_ordinal(cc, 11));
+	CHECK(DPA_SaveStream == mod_get_ordinal(cc, 10));
+	CHECK(DPA_LoadStream == mod_get_ordinal(cc, 9));
+
+	/* Union: in both merged, only in src inserted; unsorted input is
+	 * sorted first. */
+	HDPA d = DPA_Create(4), s = DPA_Create(4);
+	static const int dv[] = { 30, 10, 50 }, sv[] = { 40, 10, 50, 60 };
+	for (int i = 0; i < 3; i++)
+		DPA_InsertPtr(d, DA_LAST, (void *)(INT_PTR)dv[i]);
+	for (int i = 0; i < 4; i++)
+		DPA_InsertPtr(s, DA_LAST, (void *)(INT_PTR)sv[i]);
+	merged = inserted = deleted = 0;
+	CHECK(DPA_Merge(d, s, DPAM_UNION, cmp_exact, merge_cb, 1));
+	CHECK(merged == 2 && inserted == 2 && deleted == 0);
+	static const int want_u[] = { 11, 30, 40, 51, 60 };
+	CHECK_EQ(*(int *)d, 5);
+	for (int i = 0; i < 5; i++)
+		CHECK(DPA_GetPtr(d, i) == (void *)(INT_PTR)want_u[i]);
+	DPA_Destroy(d);
+
+	/* Intersect, both sorted already: only what is in both stays. */
+	d = DPA_Create(4);
+	static const int dv2[] = { 10, 40, 60, 70 };
+	for (int i = 0; i < 4; i++)
+		DPA_InsertPtr(d, DA_LAST, (void *)(INT_PTR)dv2[i]);
+	DPA_Destroy(s);
+	s = DPA_Create(4);
+	for (int i = 0; i < 4; i++)
+		DPA_InsertPtr(s, DA_LAST, (void *)(INT_PTR)(10 + i * 20));
+	merged = inserted = deleted = 0;	/* s: 10 30 50 70 */
+	CHECK(DPA_Merge(d, s, DPAM_SORTED | DPAM_INTERSECT, cmp_exact,
+			merge_cb, 0));
+	CHECK(merged == 2 && inserted == 0 && deleted == 2);
+	CHECK(*(int *)d == 2 && DPA_GetPtr(d, 0) == (void *)10 &&
+	      DPA_GetPtr(d, 1) == (void *)70);
+	CHECK(!DPA_Merge(NULL, s, 0, cmp_exact, merge_cb, 0));
+
+	/* Saved and loaded back, through a stream on global memory. */
+	struct module *ole = mod_load("ole32.dll", NULL);
+	CHECK(ole != NULL);
+	if (ole) {
+		HRESULT (WINAPI *CreateStreamOnHGlobal)(HGLOBAL, BOOL,
+							IStream **) =
+			(HRESULT (WINAPI *)(HGLOBAL, BOOL, IStream **))
+			get_from(ole, "CreateStreamOnHGlobal");
+		IStream *st = NULL;
+		CHECK_EQ(CreateStreamOnHGlobal(NULL, TRUE, &st), S_OK);
+		if (st) {
+			DWORD junk = 0xabcd;
+			st->lpVtbl->Write(st, &junk, 4, NULL); /* not at 0 */
+			CHECK_EQ(DPA_SaveStream(s, save_item, st, NULL), S_OK);
+			ULARGE_INTEGER at;
+			LARGE_INTEGER z = { .QuadPart = 0 };
+			st->lpVtbl->Seek(st, z, STREAM_SEEK_CUR, &at);
+			CHECK_EQ(at.QuadPart, 4 + 12 + 16);
+			LARGE_INTEGER four = { .QuadPart = 4 };
+			st->lpVtbl->Seek(st, four, STREAM_SEEK_SET, NULL);
+			DWORD head[3];
+			st->lpVtbl->Read(st, head, sizeof(head), NULL);
+			CHECK(head[0] == 28 && head[1] == 1 && head[2] == 4);
+			st->lpVtbl->Seek(st, four, STREAM_SEEK_SET, NULL);
+			HDPA l = NULL;
+			CHECK_EQ(DPA_LoadStream(&l, load_item, st, NULL), S_OK);
+			CHECK(l && *(int *)l == 4 &&
+			      DPA_GetPtr(l, 3) == (void *)70);
+			DPA_Destroy(l);
+			/* A callback that stops: what loaded is kept. */
+			st->lpVtbl->Seek(st, four, STREAM_SEEK_SET, NULL);
+			DWORD stop = 50;
+			l = NULL;
+			CHECK_EQ(DPA_LoadStream(&l, load_item, st, &stop),
+				 S_FALSE);
+			CHECK(l && *(int *)l == 2);
+			DPA_Destroy(l);
+			/* Not a saved array. */
+			st->lpVtbl->Seek(st, z, STREAM_SEEK_SET, NULL);
+			l = (HDPA)1;
+			CHECK_EQ(DPA_LoadStream(&l, load_item, st, NULL),
+				 E_FAIL);
+			CHECK(l == NULL);
+			st->lpVtbl->Release(st);
+		}
+		mod_free(ole);
+	}
+	DPA_Destroy(d);
+	DPA_Destroy(s);
 }
 
 struct item {
@@ -767,6 +915,68 @@ static void test_imagelist(void)
 	CHECK(m && ImageList_GetIconSize(m, &cx, &cy) && cx == 6 && cy == 2);
 	CHECK(ImageList_Destroy(m));
 
+	/* Written to a stream and read back: the same images and mask. */
+	struct module *ole = mod_load("ole32.dll", NULL);
+	CHECK(ole != NULL);
+	if (ole) {
+		FN(BOOL, ImageList_Write, HIMAGELIST, IStream *);
+		FN(HRESULT, ImageList_WriteEx, HIMAGELIST, DWORD, IStream *);
+		FN(HIMAGELIST, ImageList_Read, IStream *);
+		HRESULT (WINAPI *CreateStreamOnHGlobal)(HGLOBAL, BOOL,
+							IStream **) =
+			(HRESULT (WINAPI *)(HGLOBAL, BOOL, IStream **))
+			get_from(ole, "CreateStreamOnHGlobal");
+		IStream *st = NULL;
+		CHECK_EQ(CreateStreamOnHGlobal(NULL, TRUE, &st), S_OK);
+		LARGE_INTEGER z = { .QuadPart = 0 };
+		if (st) {
+			ImageList_SetBkColor(il, RGB(9, 8, 7));
+			CHECK(ImageList_Write(il, st));
+			CHECK_EQ(ImageList_WriteEx(il, 1, st), S_OK);
+			CHECK_EQ(ImageList_WriteEx(il, 2, st), E_INVALIDARG);
+			st->lpVtbl->Seek(st, z, STREAM_SEEK_SET, NULL);
+			WORD head[7];
+			st->lpVtbl->Read(st, head, sizeof(head), NULL);
+			CHECK(head[0] == 0x4c49 && head[1] == 0x101 &&
+			      head[2] == 3 && head[5] == 4 && head[6] == 2);
+			st->lpVtbl->Seek(st, z, STREAM_SEEK_SET, NULL);
+			for (int k = 0; k < 2; k++) {	/* Write, WriteEx */
+				HIMAGELIST r = ImageList_Read(st);
+				CHECK(r != NULL);
+				if (!r)
+					break;
+				CHECK_EQ(ImageList_GetImageCount(r), 3);
+				CHECK(ImageList_GetIconSize(r, &cx, &cy) &&
+				      cx == 4 && cy == 2);
+				CHECK_EQ(ImageList_SetBkColor(r, CLR_NONE),
+					 RGB(9, 8, 7));
+				for (int i = 0; i < 3; i++) {
+					DWORD want[16];
+					for (int j = 0; j < 32; j++)
+						dst[j] = 0x00ff00;
+					ImageList_Draw(il, i, dc, 0, 0,
+						       ILD_TRANSPARENT);
+					memcpy(want, dst, sizeof(want));
+					for (int j = 0; j < 32; j++)
+						dst[j] = 0x00ff00;
+					ImageList_Draw(r, i, dc, 0, 0,
+						       ILD_TRANSPARENT);
+					CHECK(!memcmp(want, dst, sizeof(want)));
+				}
+				ImageList_Destroy(r);
+			}
+			/* Not an image list. */
+			st->lpVtbl->Seek(st, z, STREAM_SEEK_SET, NULL);
+			DWORD junk = 0x12345678;
+			st->lpVtbl->Write(st, &junk, 4, NULL);
+			st->lpVtbl->Seek(st, z, STREAM_SEEK_SET, NULL);
+			CHECK(ImageList_Read(st) == NULL);
+			CHECK(!ImageList_Write(NULL, st));
+			st->lpVtbl->Release(st);
+			ImageList_SetBkColor(il, CLR_NONE);
+		}
+	}
+
 	/* Icons: blank and transparent. A new size drops every image. */
 	HICON icon = LoadIconW(NULL, (LPCWSTR)(ULONG_PTR)32512);
 	CHECK_EQ(ImageList_AddIcon(il, icon), 3);
@@ -1059,6 +1269,238 @@ static void test_fixture(void)
 	mod_free(m);
 }
 
+/* Flat scroll bars, over user32's scroll bar state. */
+static void test_flatsb(void)
+{
+	FN(BOOL, InitializeFlatSB, HWND);
+	FN(HRESULT, UninitializeFlatSB, HWND);
+	FN(BOOL, FlatSB_GetScrollProp, HWND, INT, int *);
+	FN(BOOL, FlatSB_SetScrollProp, HWND, UINT, INT_PTR, BOOL);
+	FN(int, FlatSB_SetScrollInfo, HWND, int, LPSCROLLINFO, BOOL);
+	FN(BOOL, FlatSB_GetScrollInfo, HWND, int, LPSCROLLINFO);
+	FN(int, FlatSB_SetScrollPos, HWND, int, int, BOOL);
+	FN(int, FlatSB_GetScrollPos, HWND, int);
+	FN(BOOL, FlatSB_SetScrollRange, HWND, int, int, int, BOOL);
+	FN(BOOL, FlatSB_GetScrollRange, HWND, int, int *, int *);
+	FN(BOOL, FlatSB_ShowScrollBar, HWND, int, BOOL);
+	FN(BOOL, FlatSB_EnableScrollBar, HWND, int, UINT);
+	USER(HWND, CreateWindowExW, DWORD, LPCWSTR, LPCWSTR, DWORD, int, int,
+	     int, int, HWND, HMENU, HINSTANCE, LPVOID);
+	USER(BOOL, DestroyWindow, HWND);
+	USER(int, GetSystemMetrics, int);
+
+	HWND h = CreateWindowExW(0, w("STATIC"), NULL, WS_CHILD | WS_VSCROLL,
+				 0, 0, 50, 50, parent, NULL, NULL, NULL);
+	CHECK(h != NULL);
+	int v = -1, lo = -1, hi = -1;
+	CHECK(!FlatSB_GetScrollProp(h, WSB_PROP_CYVSCROLL, &v));
+	CHECK(InitializeFlatSB(h) && InitializeFlatSB(h));
+	CHECK(FlatSB_GetScrollProp(h, WSB_PROP_CYVSCROLL, &v) &&
+	      v == GetSystemMetrics(20));
+	CHECK(FlatSB_GetScrollProp(h, WSB_PROP_VSTYLE, &v) &&
+	      v == FSB_REGULAR_MODE);
+	CHECK(FlatSB_SetScrollProp(h, WSB_PROP_VSTYLE, FSB_FLAT_MODE, FALSE));
+	CHECK(FlatSB_GetScrollProp(h, WSB_PROP_VSTYLE, &v) &&
+	      v == FSB_FLAT_MODE);
+	CHECK(!FlatSB_SetScrollProp(h, WSB_PROP_VSTYLE, 7, FALSE));
+	CHECK(!FlatSB_SetScrollProp(h, WSB_PROP_WINSTYLE, 0, FALSE));
+	CHECK(!FlatSB_SetScrollProp(h, 3, 0, FALSE));	/* two bits */
+	CHECK(FlatSB_GetScrollProp(h, WSB_PROP_WINSTYLE, &v) &&
+	      v == WS_VSCROLL);
+
+	/* The default range, then a page that holds the position back. */
+	CHECK(FlatSB_GetScrollRange(h, SB_VERT, &lo, &hi) && lo == 0 &&
+	      hi == 100);
+	CHECK(FlatSB_GetScrollRange(h, SB_CTL, &lo, &hi) && lo == 0 &&
+	      hi == 0);
+	SCROLLINFO si = { sizeof(si), SIF_ALL, 0, 99, 10, 95, 0 };
+	CHECK_EQ(FlatSB_SetScrollInfo(h, SB_VERT, &si, FALSE), 90);
+	memset(&si, 0, sizeof(si));
+	si.cbSize = sizeof(si);
+	si.fMask = SIF_ALL;
+	CHECK(FlatSB_GetScrollInfo(h, SB_VERT, &si));
+	CHECK(si.nMin == 0 && si.nMax == 99 && si.nPage == 10 &&
+	      si.nPos == 90 && si.nTrackPos == 90);
+	si.fMask = 0;
+	CHECK(!FlatSB_GetScrollInfo(h, SB_VERT, &si));
+	CHECK_EQ(FlatSB_SetScrollPos(h, SB_VERT, -5, FALSE), 90);
+	CHECK_EQ(FlatSB_GetScrollPos(h, SB_VERT), 0);
+	si = (SCROLLINFO){ sizeof(si), SIF_PAGE, 0, 0, 500, 0, 0 };
+	FlatSB_SetScrollInfo(h, SB_VERT, &si, FALSE);	/* the whole range */
+	si.fMask = SIF_PAGE;
+	CHECK(FlatSB_GetScrollInfo(h, SB_VERT, &si) && si.nPage == 100);
+	CHECK(FlatSB_SetScrollRange(h, SB_HORZ, 10, 20, FALSE));
+	CHECK_EQ(FlatSB_GetScrollPos(h, SB_HORZ), 10);
+	CHECK(!FlatSB_SetScrollRange(h, SB_HORZ, -0x7fffffff - 1, 0x7fffffff,
+				     FALSE));
+	CHECK(!FlatSB_GetScrollRange(h, 5, &lo, &hi));
+
+	/* Shown and enabled. */
+	CHECK(FlatSB_ShowScrollBar(h, SB_BOTH, TRUE));
+	CHECK(FlatSB_GetScrollProp(h, WSB_PROP_WINSTYLE, &v) &&
+	      v == (WS_HSCROLL | WS_VSCROLL));
+	CHECK(FlatSB_ShowScrollBar(h, SB_VERT, FALSE));
+	CHECK(FlatSB_GetScrollProp(h, WSB_PROP_WINSTYLE, &v) &&
+	      v == WS_HSCROLL);
+	CHECK(FlatSB_EnableScrollBar(h, SB_BOTH, ESB_DISABLE_LTUP));
+	CHECK(!FlatSB_EnableScrollBar(h, SB_BOTH, ESB_DISABLE_LTUP));
+	CHECK(FlatSB_EnableScrollBar(h, SB_VERT, ESB_ENABLE_BOTH));
+	CHECK(!FlatSB_EnableScrollBar(h, SB_VERT, ESB_ENABLE_BOTH));
+	CHECK(FlatSB_EnableScrollBar(h, SB_VERT, ESB_DISABLE_BOTH));
+
+	CHECK_EQ(UninitializeFlatSB(h), S_OK);
+	CHECK(!FlatSB_GetScrollProp(h, WSB_PROP_VSTYLE, &v));
+	CHECK(!InitializeFlatSB(NULL));
+	CHECK_EQ(FlatSB_GetScrollPos(NULL, SB_VERT), 0);
+	DestroyWindow(h);
+}
+
+/* MRU lists, in the registry. */
+static int WINAPI by_first(LPCVOID a, LPCVOID b, DWORD n)
+{
+	return *(const BYTE *)a != *(const BYTE *)b;
+}
+
+static void test_mru(void)
+{
+	FN(HANDLE, CreateMRUListA, const MRUINFOA *);
+	FN(HANDLE, CreateMRUListW, const MRUINFOW *);
+	FN(void, FreeMRUList, HANDLE);
+	FN(INT, AddMRUStringA, HANDLE, LPCSTR);
+	FN(INT, AddMRUStringW, HANDLE, LPCWSTR);
+	FN(INT, FindMRUStringA, HANDLE, LPCSTR, int *);
+	FN(INT, FindMRUStringW, HANDLE, LPCWSTR, int *);
+	FN(INT, EnumMRUListA, HANDLE, INT, LPVOID, DWORD);
+	FN(INT, EnumMRUListW, HANDLE, INT, LPVOID, DWORD);
+	FN(BOOL, DelMRUString, HANDLE, INT);
+	FN(INT, AddMRUData, HANDLE, LPCVOID, DWORD);
+	FN(INT, FindMRUData, HANDLE, LPCVOID, DWORD, int *);
+	CHECK(CreateMRUListA == mod_get_ordinal(cc, 151));
+	CHECK(AddMRUStringW == mod_get_ordinal(cc, 401));
+	CHECK(FindMRUData == mod_get_ordinal(cc, 169));
+
+	struct module *adv = mod_load("advapi32.dll", NULL);
+	CHECK(adv != NULL);
+	if (!adv)
+		return;
+	LONG (WINAPI *RegOpenKeyExA)(HKEY, LPCSTR, DWORD, REGSAM, PHKEY) =
+		(LONG (WINAPI *)(HKEY, LPCSTR, DWORD, REGSAM, PHKEY))
+		get_from(adv, "RegOpenKeyExA");
+	LONG (WINAPI *RegQueryValueExA)(HKEY, LPCSTR, LPDWORD, LPDWORD, LPBYTE,
+					LPDWORD) =
+		(LONG (WINAPI *)(HKEY, LPCSTR, LPDWORD, LPDWORD, LPBYTE,
+				 LPDWORD))get_from(adv, "RegQueryValueExA");
+	LONG (WINAPI *RegCloseKey)(HKEY) =
+		(LONG (WINAPI *)(HKEY))get_from(adv, "RegCloseKey");
+	LONG (WINAPI *RegDeleteTreeA)(HKEY, LPCSTR) =
+		(LONG (WINAPI *)(HKEY, LPCSTR))get_from(adv, "RegDeleteTreeA");
+	static const char sub[] = "Software\\seance-test\\MRU";
+	RegDeleteTreeA(HKEY_CURRENT_USER, sub);
+
+	MRUINFOA info = { sizeof(info), 3, MRU_STRING, HKEY_CURRENT_USER, sub,
+			  { NULL } };
+	HANDLE m = CreateMRUListA(&info);
+	CHECK(m != NULL);
+	if (!m)
+		return;
+	CHECK_EQ(EnumMRUListA(m, -1, NULL, 0), 0);
+	CHECK_EQ(AddMRUStringA(m, "one"), 0);
+	CHECK_EQ(AddMRUStringA(m, "two"), 1);
+	CHECK_EQ(AddMRUStringA(m, "three"), 2);
+	CHECK_EQ(AddMRUStringA(m, "ONE"), 0);	/* moves up */
+	CHECK_EQ(AddMRUStringA(m, "four"), 1);	/* takes two's place */
+	int slot = -1;
+	CHECK_EQ(FindMRUStringA(m, "two", &slot), -1);
+	CHECK(FindMRUStringA(m, "Three", &slot) == 2 && slot == 2);
+	CHECK_EQ(EnumMRUListA(m, -1, NULL, 0), 3);
+	char buf[16];
+	CHECK(EnumMRUListA(m, 1, buf, sizeof(buf)) == 3 && !strcmp(buf, "one"));
+	CHECK(EnumMRUListA(m, 0, buf, 3) == 2 && !strcmp(buf, "fo"));
+	CHECK_EQ(EnumMRUListA(m, 3, buf, sizeof(buf)), -1);
+	CHECK_EQ(AddMRUStringW(m, w("x")), -1);		/* the wrong kind */
+	CHECK_EQ(AddMRUData(m, "x", 1), -1);
+
+	HKEY k = NULL;
+	DWORD type, n = sizeof(buf);
+	CHECK_EQ(RegOpenKeyExA(HKEY_CURRENT_USER, sub, 0, KEY_READ, &k),
+		 ERROR_SUCCESS);
+	CHECK(RegQueryValueExA(k, "MRUList", NULL, &type, (BYTE *)buf, &n) ==
+		      ERROR_SUCCESS && type == REG_SZ && !strcmp(buf, "bac"));
+	n = sizeof(buf);
+	CHECK(RegQueryValueExA(k, "b", NULL, &type, (BYTE *)buf, &n) ==
+		      ERROR_SUCCESS && !strcmp(buf, "four"));
+	FreeMRUList(m);
+
+	/* Read back as it was; then one deleted. */
+	m = CreateMRUListA(&info);
+	CHECK(m && EnumMRUListA(m, -1, NULL, 0) == 3);
+	CHECK(EnumMRUListA(m, 2, buf, sizeof(buf)) == 5 &&
+	      !strcmp(buf, "three"));
+	CHECK(DelMRUString(m, 0));
+	CHECK(!DelMRUString(m, 2));
+	CHECK(EnumMRUListA(m, 0, buf, sizeof(buf)) == 3 && !strcmp(buf, "one"));
+	n = sizeof(buf);
+	CHECK(RegQueryValueExA(k, "MRUList", NULL, &type, (BYTE *)buf, &n) ==
+		      ERROR_SUCCESS && !strcmp(buf, "ac"));
+	n = sizeof(buf);
+	CHECK(RegQueryValueExA(k, "b", NULL, &type, (BYTE *)buf, &n) != 
+	      ERROR_SUCCESS);
+	FreeMRUList(m);
+	RegCloseKey(k);
+	RegDeleteTreeA(HKEY_CURRENT_USER, sub);
+
+	/* Wide strings, written only when freed. */
+	MRUINFOW wi = { sizeof(wi), 2, MRU_STRING | MRU_CACHEWRITE,
+			HKEY_CURRENT_USER, w("Software\\seance-test\\MRU"),
+			{ NULL } };
+	m = CreateMRUListW(&wi);
+	CHECK(m != NULL);
+	CHECK_EQ(AddMRUStringW(m, w("Alpha")), 0);
+	CHECK_EQ(AddMRUStringW(m, w("beta")), 1);
+	CHECK(FindMRUStringW(m, w("ALPHA"), &slot) == 1 && slot == 0);
+	WCHAR wb[8];
+	CHECK(EnumMRUListW(m, 0, wb, 8) == 4 && wb[0] == 'b' && wb[4] == 0);
+	CHECK(RegOpenKeyExA(HKEY_CURRENT_USER, sub, 0, KEY_READ, &k) ==
+	      ERROR_SUCCESS);
+	n = sizeof(buf);
+	CHECK(RegQueryValueExA(k, "MRUList", NULL, &type, (BYTE *)buf, &n) !=
+	      ERROR_SUCCESS);
+	FreeMRUList(m);
+	n = sizeof(buf);
+	CHECK(RegQueryValueExA(k, "MRUList", NULL, &type, (BYTE *)buf, &n) ==
+		      ERROR_SUCCESS && !strcmp(buf, "ba"));
+	m = CreateMRUListW(&wi);
+	CHECK(m && EnumMRUListW(m, 1, wb, 8) == 5 && wb[0] == 'A');
+	FreeMRUList(m);
+	RegCloseKey(k);
+	RegDeleteTreeA(HKEY_CURRENT_USER, sub);
+
+	/* Data, with a comparison of the first byte only. */
+	info.fFlags = MRU_BINARY;
+	info.u.binary_cmpfn = by_first;
+	m = CreateMRUListA(&info);
+	CHECK(m != NULL);
+	static const BYTE d1[] = { 1, 2, 3 }, d2[] = { 2, 0 }, d3[] = { 1, 9 };
+	CHECK_EQ(AddMRUData(m, d1, sizeof(d1)), 0);
+	CHECK_EQ(AddMRUData(m, d2, sizeof(d2)), 1);
+	CHECK(FindMRUData(m, d3, sizeof(d3), &slot) == 1 && slot == 0);
+	BYTE db[4] = { 0 };
+	CHECK(EnumMRUListA(m, 1, db, 2) == 3 && db[0] == 1 && db[1] == 2 &&
+	      db[2] == 0);
+	CHECK_EQ(AddMRUStringA(m, "x"), -1);
+	FreeMRUList(m);
+	m = CreateMRUListA(&info);
+	CHECK(m && FindMRUData(m, d2, sizeof(d2), NULL) == 0);
+	FreeMRUList(m);
+	RegDeleteTreeA(HKEY_CURRENT_USER, "Software\\seance-test");
+
+	info.cbSize = 8;
+	CHECK(CreateMRUListA(&info) == NULL);
+	CHECK_EQ(AddMRUStringA(NULL, "x"), -1);
+	FreeMRUList(NULL);
+	mod_free(adv);
+}
+
 int main(void)
 {
 	CHECK_EQ(runtime_enter(), 0);
@@ -1073,7 +1515,9 @@ int main(void)
 	mod_free(ocx);
 
 	test_dpa();
+	test_dpa_merge_stream();
 	test_dsa();
+	test_mru();
 	test_alloc_str();
 	test_classes();
 
@@ -1089,6 +1533,7 @@ int main(void)
 	test_status();
 	test_subclass();
 	test_imagelist();
+	test_flatsb();
 	test_sheets();
 	test_task_dialog();
 	test_misc();

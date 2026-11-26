@@ -14,6 +14,7 @@
 #include "win32/comctl.h"
 #include "win32/internal.h"
 #include "win32/k32.h"
+#include "win32/objbase.h"
 
 /* Alloc, ReAlloc, Free, GetSize. */
 
@@ -492,6 +493,169 @@ WINFN(void) cc_DPA_DestroyCallback(HDPA d, PFNDAENUMCALLBACK cb, LPVOID data)
 	cc_DPA_Destroy(d);
 }
 
+/*
+ * DPA_Merge: both arrays sorted by cmp (unless DPAM_SORTED says they
+ * are); items in both are merged into dst by merge(DPAMM_MERGE), items
+ * only in src are inserted (DPAMM_INSERT) for DPAM_UNION, and items only
+ * in dst are dropped (DPAMM_DELETE) for DPAM_INTERSECT. dst keeps its
+ * order.
+ */
+WINFN(BOOL) cc_DPA_Merge(HDPA dst, HDPA src, DWORD flags, PFNDACOMPARE cmp,
+			 PFNDPAMERGE merge, LPARAM lp)
+{
+	if (!dst || !src || !cmp || !merge)
+		return FALSE;
+	if (!(flags & DPAM_SORTED)) {
+		if (!cc_DPA_Sort(dst, cmp, lp) || !cc_DPA_Sort(src, cmp, lp))
+			return FALSE;
+	}
+	INT nd = dst->nItemCount, ns = src->nItemCount;
+	LPVOID *out = malloc(((size_t)nd + ns + 1) * sizeof(LPVOID));
+	if (!out)
+		return FALSE;
+	INT i = 0, j = 0, n = 0;
+	BOOL ok = TRUE;
+	while (ok && (i < nd || j < ns)) {
+		int c = i >= nd ? 1 : j >= ns ? -1 :
+			cmp(dst->ptrs[i], src->ptrs[j], lp);
+		if (!c) {
+			void *m = merge(DPAMM_MERGE, dst->ptrs[i++],
+					src->ptrs[j++], lp);
+			if (!m)
+				ok = FALSE;
+			else
+				out[n++] = m;
+		} else if (c < 0) {
+			/* only in dst */
+			if (flags & DPAM_INTERSECT)
+				merge(DPAMM_DELETE, dst->ptrs[i], NULL, lp);
+			else
+				out[n++] = dst->ptrs[i];
+			i++;
+		} else {
+			/* only in src */
+			if (flags & DPAM_UNION) {
+				void *m = merge(DPAMM_INSERT, src->ptrs[j],
+						NULL, lp);
+				if (!m)
+					ok = FALSE;
+				else
+					out[n++] = m;
+			}
+			j++;
+		}
+	}
+	/* What wasn't reached (after a failure) stays as it was. */
+	while (i < nd)
+		out[n++] = dst->ptrs[i++];
+	if (!dpa_reserve(dst, n)) {
+		free(out);
+		return FALSE;
+	}
+	memcpy(dst->ptrs, out, n * sizeof(LPVOID));
+	if (n < dst->nItemCount)
+		memset(dst->ptrs + n, 0,
+		       (dst->nItemCount - n) * sizeof(LPVOID));
+	dst->nItemCount = n;
+	free(out);
+	return ok;
+}
+
+/*
+ * The stream form: a header (its whole size, a version of 1, the item
+ * count), then whatever the callback writes for each item.
+ */
+struct dpa_stream_head {
+	DWORD size;
+	DWORD version;
+	DWORD items;
+};
+
+static HRESULT stream_pos(IStream *s, ULONGLONG *pos)
+{
+	LARGE_INTEGER zero = { .QuadPart = 0 };
+	ULARGE_INTEGER at;
+	HRESULT hr = s->lpVtbl->Seek(s, zero, STREAM_SEEK_CUR, &at);
+	*pos = at.QuadPart;
+	return hr;
+}
+
+static HRESULT stream_seek(IStream *s, ULONGLONG pos)
+{
+	LARGE_INTEGER to = { .QuadPart = (LONGLONG)pos };
+	return s->lpVtbl->Seek(s, to, STREAM_SEEK_SET, NULL);
+}
+
+WINFN(HRESULT) cc_DPA_SaveStream(HDPA d, PFNDPASTREAM save, IStream *s,
+				 LPVOID data)
+{
+	struct dpa_stream_head head = { 0, 1, 0 };
+	ULONGLONG start, end;
+	ULONG done = 0;
+	HRESULT hr;
+
+	if (!d || !save || !s)
+		return E_INVALIDARG;
+	if (FAILED(hr = stream_pos(s, &start)))
+		return hr;
+	head.items = (DWORD)d->nItemCount;
+	hr = s->lpVtbl->Write(s, &head, sizeof(head), &done);
+	if (FAILED(hr) || done != sizeof(head))
+		return FAILED(hr) ? hr : STG_E_MEDIUMFULL;
+	for (INT i = 0; i < d->nItemCount; i++) {
+		DPASTREAMINFO info = { i, d->ptrs[i] };
+		if ((hr = save(&info, s, data)) != S_OK)
+			return FAILED(hr) ? hr : E_FAIL;
+	}
+	if (FAILED(hr = stream_pos(s, &end)))
+		return hr;
+	head.size = (DWORD)(end - start);
+	if (FAILED(hr = stream_seek(s, start)) ||
+	    FAILED(hr = s->lpVtbl->Write(s, &head, sizeof(head), NULL)))
+		return hr;
+	return stream_seek(s, end);
+}
+
+WINFN(HRESULT) cc_DPA_LoadStream(HDPA *out, PFNDPASTREAM load, IStream *s,
+				 LPVOID data)
+{
+	struct dpa_stream_head head;
+	ULONG got = 0;
+	HRESULT hr;
+
+	if (!out || !load || !s)
+		return E_INVALIDARG;
+	*out = NULL;
+	hr = s->lpVtbl->Read(s, &head, sizeof(head), &got);
+	if (FAILED(hr))
+		return hr;
+	if (got != sizeof(head) || head.size < sizeof(head) ||
+	    head.version != 1 || head.items > 0x1000000)
+		return E_FAIL;
+	HDPA d = cc_DPA_Create(head.items > 8 ? (INT)head.items : 8);
+	if (!d)
+		return E_OUTOFMEMORY;
+	hr = S_OK;
+	for (DWORD i = 0; i < head.items; i++) {
+		DPASTREAMINFO info = { (int)i, NULL };
+		HRESULT r = load(&info, s, data);
+		if (r != S_OK) {
+			hr = S_FALSE;	/* (what loaded is kept) */
+			break;
+		}
+		if (cc_DPA_InsertPtr(d, (INT)i, info.pvItem) < 0) {
+			hr = E_OUTOFMEMORY;
+			break;
+		}
+	}
+	if (FAILED(hr)) {
+		cc_DPA_Destroy(d);
+		return hr;
+	}
+	*out = d;
+	return hr;
+}
+
 /* Most of these are imported by ordinal; the names are Windows' too. */
 #define E(name, ord) { #name, ord, (void *)cc_##name }
 
@@ -500,6 +664,9 @@ const struct builtin_export comctl_dpa_exports[] = {
 	E(ReAlloc, 72),
 	E(Free, 73),
 	E(GetSize, 74),
+	E(DPA_LoadStream, 9),
+	E(DPA_SaveStream, 10),
+	E(DPA_Merge, 11),
 	E(Str_GetPtrA, 233),
 	E(Str_SetPtrA, 234),
 	E(Str_GetPtrW, 235),

@@ -82,6 +82,11 @@ struct window {
 	DWORD tid;
 	int destroying;
 	struct prop *props;
+	struct sbar {		/* SB_HORZ, SB_VERT, SB_CTL */
+		int min, max, pos, track;
+		UINT page;
+		UINT disabled;	/* ESB_DISABLE_* */
+	} sb[3];
 };
 
 struct msg_node {
@@ -845,6 +850,7 @@ static HWND create_window(DWORD exstyle, const WCHAR *cls_name,
 			w->unicode = c->unicode;
 			w->nextra = c->wnd_extra;
 			w->style = style;
+			w->sb[SB_HORZ].max = w->sb[SB_VERT].max = 100;
 			w->exstyle = exstyle;
 			w->inst = inst;
 			w->tid = thread_current_id();
@@ -1858,6 +1864,213 @@ static HANDLE prop_a(HWND hwnd, const char *name, HANDLE data, int op)
 }
 
 WINFN(BOOL) user_SetPropA(HWND h, LPCSTR n, HANDLE d) { return prop_a(h, n, d, 1) != NULL || !d; }
+/*
+ * Scroll bars: their state per window (horizontal, vertical, and the
+ * window's own as a scroll bar control). Nothing is drawn; the range
+ * of a window's bars starts as 0-100, a control's as empty.
+ */
+
+#define ERROR_INVALID_SCROLLBAR_RANGE 1448
+
+static struct sbar *sbar_of(HWND h, int bar, struct window **out)
+{
+	struct window *w = get(h);
+	*out = w;
+	if (!w)
+		return NULL;
+	if (bar < SB_HORZ || bar > SB_CTL) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return NULL;
+	}
+	return &w->sb[bar];
+}
+
+/* The page fits the range, and the position the page. */
+static void sbar_clamp(struct sbar *b)
+{
+	unsigned long long span = (long long)b->max - b->min + 1;
+	if (b->page > span)
+		b->page = (UINT)span;
+	long long top = (long long)b->max - (b->page ? b->page - 1 : 0);
+	if (top < b->min)
+		top = b->min;
+	if (b->pos < b->min)
+		b->pos = b->min;
+	else if (b->pos > top)
+		b->pos = (int)top;
+}
+
+WINFN(int) user_SetScrollInfo(HWND h, int bar, LPCSCROLLINFO si,
+			      BOOL redraw)
+{
+	struct window *w;
+	int r = 0;
+
+	if (!si || (si->cbSize != sizeof(SCROLLINFO) &&
+		    si->cbSize != sizeof(SCROLLINFO) - sizeof(int))) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return 0;
+	}
+	enter();
+	struct sbar *b = sbar_of(h, bar, &w);
+	if (b) {
+		if (si->fMask & SIF_RANGE) {
+			b->min = si->nMin;
+			b->max = si->nMax < si->nMin ? si->nMin : si->nMax;
+		}
+		if (si->fMask & SIF_PAGE)
+			b->page = si->nPage;
+		if (si->fMask & SIF_POS)
+			b->pos = si->nPos;
+		sbar_clamp(b);
+		r = b->pos;
+	}
+	leave();
+	return r;
+}
+
+WINFN(BOOL) user_GetScrollInfo(HWND h, int bar, LPSCROLLINFO si)
+{
+	struct window *w;
+
+	if (!si || (si->cbSize != sizeof(SCROLLINFO) &&
+		    si->cbSize != sizeof(SCROLLINFO) - sizeof(int)) ||
+	    !(si->fMask & SIF_ALL)) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	enter();
+	struct sbar *b = sbar_of(h, bar, &w);
+	if (b) {
+		if (si->fMask & SIF_RANGE) {
+			si->nMin = b->min;
+			si->nMax = b->max;
+		}
+		if (si->fMask & SIF_PAGE)
+			si->nPage = b->page;
+		if (si->fMask & SIF_POS)
+			si->nPos = b->pos;
+		if ((si->fMask & SIF_TRACKPOS) &&
+		    si->cbSize == sizeof(SCROLLINFO))
+			si->nTrackPos = b->track ? b->track : b->pos;
+	}
+	leave();
+	return b != NULL;
+}
+
+WINFN(int) user_SetScrollPos(HWND h, int bar, int pos, BOOL redraw)
+{
+	struct window *w;
+	int old = 0;
+
+	enter();
+	struct sbar *b = sbar_of(h, bar, &w);
+	if (b) {
+		old = b->pos;
+		b->pos = pos;
+		sbar_clamp(b);
+	}
+	leave();
+	return old;
+}
+
+WINFN(int) user_GetScrollPos(HWND h, int bar)
+{
+	struct window *w;
+	int r = 0;
+
+	enter();
+	struct sbar *b = sbar_of(h, bar, &w);
+	if (b)
+		r = b->pos;
+	leave();
+	return r;
+}
+
+WINFN(BOOL) user_SetScrollRange(HWND h, int bar, int min, int max,
+				BOOL redraw)
+{
+	struct window *w;
+
+	if ((long long)max - min > 0x7fffffff) {
+		win_set_error(ERROR_INVALID_SCROLLBAR_RANGE);
+		return FALSE;
+	}
+	enter();
+	struct sbar *b = sbar_of(h, bar, &w);
+	if (b) {
+		b->min = min;
+		b->max = max < min ? min : max;
+		sbar_clamp(b);
+	}
+	leave();
+	return b != NULL;
+}
+
+WINFN(BOOL) user_GetScrollRange(HWND h, int bar, int *min, int *max)
+{
+	struct window *w;
+
+	enter();
+	struct sbar *b = sbar_of(h, bar, &w);
+	if (b) {
+		if (min)
+			*min = b->min;
+		if (max)
+			*max = b->max;
+	}
+	leave();
+	return b != NULL;
+}
+
+/* A window's bars show through WS_HSCROLL and WS_VSCROLL. */
+WINFN(BOOL) user_ShowScrollBar(HWND h, int bar, BOOL show)
+{
+	DWORD bits = bar == SB_HORZ ? WS_HSCROLL : bar == SB_VERT ? WS_VSCROLL :
+		     bar == SB_BOTH ? WS_HSCROLL | WS_VSCROLL : 0;
+	BOOL r = FALSE;
+
+	enter();
+	struct window *w = get(h);
+	if (w && bar == SB_CTL) {
+		w->style = show ? w->style | WS_VISIBLE : w->style & ~WS_VISIBLE;
+		r = TRUE;
+	} else if (w && bits) {
+		w->style = show ? w->style | bits : w->style & ~bits;
+		r = TRUE;
+	} else if (w) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+	}
+	leave();
+	return r;
+}
+
+/* FALSE when nothing changes. */
+WINFN(BOOL) user_EnableScrollBar(HWND h, UINT bar, UINT arrows)
+{
+	BOOL r = FALSE;
+
+	if (arrows > ESB_DISABLE_BOTH) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	enter();
+	struct window *w = get(h);
+	if (w && bar <= SB_BOTH) {
+		for (int i = SB_HORZ; i <= SB_CTL; i++) {
+			if (bar == SB_BOTH ? i == SB_CTL : (UINT)i != bar)
+				continue;
+			if (w->sb[i].disabled != arrows)
+				r = TRUE;
+			w->sb[i].disabled = arrows;
+		}
+	} else if (w) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+	}
+	leave();
+	return r;
+}
+
 WINFN(BOOL) user_SetPropW(HWND h, LPCWSTR n, HANDLE d) { return prop_w(h, n, d, 1) != NULL || !d; }
 WINFN(HANDLE) user_GetPropA(HWND h, LPCSTR n) { return prop_a(h, n, NULL, 0); }
 WINFN(HANDLE) user_GetPropW(HWND h, LPCWSTR n) { return prop_w(h, n, NULL, 0); }
@@ -2845,6 +3058,7 @@ const struct builtin_export u32_window_exports[] = {
 	E(DialogBoxParamW),
 	E(DispatchMessageA),
 	E(DispatchMessageW),
+	E(EnableScrollBar),
 	E(EnableWindow),
 	E(EndDialog),
 	E(EnumChildWindows),
@@ -2884,6 +3098,9 @@ const struct builtin_export u32_window_exports[] = {
 	E(GetParent),
 	E(GetPropA),
 	E(GetPropW),
+	E(GetScrollInfo),
+	E(GetScrollPos),
+	E(GetScrollRange),
 	E(GetWindowLongA),
 	E(GetWindowLongW),
 #if defined(__x86_64__)
@@ -2950,6 +3167,9 @@ const struct builtin_export u32_window_exports[] = {
 	E(SetParent),
 	E(SetPropA),
 	E(SetPropW),
+	E(SetScrollInfo),
+	E(SetScrollPos),
+	E(SetScrollRange),
 	E(SetTimer),
 	E(SetWindowLongA),
 	E(SetWindowLongW),
@@ -2960,6 +3180,7 @@ const struct builtin_export u32_window_exports[] = {
 	E(SetWindowPos),
 	E(SetWindowTextA),
 	E(SetWindowTextW),
+	E(ShowScrollBar),
 	E(ShowWindow),
 	E(TranslateMessage),
 	E(UnregisterClassA),

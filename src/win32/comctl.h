@@ -21,6 +21,7 @@ void comctl_free(void *p);
 
 /* The export tables of the other source files. */
 extern const struct builtin_export comctl_dpa_exports[];
+extern const struct builtin_export comctl_flatsb_exports[];
 extern const struct builtin_export comctl_imagelist_exports[];
 extern const struct builtin_export comctl_sheet_exports[];
 

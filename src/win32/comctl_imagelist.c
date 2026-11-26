@@ -12,7 +12,7 @@
  *
  * Icons are handles with nothing behind them in this user32, so an icon
  * added is a blank, fully transparent image, and ImageList_GetIcon hands
- * back a new such handle. There is nothing to drag, and no streams.
+ * back a new such handle. There is nothing to drag. Streams are below.
  */
 #include <pthread.h>
 #include <stdlib.h>
@@ -20,6 +20,7 @@
 
 #include "win32/comctl.h"
 #include "win32/internal.h"
+#include "win32/objbase.h"
 
 #define IL_MAGIC 0x4c4d4948	/* "HIML" */
 
@@ -781,10 +782,264 @@ WINFN(BOOL) il_ImageList_SetDragCursorImage(HIMAGELIST h, INT i, INT dx, INT dy)
 	return valid(h) && i >= 0 && i < h->count && drag_list;
 }
 
-/* No IStream persistence, and nothing to filter or recolour. */
+/*
+ * Streams, in the image list format Windows writes: a 28-byte header
+ * ("IL", version 0x101, the image count, room, growth, the image size,
+ * the background colour, the flags and four overlay images), then the
+ * images as a bitmap file, four to a row (32 bits per pixel for
+ * ILC_COLOR32, else 24), then for ILC_MASK the masks as a 1-bit one.
+ * Bitmaps of 1, 4, 8, 16 (5-5-5), 24 and 32 bits are read.
+ */
+#pragma pack(push, 1)
+struct il_head {
+	WORD magic, version, count, max, grow, cx, cy;
+	COLORREF bk;
+	WORD flags;
+	SHORT ovls[4];
+};
+struct bmp_file {
+	WORD type;
+	DWORD size;
+	WORD r1, r2;
+	DWORD bits;
+};
+#pragma pack(pop)
 
-WINFN(HIMAGELIST) il_ImageList_Read(void *stream) { return NULL; }
-WINFN(BOOL) il_ImageList_Write(HIMAGELIST h, void *stream) { return FALSE; }
+#define IL_STREAM_MAGIC 0x4c49	/* "IL" */
+#define IL_PER_ROW 4
+
+static int s_write(IStream *s, const void *p, ULONG n)
+{
+	ULONG done = 0;
+	return SUCCEEDED(s->lpVtbl->Write(s, p, n, &done)) && done == n;
+}
+
+static int s_read(IStream *s, void *p, ULONG n)
+{
+	ULONG done = 0;
+	return SUCCEEDED(s->lpVtbl->Read(s, p, n, &done)) && done == n;
+}
+
+/* The bitmap file of images (bpp 24/32) or masks (bpp 1) of h. */
+static int write_strip(HIMAGELIST h, IStream *s, int bpp)
+{
+	int slots = h->max > 0 ? h->max : 1;
+	int rows = (slots + IL_PER_ROW - 1) / IL_PER_ROW;
+	int w = h->cx * IL_PER_ROW, ht = h->cy * rows;
+	size_t stride = (((size_t)w * bpp + 31) / 32) * 4;
+	DWORD colours = bpp == 1 ? 2 : 0;
+	if (stride * ht > 0x7fff0000)
+		return 0;
+	BITMAPINFOHEADER bi;
+	struct bmp_file f;
+	memset(&bi, 0, sizeof(bi));
+	bi.biSize = sizeof(bi);
+	bi.biWidth = w;
+	bi.biHeight = ht;	/* bottom-up */
+	bi.biPlanes = 1;
+	bi.biBitCount = (WORD)bpp;
+	bi.biSizeImage = (DWORD)(stride * ht);
+	bi.biClrUsed = colours;
+	f.type = 0x4d42;	/* "BM" */
+	f.bits = sizeof(f) + sizeof(bi) + colours * 4;
+	f.size = f.bits + bi.biSizeImage;
+	f.r1 = f.r2 = 0;
+	BYTE *row = calloc(1, stride);
+	if (!row)
+		return 0;
+	static const RGBQUAD mono[2] = { { 0, 0, 0, 0 },
+					 { 0xff, 0xff, 0xff, 0 } };
+	int ok = s_write(s, &f, sizeof(f)) && s_write(s, &bi, sizeof(bi)) &&
+		 (!colours || s_write(s, mono, sizeof(mono)));
+	for (int y = ht - 1; ok && y >= 0; y--) {
+		memset(row, 0, stride);
+		int r = y / h->cy, iy = y % h->cy;
+		for (int x = 0; x < w; x++) {
+			int i = r * IL_PER_ROW + x / h->cx;
+			if (i >= h->count)
+				break;	/* the rest of the row is empty */
+			int sx = i * h->cx + x % h->cx;
+			if (bpp == 1) {
+				if (mask_get(h, sx, iy))
+					row[x >> 3] |= 0x80 >> (x & 7);
+			} else {
+				DWORD p = *pixel(h, sx, iy);
+				BYTE *o = row + (size_t)x * (bpp / 8);
+				o[0] = (BYTE)p;
+				o[1] = (BYTE)(p >> 8);
+				o[2] = (BYTE)(p >> 16);
+				if (bpp == 32)
+					o[3] = (BYTE)(p >> 24);
+			}
+		}
+		ok = s_write(s, row, (ULONG)stride);
+	}
+	free(row);
+	return ok;
+}
+
+/* Reads a bitmap file of rows of images into h's images or (mask) its
+ * masks: a mask bit is set where the pixel is not black. */
+static int read_strip(HIMAGELIST h, IStream *s, int mask)
+{
+	struct bmp_file f;
+	BITMAPINFOHEADER bi;
+
+	if (!s_read(s, &f, sizeof(f)) || f.type != 0x4d42 ||
+	    !s_read(s, &bi, sizeof(bi)) || bi.biSize < sizeof(bi) ||
+	    bi.biCompression != BI_RGB || bi.biWidth <= 0 || !bi.biHeight ||
+	    bi.biHeight == INT32_MIN || bi.biPlanes != 1)
+		return 0;
+	int bpp = bi.biBitCount;
+	if (bpp != 1 && bpp != 4 && bpp != 8 && bpp != 16 && bpp != 24 &&
+	    bpp != 32)
+		return 0;
+	/* Whatever else the header has. */
+	for (DWORD extra = bi.biSize - sizeof(bi); extra; ) {
+		BYTE skip[64];
+		ULONG n = extra > sizeof(skip) ? sizeof(skip) : extra;
+		if (!s_read(s, skip, n))
+			return 0;
+		extra -= n;
+	}
+	DWORD colours = bpp <= 8 ? (bi.biClrUsed && bi.biClrUsed <
+				    (1u << bpp) ? bi.biClrUsed : 1u << bpp) : 0;
+	RGBQUAD pal[256];
+	memset(pal, 0, sizeof(pal));
+	if (colours && !s_read(s, pal, colours * 4))
+		return 0;
+	int w = bi.biWidth, ht = bi.biHeight < 0 ? -bi.biHeight : bi.biHeight;
+	int per_row = w / h->cx;
+	if (per_row <= 0 || (long long)w * bpp > 0x7fff0000LL)
+		return 0;
+	size_t stride = (((size_t)w * bpp + 31) / 32) * 4;
+	if (stride * ht > 0x7fff0000)
+		return 0;
+	BYTE *row = malloc(stride);
+	if (!row)
+		return 0;
+	int ok = 1;
+	for (int k = 0; ok && k < ht; k++) {
+		int y = bi.biHeight > 0 ? ht - 1 - k : k;
+		if (!(ok = s_read(s, row, (ULONG)stride)))
+			break;
+		int r = y / h->cy, iy = y % h->cy;
+		for (int x = 0; x < per_row * h->cx; x++) {
+			int i = r * per_row + x / h->cx;
+			if (i >= h->count)
+				break;
+			DWORD p;
+			switch (bpp) {
+			case 1: case 4: case 8: {
+				int bit = x * bpp;
+				int v = row[bit >> 3] >> (8 - bpp - (bit & 7)) &
+					((1 << bpp) - 1);
+				RGBQUAD q = pal[v];
+				p = q.rgbBlue | q.rgbGreen << 8 |
+				    (DWORD)q.rgbRed << 16;
+				break;
+			}
+			case 16: {
+				WORD v = (WORD)(row[x * 2] | row[x * 2 + 1] << 8);
+				DWORD rr = (v >> 10 & 31) * 255 / 31,
+				      gg = (v >> 5 & 31) * 255 / 31,
+				      bb = (v & 31) * 255 / 31;
+				p = bb | gg << 8 | rr << 16;
+				break;
+			}
+			default: {
+				const BYTE *o = row + (size_t)x * (bpp / 8);
+				p = o[0] | o[1] << 8 | (DWORD)o[2] << 16 |
+				    (bpp == 32 ? (DWORD)o[3] << 24 : 0);
+			}
+			}
+			int dx = i * h->cx + x % h->cx;
+			if (mask)
+				mask_set(h, dx, iy, (p & 0xffffff) != 0);
+			else
+				*pixel(h, dx, iy) = p;
+		}
+	}
+	free(row);
+	return ok;
+}
+
+WINFN(HIMAGELIST) il_ImageList_Read(IStream *s)
+{
+	struct il_head hd;
+
+	pthread_once(&api_once, api_init);
+	if (!s || !s_read(s, &hd, sizeof(hd)) || hd.magic != IL_STREAM_MAGIC ||
+	    hd.version != 0x101 || !hd.cx || !hd.cy || hd.count > hd.max ||
+	    hd.cx > 0x4000 || hd.cy > 0x4000)
+		return NULL;
+	HIMAGELIST h = il_ImageList_Create(hd.cx, hd.cy, hd.flags, hd.max,
+					   hd.grow);
+	if (!h)
+		return NULL;
+	if (!reserve(h, hd.count)) {
+		destroy(h);
+		return NULL;
+	}
+	h->count = hd.count;
+	for (int i = 0; i < h->count; i++)
+		blank(h, i, 0);
+	if (!read_strip(h, s, 0) ||
+	    ((hd.flags & ILC_MASK) && !read_strip(h, s, 1))) {
+		destroy(h);
+		return NULL;
+	}
+	clear_under_mask(h, 0, h->count);
+	h->bk = hd.bk;
+	for (int i = 0; i < 4; i++)
+		if (hd.ovls[i] >= 0 && hd.ovls[i] < h->count)
+			h->overlay[i] = hd.ovls[i];
+	return h;
+}
+
+static HRESULT write_list(HIMAGELIST h, IStream *s)
+{
+	struct il_head hd;
+
+	if (!valid(h) || !s)
+		return E_INVALIDARG;
+	if (h->count > 0xffff || h->max > 0xffff || h->cx > 0xffff ||
+	    h->cy > 0xffff)
+		return E_FAIL;
+	memset(&hd, 0, sizeof(hd));
+	hd.magic = IL_STREAM_MAGIC;
+	hd.version = 0x101;
+	hd.count = (WORD)h->count;
+	hd.max = (WORD)h->max;
+	hd.grow = (WORD)h->grow;
+	hd.cx = (WORD)h->cx;
+	hd.cy = (WORD)h->cy;
+	hd.bk = h->bk;
+	hd.flags = (WORD)h->flags;
+	for (int i = 0; i < 4; i++)
+		hd.ovls[i] = (SHORT)h->overlay[i];
+	int bpp = (h->flags & 0xfe) == ILC_COLOR32 ? 32 : 24;
+	if (!s_write(s, &hd, sizeof(hd)) || !write_strip(h, s, bpp) ||
+	    (has_mask(h) && !write_strip(h, s, 1)))
+		return STG_E_WRITEFAULT;
+	return S_OK;
+}
+
+WINFN(BOOL) il_ImageList_Write(HIMAGELIST h, IStream *s)
+{
+	return write_list(h, s) == S_OK;
+}
+
+/* ILP_NORMAL and ILP_DOWNLEVEL write the same: the classic format. */
+WINFN(HRESULT) il_ImageList_WriteEx(HIMAGELIST h, DWORD flags, IStream *s)
+{
+	if (flags > 1)
+		return E_INVALIDARG;
+	return write_list(h, s);
+}
+
+/* Nothing to filter or recolour. */
+
 WINFN(BOOL) il_ImageList_SetFilter(HIMAGELIST h, INT i, DWORD filter) { return FALSE; }
 
 WINFN(UINT) il_ImageList_SetColorTable(HIMAGELIST h, UINT start, UINT n,
@@ -846,5 +1101,6 @@ const struct builtin_export comctl_imagelist_exports[] = {
 	E(ImageList_SetImageCount),
 	E(ImageList_SetOverlayImage),
 	E(ImageList_Write),
+	E(ImageList_WriteEx),
 	BUILTIN_END
 };

@@ -1486,7 +1486,8 @@ static const struct builtin_export exports[] = {
 };
 
 static const struct builtin_export *const tables[] = {
-	exports, comctl_dpa_exports, comctl_imagelist_exports,
+	exports, comctl_dpa_exports, comctl_flatsb_exports,
+	comctl_imagelist_exports,
 	comctl_sheet_exports, NULL
 };
 

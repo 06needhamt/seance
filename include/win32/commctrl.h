@@ -296,6 +296,27 @@ typedef PFNDACOMPARE PFNDPACOMPARE;
 #define DPAS_INSERTBEFORE    0x2
 #define DPAS_INSERTAFTER     0x4
 
+/* DPA_Merge. */
+#define DPAM_SORTED          0x1
+#define DPAM_NORMAL          0x2
+#define DPAM_UNION           0x4
+#define DPAM_INTERSECT       0x8
+#define DPAMM_MERGE          1
+#define DPAMM_DELETE         2
+#define DPAMM_INSERT         3
+typedef void *(CALLBACK *PFNDPAMERGE)(UINT uMsg, void *pvDest, void *pvSrc,
+				      LPARAM lParam);
+
+/* DPA_LoadStream and DPA_SaveStream: one item per callback. */
+struct IStream;
+typedef struct _DPASTREAMINFO {
+	int iPos;
+	void *pvItem;
+} DPASTREAMINFO;
+typedef HRESULT (CALLBACK *PFNDPASTREAM)(DPASTREAMINFO *pinfo,
+					 struct IStream *pstream,
+					 void *pvInstData);
+
 /* Window subclassing. */
 typedef LRESULT (CALLBACK *SUBCLASSPROC)(HWND hWnd, UINT uMsg, WPARAM wParam,
 					 LPARAM lParam, UINT_PTR uIdSubclass,
@@ -567,5 +588,58 @@ typedef struct _DLLVERSIONINFO2 {
 
 #define DLLVER_PLATFORM_WINDOWS 0x1
 #define DLLVER_PLATFORM_NT      0x2
+
+
+/* Flat scroll bars. */
+#define WSB_PROP_CYVSCROLL 0x00000001
+#define WSB_PROP_CXHSCROLL 0x00000002
+#define WSB_PROP_CYHSCROLL 0x00000004
+#define WSB_PROP_CXVSCROLL 0x00000008
+#define WSB_PROP_CXHTHUMB  0x00000010
+#define WSB_PROP_CYVTHUMB  0x00000020
+#define WSB_PROP_VBKGCOLOR 0x00000040
+#define WSB_PROP_HBKGCOLOR 0x00000080
+#define WSB_PROP_VSTYLE    0x00000100
+#define WSB_PROP_HSTYLE    0x00000200
+#define WSB_PROP_WINSTYLE  0x00000400
+#define WSB_PROP_PALETTE   0x00000800
+#define WSB_PROP_MASK      0x00000fff
+
+#define FSB_REGULAR_MODE 0
+#define FSB_ENCARTA_MODE 1
+#define FSB_FLAT_MODE    2
+
+/* MRU lists. */
+#define MRU_STRING   0x0000
+#define MRU_BINARY   0x0001
+#define MRU_CACHEWRITE 0x0002
+
+typedef int (CALLBACK *MRUSTRINGCMPPROCA)(LPCSTR, LPCSTR);
+typedef int (CALLBACK *MRUSTRINGCMPPROCW)(LPCWSTR, LPCWSTR);
+typedef int (CALLBACK *MRUBINARYCMPPROC)(LPCVOID, LPCVOID, DWORD);
+
+typedef struct tagMRUINFOA {
+	DWORD cbSize;
+	UINT uMax;
+	UINT fFlags;
+	HKEY hKey;
+	LPCSTR lpszSubKey;
+	union {
+		MRUSTRINGCMPPROCA string_cmpfn;
+		MRUBINARYCMPPROC binary_cmpfn;
+	} u;
+} MRUINFOA, *LPMRUINFOA;
+
+typedef struct tagMRUINFOW {
+	DWORD cbSize;
+	UINT uMax;
+	UINT fFlags;
+	HKEY hKey;
+	LPCWSTR lpszSubKey;
+	union {
+		MRUSTRINGCMPPROCW string_cmpfn;
+		MRUBINARYCMPPROC binary_cmpfn;
+	} u;
+} MRUINFOW, *LPMRUINFOW;
 
 #endif /* VFW_WIN32_COMMCTRL_H */

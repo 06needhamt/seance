@@ -339,6 +339,37 @@ typedef struct tagMONITORINFO {
 #define WS_CAPTION          0x00c00000
 #define WS_SYSMENU          0x00080000
 #define WS_OVERLAPPEDWINDOW 0x00cf0000
+#define WS_VSCROLL          0x00200000
+#define WS_HSCROLL          0x00100000
+
+/* Scroll bars. */
+#define SB_HORZ 0
+#define SB_VERT 1
+#define SB_CTL  2
+#define SB_BOTH 3
+
+#define SIF_RANGE           0x0001
+#define SIF_PAGE            0x0002
+#define SIF_POS             0x0004
+#define SIF_DISABLENOSCROLL 0x0008
+#define SIF_TRACKPOS        0x0010
+#define SIF_ALL             (SIF_RANGE | SIF_PAGE | SIF_POS | SIF_TRACKPOS)
+
+#define ESB_ENABLE_BOTH  0x0000
+#define ESB_DISABLE_LTUP 0x0001
+#define ESB_DISABLE_RTDN 0x0002
+#define ESB_DISABLE_BOTH 0x0003
+
+typedef struct tagSCROLLINFO {
+	UINT cbSize;
+	UINT fMask;
+	int nMin;
+	int nMax;
+	UINT nPage;
+	int nPos;
+	int nTrackPos;
+} SCROLLINFO, *LPSCROLLINFO;
+typedef const SCROLLINFO *LPCSCROLLINFO;
 
 #define CW_USEDEFAULT ((int)0x80000000)
 
