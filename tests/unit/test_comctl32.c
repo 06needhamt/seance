@@ -4,8 +4,10 @@
  * helpers, the controls' state, window subclassing, image lists, the
  * headless property sheets and task dialogs, the rest, and its ordinals.
  */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "loader/modules.h"
 #include "runtime/runtime.h"
@@ -1233,6 +1235,13 @@ static NMLISTVIEW last_lv;
 static NMTREEVIEWW last_tv;
 static int deleted_tv;
 static WPARAM last_command;
+static WORD commands[16];
+static NMSELCHANGE last_sel;
+static COMBOBOXEXITEMW last_cbe;
+static HWND link_window;
+static int last_link = -9;
+static SYSTEMTIME last_daystate_start;
+static int ncommands;
 
 static int seen(UINT code)
 {
@@ -1248,6 +1257,8 @@ static LRESULT WINAPI record_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
 	USER(LRESULT, DefWindowProcW, HWND, UINT, WPARAM, LPARAM);
 	if (m == WM_COMMAND) {
 		last_command = wp;
+		if (ncommands < 16)
+			commands[ncommands++] = HIWORD(wp);
 		return 0;
 	}
 	if (m != WM_NOTIFY)
@@ -1308,6 +1319,50 @@ static LRESULT WINAPI record_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
 	case TCN_SELCHANGING:
 	case RBN_BEGINDRAG:
 		return refuse;
+	case CBEN_GETDISPINFOW: {
+		NMCOMBOBOXEXW *c = (NMCOMBOBOXEXW *)lp;
+		if (c->ceItem.pszText && c->ceItem.cchTextMax > 3) {
+			c->ceItem.pszText[0] = 'c';
+			c->ceItem.pszText[1] = 'b';
+			c->ceItem.pszText[2] = (WCHAR)('0' + c->ceItem.lParam);
+			c->ceItem.pszText[3] = 0;
+		}
+		return 0;
+	}
+	case CBEN_INSERTITEM:
+	case CBEN_DELETEITEM:
+		last_cbe = ((NMCOMBOBOXEXW *)lp)->ceItem;
+		return 0;
+	case NM_CLICK:
+	case NM_RETURN:
+		if (hdr->hwndFrom && link_window == hdr->hwndFrom)
+			last_link = ((NMLINK *)lp)->item.iLink;
+		return 0;
+	case MCN_SELCHANGE:
+	case MCN_SELECT:
+		last_sel = *(NMSELCHANGE *)lp;
+		return 0;
+	case MCN_GETDAYSTATE: {
+		NMDAYSTATE *d = (NMDAYSTATE *)lp;
+		for (int i = 0; i < d->cDayState; i++)
+			d->prgDayState[i] = 1u << i;	/* bold day i+1 */
+		last_daystate_start = d->stStart;
+		return 0;
+	}
+	case IPN_FIELDCHANGED: {
+		NMIPADDRESS *ip = (NMIPADDRESS *)lp;
+		if (ip->iValue == 13)
+			ip->iValue = 31;	/* the parent can change it */
+		return 0;
+	}
+	case PGN_CALCSIZE: {
+		NMPGCALCSIZE *c = (NMPGCALCSIZE *)lp;
+		if (c->dwFlag == PGF_CALCWIDTH)
+			c->iWidth = 500;
+		else
+			c->iHeight = 400;
+		return 0;
+	}
 	case TTN_GETDISPINFOW: {
 		NMTTDISPINFOW *d = (NMTTDISPINFOW *)lp;
 		d->szText[0] = 't';
@@ -2016,6 +2071,14 @@ static void test_toolbar(void)
 }
 
 
+static HWND CreateWindowExW_(HWND owner)
+{
+	USER(HWND, CreateWindowExW, DWORD, LPCWSTR, LPCWSTR, DWORD, int, int,
+	     int, int, HWND, HMENU, HINSTANCE, LPVOID);
+	return CreateWindowExW(0, w("STATIC"), NULL, WS_CHILD, 0, 0, 10, 10,
+			       owner, NULL, NULL, NULL);
+}
+
 static void set_rect(RECT *r, int l, int t, int rt, int b)
 {
 	r->left = l;
@@ -2493,6 +2556,508 @@ static void test_rebar(void)
 	CHECK(DestroyWindow(child));
 }
 
+
+static int seen_command(WORD code)
+{
+	int n = 0;
+	for (int i = 0; i < ncommands; i++)
+		n += commands[i] == code;
+	return n;
+}
+
+static void test_small_controls(void)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	USER(LRESULT, SendMessageA, HWND, UINT, WPARAM, LPARAM);
+	USER(BOOL, DestroyWindow, HWND);
+	USER(BOOL, GetWindowRect, HWND, LPRECT);
+	USER(int, GetWindowTextA, HWND, LPSTR, int);
+	USER(BOOL, SetWindowTextA, HWND, LPCSTR);
+	WCHAR buf[64];
+
+	/* Hot keys: the rules replace a forbidden combination. */
+	HWND h = make("msctls_hotkey32", 0, 100, 20);
+	CHECK(h != NULL);
+	SendMessageW(h, HKM_SETHOTKEY, MAKEWORD('A', HOTKEYF_CONTROL), 0);
+	CHECK_EQ(SendMessageW(h, HKM_GETHOTKEY, 0, 0),
+		 MAKEWORD('A', HOTKEYF_CONTROL));
+	SendMessageW(h, HKM_SETRULES, HKCOMB_NONE | HKCOMB_S,
+		     MAKELPARAM(HOTKEYF_CONTROL | HOTKEYF_ALT, 0));
+	ncommands = 0;
+	SendMessageW(h, WM_KEYDOWN, 'B', 0);
+	CHECK_EQ(SendMessageW(h, HKM_GETHOTKEY, 0, 0),
+		 MAKEWORD('B', HOTKEYF_CONTROL | HOTKEYF_ALT));
+	CHECK_EQ(seen_command(EN_CHANGE), 1);
+	SendMessageW(h, WM_KEYDOWN, VK_CONTROL, 0);
+	SendMessageW(h, WM_KEYDOWN, VK_SHIFT, 0);
+	SendMessageW(h, WM_KEYDOWN, 'C', 0);
+	CHECK_EQ(SendMessageW(h, HKM_GETHOTKEY, 0, 0),
+		 MAKEWORD('C', HOTKEYF_CONTROL | HOTKEYF_SHIFT));
+	SendMessageW(h, WM_KEYUP, VK_CONTROL, 0);
+	SendMessageW(h, WM_KEYUP, VK_SHIFT, 0);
+	SendMessageW(h, WM_KEYDOWN, VK_BACK, 0);
+	CHECK_EQ(SendMessageW(h, HKM_GETHOTKEY, 0, 0), 0);
+	CHECK(DestroyWindow(h));
+
+	/* Animation: an AVI file opens and plays; anything else doesn't. */
+	char path[] = "/tmp/seance-aviXXXXXX";
+	int fd = mkstemp(path);
+	CHECK(fd >= 0);
+	static const unsigned char avi[] = {
+		'R', 'I', 'F', 'F', 100, 0, 0, 0, 'A', 'V', 'I', ' ',
+		'L', 'I', 'S', 'T', 64, 0, 0, 0, 'h', 'd', 'r', 'l',
+		'a', 'v', 'i', 'h', 56, 0, 0, 0,
+		0x40, 0x9c, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		12, 0, 0, 0,	/* dwTotalFrames */
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	};
+	CHECK(fd >= 0 && write(fd, avi, sizeof(avi)) == (ssize_t)sizeof(avi));
+	if (fd >= 0)
+		close(fd);
+	char winpath[64];
+	snprintf(winpath, sizeof(winpath), "Z:%s", path);
+	h = make("SysAnimate32", 0, 50, 50);
+	CHECK(!SendMessageW(h, ACM_PLAY, 1, MAKELONG(0, -1)));
+	CHECK(SendMessageA(h, ACM_OPENA, 0, (LPARAM)winpath));
+	ncommands = 0;
+	CHECK(SendMessageW(h, ACM_PLAY, 1, MAKELONG(0, -1)));
+	CHECK(seen_command(ACN_START) == 1 && seen_command(ACN_STOP) == 1);
+	CHECK(!SendMessageW(h, ACM_ISPLAYING, 0, 0));
+	CHECK(SendMessageW(h, ACM_PLAY, -1, MAKELONG(0, -1)));
+	CHECK(SendMessageW(h, ACM_ISPLAYING, 0, 0));
+	CHECK(SendMessageW(h, ACM_STOP, 0, 0));
+	CHECK(!SendMessageW(h, ACM_ISPLAYING, 0, 0));
+	CHECK_EQ(seen_command(ACN_STOP), 2);
+	CHECK(SendMessageW(h, ACM_OPENW, 0, 0));	/* closes */
+	CHECK(!SendMessageW(h, ACM_PLAY, 1, 0));
+	CHECK(!SendMessageA(h, ACM_OPENA, 0, (LPARAM)"Z:/nonexistent.avi"));
+	CHECK(DestroyWindow(h));
+	unlink(path);
+
+	/* IP addresses. */
+	h = make("SysIPAddress32", 0, 120, 20);
+	CHECK(SendMessageW(h, IPM_ISBLANK, 0, 0));
+	DWORD ip = 1;
+	CHECK_EQ(SendMessageW(h, IPM_GETADDRESS, 0, (LPARAM)&ip), 0);
+	CHECK_EQ(ip, 0);
+	SendMessageW(h, IPM_SETADDRESS, 0, MAKEIPADDRESS(192, 168, 1, 20));
+	CHECK_EQ(SendMessageW(h, IPM_GETADDRESS, 0, (LPARAM)&ip), 4);
+	CHECK_EQ(ip, (DWORD)MAKEIPADDRESS(192, 168, 1, 20));
+	char text[32];
+	GetWindowTextA(h, text, 32);
+	CHECK(!strcmp(text, "192.168.1.20"));
+	CHECK(SendMessageW(h, IPM_SETRANGE, 3, MAKEIPRANGE(1, 10)));
+	CHECK(!SendMessageW(h, IPM_SETRANGE, 4, MAKEIPRANGE(1, 10)));
+	CHECK(!SendMessageW(h, IPM_SETRANGE, 0, MAKEIPRANGE(9, 1)));
+	SendMessageW(h, IPM_GETADDRESS, 0, (LPARAM)&ip);
+	CHECK_EQ(FOURTH_IPADDRESS(ip), 10);
+	SendMessageW(h, IPM_CLEARADDRESS, 0, 0);
+	/* Typing: digits, a dot to move on, a full field moving on. */
+	ncodes = 0;
+	SendMessageW(h, IPM_SETFOCUS, 0, 0);
+	SendMessageW(h, WM_CHAR, '1', 0);
+	SendMessageW(h, WM_CHAR, '3', 0);
+	SendMessageW(h, WM_CHAR, '.', 0);
+	SendMessageW(h, WM_CHAR, '2', 0);
+	SendMessageW(h, WM_CHAR, '5', 0);
+	SendMessageW(h, WM_CHAR, '5', 0);
+	SendMessageW(h, WM_CHAR, '7', 0);
+	CHECK_EQ(seen(IPN_FIELDCHANGED), 2);
+	CHECK_EQ(SendMessageW(h, IPM_GETADDRESS, 0, (LPARAM)&ip), 3);
+	CHECK_EQ(ip, (DWORD)MAKEIPADDRESS(31, 255, 7, 0));
+	SetWindowTextA(h, "10.0..4");
+	CHECK_EQ(SendMessageW(h, IPM_GETADDRESS, 0, (LPARAM)&ip), 3);
+	CHECK_EQ(ip, (DWORD)MAKEIPADDRESS(10, 0, 0, 4));
+	GetWindowTextA(h, text, 32);
+	CHECK(!strcmp(text, "10.0..4"));
+	CHECK(DestroyWindow(h));
+
+	/* Pagers: the parent sizes the child, the position is clamped. */
+	h = make("SysPager", PGS_HORZ, 100, 30);
+	HWND child = CreateWindowExW_(h);
+	CHECK(child != NULL);
+	SendMessageW(h, PGM_SETCHILD, 0, (LPARAM)child);
+	RECT rc;
+	GetWindowRect(child, &rc);
+	CHECK(rc.right - rc.left == 500 && rc.bottom - rc.top == 30);
+	CHECK_EQ(SendMessageW(h, PGM_GETBUTTONSTATE, 0, PGB_TOPORLEFT),
+		 PGF_INVISIBLE);
+	CHECK_EQ(SendMessageW(h, PGM_GETBUTTONSTATE, 0, PGB_BOTTOMORRIGHT),
+		 PGF_NORMAL);
+	SendMessageW(h, PGM_SETPOS, 0, 1000);
+	CHECK_EQ(SendMessageW(h, PGM_GETPOS, 0, 0), 400);
+	CHECK_EQ(SendMessageW(h, PGM_GETBUTTONSTATE, 0, PGB_BOTTOMORRIGHT),
+		 PGF_INVISIBLE);
+	CHECK_EQ(SendMessageW(h, PGM_SETBORDER, 0, 5), 0);
+	CHECK_EQ(SendMessageW(h, PGM_GETBORDER, 0, 0), 5);
+	CHECK_EQ(SendMessageW(h, PGM_GETPOS, 0, 0), 400);	/* max is 410 */
+	SendMessageW(h, PGM_SETPOS, 0, 1000);
+	CHECK_EQ(SendMessageW(h, PGM_GETPOS, 0, 0), 410);
+	CHECK_EQ(SendMessageW(h, PGM_SETBUTTONSIZE, 0, 20), 12);
+	CHECK_EQ(SendMessageW(h, PGM_GETBUTTONSIZE, 0, 0), 20);
+	CHECK_EQ((COLORREF)SendMessageW(h, PGM_SETBKCOLOR, 0, RGB(1, 2, 3)) !=
+		 RGB(1, 2, 3), 1);
+	CHECK_EQ(SendMessageW(h, PGM_GETBKCOLOR, 0, 0), RGB(1, 2, 3));
+	CHECK(DestroyWindow(h));
+
+	/* The native font control keeps its font. */
+	h = make("NativeFontCtl", NFS_ALL, 10, 10);
+	SendMessageW(h, WM_SETFONT, (WPARAM)0x1234, 0);
+	CHECK_EQ(SendMessageW(h, WM_GETFONT, 0, 0), 0x1234);
+	CHECK(DestroyWindow(h));
+	(void)buf;
+}
+
+
+static SYSTEMTIME day(int y, int m, int d)
+{
+	SYSTEMTIME st;
+	memset(&st, 0, sizeof(st));
+	st.wYear = (WORD)y;
+	st.wMonth = (WORD)m;
+	st.wDay = (WORD)d;
+	return st;
+}
+
+static void test_date_controls(void)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	USER(LRESULT, SendMessageA, HWND, UINT, WPARAM, LPARAM);
+	USER(BOOL, DestroyWindow, HWND);
+	USER(int, GetWindowTextA, HWND, LPSTR, int);
+	SYSTEMTIME st, r[2];
+	char text[64];
+
+	/* The month calendar, one day selected. */
+	HWND h = make("SysMonthCal32", MCS_DAYSTATE, 200, 200);
+	CHECK(h != NULL);
+	CHECK(SendMessageW(h, MCM_GETCURSEL, 0, (LPARAM)&st));
+	CHECK(st.wYear >= 2000);
+	st = day(2024, 2, 29);
+	ncodes = 0;
+	CHECK(SendMessageW(h, MCM_SETCURSEL, 0, (LPARAM)&st));
+	CHECK_EQ(seen(MCN_GETDAYSTATE), 1);	/* a new month */
+	CHECK(last_daystate_start.wMonth == 1 && last_daystate_start.wDay == 28);
+	memset(&st, 0, sizeof(st));
+	CHECK(SendMessageW(h, MCM_GETCURSEL, 0, (LPARAM)&st));
+	CHECK(st.wYear == 2024 && st.wMonth == 2 && st.wDay == 29 &&
+	      st.wDayOfWeek == 4);
+	st = day(2023, 2, 29);
+	CHECK(!SendMessageW(h, MCM_SETCURSEL, 0, (LPARAM)&st));
+	CHECK(!SendMessageW(h, MCM_SETSELRANGE, 0, (LPARAM)r));
+
+	/* Ranges keep the selection inside. */
+	r[0] = day(2024, 3, 5);
+	r[1] = day(2024, 6, 1);
+	CHECK(SendMessageW(h, MCM_SETRANGE, GDTR_MIN | GDTR_MAX, (LPARAM)r));
+	CHECK(SendMessageW(h, MCM_GETCURSEL, 0, (LPARAM)&st) && st.wMonth == 3 &&
+	      st.wDay == 5);
+	memset(r, 0, sizeof(r));
+	CHECK_EQ(SendMessageW(h, MCM_GETRANGE, 0, (LPARAM)r), GDTR_MIN | GDTR_MAX);
+	CHECK(r[1].wMonth == 6);
+	st = day(2024, 7, 1);
+	CHECK(!SendMessageW(h, MCM_SETCURSEL, 0, (LPARAM)&st));
+	SendMessageW(h, MCM_SETRANGE, 0, 0);
+
+	/* The grid: March 2024 starts on a Friday; Sunday first. */
+	st = day(2024, 3, 15);
+	SendMessageW(h, MCM_SETCURSEL, 0, (LPARAM)&st);
+	CHECK_EQ(SendMessageW(h, MCM_GETMONTHRANGE, GMR_VISIBLE, (LPARAM)r), 1);
+	CHECK(r[0].wDay == 1 && r[1].wDay == 31);
+	CHECK_EQ(SendMessageW(h, MCM_GETMONTHRANGE, GMR_DAYSTATE, (LPARAM)r), 3);
+	CHECK(r[0].wMonth == 2 && r[0].wDay == 25 && r[1].wMonth == 4 &&
+	      r[1].wDay == 6);
+	MCHITTESTINFO hi;
+	memset(&hi, 0, sizeof(hi));
+	hi.cbSize = MCHITTESTINFO_V1_SIZE;
+	hi.pt.x = 5 * 23 + 3;	/* Friday */
+	hi.pt.y = 20 + 16 + 3;	/* the first week */
+	CHECK_EQ(SendMessageW(h, MCM_HITTEST, 0, (LPARAM)&hi), MCHT_CALENDARDATE);
+	CHECK(hi.st.wMonth == 3 && hi.st.wDay == 1);
+	hi.pt.x = 3;
+	CHECK_EQ(SendMessageW(h, MCM_HITTEST, 0, (LPARAM)&hi),
+		 MCHT_CALENDARDATEPREV);
+	hi.pt.y = 5;
+	hi.pt.x = 80;
+	CHECK_EQ(SendMessageW(h, MCM_HITTEST, 0, (LPARAM)&hi), MCHT_TITLEBK);
+	hi.pt.x = 500;
+	CHECK_EQ(SendMessageW(h, MCM_HITTEST, 0, (LPARAM)&hi), MCHT_NOWHERE);
+	/* Clicking a day selects it. */
+	ncodes = 0;
+	SendMessageW(h, WM_LBUTTONDOWN, 0, MAKELPARAM(2 * 23 + 3, 20 + 16 + 16 + 3));
+	CHECK(seen(MCN_SELCHANGE) == 1 && seen(MCN_SELECT) == 1);
+	CHECK(last_sel.stSelStart.wDay == 5 && last_sel.stSelEnd.wDay == 5);
+	/* First day of the week. */
+	CHECK_EQ(SendMessageW(h, MCM_GETFIRSTDAYOFWEEK, 0, 0), MAKELONG(6, 0));
+	CHECK_EQ(SendMessageW(h, MCM_SETFIRSTDAYOFWEEK, 0, 0), MAKELONG(6, 0));
+	CHECK_EQ(SendMessageW(h, MCM_GETFIRSTDAYOFWEEK, 0, 0), MAKELONG(0, 1));
+	SendMessageW(h, MCM_GETMONTHRANGE, GMR_DAYSTATE, (LPARAM)r);
+	CHECK(r[0].wMonth == 2 && r[0].wDay == 26);	/* a Monday */
+	/* Today, colours, sizes. */
+	st = day(2020, 1, 2);
+	SendMessageW(h, MCM_SETTODAY, 0, (LPARAM)&st);
+	memset(&st, 0, sizeof(st));
+	CHECK(SendMessageW(h, MCM_GETTODAY, 0, (LPARAM)&st) &&
+	      st.wYear == 2020 && st.wDay == 2);
+	CHECK(SendMessageW(h, MCM_SETCOLOR, MCSC_TEXT, RGB(1, 2, 3)) != -1);
+	CHECK_EQ(SendMessageW(h, MCM_GETCOLOR, MCSC_TEXT, 0), RGB(1, 2, 3));
+	CHECK_EQ(SendMessageW(h, MCM_GETCOLOR, 9, 0), -1);
+	RECT rc;
+	CHECK(SendMessageW(h, MCM_GETMINREQRECT, 0, (LPARAM)&rc) &&
+	      rc.right > 0 && rc.bottom > 0);
+	MONTHDAYSTATE ds[3] = { 1, 2, 4 };
+	CHECK(SendMessageW(h, MCM_SETDAYSTATE, 3, (LPARAM)ds));
+	CHECK(DestroyWindow(h));
+
+	/* A multiple selection. */
+	h = make("SysMonthCal32", MCS_MULTISELECT, 200, 200);
+	CHECK(!SendMessageW(h, MCM_GETCURSEL, 0, (LPARAM)&st));
+	CHECK_EQ(SendMessageW(h, MCM_GETMAXSELCOUNT, 0, 0), 7);
+	r[0] = day(2024, 5, 10);
+	r[1] = day(2024, 5, 14);
+	CHECK(SendMessageW(h, MCM_SETSELRANGE, 0, (LPARAM)r));
+	memset(r, 0, sizeof(r));
+	CHECK(SendMessageW(h, MCM_GETSELRANGE, 0, (LPARAM)r));
+	CHECK(r[0].wDay == 10 && r[1].wDay == 14);
+	CHECK(SendMessageW(h, MCM_SETMAXSELCOUNT, 3, 0));
+	r[0] = day(2024, 5, 10);
+	r[1] = day(2024, 5, 14);
+	CHECK(!SendMessageW(h, MCM_SETSELRANGE, 0, (LPARAM)r));
+	CHECK(DestroyWindow(h));
+
+	/* The date and time picker. */
+	h = make("SysDateTimePick32", DTS_SHOWNONE, 150, 20);
+	CHECK(h != NULL);
+	CHECK_EQ(SendMessageW(h, DTM_GETSYSTEMTIME, 0, (LPARAM)&st), GDT_VALID);
+	st = day(2024, 7, 4);
+	st.wHour = 15;
+	st.wMinute = 5;
+	st.wSecond = 9;
+	CHECK(SendMessageW(h, DTM_SETSYSTEMTIME, GDT_VALID, (LPARAM)&st));
+	GetWindowTextA(h, text, 64);
+	CHECK(!strcmp(text, "7/4/2024"));
+	CHECK(SendMessageA(h, DTM_SETFORMATA, 0,
+			   (LPARAM)"dddd, MMM dd yy 'at' hh:mm:ss tt"));
+	GetWindowTextA(h, text, 64);
+	CHECK(!strcmp(text, "Thursday, Jul 04 24 at 03:05:09 PM"));
+	SendMessageW(h, DTM_SETFORMATW, 0, (LPARAM)u"HH'h'mm");
+	GetWindowTextA(h, text, 64);
+	CHECK(!strcmp(text, "15h05"));
+	CHECK(SendMessageW(h, DTM_SETSYSTEMTIME, GDT_NONE, 0));
+	CHECK_EQ(SendMessageW(h, DTM_GETSYSTEMTIME, 0, (LPARAM)&st), GDT_NONE);
+	CHECK_EQ(SendMessageW(h, DTM_GETSYSTEMTIME, 0, 0), GDT_ERROR);
+	st = day(2024, 13, 1);
+	CHECK(!SendMessageW(h, DTM_SETSYSTEMTIME, GDT_VALID, (LPARAM)&st));
+	r[0] = day(2024, 1, 1);
+	r[1] = day(2024, 12, 31);
+	CHECK(SendMessageW(h, DTM_SETRANGE, GDTR_MIN | GDTR_MAX, (LPARAM)r));
+	st = day(2025, 1, 1);
+	CHECK(!SendMessageW(h, DTM_SETSYSTEMTIME, GDT_VALID, (LPARAM)&st));
+	CHECK_EQ(SendMessageW(h, DTM_GETRANGE, 0, (LPARAM)r), GDTR_MIN | GDTR_MAX);
+	CHECK(!SendMessageW(h, DTM_GETMONTHCAL, 0, 0));
+	CHECK(DestroyWindow(h));
+	h = make("SysDateTimePick32", 0, 150, 20);
+	CHECK(!SendMessageW(h, DTM_SETSYSTEMTIME, GDT_NONE, 0));
+	h = (DestroyWindow(h), make("SysDateTimePick32", DTS_TIMEFORMAT, 150, 20));
+	st = day(2024, 7, 4);
+	st.wHour = 0;
+	st.wMinute = 30;
+	SendMessageW(h, DTM_SETSYSTEMTIME, GDT_VALID, (LPARAM)&st);
+	GetWindowTextA(h, text, 64);
+	CHECK(!strcmp(text, "12:30:00 AM"));
+	CHECK(DestroyWindow(h));
+}
+
+
+/* How wide text is in the default font, as the controls measure it. */
+static int comctl_width(const WCHAR *t)
+{
+	GDI(HDC, CreateCompatibleDC, HDC);
+	GDI(BOOL, GetTextExtentPoint32W, HDC, LPCWSTR, int, SIZE *);
+	GDI(BOOL, DeleteDC, HDC);
+	SIZE sz = { 0, 0 };
+	int n = 0;
+	while (t[n])
+		n++;
+	HDC dc = CreateCompatibleDC(NULL);
+	GetTextExtentPoint32W(dc, t, n, &sz);
+	DeleteDC(dc);
+	return sz.cx;
+}
+
+static void test_comboex_link(void)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	USER(LRESULT, SendMessageA, HWND, UINT, WPARAM, LPARAM);
+	USER(BOOL, DestroyWindow, HWND);
+	USER(HWND, CreateWindowExW, DWORD, LPCWSTR, LPCWSTR, DWORD, int, int,
+	     int, int, HWND, HMENU, HINSTANCE, LPVOID);
+	USER(BOOL, SetWindowTextW, HWND, LPCWSTR);
+	USER(int, GetWindowTextA, HWND, LPSTR, int);
+	WCHAR buf[64];
+
+	/* ComboBoxEx. */
+	HWND h = make("ComboBoxEx32", 0, 150, 100);
+	CHECK(h != NULL);
+	COMBOBOXEXITEMW it;
+	memset(&it, 0, sizeof(it));
+	it.mask = CBEIF_TEXT | CBEIF_IMAGE | CBEIF_LPARAM | CBEIF_INDENT;
+	static const char *const names[3] = { "Red", "Green", "blue" };
+	ncodes = 0;
+	for (int i = 0; i < 3; i++) {
+		it.iItem = -1;
+		it.pszText = w(names[i]);
+		it.iImage = i;
+		it.lParam = 10 + i;
+		it.iIndent = i;
+		CHECK_EQ(SendMessageW(h, CBEM_INSERTITEMW, 0, (LPARAM)&it), i);
+	}
+	CHECK(seen(CBEN_INSERTITEM) == 3 && last_cbe.lParam == 12);
+	COMBOBOXEXITEMA ia;
+	memset(&ia, 0, sizeof(ia));
+	ia.mask = CBEIF_TEXT;
+	ia.iItem = 0;
+	ia.pszText = (LPSTR)"Black";
+	CHECK_EQ(SendMessageA(h, CBEM_INSERTITEMA, 0, (LPARAM)&ia), 0);
+	it.mask = CBEIF_TEXT | CBEIF_LPARAM;
+	it.iItem = 4;
+	it.pszText = LPSTR_TEXTCALLBACKW;
+	it.lParam = 7;
+	CHECK_EQ(SendMessageW(h, CBEM_INSERTITEMW, 0, (LPARAM)&it), 4);
+	CHECK_EQ(SendMessageW(h, CB_GETCOUNT, 0, 0), 5);
+
+	memset(&it, 0, sizeof(it));
+	it.mask = CBEIF_TEXT | CBEIF_IMAGE | CBEIF_LPARAM | CBEIF_INDENT;
+	it.iItem = 2;
+	it.pszText = buf;
+	it.cchTextMax = 64;
+	CHECK(SendMessageW(h, CBEM_GETITEMW, 0, (LPARAM)&it));
+	CHECK(!strcmp(a(buf), "Green") && it.iImage == 1 && it.lParam == 11 &&
+	      it.iIndent == 1);
+	it.iItem = 4;
+	CHECK(SendMessageW(h, CBEM_GETITEMW, 0, (LPARAM)&it));
+	CHECK(!strcmp(a(buf), "cb7"));
+	CHECK_EQ(SendMessageW(h, CB_GETLBTEXT, 4, (LPARAM)buf), 3);
+	CHECK_EQ(SendMessageW(h, CB_GETLBTEXTLEN, 1, 0), 3);
+	CHECK_EQ(SendMessageW(h, CB_GETITEMDATA, 3, 0), 12);
+	CHECK(SendMessageW(h, CB_SETITEMDATA, 3, 99));
+	CHECK_EQ(SendMessageW(h, CB_GETITEMDATA, 3, 0), 99);
+	CHECK_EQ(SendMessageW(h, CB_GETITEMDATA, 9, 0), CB_ERR);
+
+	/* Selection and finding. */
+	CHECK_EQ(SendMessageW(h, CB_GETCURSEL, 0, 0), -1);
+	CHECK_EQ(SendMessageW(h, CB_SETCURSEL, 2, 0), 2);
+	it.iItem = -1;	/* the selection */
+	it.mask = CBEIF_TEXT;
+	CHECK(SendMessageW(h, CBEM_GETITEMW, 0, (LPARAM)&it));
+	CHECK(!strcmp(a(buf), "Green"));
+	ncommands = 0;
+	SendMessageW(h, WM_KEYDOWN, 0x28, 0);	/* down */
+	CHECK(SendMessageW(h, CB_GETCURSEL, 0, 0) == 3 &&
+	      seen_command(CBN_SELCHANGE) == 1);
+	CHECK_EQ(SendMessageW(h, CB_FINDSTRINGEXACT, -1, (LPARAM)u"BLUE"), 3);
+	CHECK_EQ(SendMessageW(h, CB_FINDSTRINGEXACT, -1, (LPARAM)u"Gre"), CB_ERR);
+	CHECK_EQ(SendMessageW(h, CB_FINDSTRING, -1, (LPARAM)u"Gre"), 2);
+	CHECK_EQ(SendMessageW(h, CB_FINDSTRING, 2, (LPARAM)u"b"), 3);
+	CHECK_EQ(SendMessageW(h, CBEM_SETEXTENDEDSTYLE, 0,
+			      CBES_EX_CASESENSITIVE), 0);
+	CHECK_EQ(SendMessageW(h, CB_FINDSTRINGEXACT, -1, (LPARAM)u"BLUE"),
+		 CB_ERR);
+	CHECK_EQ(SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)u"x"), CB_ERR);
+	CHECK(SendMessageW(h, CB_SHOWDROPDOWN, TRUE, 0));
+	CHECK(SendMessageW(h, CB_GETDROPPEDSTATE, 0, 0));
+	CHECK_EQ(seen_command(CBN_DROPDOWN), 1);
+	CHECK(SendMessageW(h, CBEM_GETCOMBOCONTROL, 0, 0) == (LRESULT)h);
+
+	/* Deleting (CBEN_DELETEITEM), set item. */
+	ncodes = 0;
+	CHECK_EQ(SendMessageW(h, CBEM_DELETEITEM, 0, 0), 4);
+	CHECK(seen(CBEN_DELETEITEM) == 1);
+	CHECK_EQ(SendMessageW(h, CB_GETCURSEL, 0, 0), 2);
+	it.mask = CBEIF_TEXT;
+	it.iItem = 0;
+	it.pszText = (LPWSTR)u"Crimson";
+	CHECK(SendMessageW(h, CBEM_SETITEMW, 0, (LPARAM)&it));
+	CHECK_EQ(SendMessageW(h, CB_GETLBTEXT, 0, (LPARAM)buf), 7);
+	SendMessageW(h, CB_RESETCONTENT, 0, 0);
+	CHECK_EQ(seen(CBEN_DELETEITEM), 5);
+	CHECK_EQ(SendMessageW(h, CB_GETCOUNT, 0, 0), 0);
+	CHECK(DestroyWindow(h));
+
+	/* SysLink: markup, items, hit test, clicks. */
+	h = CreateWindowExW(0, w("SysLink"),
+			    w("See <a href=\"http://a.example/\" id=\"one\">"
+			      "this</a> or <A id='two'>that</A>."),
+			    WS_CHILD, 0, 0, 300, 20, parent, NULL, NULL, NULL);
+	CHECK(h != NULL);
+	link_window = h;
+	LITEM li;
+	memset(&li, 0, sizeof(li));
+	li.mask = LIF_ITEMINDEX | LIF_STATE | LIF_ITEMID | LIF_URL;
+	li.iLink = 0;
+	li.stateMask = LIS_ENABLED | LIS_FOCUSED;
+	CHECK(SendMessageW(h, LM_GETITEM, 0, (LPARAM)&li));
+	CHECK(!strcmp(a(li.szUrl), "http://a.example/") &&
+	      !strcmp(a(li.szID), "one") &&
+	      li.state == (LIS_ENABLED | LIS_FOCUSED));
+	memset(&li, 0, sizeof(li));
+	li.mask = LIF_ITEMID | LIF_STATE;
+	memcpy(li.szID, u"two", 8);
+	li.stateMask = ~0u;
+	CHECK(SendMessageW(h, LM_GETITEM, 0, (LPARAM)&li));
+	CHECK(li.iLink == 1 && li.szUrl[0] == 0 && li.state == LIS_ENABLED);
+	li.mask = LIF_ITEMINDEX;
+	li.iLink = 2;
+	CHECK(!SendMessageW(h, LM_GETITEM, 0, (LPARAM)&li));
+	/* Set a URL and the visited state. */
+	memset(&li, 0, sizeof(li));
+	li.mask = LIF_ITEMINDEX | LIF_URL | LIF_STATE;
+	li.iLink = 1;
+	memcpy(li.szUrl, u"x:y", 8);
+	li.state = LIS_VISITED;
+	li.stateMask = LIS_VISITED;
+	CHECK(SendMessageW(h, LM_SETITEM, 0, (LPARAM)&li));
+	memset(&li, 0, sizeof(li));
+	li.mask = LIF_ITEMINDEX | LIF_URL | LIF_STATE;
+	li.iLink = 1;
+	li.stateMask = LIS_VISITED;
+	CHECK(SendMessageW(h, LM_GETITEM, 0, (LPARAM)&li));
+	CHECK(!strcmp(a(li.szUrl), "x:y") && li.state == LIS_VISITED);
+	/* Hit test: the second link lies after "See this or ". */
+	CHECK_EQ(SendMessageW(h, LM_GETIDEALHEIGHT, 0, 0), 16);
+	int x0 = comctl_width(u"See this or "), x1 = comctl_width(u"See this or that");
+	LHITTESTINFO hi;
+	memset(&hi, 0, sizeof(hi));
+	hi.pt.x = (x0 + x1) / 2;
+	hi.pt.y = 5;
+	CHECK(SendMessageW(h, LM_HITTEST, 0, (LPARAM)&hi));
+	CHECK(hi.item.iLink == 1 && !strcmp(a(hi.item.szID), "two"));
+	hi.pt.x = 1;
+	CHECK(!SendMessageW(h, LM_HITTEST, 0, (LPARAM)&hi));
+	last_link = -9;
+	SendMessageW(h, WM_LBUTTONDOWN, 0, MAKELPARAM((x0 + x1) / 2, 5));
+	CHECK_EQ(last_link, 1);
+	last_link = -9;
+	SendMessageW(h, WM_KEYDOWN, VK_RETURN, 0);
+	CHECK_EQ(last_link, 1);
+	SendMessageW(h, WM_KEYDOWN, VK_TAB, 0);
+	last_link = -9;
+	SendMessageW(h, WM_KEYDOWN, VK_RETURN, 0);
+	CHECK_EQ(last_link, 0);
+	/* New markup replaces the links; the window keeps the markup. */
+	SetWindowTextW(h, w("<a>only</a>"));
+	char text[64];
+	GetWindowTextA(h, text, 64);
+	CHECK(!strcmp(text, "<a>only</a>"));
+	li.mask = LIF_ITEMINDEX;
+	li.iLink = 1;
+	CHECK(!SendMessageW(h, LM_GETITEM, 0, (LPARAM)&li));
+	li.iLink = 0;
+	CHECK(SendMessageW(h, LM_GETITEM, 0, (LPARAM)&li));
+	link_window = NULL;
+	CHECK(DestroyWindow(h));
+}
+
 static void test_list_controls(void)
 {
 	USER_WLP(Set, HWND, int, LONG_PTR);
@@ -2504,6 +3069,9 @@ static void test_list_controls(void)
 	test_tooltip();
 	test_tab();
 	test_rebar();
+	test_small_controls();
+	test_date_controls();
+	test_comboex_link();
 }
 
 static void test_ordinals(void)

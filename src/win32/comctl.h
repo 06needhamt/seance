@@ -56,6 +56,15 @@ LRESULT STUB_WINAPI comctl_toolbar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 LRESULT STUB_WINAPI comctl_tooltip_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 LRESULT STUB_WINAPI comctl_tab_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 LRESULT STUB_WINAPI comctl_rebar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_hotkey_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_animate_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_ipaddr_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_pager_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_nativefont_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_monthcal_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_datetime_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_comboex_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_link_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 
 /* The export tables of the other source files. */
 extern const struct builtin_export comctl_dpa_exports[];

@@ -463,9 +463,13 @@ comdlg32 are built in too, headless:
   stderr.
 
 - **comctl32:** `InitCommonControls(Ex)` registers the control classes.
-  Nothing is drawn, so a control is its state: trackbars, progress bars,
-  up-down controls (with their buddy's text) and status bars keep and
-  answer theirs, and the other classes are plain windows. Window
+  Nothing is drawn, so a control is its state: every class (trackbars,
+  progress bars, up-down controls, status bars, headers, list and tree
+  views, toolbars, tooltips, tabs, rebars, hot keys, animations, IP
+  addresses, pagers, month calendars, date pickers, ComboBoxEx and
+  SysLink) keeps and answers its messages, with a simple geometry model
+  and the notifications Windows sends; there are no timers, so tooltips
+  show and animations end at once. Window
   subclassing (`SetWindowSubclass`), the DPA and DSA arrays, `Alloc` and
   `Str_SetPtr`, and image lists (kept at 32 bits, drawn through gdi32
   with their masks) work, with Windows' ordinals, since much of comctl32

@@ -81,9 +81,14 @@ typedef struct tagACCEL {
 #define FCONTROL  0x08
 #define FALT      0x10
 
+#define VK_BACK              0x08
+#define VK_TAB               0x09
+#define VK_RETURN            0x0D
 #define VK_SHIFT   0x10
 #define VK_CONTROL 0x11
 #define VK_MENU    0x12
+#define VK_ESCAPE            0x1B
+#define VK_DELETE            0x2E
 
 typedef struct tagMSG {
 	HWND hwnd;
@@ -281,6 +286,29 @@ typedef struct tagMONITORINFO {
 #define MK_RBUTTON           0x0002
 #define MK_SHIFT             0x0004
 #define MK_CONTROL           0x0008
+
+/* Combo box messages (which ComboBoxEx answers). */
+#define CB_ERR               (-1)
+#define CB_ERRSPACE          (-2)
+#define CB_ADDSTRING         0x0143
+#define CB_DELETESTRING      0x0144
+#define CB_GETCOUNT          0x0146
+#define CB_GETCURSEL         0x0147
+#define CB_GETLBTEXT         0x0148
+#define CB_GETLBTEXTLEN      0x0149
+#define CB_INSERTSTRING      0x014A
+#define CB_RESETCONTENT      0x014B
+#define CB_FINDSTRING        0x014C
+#define CB_SETCURSEL         0x014E
+#define CB_SHOWDROPDOWN      0x014F
+#define CB_GETITEMDATA       0x0150
+#define CB_SETITEMDATA       0x0151
+#define CB_GETDROPPEDSTATE   0x0157
+#define CB_FINDSTRINGEXACT   0x0158
+#define CBN_SELCHANGE        1
+#define EN_CHANGE            0x0300
+#define CBN_DROPDOWN         7
+#define CBN_CLOSEUP          8
 #define WM_STYLECHANGING     0x007C
 #define WM_STYLECHANGED      0x007D
 #define NFR_ANSI             1

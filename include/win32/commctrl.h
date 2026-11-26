@@ -2104,4 +2104,377 @@ typedef struct tagNMRBAUTOSIZE {
 	RECT rcActual;
 } NMRBAUTOSIZE, *LPNMRBAUTOSIZE;
 
+/* Hot key controls. */
+#define HKM_SETHOTKEY        (WM_USER + 1)
+#define HKM_GETHOTKEY        (WM_USER + 2)
+#define HKM_SETRULES         (WM_USER + 3)
+#define HOTKEYF_SHIFT        0x1
+#define HOTKEYF_CONTROL      0x2
+#define HOTKEYF_ALT          0x4
+#define HOTKEYF_EXT          0x8
+#define HKCOMB_NONE          0x1
+#define HKCOMB_S             0x2
+#define HKCOMB_C             0x4
+#define HKCOMB_A             0x8
+#define HKCOMB_SC            0x10
+#define HKCOMB_SA            0x20
+#define HKCOMB_CA            0x40
+#define HKCOMB_SCA           0x80
+
+/* Animation controls. */
+#define ACS_CENTER           0x1
+#define ACS_TRANSPARENT      0x2
+#define ACS_AUTOPLAY         0x4
+#define ACS_TIMER            0x8
+#define ACM_OPENA            (WM_USER + 100)
+#define ACM_PLAY             (WM_USER + 101)
+#define ACM_STOP             (WM_USER + 102)
+#define ACM_OPENW            (WM_USER + 103)
+#define ACM_ISPLAYING        (WM_USER + 104)
+#define ACN_START            1
+#define ACN_STOP             2
+
+/* IP address controls. */
+#define IPM_CLEARADDRESS     (WM_USER + 100)
+#define IPM_SETADDRESS       (WM_USER + 101)
+#define IPM_GETADDRESS       (WM_USER + 102)
+#define IPM_SETRANGE         (WM_USER + 103)
+#define IPM_SETFOCUS         (WM_USER + 104)
+#define IPM_ISBLANK          (WM_USER + 105)
+#define IPN_FIRST            (0U - 860U)
+#define IPN_FIELDCHANGED     (IPN_FIRST - 0)
+#define MAKEIPRANGE(low, high) ((LPARAM)(WORD)(((BYTE)(high) << 8) + (BYTE)(low)))
+#define MAKEIPADDRESS(b1, b2, b3, b4) ((LPARAM)(((DWORD)(b1) << 24) + \
+	((DWORD)(b2) << 16) + ((DWORD)(b3) << 8) + ((DWORD)(b4))))
+#define FIRST_IPADDRESS(x)   (((x) >> 24) & 0xff)
+#define SECOND_IPADDRESS(x)  (((x) >> 16) & 0xff)
+#define THIRD_IPADDRESS(x)   (((x) >> 8) & 0xff)
+#define FOURTH_IPADDRESS(x)  ((x) & 0xff)
+
+typedef struct tagNMIPADDRESS {
+	NMHDR hdr;
+	int iField;
+	int iValue;
+} NMIPADDRESS, *LPNMIPADDRESS;
+
+/* Month calendars. */
+#define MCM_FIRST            0x1000
+#define MCM_GETCURSEL        (MCM_FIRST + 1)
+#define MCM_SETCURSEL        (MCM_FIRST + 2)
+#define MCM_GETMAXSELCOUNT   (MCM_FIRST + 3)
+#define MCM_SETMAXSELCOUNT   (MCM_FIRST + 4)
+#define MCM_GETSELRANGE      (MCM_FIRST + 5)
+#define MCM_SETSELRANGE      (MCM_FIRST + 6)
+#define MCM_GETMONTHRANGE    (MCM_FIRST + 7)
+#define MCM_SETDAYSTATE      (MCM_FIRST + 8)
+#define MCM_GETMINREQRECT    (MCM_FIRST + 9)
+#define MCM_SETCOLOR         (MCM_FIRST + 10)
+#define MCM_GETCOLOR         (MCM_FIRST + 11)
+#define MCM_SETTODAY         (MCM_FIRST + 12)
+#define MCM_GETTODAY         (MCM_FIRST + 13)
+#define MCM_HITTEST          (MCM_FIRST + 14)
+#define MCM_SETFIRSTDAYOFWEEK (MCM_FIRST + 15)
+#define MCM_GETFIRSTDAYOFWEEK (MCM_FIRST + 16)
+#define MCM_GETRANGE         (MCM_FIRST + 17)
+#define MCM_SETRANGE         (MCM_FIRST + 18)
+#define MCM_GETMONTHDELTA    (MCM_FIRST + 19)
+#define MCM_SETMONTHDELTA    (MCM_FIRST + 20)
+#define MCM_GETMAXTODAYWIDTH (MCM_FIRST + 21)
+#define MCM_GETCURRENTVIEW   (MCM_FIRST + 22)
+#define MCM_GETCALENDARCOUNT (MCM_FIRST + 23)
+#define MCM_SETCURRENTVIEW   (MCM_FIRST + 32)
+#define MCM_SETUNICODEFORMAT CCM_SETUNICODEFORMAT
+#define MCM_GETUNICODEFORMAT CCM_GETUNICODEFORMAT
+#define MCSC_BACKGROUND      0
+#define MCSC_TEXT            1
+#define MCSC_TITLEBK         2
+#define MCSC_TITLETEXT       3
+#define MCSC_MONTHBK         4
+#define MCSC_TRAILINGTEXT    5
+#define MCS_DAYSTATE         0x1
+#define MCS_MULTISELECT      0x2
+#define MCS_WEEKNUMBERS      0x4
+#define MCS_NOTODAYCIRCLE    0x8
+#define MCS_NOTODAY          0x10
+#define MCS_NOTRAILINGDATES  0x40
+#define MCS_SHORTDAYSOFWEEK  0x80
+#define MCS_NOSELCHANGEONNAV 0x100
+#define MCHT_TITLE           0x10000
+#define MCHT_CALENDAR        0x20000
+#define MCHT_TODAYLINK       0x30000
+#define MCHT_CALENDARCONTROL 0x100000
+#define MCHT_NEXT            0x1000000
+#define MCHT_PREV            0x2000000
+#define MCHT_NOWHERE         0x0
+#define MCHT_TITLEBK         (MCHT_TITLE)
+#define MCHT_CALENDARDATE    (MCHT_CALENDAR | 0x1)
+#define MCHT_CALENDARBK      (MCHT_CALENDAR)
+#define MCHT_TITLEMONTH      (MCHT_TITLE | 0x1)
+#define MCHT_TITLEYEAR       (MCHT_TITLE | 0x2)
+#define MCHT_TITLEBTNNEXT    (MCHT_TITLE | MCHT_NEXT | 0x3)
+#define MCHT_TITLEBTNPREV    (MCHT_TITLE | MCHT_PREV | 0x3)
+#define MCHT_CALENDARDATENEXT (MCHT_CALENDARDATE | MCHT_NEXT)
+#define MCHT_CALENDARDATEPREV (MCHT_CALENDARDATE | MCHT_PREV)
+#define MCHT_CALENDARDAY     (MCHT_CALENDAR | 0x2)
+#define MCHT_CALENDARWEEKNUM (MCHT_CALENDAR | 0x3)
+#define MCMV_MONTH           0
+#define MCMV_YEAR            1
+#define MCMV_DECADE          2
+#define MCMV_CENTURY         3
+#define GMR_VISIBLE          0
+#define GMR_DAYSTATE         1
+#define MCN_FIRST            (0U - 746U)
+#define MCN_SELECT           (MCN_FIRST + 0)
+#define MCN_GETDAYSTATE      (MCN_FIRST + 3)
+#define MCN_SELCHANGE        (MCN_FIRST - 3)
+#define MCN_VIEWCHANGE       (MCN_FIRST - 4)
+
+typedef DWORD MONTHDAYSTATE, *LPMONTHDAYSTATE;
+
+typedef struct {
+	UINT cbSize;
+	POINT pt;
+	UINT uHit;
+	SYSTEMTIME st;
+	RECT rc;		/* from here on, Vista's comctl32 6 */
+	int iOffset;
+	int iRow;
+	int iCol;
+} MCHITTESTINFO, *PMCHITTESTINFO;
+#define MCHITTESTINFO_V1_SIZE (offsetof(MCHITTESTINFO, st) + sizeof(SYSTEMTIME))
+
+typedef struct tagNMSELCHANGE {
+	NMHDR nmhdr;
+	SYSTEMTIME stSelStart;
+	SYSTEMTIME stSelEnd;
+} NMSELCHANGE, *LPNMSELCHANGE;
+typedef NMSELCHANGE NMSELECT, *LPNMSELECT;
+
+typedef struct tagNMDAYSTATE {
+	NMHDR nmhdr;
+	SYSTEMTIME stStart;
+	int cDayState;
+	LPMONTHDAYSTATE prgDayState;
+} NMDAYSTATE, *LPNMDAYSTATE;
+
+/* Date and time pickers. */
+#define DTM_FIRST            0x1000
+#define DTM_GETSYSTEMTIME    (DTM_FIRST + 1)
+#define DTM_SETSYSTEMTIME    (DTM_FIRST + 2)
+#define DTM_GETRANGE         (DTM_FIRST + 3)
+#define DTM_SETRANGE         (DTM_FIRST + 4)
+#define DTM_SETFORMATA       (DTM_FIRST + 5)
+#define DTM_SETMCCOLOR       (DTM_FIRST + 6)
+#define DTM_GETMCCOLOR       (DTM_FIRST + 7)
+#define DTM_GETMONTHCAL      (DTM_FIRST + 8)
+#define DTM_SETMCFONT        (DTM_FIRST + 9)
+#define DTM_GETMCFONT        (DTM_FIRST + 10)
+#define DTM_SETMCSTYLE       (DTM_FIRST + 11)
+#define DTM_GETMCSTYLE       (DTM_FIRST + 12)
+#define DTM_CLOSEMONTHCAL    (DTM_FIRST + 13)
+#define DTM_GETIDEALSIZE     (DTM_FIRST + 15)
+#define DTM_SETFORMATW       (DTM_FIRST + 50)
+#define DTS_UPDOWN           0x1
+#define DTS_SHOWNONE         0x2
+#define DTS_SHORTDATEFORMAT  0x0
+#define DTS_LONGDATEFORMAT   0x4
+#define DTS_SHORTDATECENTURYFORMAT 0xc
+#define DTS_TIMEFORMAT       0x9
+#define DTS_APPCANPARSE      0x10
+#define DTS_RIGHTALIGN       0x20
+#define GDTR_MIN             0x1
+#define GDTR_MAX             0x2
+#define GDT_ERROR            -1
+#define GDT_VALID            0
+#define GDT_NONE             1
+#define DTN_FIRST            (0U - 740U)
+#define DTN_FIRST2           (0U - 753U)
+#define DTN_DATETIMECHANGE   (DTN_FIRST2 - 6)
+
+typedef struct tagNMDATETIMECHANGE {
+	NMHDR nmhdr;
+	DWORD dwFlags;
+	SYSTEMTIME st;
+} NMDATETIMECHANGE, *LPNMDATETIMECHANGE;
+
+/* Pagers. */
+#define PGM_FIRST            0x1400
+#define PGM_SETCHILD         (PGM_FIRST + 1)
+#define PGM_RECALCSIZE       (PGM_FIRST + 2)
+#define PGM_FORWARDMOUSE     (PGM_FIRST + 3)
+#define PGM_SETBKCOLOR       (PGM_FIRST + 4)
+#define PGM_GETBKCOLOR       (PGM_FIRST + 5)
+#define PGM_SETBORDER        (PGM_FIRST + 6)
+#define PGM_GETBORDER        (PGM_FIRST + 7)
+#define PGM_SETPOS           (PGM_FIRST + 8)
+#define PGM_GETPOS           (PGM_FIRST + 9)
+#define PGM_SETBUTTONSIZE    (PGM_FIRST + 10)
+#define PGM_GETBUTTONSIZE    (PGM_FIRST + 11)
+#define PGM_GETBUTTONSTATE   (PGM_FIRST + 12)
+#define PGS_VERT             0x0
+#define PGS_HORZ             0x1
+#define PGS_AUTOSCROLL       0x2
+#define PGS_DRAGNDROP        0x4
+#define PGF_INVISIBLE        0
+#define PGF_NORMAL           1
+#define PGF_GRAYED           2
+#define PGF_DEPRESSED        4
+#define PGF_HOT              8
+#define PGB_TOPORLEFT        0
+#define PGB_BOTTOMORRIGHT    1
+#define PGF_SCROLLUP         1
+#define PGF_SCROLLDOWN       2
+#define PGF_SCROLLLEFT       4
+#define PGF_SCROLLRIGHT      8
+#define PGF_CALCWIDTH        1
+#define PGF_CALCHEIGHT       2
+#define PGN_FIRST            (0U - 900U)
+#define PGN_SCROLL           (PGN_FIRST - 1)
+#define PGN_CALCSIZE         (PGN_FIRST - 2)
+
+#pragma pack(push, 1)
+typedef struct {
+	NMHDR hdr;
+	WORD fwKeys;
+	RECT rcParent;
+	int iDir;
+	int iXpos;
+	int iYpos;
+	int iScroll;
+} NMPGSCROLL, *LPNMPGSCROLL;
+#pragma pack(pop)
+
+typedef struct {
+	NMHDR hdr;
+	DWORD dwFlag;
+	int iWidth;
+	int iHeight;
+} NMPGCALCSIZE, *LPNMPGCALCSIZE;
+
+/* ComboBoxEx. */
+#define CBEM_INSERTITEMA     (WM_USER + 1)
+#define CBEM_SETIMAGELIST    (WM_USER + 2)
+#define CBEM_GETIMAGELIST    (WM_USER + 3)
+#define CBEM_GETITEMA        (WM_USER + 4)
+#define CBEM_SETITEMA        (WM_USER + 5)
+#define CBEM_DELETEITEM      CB_DELETESTRING
+#define CBEM_GETCOMBOCONTROL (WM_USER + 6)
+#define CBEM_GETEDITCONTROL  (WM_USER + 7)
+#define CBEM_SETEXSTYLE      (WM_USER + 8)
+#define CBEM_GETEXSTYLE      (WM_USER + 9)
+#define CBEM_GETEXTENDEDSTYLE (WM_USER + 9)
+#define CBEM_HASEDITCHANGED  (WM_USER + 10)
+#define CBEM_INSERTITEMW     (WM_USER + 11)
+#define CBEM_SETITEMW        (WM_USER + 12)
+#define CBEM_GETITEMW        (WM_USER + 13)
+#define CBEM_SETEXTENDEDSTYLE (WM_USER + 14)
+#define CBEM_SETUNICODEFORMAT CCM_SETUNICODEFORMAT
+#define CBEM_GETUNICODEFORMAT CCM_GETUNICODEFORMAT
+#define CBEIF_TEXT           0x1
+#define CBEIF_IMAGE          0x2
+#define CBEIF_SELECTEDIMAGE  0x4
+#define CBEIF_OVERLAY        0x8
+#define CBEIF_INDENT         0x10
+#define CBEIF_LPARAM         0x20
+#define CBEIF_DI_SETITEM     0x10000000
+#define CBES_EX_NOEDITIMAGE  0x1
+#define CBES_EX_NOEDITIMAGEINDENT 0x2
+#define CBES_EX_PATHWORDBREAKPROC 0x4
+#define CBES_EX_NOSIZELIMIT  0x8
+#define CBES_EX_CASESENSITIVE 0x10
+#define CBEN_FIRST           (0U - 800U)
+#define CBEN_GETDISPINFOA    (CBEN_FIRST - 0)
+#define CBEN_INSERTITEM      (CBEN_FIRST - 1)
+#define CBEN_DELETEITEM      (CBEN_FIRST - 2)
+#define CBEN_BEGINEDIT       (CBEN_FIRST - 4)
+#define CBEN_ENDEDITA        (CBEN_FIRST - 5)
+#define CBEN_ENDEDITW        (CBEN_FIRST - 6)
+#define CBEN_GETDISPINFOW    (CBEN_FIRST - 7)
+
+typedef struct tagCOMBOBOXEXITEMA {
+	UINT mask;
+	INT_PTR iItem;
+	LPSTR pszText;
+	int cchTextMax;
+	int iImage;
+	int iSelectedImage;
+	int iOverlay;
+	int iIndent;
+	LPARAM lParam;
+} COMBOBOXEXITEMA, *PCOMBOBOXEXITEMA;
+typedef const COMBOBOXEXITEMA *PCCOMBOEXITEMA;
+
+typedef struct tagCOMBOBOXEXITEMW {
+	UINT mask;
+	INT_PTR iItem;
+	LPWSTR pszText;
+	int cchTextMax;
+	int iImage;
+	int iSelectedImage;
+	int iOverlay;
+	int iIndent;
+	LPARAM lParam;
+} COMBOBOXEXITEMW, *PCOMBOBOXEXITEMW;
+typedef const COMBOBOXEXITEMW *PCCOMBOEXITEMW;
+
+typedef struct {
+	NMHDR hdr;
+	COMBOBOXEXITEMA ceItem;
+} NMCOMBOBOXEXA, *PNMCOMBOBOXEXA;
+
+typedef struct {
+	NMHDR hdr;
+	COMBOBOXEXITEMW ceItem;
+} NMCOMBOBOXEXW, *PNMCOMBOBOXEXW;
+
+/* SysLink. */
+#define MAX_LINKID_TEXT      48
+#define L_MAX_URL_LENGTH     (2048 + 32 + sizeof("://"))
+#define LWS_TRANSPARENT      0x1
+#define LWS_IGNORERETURN     0x2
+#define LWS_NOPREFIX         0x4
+#define LWS_USEVISUALSTYLE   0x8
+#define LWS_USECUSTOMTEXT    0x10
+#define LWS_RIGHT            0x20
+#define LIF_ITEMINDEX        0x1
+#define LIF_STATE            0x2
+#define LIF_ITEMID           0x4
+#define LIF_URL              0x8
+#define LIS_FOCUSED          0x1
+#define LIS_ENABLED          0x2
+#define LIS_VISITED          0x4
+#define LIS_HOTTRACK         0x8
+#define LIS_DEFAULTCOLORS    0x10
+#define LM_HITTEST           (WM_USER + 0x300)
+#define LM_GETIDEALHEIGHT    (WM_USER + 0x301)
+#define LM_SETITEM           (WM_USER + 0x302)
+#define LM_GETITEM           (WM_USER + 0x303)
+
+typedef struct tagLITEM {
+	UINT mask;
+	int iLink;
+	UINT state;
+	UINT stateMask;
+	WCHAR szID[MAX_LINKID_TEXT];
+	WCHAR szUrl[L_MAX_URL_LENGTH];
+} LITEM, *PLITEM;
+
+typedef struct tagLHITTESTINFO {
+	POINT pt;
+	LITEM item;
+} LHITTESTINFO, *PLHITTESTINFO;
+
+typedef struct tagNMLINK {
+	NMHDR hdr;
+	LITEM item;
+} NMLINK, *PNMLINK;
+
+/* The native font control. */
+#define NFS_EDIT             0x1
+#define NFS_STATIC           0x2
+#define NFS_LISTCOMBO        0x4
+#define NFS_BUTTON           0x8
+#define NFS_ALL              0x10
+#define NFS_USEFONTASSOC     0x20
+
 #endif /* VFW_WIN32_COMMCTRL_H */
