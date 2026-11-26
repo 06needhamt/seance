@@ -277,6 +277,10 @@ typedef struct tagMONITORINFO {
 #define WM_MOUSEMOVE         0x0200
 #define WM_LBUTTONDOWN       0x0201
 #define WM_LBUTTONUP         0x0202
+#define MK_LBUTTON           0x0001
+#define MK_RBUTTON           0x0002
+#define MK_SHIFT             0x0004
+#define MK_CONTROL           0x0008
 #define WM_STYLECHANGING     0x007C
 #define WM_STYLECHANGED      0x007D
 #define NFR_ANSI             1

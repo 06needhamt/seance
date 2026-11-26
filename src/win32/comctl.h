@@ -54,6 +54,8 @@ LRESULT STUB_WINAPI comctl_listview_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 LRESULT STUB_WINAPI comctl_treeview_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 LRESULT STUB_WINAPI comctl_toolbar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 LRESULT STUB_WINAPI comctl_tooltip_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_tab_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_rebar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 
 /* The export tables of the other source files. */
 extern const struct builtin_export comctl_dpa_exports[];
