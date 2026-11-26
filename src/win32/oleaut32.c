@@ -309,6 +309,7 @@ HRESULT STUB_WINAPI oa_VariantCopyInd(VARIANTARG *dst, const VARIANTARG *src)
 	if (!src->byref)
 		return E_INVALIDARG;
 
+	hr = S_OK;	/* the copies below set it only when they can fail */
 	VARTYPE vt = src->vt & ~VT_BYREF;
 	oa_VariantInit(&v);
 	if (vt & VT_ARRAY) {
@@ -571,7 +572,9 @@ static const struct builtin_export exports[] = {
 
 static const struct builtin_export *const tables[] = {
 	exports, oa_conv_exports, oa_array_exports, oa_typelib_exports,
-	oa_typereg_exports, oa_dispatch_exports, NULL
+	oa_typereg_exports, oa_dispatch_exports, oa_var_exports,
+	oa_format_exports, oa_create_exports, oa_marshal_exports,
+	oa_record_exports, NULL
 };
 
 const struct builtin_dll builtin_oleaut32 = { "oleaut32.dll", NULL, tables, 0 };

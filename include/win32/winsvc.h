@@ -1,0 +1,220 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+/*
+ * The service control manager (winsvc.h, winnt.h's service types) and the
+ * event log (winnt.h's EVENTLOGRECORD, winbase.h's read flags), for
+ * advapi32.
+ */
+#ifndef VFW_WIN32_WINSVC_H
+#define VFW_WIN32_WINSVC_H
+
+#include "types.h"
+
+#define ERROR_INVALID_LEVEL                     124
+#define ERROR_INVALID_SERVICE_CONTROL           1052
+#define ERROR_SERVICE_REQUEST_TIMEOUT           1053
+#define ERROR_SERVICE_ALREADY_RUNNING           1056
+#define ERROR_SERVICE_DATABASE_LOCKED           1055
+#define ERROR_SERVICE_DISABLED                  1058
+#define ERROR_SERVICE_DOES_NOT_EXIST            1060
+#define ERROR_SERVICE_CANNOT_ACCEPT_CTRL        1061
+#define ERROR_SERVICE_NOT_ACTIVE                1062
+#define ERROR_FAILED_SERVICE_CONTROLLER_CONNECT 1063
+#define ERROR_INVALID_SERVICE_LOCK              1071
+#define ERROR_SERVICE_MARKED_FOR_DELETE         1072
+#define ERROR_SERVICE_EXISTS                    1073
+#define ERROR_SERVICE_NEVER_STARTED             1077
+#define ERROR_DUPLICATE_SERVICE_NAME            1078
+#define ERROR_GENERIC_NOT_MAPPED                1360
+
+typedef void *SC_HANDLE;
+typedef void *SERVICE_STATUS_HANDLE;
+typedef void *SC_LOCK;
+
+/* Access to the manager and to a service. */
+#define SC_MANAGER_CONNECT            0x0001
+#define SC_MANAGER_CREATE_SERVICE     0x0002
+#define SC_MANAGER_ENUMERATE_SERVICE  0x0004
+#define SC_MANAGER_LOCK               0x0008
+#define SC_MANAGER_QUERY_LOCK_STATUS  0x0010
+#define SC_MANAGER_MODIFY_BOOT_CONFIG 0x0020
+#define SC_MANAGER_ALL_ACCESS         0x000f003f
+
+#define SERVICE_QUERY_CONFIG         0x0001
+#define SERVICE_CHANGE_CONFIG        0x0002
+#define SERVICE_QUERY_STATUS         0x0004
+#define SERVICE_ENUMERATE_DEPENDENTS 0x0008
+#define SERVICE_START                0x0010
+#define SERVICE_STOP                 0x0020
+#define SERVICE_PAUSE_CONTINUE       0x0040
+#define SERVICE_INTERROGATE          0x0080
+#define SERVICE_USER_DEFINED_CONTROL 0x0100
+#define SERVICE_ALL_ACCESS           0x000f01ff
+
+/* Types, start types and error control. */
+#define SERVICE_KERNEL_DRIVER       0x00000001
+#define SERVICE_FILE_SYSTEM_DRIVER  0x00000002
+#define SERVICE_ADAPTER             0x00000004
+#define SERVICE_RECOGNIZER_DRIVER   0x00000008
+#define SERVICE_DRIVER              0x0000000b
+#define SERVICE_WIN32_OWN_PROCESS   0x00000010
+#define SERVICE_WIN32_SHARE_PROCESS 0x00000020
+#define SERVICE_WIN32               0x00000030
+#define SERVICE_INTERACTIVE_PROCESS 0x00000100
+#define SERVICE_TYPE_ALL            0x0000013f
+
+#define SERVICE_BOOT_START   0x00000000
+#define SERVICE_SYSTEM_START 0x00000001
+#define SERVICE_AUTO_START   0x00000002
+#define SERVICE_DEMAND_START 0x00000003
+#define SERVICE_DISABLED     0x00000004
+
+#define SERVICE_ERROR_IGNORE   0x00000000
+#define SERVICE_ERROR_NORMAL   0x00000001
+#define SERVICE_ERROR_SEVERE   0x00000002
+#define SERVICE_ERROR_CRITICAL 0x00000003
+
+#define SERVICE_NO_CHANGE 0xffffffff
+
+/* States, controls and what a service accepts. */
+#define SERVICE_STOPPED          0x00000001
+#define SERVICE_START_PENDING    0x00000002
+#define SERVICE_STOP_PENDING     0x00000003
+#define SERVICE_RUNNING          0x00000004
+#define SERVICE_CONTINUE_PENDING 0x00000005
+#define SERVICE_PAUSE_PENDING    0x00000006
+#define SERVICE_PAUSED           0x00000007
+
+#define SERVICE_ACTIVE    0x00000001
+#define SERVICE_INACTIVE  0x00000002
+#define SERVICE_STATE_ALL 0x00000003
+
+#define SERVICE_CONTROL_STOP        0x00000001
+#define SERVICE_CONTROL_PAUSE       0x00000002
+#define SERVICE_CONTROL_CONTINUE    0x00000003
+#define SERVICE_CONTROL_INTERROGATE 0x00000004
+#define SERVICE_CONTROL_SHUTDOWN    0x00000005
+
+#define SERVICE_ACCEPT_STOP           0x00000001
+#define SERVICE_ACCEPT_PAUSE_CONTINUE 0x00000002
+#define SERVICE_ACCEPT_SHUTDOWN       0x00000004
+
+#define SC_STATUS_PROCESS_INFO 0
+#define SC_ENUM_PROCESS_INFO   0
+
+typedef struct _SERVICE_STATUS {
+	DWORD dwServiceType;
+	DWORD dwCurrentState;
+	DWORD dwControlsAccepted;
+	DWORD dwWin32ExitCode;
+	DWORD dwServiceSpecificExitCode;
+	DWORD dwCheckPoint;
+	DWORD dwWaitHint;
+} SERVICE_STATUS, *LPSERVICE_STATUS;
+
+typedef struct _SERVICE_STATUS_PROCESS {
+	DWORD dwServiceType;
+	DWORD dwCurrentState;
+	DWORD dwControlsAccepted;
+	DWORD dwWin32ExitCode;
+	DWORD dwServiceSpecificExitCode;
+	DWORD dwCheckPoint;
+	DWORD dwWaitHint;
+	DWORD dwProcessId;
+	DWORD dwServiceFlags;
+} SERVICE_STATUS_PROCESS, *LPSERVICE_STATUS_PROCESS;
+
+typedef struct _QUERY_SERVICE_CONFIGA {
+	DWORD dwServiceType;
+	DWORD dwStartType;
+	DWORD dwErrorControl;
+	LPSTR lpBinaryPathName;
+	LPSTR lpLoadOrderGroup;
+	DWORD dwTagId;
+	LPSTR lpDependencies;
+	LPSTR lpServiceStartName;
+	LPSTR lpDisplayName;
+} QUERY_SERVICE_CONFIGA, *LPQUERY_SERVICE_CONFIGA;
+
+typedef struct _QUERY_SERVICE_CONFIGW {
+	DWORD dwServiceType;
+	DWORD dwStartType;
+	DWORD dwErrorControl;
+	LPWSTR lpBinaryPathName;
+	LPWSTR lpLoadOrderGroup;
+	DWORD dwTagId;
+	LPWSTR lpDependencies;
+	LPWSTR lpServiceStartName;
+	LPWSTR lpDisplayName;
+} QUERY_SERVICE_CONFIGW, *LPQUERY_SERVICE_CONFIGW;
+
+typedef struct _ENUM_SERVICE_STATUSA {
+	LPSTR lpServiceName;
+	LPSTR lpDisplayName;
+	SERVICE_STATUS ServiceStatus;
+} ENUM_SERVICE_STATUSA, *LPENUM_SERVICE_STATUSA;
+
+typedef struct _ENUM_SERVICE_STATUSW {
+	LPWSTR lpServiceName;
+	LPWSTR lpDisplayName;
+	SERVICE_STATUS ServiceStatus;
+} ENUM_SERVICE_STATUSW, *LPENUM_SERVICE_STATUSW;
+
+typedef struct _ENUM_SERVICE_STATUS_PROCESSA {
+	LPSTR lpServiceName;
+	LPSTR lpDisplayName;
+	SERVICE_STATUS_PROCESS ServiceStatusProcess;
+} ENUM_SERVICE_STATUS_PROCESSA, *LPENUM_SERVICE_STATUS_PROCESSA;
+
+typedef struct _ENUM_SERVICE_STATUS_PROCESSW {
+	LPWSTR lpServiceName;
+	LPWSTR lpDisplayName;
+	SERVICE_STATUS_PROCESS ServiceStatusProcess;
+} ENUM_SERVICE_STATUS_PROCESSW, *LPENUM_SERVICE_STATUS_PROCESSW;
+
+typedef void (WINAPI *LPSERVICE_MAIN_FUNCTIONA)(DWORD, LPSTR *);
+typedef void (WINAPI *LPSERVICE_MAIN_FUNCTIONW)(DWORD, LPWSTR *);
+
+typedef struct _SERVICE_TABLE_ENTRYA {
+	LPSTR lpServiceName;
+	LPSERVICE_MAIN_FUNCTIONA lpServiceProc;
+} SERVICE_TABLE_ENTRYA, *LPSERVICE_TABLE_ENTRYA;
+
+typedef struct _SERVICE_TABLE_ENTRYW {
+	LPWSTR lpServiceName;
+	LPSERVICE_MAIN_FUNCTIONW lpServiceProc;
+} SERVICE_TABLE_ENTRYW, *LPSERVICE_TABLE_ENTRYW;
+
+/* The event log. */
+#define EVENTLOG_SUCCESS          0x0000
+#define EVENTLOG_ERROR_TYPE       0x0001
+#define EVENTLOG_WARNING_TYPE     0x0002
+#define EVENTLOG_INFORMATION_TYPE 0x0004
+#define EVENTLOG_AUDIT_SUCCESS    0x0008
+#define EVENTLOG_AUDIT_FAILURE    0x0010
+
+#define EVENTLOG_SEQUENTIAL_READ 0x0001
+#define EVENTLOG_SEEK_READ       0x0002
+#define EVENTLOG_FORWARDS_READ   0x0004
+#define EVENTLOG_BACKWARDS_READ  0x0008
+
+/* Followed by the source and computer names, the SID, strings and data. */
+typedef struct _EVENTLOGRECORD {
+	DWORD Length;
+	DWORD Reserved;
+	DWORD RecordNumber;
+	DWORD TimeGenerated;
+	DWORD TimeWritten;
+	DWORD EventID;
+	WORD EventType;
+	WORD NumStrings;
+	WORD EventCategory;
+	WORD ReservedFlags;
+	DWORD ClosingRecordNumber;
+	DWORD StringOffset;
+	DWORD UserSidLength;
+	DWORD UserSidOffset;
+	DWORD DataLength;
+	DWORD DataOffset;
+} EVENTLOGRECORD, *PEVENTLOGRECORD;
+
+#endif /* VFW_WIN32_WINSVC_H */

@@ -7,9 +7,13 @@
  *   Windows XP, under drive C:, with the profile named after GetUserName
  *   ($USER): C:\Documents and Settings\<user>\Application Data and so on.
  *   Each is created when first asked for, as a real profile has them all.
- * - Item ID lists are this shell32's own: one item holding a Windows path
- *   (or a virtual folder's CSIDL), allocated with the COM task allocator.
- *   The desktop is the empty list, as on Windows.
+ * - Item ID lists are this shell32's own: each item is absolute (a Windows
+ *   path, or a virtual folder's CSIDL) and the last one is what the list
+ *   stands for, so ILCombine, ILFindLastID and SHBindToParent work as on
+ *   Windows. They come from the COM task allocator; the desktop is the
+ *   empty list, as on Windows.
+ * - Known folders (SHGetKnownFolderPath and friends) map onto the special
+ *   folders, plus the few Vista added (Downloads, Links, ...).
  * - With nothing to show anything on, ShellExecute finds no program for
  *   what it is asked to open, SHBrowseForFolder is cancelled, ShellAbout
  *   and the tray icon calls succeed, and there are no icons, dropped
@@ -17,7 +21,8 @@
  *   MessageBox does.
  *
  * SHFileOperation, SHCreateDirectoryEx and SHGetFileInfo are in
- * shell_file.c.
+ * shell_file.c; IShellFolder and the namespace in shell_folder.c; the
+ * Recycle Bin in shell_recycle.c; shortcuts (IShellLink) in shell_link.c.
  */
 #include <errno.h>
 #include <stdio.h>
@@ -34,6 +39,9 @@
 
 extern const struct builtin_dll builtin_ole32;
 extern const struct builtin_export shell_file_exports[];
+extern const struct builtin_export shell_folder_exports[];
+extern const struct builtin_export shell_recycle_exports[];
+extern const struct builtin_export shell_link_exports[];
 
 /* Folders: where each CSIDL is, from the profile, All Users, or C:. */
 enum base { ROOT, PROFILE, ALL_USERS, VIRTUAL };
@@ -303,17 +311,48 @@ static USHORT item_size(const BYTE *p)
 	return (USHORT)(p[0] | p[1] << 8);
 }
 
-char *shell_pidl_path(LPCITEMIDLIST pidl)
+/*
+ * The last item of a list: lists this shell32 makes are absolute in
+ * every item, so the last says what the whole list stands for (a list
+ * built by ILCombine of a folder and a child is the child).
+ */
+const BYTE *shell_pidl_last(LPCITEMIDLIST pidl)
 {
-	const BYTE *p = (const BYTE *)pidl;
-	HRESULT hr;
+	const BYTE *p = (const BYTE *)pidl, *last = NULL;
 
 	if (!p)
 		return NULL;
-	USHORT cb = item_size(p);
-	if (!cb)
+	for (USHORT cb; (cb = item_size(p)); p += cb)
+		last = p;
+	return last;
+}
+
+int shell_pidl_csidl(LPCITEMIDLIST pidl)
+{
+	const BYTE *p = shell_pidl_last(pidl);
+	DWORD c;
+
+	if (!pidl)
+		return -1;
+	if (!p)
+		return CSIDL_DESKTOP;
+	if (item_size(p) != 10 || memcmp(p + 2, virtual_tag, 4))
+		return -1;
+	memcpy(&c, p + 6, 4);
+	return (int)c;
+}
+
+char *shell_pidl_path(LPCITEMIDLIST pidl)
+{
+	const BYTE *p = shell_pidl_last(pidl);
+	HRESULT hr;
+
+	if (!pidl)
+		return NULL;
+	if (!p)
 		return folder_path(CSIDL_DESKTOPDIRECTORY, &hr);
-	if (cb < 8 || memcmp(p + 2, path_tag, 4) || item_size(p + cb))
+	USHORT cb = item_size(p);
+	if (cb < 8 || memcmp(p + 2, path_tag, 4))
 		return NULL;
 	size_t n = (cb - 6) / sizeof(WCHAR);
 	WCHAR *w = malloc((n + 1) * sizeof(WCHAR));
@@ -324,6 +363,26 @@ char *shell_pidl_path(LPCITEMIDLIST pidl)
 	char *path = utf16_to_utf8_dup(w);
 	free(w);
 	return path;
+}
+
+LPITEMIDLIST shell_pidl_from_path(const char *path)
+{
+	return pidl_from_path(path);
+}
+
+LPITEMIDLIST shell_pidl_virtual(int csidl)
+{
+	DWORD c = (DWORD)csidl;
+
+	if (csidl == CSIDL_DESKTOP)
+		return heap_alloc(heap_process(), HEAP_ZERO_MEMORY, 2);
+	return pidl_alloc(virtual_tag, &c, sizeof(c));
+}
+
+char *shell_folder_path(int csidl)
+{
+	HRESULT hr;
+	return folder_path(csidl, &hr);
 }
 
 static HRESULT folder_location(int csidl, LPITEMIDLIST *out)
@@ -429,6 +488,254 @@ WINFN(LPITEMIDLIST) sh_ILClone(LPCITEMIDLIST pidl)
 WINFN(void) sh_ILFree(LPITEMIDLIST pidl)
 {
 	heap_free(heap_process(), 0, pidl);
+}
+
+WINFN(LPITEMIDLIST) sh_ILGetNext(LPCITEMIDLIST pidl)
+{
+	const BYTE *p = (const BYTE *)pidl;
+	USHORT cb;
+
+	if (!p || !(cb = item_size(p)))
+		return NULL;
+	return (LPITEMIDLIST)(p + cb);
+}
+
+WINFN(LPITEMIDLIST) sh_ILFindLastID(LPCITEMIDLIST pidl)
+{
+	const BYTE *p = shell_pidl_last(pidl);
+	return (LPITEMIDLIST)(p ? p : (const BYTE *)pidl);
+}
+
+WINFN(BOOL) sh_ILRemoveLastID(LPITEMIDLIST pidl)
+{
+	BYTE *p = (BYTE *)shell_pidl_last(pidl);
+
+	if (!p)
+		return FALSE;
+	p[0] = p[1] = 0;
+	return TRUE;
+}
+
+WINFN(LPITEMIDLIST) sh_ILCombine(LPCITEMIDLIST a, LPCITEMIDLIST b)
+{
+	if (!a && !b)
+		return NULL;
+	if (!a)
+		return sh_ILClone(b);
+	if (!b)
+		return sh_ILClone(a);
+	UINT na = sh_ILGetSize(a) - 2, nb = sh_ILGetSize(b);
+	BYTE *p = heap_alloc(heap_process(), 0, na + nb);
+	if (p) {
+		memcpy(p, a, na);
+		memcpy(p + na, b, nb);
+	}
+	return (LPITEMIDLIST)p;
+}
+
+/* Two lists for the same thing (paths case-insensitively). */
+WINFN(BOOL) sh_ILIsEqual(LPCITEMIDLIST a, LPCITEMIDLIST b)
+{
+	if (!a || !b)
+		return FALSE;
+	int ca = shell_pidl_csidl(a), cb = shell_pidl_csidl(b);
+	if (ca >= 0 || cb >= 0)
+		return ca == cb;
+	char *pa = shell_pidl_path(a), *pb = shell_pidl_path(b);
+	BOOL r = pa && pb && !strcasecmp(pa, pb);
+	free(pa);
+	free(pb);
+	return r;
+}
+
+/* Whether b is a (direct, with immediate) child of a. */
+WINFN(BOOL) sh_ILIsParent(LPCITEMIDLIST a, LPCITEMIDLIST b, BOOL immediate)
+{
+	char *pa = shell_pidl_path(a), *pb = shell_pidl_path(b);
+	BOOL r = FALSE;
+
+	if (pa && pb) {
+		size_t n = strlen(pa);
+		while (n && pa[n - 1] == '\\')
+			n--;
+		if (!strncasecmp(pa, pb, n) && pb[n] == '\\' && pb[n + 1])
+			r = !immediate || !strchr(pb + n + 1, '\\') ||
+			    !strchr(pb + n + 1, '\\')[1];
+	}
+	free(pa);
+	free(pb);
+	return r;
+}
+
+/* Known folders (Vista on): each one a CSIDL's, or a profile folder. */
+static const struct {
+	const KNOWNFOLDERID *id;
+	int csidl;
+	const char *sub;	/* under the profile, when csidl is -1 */
+} known[] = {
+	{ &FOLDERID_Desktop, CSIDL_DESKTOPDIRECTORY, NULL },
+	{ &FOLDERID_Documents, CSIDL_PERSONAL, NULL },
+	{ &FOLDERID_RoamingAppData, CSIDL_APPDATA, NULL },
+	{ &FOLDERID_LocalAppData, CSIDL_LOCAL_APPDATA, NULL },
+	{ &FOLDERID_ProgramData, CSIDL_COMMON_APPDATA, NULL },
+	{ &FOLDERID_ProgramFiles, CSIDL_PROGRAM_FILES, NULL },
+	{ &FOLDERID_ProgramFilesX86, CSIDL_PROGRAM_FILESX86, NULL },
+	{ &FOLDERID_ProgramFilesCommon, CSIDL_PROGRAM_FILES_COMMON, NULL },
+	{ &FOLDERID_System, CSIDL_SYSTEM, NULL },
+	{ &FOLDERID_SystemX86, CSIDL_SYSTEMX86, NULL },
+	{ &FOLDERID_Windows, CSIDL_WINDOWS, NULL },
+	{ &FOLDERID_Profile, CSIDL_PROFILE, NULL },
+	{ &FOLDERID_Music, CSIDL_MYMUSIC, NULL },
+	{ &FOLDERID_Pictures, CSIDL_MYPICTURES, NULL },
+	{ &FOLDERID_Videos, CSIDL_MYVIDEO, NULL },
+	{ &FOLDERID_Fonts, CSIDL_FONTS, NULL },
+	{ &FOLDERID_Startup, CSIDL_STARTUP, NULL },
+	{ &FOLDERID_Programs, CSIDL_PROGRAMS, NULL },
+	{ &FOLDERID_StartMenu, CSIDL_STARTMENU, NULL },
+	{ &FOLDERID_Favorites, CSIDL_FAVORITES, NULL },
+	{ &FOLDERID_Recent, CSIDL_RECENT, NULL },
+	{ &FOLDERID_SendTo, CSIDL_SENDTO, NULL },
+	{ &FOLDERID_Templates, CSIDL_TEMPLATES, NULL },
+	{ &FOLDERID_PublicDesktop, CSIDL_COMMON_DESKTOPDIRECTORY, NULL },
+	{ &FOLDERID_PublicDocuments, CSIDL_COMMON_DOCUMENTS, NULL },
+	{ &FOLDERID_InternetCache, CSIDL_INTERNET_CACHE, NULL },
+	{ &FOLDERID_Cookies, CSIDL_COOKIES, NULL },
+	{ &FOLDERID_History, CSIDL_HISTORY, NULL },
+	{ &FOLDERID_CommonStartMenu, CSIDL_COMMON_STARTMENU, NULL },
+	{ &FOLDERID_CommonPrograms, CSIDL_COMMON_PROGRAMS, NULL },
+	{ &FOLDERID_CommonStartup, CSIDL_COMMON_STARTUP, NULL },
+	{ &FOLDERID_AdminTools, CSIDL_ADMINTOOLS, NULL },
+	{ &FOLDERID_ComputerFolder, CSIDL_DRIVES, NULL },
+	{ &FOLDERID_RecycleBinFolder, CSIDL_BITBUCKET, NULL },
+	{ &FOLDERID_Downloads, -1, "Downloads" },
+};
+
+static int known_index(REFKNOWNFOLDERID id)
+{
+	for (size_t i = 0; id && i < sizeof(known) / sizeof(*known); i++)
+		if (!memcmp(known[i].id, id, sizeof(GUID)))
+			return (int)i;
+	return -1;
+}
+
+/* A known folder's path (malloc()ed), or NULL with *hr. */
+static char *known_path(REFKNOWNFOLDERID id, HRESULT *hr)
+{
+	int i = known_index(id);
+
+	if (i < 0) {
+		*hr = HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+		return NULL;
+	}
+	if (known[i].csidl >= 0) {
+		const struct folder *f = find_folder(known[i].csidl);
+		if (f && f->base == VIRTUAL) {
+			*hr = E_INVALIDARG;	/* no path */
+			return NULL;
+		}
+		return folder_path(known[i].csidl, hr);
+	}
+	char *prof = folder_path(CSIDL_PROFILE, hr);
+	if (!prof)
+		return NULL;
+	char *path = malloc(strlen(prof) + strlen(known[i].sub) + 2);
+	if (path)
+		sprintf(path, "%s\\%s", prof, known[i].sub);
+	free(prof);
+	char *u = path ? path_to_unix(path) : NULL;
+	if (!u || shell_mkdirs(u)) {
+		free(path);
+		path = NULL;
+		*hr = E_FAIL;
+	}
+	free(u);
+	return path;
+}
+
+/*
+ * The profile a token asks for: NULL or a token of this process mean the
+ * one user there is; (HANDLE)-1, the Default User profile, isn't kept, so
+ * that fails rather than answering with the current user's folder.
+ */
+static HRESULT check_token(HANDLE token)
+{
+	return token == (HANDLE)(LONG_PTR)-1 ?
+	       HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED) : S_OK;
+}
+
+static void *task_alloc(SIZE_T n)
+{
+	LPVOID (WINAPI *alloc)(SIZE_T) =
+		builtin_export(&builtin_ole32, "CoTaskMemAlloc");
+	return alloc ? alloc(n) : NULL;
+}
+
+WINFN(HRESULT) sh_SHGetKnownFolderPath(REFKNOWNFOLDERID id, DWORD flags,
+				       HANDLE token, PWSTR *out)
+{
+	HRESULT hr;
+
+	if (!out)
+		return E_INVALIDARG;
+	*out = NULL;
+	if (FAILED(hr = check_token(token)))
+		return hr;
+	char *path = known_path(id, &hr);
+	if (!path)
+		return hr;
+	WCHAR *w = utf8_to_utf16_dup(path);
+	free(path);
+	size_t n = w ? (wstrlen(w) + 1) * sizeof(WCHAR) : 0;
+	*out = w ? task_alloc(n) : NULL;
+	if (*out)
+		memcpy(*out, w, n);
+	free(w);
+	return *out ? S_OK : E_OUTOFMEMORY;
+}
+
+WINFN(HRESULT) sh_SHGetFolderPathEx(REFKNOWNFOLDERID id, DWORD flags,
+				    HANDLE token, LPWSTR buf, UINT cch)
+{
+	HRESULT hr;
+
+	if (!buf || !cch)
+		return E_INVALIDARG;
+	buf[0] = 0;
+	if (FAILED(hr = check_token(token)))
+		return hr;
+	char *path = known_path(id, &hr);
+	if (!path)
+		return hr;
+	int n = cp_to_utf16(CP_UTF8, path, -1, buf, (int)cch, 0);
+	free(path);
+	if (n < 0) {
+		buf[0] = 0;
+		return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+	}
+	return S_OK;
+}
+
+WINFN(HRESULT) sh_SHGetKnownFolderIDList(REFKNOWNFOLDERID id, DWORD flags,
+					 HANDLE token, LPITEMIDLIST *out)
+{
+	HRESULT hr;
+	int i = known_index(id);
+
+	if (!out)
+		return E_INVALIDARG;
+	*out = NULL;
+	if (FAILED(hr = check_token(token)))
+		return hr;
+	if (i < 0)
+		return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+	if (known[i].csidl >= 0)
+		return folder_location(known[i].csidl, out);
+	char *path = known_path(id, &hr);
+	if (!path)
+		return hr;
+	*out = pidl_from_path(path);
+	free(path);
+	return *out ? S_OK : E_OUTOFMEMORY;
 }
 
 /* The COM task allocator, which item ID lists come from. */
@@ -863,8 +1170,11 @@ static const struct builtin_export exports[] = {
 	E(ExtractIconA), E(ExtractIconExA), E(ExtractIconExW),
 	E(ExtractIconW),
 	E(FindExecutableA), E(FindExecutableW),
-	E(ILClone), E(ILCreateFromPathA), E(ILCreateFromPathW), E(ILFree),
-	E(ILGetSize), E(IsUserAnAdmin),
+	E(ILClone), E(ILCombine), E(ILCreateFromPathA), E(ILCreateFromPathW),
+	E(ILFindLastID), E(ILFree), E(ILGetNext), E(ILGetSize), E(ILIsEqual),
+	E(ILIsParent), E(ILRemoveLastID), E(IsUserAnAdmin),
+	E(SHGetFolderPathEx), E(SHGetKnownFolderIDList),
+	E(SHGetKnownFolderPath),
 	E(SHAddToRecentDocs), E(SHAppBarMessage),
 	E(SHBrowseForFolderA), E(SHBrowseForFolderW), E(SHChangeNotify),
 	E(SHGetFolderLocation), E(SHGetFolderPathA),
@@ -881,7 +1191,8 @@ static const struct builtin_export exports[] = {
 };
 
 static const struct builtin_export *const tables[] = {
-	exports, shell_file_exports, NULL
+	exports, shell_file_exports, shell_folder_exports,
+	shell_recycle_exports, shell_link_exports, NULL
 };
 
 const struct builtin_dll builtin_shell32 = { "shell32.dll", NULL, tables, 0 };

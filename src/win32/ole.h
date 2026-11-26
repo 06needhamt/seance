@@ -26,6 +26,13 @@ HRESULT ole_stream_on_hglobal(HGLOBAL h, BOOL delete_on_release,
 			      IStream **out);
 HRESULT ole_hglobal_from_stream(IStream *stream, HGLOBAL *out);
 
+/*
+ * A storage as global memory (a compound file in a new block) and back
+ * (a storage over h, which it frees), as the clipboard keeps one.
+ */
+HRESULT ole_storage_to_hglobal(IStorage *src, HGLOBAL *out);
+HRESULT ole_storage_on_hglobal(HGLOBAL h, IStorage **out);
+
 /* Host-side users that must return memory compatible with CoTaskMemFree. */
 void *ole_taskmem_alloc(SIZE_T size);
 void ole_taskmem_free(void *p);
@@ -41,5 +48,37 @@ void ole_host_leave(void);
 
 /* The streams and in-process marshalling (ole_stream.c). */
 extern const struct builtin_export ole_stream_exports[];
+/*
+ * What CoMarshalInterface writes, for marshallers that keep it in their
+ * own buffers: its size; writing it (holding a reference to obj until
+ * it is unmarshalled or released); reading it back; and releasing it
+ * unread.
+ */
+size_t ole_marshal_size(void);
+HRESULT ole_marshal_write(void *buf, REFIID riid, IUnknown *obj);
+HRESULT ole_marshal_read(const void *buf, size_t len, REFIID riid,
+			 void **ppv);
+void ole_marshal_release(const void *buf, size_t len);
+
+/*
+ * A string value under HKEY_CLASSES_ROOT (per-user classes first), as
+ * UTF-8, malloc()ed; NULL if there is none. name "" is the default value.
+ */
+char *ole_classes_value(const char *sub, const char *name);
+
+/* Monikers and the running object table (ole_moniker.c). */
+extern const struct builtin_export ole_moniker_exports[];
+/* The class objects of the system monikers, REGDB_E_CLASSNOTREG else. */
+HRESULT ole_moniker_class_object(REFCLSID clsid, REFIID riid, void **ppv);
+
+/* The rest of OLE (ole_misc.c). */
+extern const struct builtin_export ole_misc_exports[];
+/* The class TreatAs names in place of clsid (itself if none). */
+void ole_treat_as(REFCLSID clsid, CLSID *out);
+/* Lets go of the calling thread's message filter (its last CoUninitialize). */
+void ole_message_filter_drop(void);
+
+/* Structured storage (ole_storage.c). */
+extern const struct builtin_export ole_storage_exports[];
 
 #endif /* VFW_WIN32_OLE_H */

@@ -12,6 +12,7 @@
 #include "win32/winuser.h"
 #include "win32/winreg.h"
 #include "win32/winsec.h"
+#include "win32/winsvc.h"
 #include "win32/objbase.h"
 #include "win32/oleauto.h"
 #include "win32/shellapi.h"

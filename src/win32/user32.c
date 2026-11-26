@@ -28,7 +28,7 @@
 
 #define IS_INTRESOURCE(p) (((ULONG_PTR)(p) >> 16) == 0)
 
-extern const struct builtin_dll builtin_gdi32;
+extern const struct builtin_dll builtin_gdi32, builtin_user32;
 
 /* Message boxes. */
 
@@ -346,16 +346,69 @@ WINFN(BOOL) user_PtInRect(const RECT *rc, POINT pt)
 	       pt.y < rc->bottom;
 }
 
-/* Keyboard and mouse: nothing is pressed, the cursor rests mid-screen. */
+/*
+ * Keyboard and mouse: no device, the cursor rests mid-screen. Each
+ * thread's key state follows the keyboard messages it takes from its
+ * queue (and SetKeyboardState), as Windows' does; the asynchronous state
+ * of the (absent) hardware is always up.
+ */
 
-WINFN(SHORT) user_GetKeyState(int key) { return 0; }
+static __thread BYTE key_state[256];	/* 0x80 down, 0x01 toggled */
+
+static void key_set(int vk, int down)
+{
+	if (down && !(key_state[vk] & 0x80))
+		key_state[vk] ^= 0x01;
+	key_state[vk] = (BYTE)((key_state[vk] & 0x01) | (down ? 0x80 : 0));
+}
+
+void user_key_message(const MSG *m)
+{
+	int down;
+	switch (m->message) {
+	case WM_KEYDOWN:
+	case WM_SYSKEYDOWN:
+		down = 1;
+		break;
+	case WM_KEYUP:
+	case WM_SYSKEYUP:
+		down = 0;
+		break;
+	default:
+		return;
+	}
+	int vk = (int)(m->wParam & 0xff);
+	key_set(vk, down);
+	/* The left and right keys move the generic one too. */
+	if (vk == 0xa0 || vk == 0xa1)
+		key_set(VK_SHIFT, down);
+	else if (vk == 0xa2 || vk == 0xa3)
+		key_set(VK_CONTROL, down);
+	else if (vk == 0xa4 || vk == 0xa5)
+		key_set(VK_MENU, down);
+}
+
+WINFN(SHORT) user_GetKeyState(int key)
+{
+	BYTE s = key_state[key & 0xff];
+	return (SHORT)(((s & 0x80) ? 0xff80 : 0) | (s & 0x01));
+}
+
 WINFN(SHORT) user_GetAsyncKeyState(int key) { return 0; }
 
 WINFN(BOOL) user_GetKeyboardState(PBYTE keys)
 {
 	if (keys)
-		memset(keys, 0, 256);
+		memcpy(keys, key_state, 256);
 	return keys != NULL;
+}
+
+WINFN(BOOL) user_SetKeyboardState(PBYTE keys)
+{
+	if (!keys)
+		return FALSE;
+	memcpy(key_state, keys, 256);
+	return TRUE;
 }
 
 /* An enhanced 101/102-key keyboard: Delphi's start-up code asks, to see
@@ -856,6 +909,7 @@ static DWORD clip_thread;		/* that has it open, or 0 */
 static HWND clip_window;		/* that opened it */
 static HWND clip_owner;			/* that last emptied it */
 static UINT rendering;			/* the format WM_RENDERFORMAT asked for */
+static DWORD clip_sequence;		/* changes with the contents */
 
 static void clip_release(UINT format, HANDLE data)
 {
@@ -947,8 +1001,17 @@ WINFN(BOOL) user_EmptyClipboard(void)
 	pthread_mutex_lock(&clip_lock);
 	clip_empty();
 	clip_owner = clip_window;
+	clip_sequence++;
 	pthread_mutex_unlock(&clip_lock);
 	return TRUE;
+}
+
+WINFN(DWORD) user_GetClipboardSequenceNumber(void)
+{
+	pthread_mutex_lock(&clip_lock);
+	DWORD n = clip_sequence;
+	pthread_mutex_unlock(&clip_lock);
+	return n;
 }
 
 void user_clipboard_owner_destroyed(HWND hwnd)
@@ -966,9 +1029,14 @@ void user_clipboard_owner_destroyed(HWND hwnd)
 		clip_send(hwnd, WM_RENDERALLFORMATS, 0);
 	pthread_mutex_lock(&clip_lock);
 	if (clip_owner == hwnd) {
+		int gone = 0;
 		for (int i = 0; i < CLIP_FORMATS; i++)
-			if (clip[i].format && !clip[i].data)
+			if (clip[i].format && !clip[i].data) {
 				clip[i].format = 0;
+				gone = 1;
+			}
+		if (gone)	/* the contents changed */
+			clip_sequence++;
 		clip_owner = NULL;
 	}
 	pthread_mutex_unlock(&clip_lock);
@@ -997,10 +1065,15 @@ WINFN(HANDLE) user_SetClipboardData(UINT format, HANDLE data)
 		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
 		goto out;
 	}
+	int same = clip[slot].format == format && clip[slot].data == data;
 	if (clip[slot].format == format && clip[slot].data != data)
 		clip_release(format, clip[slot].data);
 	clip[slot].format = format;
 	clip[slot].data = data;
+	/* A change, a delayed format's data arriving included, is a new
+	 * sequence number; the same handle set again isn't. */
+	if (!same)
+		clip_sequence++;
 	ret = data;	/* NULL for delayed rendering, as on Windows */
 	win_set_error(ERROR_SUCCESS);
 out:
@@ -1092,14 +1165,265 @@ WINFN(HWND) user_GetClipboardOwner(void)
 
 #define E(name) { #name, 0, (void *)user_##name }
 
+/* ---- accelerator tables ---- */
+
+struct accel_table {
+	struct accel_table *next;
+	int n;
+	ACCEL e[];
+};
+
+static pthread_mutex_t accel_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct accel_table *accels;
+
+/* Windows' largest accelerator table. */
+#define ACCEL_MAX 32767
+
+static HACCEL accel_new(const ACCEL *e, int n)
+{
+	struct accel_table *t;
+
+	if (n <= 0 || n > ACCEL_MAX || !e) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return NULL;
+	}
+	if (!(t = malloc(sizeof(*t) + (size_t)n * sizeof(ACCEL)))) {
+		win_set_error(ERROR_NOT_ENOUGH_MEMORY);
+		return NULL;
+	}
+	t->n = n;
+	for (int i = 0; i < n; i++) {
+		t->e[i] = e[i];
+		t->e[i].fVirt &= FVIRTKEY | FNOINVERT | FSHIFT | FCONTROL | FALT;
+	}
+	pthread_mutex_lock(&accel_lock);
+	t->next = accels;
+	accels = t;
+	pthread_mutex_unlock(&accel_lock);
+	return (HACCEL)t;
+}
+
+/* The live table h, with accel_lock held; NULL (and unlocked) if none. */
+static struct accel_table *accel_get(HACCEL h)
+{
+	pthread_mutex_lock(&accel_lock);
+	for (struct accel_table *t = accels; t; t = t->next)
+		if ((HACCEL)t == h)
+			return t;
+	pthread_mutex_unlock(&accel_lock);
+	win_set_error(ERROR_INVALID_HANDLE);
+	return NULL;
+}
+
+/* A non-virtual key in ANSI, as the A functions take and give it. */
+static WORD key_from_ansi(WORD k)
+{
+	char c = (char)k;
+	WCHAR w = 0;
+	return cp_to_utf16(CP_ACP, &c, 1, &w, 1, 0) == 1 ? w : k;
+}
+
+static WORD key_to_ansi(WORD k)
+{
+	WCHAR w = k;
+	char c = 0;
+	return cp_from_utf16(CP_ACP, &w, 1, &c, 1, '?', NULL) == 1 ?
+		       (BYTE)c : k;
+}
+
+WINFN(HACCEL) user_CreateAcceleratorTableW(LPACCEL e, int n)
+{
+	return accel_new(e, n);
+}
+
+WINFN(HACCEL) user_CreateAcceleratorTableA(LPACCEL e, int n)
+{
+	if (n <= 0 || n > ACCEL_MAX || !e) {
+		win_set_error(ERROR_INVALID_PARAMETER);
+		return NULL;
+	}
+	ACCEL *w = malloc((size_t)n * sizeof(*w));
+	if (!w)
+		return NULL;
+	for (int i = 0; i < n; i++) {
+		w[i] = e[i];
+		if (!(w[i].fVirt & FVIRTKEY))
+			w[i].key = key_from_ansi(w[i].key);
+	}
+	HACCEL h = accel_new(w, n);
+	free(w);
+	return h;
+}
+
+WINFN(BOOL) user_DestroyAcceleratorTable(HACCEL h)
+{
+	pthread_mutex_lock(&accel_lock);
+	for (struct accel_table **p = &accels; *p; p = &(*p)->next)
+		if ((HACCEL)*p == h) {
+			struct accel_table *t = *p;
+			*p = t->next;
+			pthread_mutex_unlock(&accel_lock);
+			free(t);
+			return TRUE;
+		}
+	pthread_mutex_unlock(&accel_lock);
+	return FALSE;
+}
+
+static int accel_copy(HACCEL h, LPACCEL dst, int n, int ansi)
+{
+	struct accel_table *t = accel_get(h);
+	if (!t)
+		return 0;
+	int count = t->n;
+	if (dst) {
+		count = n < t->n ? n : t->n;
+		for (int i = 0; i < count; i++) {
+			dst[i] = t->e[i];
+			if (ansi && !(dst[i].fVirt & FVIRTKEY))
+				dst[i].key = key_to_ansi(dst[i].key);
+		}
+	}
+	pthread_mutex_unlock(&accel_lock);
+	return count < 0 ? 0 : count;
+}
+
+WINFN(int) user_CopyAcceleratorTableW(HACCEL h, LPACCEL dst, int n)
+{
+	return accel_copy(h, dst, n, 0);
+}
+
+WINFN(int) user_CopyAcceleratorTableA(HACCEL h, LPACCEL dst, int n)
+{
+	return accel_copy(h, dst, n, 1);
+}
+
+/* RT_ACCELERATOR: 8-byte entries, the last flagged 0x80. */
+static HACCEL load_accel(HINSTANCE inst, const void *name, int wide)
+{
+	DWORD size;
+	const BYTE *p = resource(inst, RT_ACCELERATOR, name, wide, &size);
+	int n = 0;
+
+	if (!p)
+		return NULL;
+	ACCEL *e = malloc((size / 8 + 1) * sizeof(*e));
+	if (!e)
+		return NULL;
+	for (DWORD at = 0; at + 8 <= size; at += 8) {
+		e[n].fVirt = p[at];
+		e[n].key = (WORD)(p[at + 2] | p[at + 3] << 8);
+		e[n].cmd = (WORD)(p[at + 4] | p[at + 5] << 8);
+		n++;
+		if (p[at] & 0x80)
+			break;
+	}
+	HACCEL h = n ? accel_new(e, n) : NULL;
+	if (!n)
+		win_set_error(ERROR_RESOURCE_DATA_NOT_FOUND);
+	free(e);
+	return h;
+}
+
+WINFN(HACCEL) user_LoadAcceleratorsW(HINSTANCE inst, LPCWSTR name)
+{
+	return load_accel(inst, name, 1);
+}
+
+WINFN(HACCEL) user_LoadAcceleratorsA(HINSTANCE inst, LPCSTR name)
+{
+	return load_accel(inst, name, 0);
+}
+
+/*
+ * The command a keyboard message is the accelerator for, or -1. Virtual
+ * keys match WM_KEYDOWN/WM_SYSKEYDOWN with the shift states; characters
+ * match WM_CHAR/WM_SYSCHAR, ALT being bit 29 of a system message.
+ */
+int user_accel_match(const ACCEL *e, int n, const MSG *msg)
+{
+	int virt, alt = (msg->message == WM_SYSKEYDOWN ||
+			 msg->message == WM_SYSCHAR) &&
+			(msg->lParam & 0x20000000);
+
+	switch (msg->message) {
+	case WM_KEYDOWN:
+	case WM_SYSKEYDOWN:
+		virt = 1;
+		break;
+	case WM_CHAR:
+	case WM_SYSCHAR:
+		virt = 0;
+		break;
+	default:
+		return -1;
+	}
+	int shift = user_GetKeyState(VK_SHIFT) < 0;
+	int ctrl = user_GetKeyState(VK_CONTROL) < 0;
+	for (int i = 0; i < n; i++) {
+		if (!!(e[i].fVirt & FVIRTKEY) != virt ||
+		    e[i].key != (WORD)msg->wParam)
+			continue;
+		if (!!(e[i].fVirt & FALT) != alt)
+			continue;
+		if (virt && (!!(e[i].fVirt & FSHIFT) != shift ||
+			     !!(e[i].fVirt & FCONTROL) != ctrl))
+			continue;
+		return e[i].cmd;
+	}
+	return -1;
+}
+
+static int translate_accel(HWND hwnd, HACCEL h, const MSG *msg)
+{
+	if (!msg)
+		return 0;
+	struct accel_table *t = accel_get(h);
+	if (!t)
+		return 0;
+	int cmd = user_accel_match(t->e, t->n, msg);
+	pthread_mutex_unlock(&accel_lock);
+	if (cmd < 0)
+		return 0;
+	LRESULT (WINAPI *send)(HWND, UINT, WPARAM, LPARAM) =
+		builtin_export(&builtin_user32, "SendMessageW");
+	if (send)
+		send(hwnd, WM_COMMAND, (WPARAM)(DWORD)(cmd | 0x10000), 0);
+	return 1;
+}
+
+WINFN(int) user_TranslateAcceleratorW(HWND hwnd, HACCEL h, LPMSG msg)
+{
+	return translate_accel(hwnd, h, msg);
+}
+
+WINFN(int) user_TranslateAcceleratorA(HWND hwnd, HACCEL h, LPMSG msg)
+{
+	if (!msg || (msg->message != WM_CHAR && msg->message != WM_SYSCHAR))
+		return translate_accel(hwnd, h, msg);
+	MSG w = *msg;
+	w.wParam = key_from_ansi((WORD)msg->wParam);
+	return translate_accel(hwnd, h, &w);
+}
+
 static const struct builtin_export exports[] = {
 	E(BeginPaint),
+	E(CopyAcceleratorTableA),
+	E(CopyAcceleratorTableW),
+	E(CreateAcceleratorTableA),
+	E(CreateAcceleratorTableW),
+	E(DestroyAcceleratorTable),
+	E(LoadAcceleratorsA),
+	E(LoadAcceleratorsW),
+	E(TranslateAcceleratorA),
+	E(TranslateAcceleratorW),
 	E(CloseClipboard),
 	E(CountClipboardFormats),
 	E(EmptyClipboard),
 	E(EnumClipboardFormats),
 	E(GetClipboardData),
 	E(GetClipboardOwner),
+	E(GetClipboardSequenceNumber),
 	E(IsClipboardFormatAvailable),
 	E(OpenClipboard),
 	E(SetClipboardData),
@@ -1119,6 +1443,7 @@ static const struct builtin_export exports[] = {
 	E(GetKeyboardLayout),
 	E(GetKeyboardLayoutList),
 	E(GetKeyboardState),
+	E(SetKeyboardState),
 	E(GetKeyboardType),
 	E(EnumDisplaySettingsA),
 	E(EnumDisplaySettingsExA),

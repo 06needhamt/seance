@@ -4,8 +4,8 @@
  * ITypeInfo2 objects over them.
  *
  * - Libraries come from a .tlb file, or from a PE file's TYPELIB resource
- *   (1, or N given as "path\N"), in the current "MSFT" format. The older
- *   "SLTG" format is not read.
+ *   (1, or N given as "path\N"), in the current "MSFT" format, or the
+ *   older "SLTG" one, which oleaut_sltg.c turns into MSFT first.
  * - The file is read into one model (struct typelib, struct tl_type and
  *   their functions and variables), which everything else reads. The
  *   reader is written from the format's layout: a header, offsets of the
@@ -31,7 +31,8 @@
  * - ITypeInfo::Invoke is oa_typeinfo_invoke (oleaut_dispatch.c).
  *   CreateDispTypeInfo builds a library of two types: the interface it
  *   describes, and a coclass whose default interface it is.
- * - Not here yet: ITypeComp, CreateInstance, AddressOfMember.
+ * - Not here yet: ITypeComp, CreateInstance. AddressOfMember finds a
+ *   module function's DLL entry.
  *   Registration is in oleaut_typereg.c. A dual interface's functions
  *   inherited from a dual interface in a third library (rather than
  *   stdole2's IDispatch) keep that library's hrefs, which this one's
@@ -189,11 +190,19 @@ struct typelib {
 	/* hrefs of other libraries' types that this one's views show */
 	struct tl_foreign *foreign;
 	size_t nforeign;
-	pthread_mutex_t lock;		/* imports[], foreign[] */
+	pthread_mutex_t lock;		/* imports[], foreign[], dlls[] */
+	/* the DLLs AddressOfMember loaded, held while the library is */
+	struct module **dlls;
+	size_t ndlls;
 
 	struct arena_block *arena;
 	BSTR *bstrs;			/* to free with the library */
 	size_t nbstrs, bstrs_cap;
+
+	IUnknown *outer;		/* a view's maker (held), or NULL */
+	oa_outer_qi outer_qi;
+	UINT *outer_ids;		/* the maker's ids of the types */
+	UINT nouter_ids;
 };
 
 static const ITypeLib2Vtbl typelib_vtbl;
@@ -285,13 +294,20 @@ static void lib_free(struct typelib *lib)
 		lib->arena = b->next;
 		win_free(b);
 	}
+	for (size_t i = 0; i < lib->ndlls; i++)
+		mod_free(lib->dlls[i]);
+	free(lib->dlls);
 	pthread_mutex_destroy(&lib->lock);
 	free(lib->bstrs);
 	free(lib->imports);
 	free(lib->foreign);
+	free(lib->outer_ids);
 	free(lib->data);
 	free(lib->key);
+	IUnknown *outer = lib->outer;
 	free(lib);
+	if (outer)
+		outer->lpVtbl->Release(outer);
 }
 
 static struct typelib *lib_new(void)
@@ -727,8 +743,12 @@ static int msft_members(struct msft *m, struct tl_type *t, INT memoffset)
 			d->callconv = (fkccic >> 8) & 0xf;
 			d->cParams = nargs;
 			d->cParamsOpt = rd16(p + 22);
-			d->oVft = (SHORT)((rd16(p + 12) & ~1) * PTR_SIZE /
-					  lib->ptr_size);
+			/* In this host's pointers, which must fit a SHORT. */
+			long vft = (long)((USHORT)rd16(p + 12) & ~1u) *
+				   PTR_SIZE / lib->ptr_size;
+			if (vft > 0x7fff)
+				return -1;
+			d->oVft = (SHORT)vft;
 			d->wFuncFlags = (WORD)rd32(p + 8);
 			if (msft_tdesc(m, rd32(p + 4), &d->elemdescFunc.tdesc))
 				return -1;
@@ -1383,9 +1403,18 @@ static HRESULT lib_from_bytes(const BYTE *d, size_t len, const char *what,
 	HRESULT hr;
 
 	if (len >= 4 && rd32(d) == SLTG_MAGIC) {
-		TRACE("LoadTypeLib(%s): an SLTG library, which isn't read",
-		      what);
-		return TYPE_E_UNSUPFORMAT;
+		/* Read as the MSFT library it converts to. */
+		BYTE *m;
+		size_t mlen;
+
+		if (FAILED(hr = oa_sltg_to_msft(d, len, &m, &mlen))) {
+			TRACE("LoadTypeLib(%s): a bad SLTG library (%#x)", what,
+			      (unsigned)hr);
+			return hr;
+		}
+		hr = lib_from_bytes(m, mlen, what, out);
+		free(m);
+		return hr;
 	}
 	if (len < 4 || rd32(d) != MSFT_MAGIC)
 		return TYPE_E_CANTLOADLIBRARY;
@@ -1398,6 +1427,41 @@ static HRESULT lib_from_bytes(const BYTE *d, size_t len, const char *what,
 		return hr;
 	}
 	*out = lib;
+	return S_OK;
+}
+
+/* A library from bytes in memory, outside the cache (ICreateTypeLib's). */
+HRESULT oa_typelib_from_bytes(const void *d, size_t len, ITypeLib **out)
+{
+	struct typelib *lib;
+	HRESULT hr = lib_from_bytes(d, len, "memory", &lib);
+
+	if (hr == S_OK)
+		*out = (ITypeLib *)&lib->iface;
+	return hr;
+}
+
+HRESULT oa_typelib_view(const void *d, size_t len, IUnknown *outer,
+			oa_outer_qi qi, const UINT *ids, UINT nids,
+			ITypeLib **out)
+{
+	struct typelib *lib;
+	HRESULT hr = lib_from_bytes(d, len, "memory", &lib);
+
+	if (hr != S_OK)
+		return hr;
+	if (ids && nids) {
+		if (!(lib->outer_ids = malloc(nids * sizeof(*ids)))) {
+			lib_release(lib);
+			return E_OUTOFMEMORY;
+		}
+		memcpy(lib->outer_ids, ids, nids * sizeof(*ids));
+		lib->nouter_ids = nids;
+	}
+	outer->lpVtbl->AddRef(outer);
+	lib->outer = outer;
+	lib->outer_qi = qi;
+	*out = (ITypeLib *)&lib->iface;
 	return S_OK;
 }
 
@@ -1565,22 +1629,47 @@ static ITypeLib *tl_iface(struct typelib *lib)
  * A loaded library with this GUID and major version, and at least this
  * minor version (the newest), with a reference; stdole2 for stdole.
  */
+/*
+ * How well a library's locale serves one asked for, as LoadRegTypeLib
+ * falls back: 3 the same, 2 its language's neutral one, 1 the neutral
+ * one (or any, for an import of no locale), 0 not at all.
+ */
+static int lcid_rank(LCID want, LCID have)
+{
+	WORD w = (WORD)want, h = (WORD)have;
+
+	if (w == h)
+		return 3;
+	if (h == (w & 0x3ff))		/* PRIMARYLANGID, SUBLANG_NEUTRAL */
+		return 2;
+	/* LANG_NEUTRAL; an import that names no locale takes any. */
+	return h == 0 || w == 0 ? 1 : 0;
+}
+
 static struct typelib *find_loaded(const GUID *libid, WORD major,
-				   WORD minor, int exact)
+				   WORD minor, int exact, LCID lcid)
 {
 	struct typelib *best = NULL, *std = stdole2_lib();
+	int best_rank = 0;
 
-	/* stdole32 (1.0) has the same GUID: the built-in one stands in. */
+	/* stdole32 (1.0) has the same GUID: the built-in one stands in,
+	 * whatever the locale asked for. */
 	if (std && guid_eq(libid, &std->attr.guid))
 		return std;
 	pthread_mutex_lock(&cache_lock);
-	for (struct typelib *l = cache; l; l = l->next)
+	for (struct typelib *l = cache; l; l = l->next) {
+		int rank = lcid_rank(lcid, l->attr.lcid);
 		if (guid_eq(&l->attr.guid, libid) &&
 		    l->attr.wMajorVerNum == major &&
 		    l->attr.wMinorVerNum >= minor &&
-		    (!exact || l->attr.wMinorVerNum == minor) &&
-		    (!best || l->attr.wMinorVerNum > best->attr.wMinorVerNum))
+		    (!exact || l->attr.wMinorVerNum == minor) && rank &&
+		    (!best || l->attr.wMinorVerNum > best->attr.wMinorVerNum ||
+		     (l->attr.wMinorVerNum == best->attr.wMinorVerNum &&
+		      rank > best_rank))) {
 			best = l;
+			best_rank = rank;
+		}
+	}
 	if (best)
 		lib_addref(best);
 	pthread_mutex_unlock(&cache_lock);
@@ -1657,7 +1746,8 @@ static int import_matches(const struct tl_import *imp,
 	return lib->builtin ||
 	       (lib->attr.wMajorVerNum == imp->major &&
 		(imp->exact ? lib->attr.wMinorVerNum == imp->minor
-			    : lib->attr.wMinorVerNum >= imp->minor));
+			    : lib->attr.wMinorVerNum >= imp->minor) &&
+		lcid_rank(imp->lcid, lib->attr.lcid));
 }
 
 /* The library an import names, with a reference, or NULL. */
@@ -1665,7 +1755,7 @@ static struct typelib *import_load(struct typelib *lib,
 				   const struct tl_import *imp)
 {
 	struct typelib *l = find_loaded(&imp->libid, imp->major, imp->minor,
-					imp->exact);
+					imp->exact, imp->lcid);
 	ITypeLib *tl = NULL;
 
 	if (l)
@@ -1925,10 +2015,24 @@ static struct tl_func *view_func(struct tl_type *t, UINT i,
  * ITypeInfo2.
  */
 
+/* The maker's id of the view's type index: -2 (none) past its map. */
+static int outer_id(const struct typelib *lib, UINT index)
+{
+	if (!lib->outer_ids)
+		return (int)index;
+	return index < lib->nouter_ids ? (int)lib->outer_ids[index] : -2;
+}
+
 WINFN(HRESULT) ti_QueryInterface(ITypeInfo2 *self, REFIID riid, void **ppv)
 {
+	struct typelib *lib = type_of(self)->lib;
+
 	if (!ppv)
 		return E_POINTER;
+	if (lib->outer && riid && !guid_eq(riid, &IID_ITypeInfo) &&
+	    !guid_eq(riid, &IID_ITypeInfo2))
+		return lib->outer_qi(lib->outer, outer_id(lib,
+					type_of(self)->index), riid, ppv);
 	if (riid && (guid_eq(riid, &oa_IID_IUnknown) ||
 		     guid_eq(riid, &IID_ITypeInfo) ||
 		     guid_eq(riid, &IID_ITypeInfo2))) {
@@ -2010,7 +2114,8 @@ static HREFTYPE foreign_href(struct typelib *lib, struct typelib *other,
 
 		if (f->href == href && guid_eq(&f->lib.libid, &other->attr.guid) &&
 		    f->lib.major == other->attr.wMajorVerNum &&
-		    f->lib.minor == other->attr.wMinorVerNum)
+		    f->lib.minor == other->attr.wMinorVerNum &&
+		    f->lib.lcid == other->attr.lcid)
 			goto found;
 	}
 	if (i < FOREIGN_MAX) {
@@ -2526,13 +2631,61 @@ WINFN(HRESULT) ti_GetRefTypeInfo(ITypeInfo2 *self, HREFTYPE href,
 	return S_OK;
 }
 
+/*
+ * A module's function's address: its DLL loaded (and kept loaded, once,
+ * while the type library is), and its entry looked up by name or
+ * ordinal.
+ */
 WINFN(HRESULT) ti_AddressOfMember(ITypeInfo2 *self, MEMBERID memid,
 				  INVOKEKIND kind, PVOID *addr)
 {
-	if (addr)
-		*addr = NULL;
-	TRACE("ITypeInfo::AddressOfMember: not implemented");
-	return E_NOTIMPL;
+	BSTR dll = NULL, name = NULL;
+	WORD ordinal = 0;
+	HRESULT hr;
+
+	if (!addr)
+		return E_INVALIDARG;
+	*addr = NULL;
+	if (FAILED(hr = ti_GetDllEntry(self, memid, kind, &dll, &name,
+				       &ordinal)))
+		return hr;
+	char *d = dll ? utf16_to_utf8_dup(dll) : NULL;
+	char *n = name ? utf16_to_utf8_dup(name) : NULL;
+	oa_SysFreeString(dll);
+	oa_SysFreeString(name);
+	HMODULE h = d && *d ? k32_load_library(d, NULL) : NULL;
+	struct module *m = h ? mod_from_base(h) : NULL;
+	if (m)
+		*addr = n ? mod_get_proc(m, n) : mod_get_ordinal(m, ordinal);
+	TRACE("ITypeInfo::AddressOfMember(%#x): %s!%s = %p", (unsigned)memid,
+	      d ? d : "?", n ? n : "(ordinal)", *addr);
+	free(d);
+	free(n);
+	if (!m)
+		return TYPE_E_CANTLOADLIBRARY;
+	/* The library holds the DLL once; this load's reference goes if it
+	 * already does, or if the entry isn't there. */
+	struct typelib *lib = type_of(self)->lib;
+	int keep = 0;
+	if (*addr) {
+		pthread_mutex_lock(&lib->lock);
+		size_t i = 0;
+		while (i < lib->ndlls && lib->dlls[i] != m)
+			i++;
+		if (i == lib->ndlls) {
+			struct module **g = realloc(lib->dlls,
+						    (i + 1) * sizeof(*g));
+			if (g) {
+				lib->dlls = g;
+				lib->dlls[lib->ndlls++] = m;
+				keep = 1;
+			}
+		}
+		pthread_mutex_unlock(&lib->lock);
+	}
+	if (!keep)
+		mod_free(m);	/* (still held, if found) */
+	return *addr ? S_OK : TYPE_E_DLLFUNCTIONNOTFOUND;
 }
 
 WINFN(HRESULT) ti_CreateInstance(ITypeInfo2 *self, IUnknown *outer,
@@ -2836,8 +2989,13 @@ static const ITypeInfo2Vtbl typeinfo_vtbl = {
 
 WINFN(HRESULT) tl_QueryInterface(ITypeLib2 *self, REFIID riid, void **ppv)
 {
+	struct typelib *lib = lib_of(self);
+
 	if (!ppv)
 		return E_POINTER;
+	if (lib->outer && riid && !guid_eq(riid, &IID_ITypeLib) &&
+	    !guid_eq(riid, &IID_ITypeLib2))
+		return lib->outer_qi(lib->outer, -1, riid, ppv);
 	if (riid && (guid_eq(riid, &oa_IID_IUnknown) ||
 		     guid_eq(riid, &IID_ITypeLib) ||
 		     guid_eq(riid, &IID_ITypeLib2))) {
@@ -3202,14 +3360,6 @@ HRESULT STUB_WINAPI oa_LoadRegTypeLib(REFGUID guid, WORD major, WORD minor,
 	return hr;
 }
 
-WINFN(HRESULT) oa_CreateTypeLib2(SYSKIND kind, LPCOLESTR file, void **out)
-{
-	if (out)
-		*out = NULL;
-	TRACE("CreateTypeLib2: not implemented");
-	return E_NOTIMPL;
-}
-
 WINFN(void) oa_ClearCustData(CUSTDATA *data)
 {
 	if (!data)
@@ -3348,7 +3498,6 @@ const struct builtin_export oa_typelib_exports[] = {
 	E(LoadTypeLib, 161),
 	E(LoadRegTypeLib, 162),
 	E(ClearCustData, 171),
-	E(CreateTypeLib2, 180),
 	E(LoadTypeLibEx, 183),
 	BUILTIN_END
 };

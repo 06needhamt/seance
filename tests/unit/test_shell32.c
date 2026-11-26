@@ -2,7 +2,8 @@
 /*
  * shell32, called through its export table: special folders, item ID
  * lists, CommandLineToArgvW, the headless ShellExecute and dialogs,
- * SHCreateDirectoryEx, SHFileOperation and SHGetFileInfo. The Windows
+ * SHCreateDirectoryEx, SHFileOperation, SHGetFileInfo, known folders,
+ * IShellFolder, the Recycle Bin and shortcuts. The Windows
  * world lives in a temporary $VFW_ROOT.
  */
 #include <stdlib.h>
@@ -408,6 +409,34 @@ static void test_file_operation(void)
 		 ERROR_ALREADY_EXISTS);
 	CHECK_EQ(OP(FO_DELETE, "C:\\copy\0C:\\a.txt\0", NULL, FOF_ALLOWUNDO), 0);
 	CHECK(!exists("copy") && !exists("a.txt"));
+	/* One on another file system than the bin can't be recycled:
+	 * with no one to ask it stays, and goes for good only without
+	 * confirmation. */
+	char shm[] = "/dev/shm/vfw-rb-XXXXXX";
+	struct stat sr, ss;
+	if (!stat(root, &sr) && mkdtemp(shm)) {
+		char fp[64], zp[80];
+		snprintf(fp, sizeof(fp), "%s/x.txt", shm);
+		snprintf(zp, sizeof(zp), "Z:%s\\x.txt", shm);
+		for (char *c = zp; *c; c++)
+			if (*c == '/')
+				*c = '\\';
+		zp[strlen(zp) + 1] = 0;	/* the list's second NUL */
+		FILE *xf = fopen(fp, "w");
+		if (xf)
+			fclose(xf);
+		if (!stat(shm, &ss) && ss.st_dev != sr.st_dev) {
+			CHECK_EQ(OP(FO_DELETE, zp, NULL, FOF_ALLOWUNDO), 0);
+			CHECK(op.fAnyOperationsAborted);
+			CHECK(!access(fp, F_OK));
+			CHECK_EQ(OP(FO_DELETE, zp, NULL,
+				    FOF_ALLOWUNDO | FOF_NOCONFIRMATION), 0);
+			CHECK(!op.fAnyOperationsAborted);
+			CHECK(access(fp, F_OK));
+		}
+		unlink(fp);
+		rmdir(shm);
+	}
 	CHECK_EQ(OP(FO_DELETE, "C:\\no such thing\0", NULL, 0),
 		 ERROR_FILE_NOT_FOUND);
 	CHECK_EQ(OP(FO_DELETE, "C:\\files\\*\0", NULL, 0), 0);
@@ -520,6 +549,619 @@ static void test_fixture(void)
 	mod_free(m);
 }
 
+static struct module *ole;
+
+static void task_free(void *p)
+{
+	void (WINAPI *f)(void *) = get_from(ole, "CoTaskMemFree");
+	f(p);
+}
+
+/* A STRRET's text as UTF-8 (malloc()ed), freeing it. */
+static char *strret(STRRET *s)
+{
+	if (s->uType != STRRET_WSTR)
+		return strdup("?");
+	char *r = utf16_to_utf8_dup(s->u.pOleStr);
+	task_free(s->u.pOleStr);
+	return r;
+}
+
+#define CHECK_NAME(sf, pidl, flags, want) do { \
+	STRRET s_; \
+	CHECK((sf)->lpVtbl->GetDisplayNameOf((sf), (pidl), (flags), &s_) == S_OK); \
+	char *n_ = strret(&s_); \
+	CHECK_STR(n_, want); \
+	free(n_); \
+} while (0)
+
+static void test_known_folders(void)
+{
+	FN(HRESULT, SHGetKnownFolderPath, REFKNOWNFOLDERID, DWORD, HANDLE,
+	   PWSTR *);
+	FN(HRESULT, SHGetFolderPathEx, REFKNOWNFOLDERID, DWORD, HANDLE, LPWSTR,
+	   UINT);
+	FN(HRESULT, SHGetKnownFolderIDList, REFKNOWNFOLDERID, DWORD, HANDLE,
+	   LPITEMIDLIST *);
+	FN(BOOL, SHGetPathFromIDListA, LPCITEMIDLIST, LPSTR);
+	FN(void, ILFree, LPITEMIDLIST);
+	PWSTR w = NULL;
+
+	CHECK(SHGetKnownFolderPath(&FOLDERID_RoamingAppData, 0, NULL, &w) == S_OK);
+	char *s = w ? utf16_to_utf8_dup(w) : NULL;
+	CHECK_STR(s, "C:\\Documents and Settings\\tester\\Application Data");
+	free(s);
+	task_free(w);
+	CHECK(SHGetKnownFolderPath(&FOLDERID_Downloads, 0, NULL, &w) == S_OK);
+	s = w ? utf16_to_utf8_dup(w) : NULL;
+	CHECK_STR(s, "C:\\Documents and Settings\\tester\\Downloads");
+	CHECK(is_dir("Documents and Settings/tester/Downloads"));
+	free(s);
+	task_free(w);
+	/* The Default User's profile isn't the current user's. */
+	w = NULL;
+	CHECK(SHGetKnownFolderPath(&FOLDERID_Downloads, 0, (HANDLE)(LONG_PTR)-1,
+				   &w) == HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED));
+	CHECK(w == NULL);
+	/* No path for a virtual folder; an unknown one isn't found. */
+	CHECK(SHGetKnownFolderPath(&FOLDERID_ComputerFolder, 0, NULL, &w) ==
+	      E_INVALIDARG && !w);
+	CHECK(SHGetKnownFolderPath(&IID_IUnknown, 0, NULL, &w) ==
+	      HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND));
+	WCHAR buf[MAX_PATH];
+	CHECK(SHGetFolderPathEx(&FOLDERID_System, 0, NULL, buf, MAX_PATH) == S_OK);
+	s = utf16_to_utf8_dup(buf);
+	CHECK_STR(s, "C:\\WINDOWS\\system32");
+	free(s);
+	CHECK(SHGetFolderPathEx(&FOLDERID_System, 0, NULL, buf, 5) ==
+	      HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER));
+	LPITEMIDLIST pidl = NULL;
+	char path[MAX_PATH];
+	CHECK(SHGetKnownFolderIDList(&FOLDERID_Documents, 0, NULL, &pidl) == S_OK);
+	CHECK(pidl && SHGetPathFromIDListA(pidl, path));
+	CHECK_STR(path, "C:\\Documents and Settings\\tester\\My Documents");
+	ILFree(pidl);
+}
+
+static void test_namespace(void)
+{
+	FN(HRESULT, SHGetDesktopFolder, IShellFolder **);
+	FN(HRESULT, SHBindToParent, LPCITEMIDLIST, REFIID, void **,
+	   LPCITEMIDLIST *);
+	FN(HRESULT, SHParseDisplayName, LPCWSTR, IBindCtx *, LPITEMIDLIST *,
+	   ULONG, ULONG *);
+	FN(BOOL, SHGetPathFromIDListA, LPCITEMIDLIST, LPSTR);
+	FN(LPITEMIDLIST, ILCombine, LPCITEMIDLIST, LPCITEMIDLIST);
+	FN(LPITEMIDLIST, ILFindLastID, LPCITEMIDLIST);
+	FN(BOOL, ILRemoveLastID, LPITEMIDLIST);
+	FN(BOOL, ILIsEqual, LPCITEMIDLIST, LPCITEMIDLIST);
+	FN(BOOL, ILIsParent, LPCITEMIDLIST, LPCITEMIDLIST, BOOL);
+	FN(LPITEMIDLIST, ILGetNext, LPCITEMIDLIST);
+	FN(UINT, ILGetSize, LPCITEMIDLIST);
+	FN(LPITEMIDLIST, ILCreateFromPathA, LPCSTR);
+	FN(void, ILFree, LPITEMIDLIST);
+	IShellFolder *desk = NULL, *dir = NULL, *drives = NULL;
+	char path[MAX_PATH];
+
+	mkdir(on_disk("ns"), 0755);
+	mkdir(on_disk("ns/sub"), 0755);
+	write_file("ns/b.txt", "b");
+	write_file("ns/a.lnk", "a");
+	write_file("ns/.hidden", "h");
+
+	CHECK(SHGetDesktopFolder(&desk) == S_OK && desk);
+	if (!desk)
+		return;
+	/* Parse a path: one item, its path. */
+	WCHAR *name = w16("C:\\ns\\");
+	LPITEMIDLIST ns = NULL;
+	ULONG eaten = 0, attrs = SFGAO_FOLDER | SFGAO_STREAM;
+	CHECK(desk->lpVtbl->ParseDisplayName(desk, NULL, NULL, name, &eaten, &ns,
+					     &attrs) == S_OK);
+	CHECK(eaten == 6 && attrs == SFGAO_FOLDER);
+	free(name);
+	CHECK(ns && SHGetPathFromIDListA(ns, path));
+	CHECK_STR(path, "C:\\ns");
+	name = w16("C:\\nothing-here");
+	LPITEMIDLIST none = (void *)1;
+	CHECK(desk->lpVtbl->ParseDisplayName(desk, NULL, NULL, name, NULL, &none,
+					     NULL) ==
+	      HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) && !none);
+	free(name);
+
+	/* Bind to it and list it: folders, then files; hidden ones only
+	 * when asked. */
+	CHECK(desk->lpVtbl->BindToObject(desk, ns, NULL, &IID_IShellFolder,
+					 (void **)&dir) == S_OK && dir);
+	if (dir) {
+		IEnumIDList *en = NULL;
+		LPITEMIDLIST item[8];
+		ULONG got = 0;
+		CHECK(dir->lpVtbl->EnumObjects(dir, NULL, SHCONTF_FOLDERS |
+					       SHCONTF_NONFOLDERS, &en) == S_OK);
+		CHECK(en && en->lpVtbl->Next(en, 8, item, &got) == S_FALSE);
+		CHECK_EQ(got, 3);
+		int sub = -1, b = -1, lnk = -1;
+		for (ULONG i = 0; i < got; i++) {
+			STRRET s;
+			dir->lpVtbl->GetDisplayNameOf(dir, item[i], SHGDN_INFOLDER, &s);
+			char *n = strret(&s);
+			if (!strcmp(n, "sub")) sub = (int)i;
+			if (!strcmp(n, "b.txt")) b = (int)i;
+			if (!strcmp(n, "a.lnk")) lnk = (int)i;
+			free(n);
+		}
+		CHECK(sub >= 0 && b >= 0 && lnk >= 0);
+		if (sub >= 0 && b >= 0 && lnk >= 0) {
+			CHECK_NAME(dir, item[b], SHGDN_FORPARSING, "C:\\ns\\b.txt");
+			CHECK_NAME(dir, item[b], SHGDN_FORPARSING | SHGDN_INFOLDER,
+				   "b.txt");
+			/* Folders sort first, then names. */
+			CHECK((SHORT)dir->lpVtbl->CompareIDs(dir, 0, item[sub],
+							     item[b]) == -1);
+			CHECK((SHORT)dir->lpVtbl->CompareIDs(dir, 0, item[b],
+							     item[lnk]) == 1);
+			CHECK((SHORT)dir->lpVtbl->CompareIDs(dir, 0, item[b],
+							     item[b]) == 0);
+			ULONG a = 0xffffffff;
+			LPCITEMIDLIST one[1] = { item[sub] };
+			CHECK(dir->lpVtbl->GetAttributesOf(dir, 1, one, &a) == S_OK);
+			CHECK((a & SFGAO_FOLDER) && (a & SFGAO_FILESYSTEM) &&
+			      !(a & SFGAO_STREAM));
+			a = 0xffffffff;
+			one[0] = item[lnk];
+			CHECK(dir->lpVtbl->GetAttributesOf(dir, 1, one, &a) == S_OK);
+			CHECK((a & SFGAO_LINK) && (a & SFGAO_STREAM) &&
+			      !(a & SFGAO_FOLDER));
+			LPCITEMIDLIST two[2] = { item[sub], item[b] };
+			a = SFGAO_FOLDER | SFGAO_FILESYSTEM;
+			CHECK(dir->lpVtbl->GetAttributesOf(dir, 2, two, &a) == S_OK);
+			CHECK_EQ(a, SFGAO_FILESYSTEM);
+			/* Rename. */
+			name = w16("c.txt");
+			LPITEMIDLIST renamed = NULL;
+			CHECK(dir->lpVtbl->SetNameOf(dir, NULL, item[b], name, 0,
+						     &renamed) == S_OK);
+			free(name);
+			CHECK(exists("ns/c.txt") && !exists("ns/b.txt"));
+			CHECK(renamed && SHGetPathFromIDListA(renamed, path));
+			CHECK_STR(path, "C:\\ns\\c.txt");
+			ILFree(renamed);
+			/* Not over another link to the same file: both names
+			 * stay, and the rename fails. */
+			char c_path[512];
+			snprintf(c_path, sizeof(c_path), "%s", on_disk("ns/c.txt"));
+			CHECK_EQ(link(c_path, on_disk("ns/d.txt")), 0);
+			LPITEMIDLIST ci = NULL;
+			name = w16("c.txt");
+			CHECK(dir->lpVtbl->ParseDisplayName(dir, NULL, NULL, name,
+							    NULL, &ci, NULL) ==
+			      S_OK);
+			free(name);
+			name = w16("d.txt");
+			renamed = NULL;
+			CHECK(ci && dir->lpVtbl->SetNameOf(dir, NULL, ci, name, 0,
+							   &renamed) ==
+			      HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS));
+			free(name);
+			ILFree(ci);
+			CHECK(!renamed && exists("ns/c.txt") &&
+			      exists("ns/d.txt"));
+			unlink(on_disk("ns/d.txt"));
+			/* A combined list stands for its last item. */
+			LPITEMIDLIST full = ILCombine(ns, item[sub]);
+			CHECK(full && ILGetSize(full) == ILGetSize(ns) +
+			      ILGetSize(item[sub]) - 2);
+			CHECK(full && SHGetPathFromIDListA(full, path));
+			CHECK_STR(path, "C:\\ns\\sub");
+			CHECK(ILGetNext(full) == ILFindLastID(full));
+			CHECK(ILIsEqual(ILFindLastID(full), item[sub]));
+			CHECK(ILIsParent(ns, full, TRUE) && !ILIsParent(full, ns, FALSE));
+			/* Its parent: the directory, and the item. */
+			IShellFolder *parent = NULL;
+			LPCITEMIDLIST last = NULL;
+			CHECK(SHBindToParent(full, &IID_IShellFolder, (void **)&parent,
+					     &last) == S_OK && parent);
+			CHECK(last == ILFindLastID(full));
+			if (parent) {
+				CHECK_NAME(parent, last, SHGDN_INFOLDER, "sub");
+				parent->lpVtbl->Release(parent);
+			}
+			CHECK(ILRemoveLastID(full) && ILIsEqual(full, ns));
+			ILFree(full);
+		}
+		for (ULONG i = 0; i < got; i++)
+			ILFree(item[i]);
+		CHECK(en->lpVtbl->Reset(en) == S_OK);
+		IEnumIDList *c = NULL;
+		CHECK(en->lpVtbl->Clone(en, &c) == S_OK && c);
+		CHECK(c && c->lpVtbl->Skip(c, 9) == S_FALSE);
+		if (c)
+			c->lpVtbl->Release(c);
+		en->lpVtbl->Release(en);
+		CHECK(dir->lpVtbl->EnumObjects(dir, NULL, SHCONTF_NONFOLDERS |
+					       SHCONTF_INCLUDEHIDDEN, &en) == S_OK);
+		got = 0;
+		en->lpVtbl->Next(en, 8, item, &got);
+		CHECK_EQ(got, 3);	/* c.txt, a.lnk, .hidden */
+		for (ULONG i = 0; i < got; i++)
+			ILFree(item[i]);
+		en->lpVtbl->Release(en);
+		/* A file is no folder. */
+		LPITEMIDLIST file = ILCreateFromPathA("C:\\ns\\c.txt");
+		IShellFolder *bad = (void *)1;
+		CHECK(dir->lpVtbl->BindToObject(dir, file, NULL, &IID_IShellFolder,
+						(void **)&bad) == E_INVALIDARG &&
+		      !bad);
+		ILFree(file);
+		dir->lpVtbl->Release(dir);
+	}
+	ILFree(ns);
+
+	/* The desktop holds My Computer and the Recycle Bin; My Computer
+	 * holds drive C:. */
+	IEnumIDList *en = NULL;
+	LPITEMIDLIST item[2];
+	ULONG got = 0;
+	CHECK(desk->lpVtbl->EnumObjects(desk, NULL, SHCONTF_FOLDERS, &en) == S_OK);
+	CHECK(en->lpVtbl->Next(en, 2, item, &got) == S_OK && got == 2);
+	CHECK_NAME(desk, item[0], SHGDN_NORMAL, "My Computer");
+	CHECK_NAME(desk, item[0], SHGDN_FORPARSING,
+		   "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}");
+	CHECK_NAME(desk, item[1], SHGDN_NORMAL, "Recycle Bin");
+	CHECK(!SHGetPathFromIDListA(item[0], path));
+	CHECK(desk->lpVtbl->BindToObject(desk, item[0], NULL, &IID_IShellFolder,
+					 (void **)&drives) == S_OK && drives);
+	ILFree(item[0]);
+	ILFree(item[1]);
+	en->lpVtbl->Release(en);
+	if (drives) {
+		CHECK(drives->lpVtbl->EnumObjects(drives, NULL, SHCONTF_FOLDERS,
+						  &en) == S_OK);
+		int c = 0;
+		LPITEMIDLIST d;
+		while (en->lpVtbl->Next(en, 1, &d, NULL) == S_OK) {
+			STRRET s;
+			drives->lpVtbl->GetDisplayNameOf(drives, d, SHGDN_FORPARSING, &s);
+			char *n = strret(&s);
+			if (!strcmp(n, "C:\\")) {
+				c = 1;
+				CHECK_NAME(drives, d, SHGDN_NORMAL, "Local Disk (C:)");
+			}
+			free(n);
+			ILFree(d);
+		}
+		CHECK(c);
+		en->lpVtbl->Release(en);
+		drives->lpVtbl->Release(drives);
+	}
+	/* "::{CLSID}" names, through SHParseDisplayName. */
+	name = w16("::{645FF040-5081-101B-9F08-00AA002F954E}");
+	LPITEMIDLIST bin = NULL;
+	ULONG sfgao = 0;
+	CHECK(SHParseDisplayName(name, NULL, &bin, SFGAO_FOLDER, &sfgao) == S_OK);
+	CHECK(bin && sfgao == SFGAO_FOLDER);
+	free(name);
+	if (bin)
+		CHECK_NAME(desk, bin, SHGDN_NORMAL, "Recycle Bin");
+	ILFree(bin);
+	desk->lpVtbl->Release(desk);
+}
+
+static void test_recycle_bin(void)
+{
+	FN(int, SHFileOperationA, SHFILEOPSTRUCTA *);
+	FN(HRESULT, SHQueryRecycleBinA, LPCSTR, LPSHQUERYRBINFO);
+	FN(HRESULT, SHEmptyRecycleBinA, HWND, LPCSTR, DWORD);
+	FN(HRESULT, SHGetDesktopFolder, IShellFolder **);
+	FN(void, ILFree, LPITEMIDLIST);
+
+	SHQUERYRBINFO info = { sizeof(info), -1, -1 };
+	/* Empty what test_file_operation() put there. */
+	CHECK(SHEmptyRecycleBinA(NULL, NULL, SHERB_NOCONFIRMATION) == S_OK);
+	CHECK(SHQueryRecycleBinA("C:\\", &info) == S_OK);
+	CHECK(info.i64Size == 0 && info.i64NumItems == 0);
+	write_file("junk.txt", "12345");
+	SHFILEOPSTRUCTA op = { 0 };
+	op.wFunc = FO_DELETE;
+	op.pFrom = "C:\\junk.txt\0";
+	op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION;
+	CHECK_EQ(SHFileOperationA(&op), 0);
+	CHECK(!exists("junk.txt"));
+	CHECK(SHQueryRecycleBinA(NULL, &info) == S_OK);
+	CHECK(info.i64Size == 5 && info.i64NumItems == 1);
+	CHECK(SHQueryRecycleBinA("D:\\", &info) == S_OK && !info.i64NumItems);
+	info.cbSize = 4;
+	CHECK(SHQueryRecycleBinA(NULL, &info) == E_INVALIDARG);
+
+	/* The bin lists it by its old name. */
+	IShellFolder *desk = NULL, *bin = NULL;
+	CHECK(SHGetDesktopFolder(&desk) == S_OK);
+	WCHAR *name = w16("::{645FF040-5081-101B-9F08-00AA002F954E}");
+	LPITEMIDLIST pidl = NULL;
+	CHECK(desk->lpVtbl->ParseDisplayName(desk, NULL, NULL, name, NULL, &pidl,
+					     NULL) == S_OK);
+	free(name);
+	CHECK(desk->lpVtbl->BindToObject(desk, pidl, NULL, &IID_IShellFolder,
+					 (void **)&bin) == S_OK && bin);
+	ILFree(pidl);
+	if (bin) {
+		IEnumIDList *en = NULL;
+		LPITEMIDLIST item;
+		CHECK(bin->lpVtbl->EnumObjects(bin, NULL, SHCONTF_FOLDERS |
+					       SHCONTF_NONFOLDERS, &en) == S_OK);
+		CHECK(en->lpVtbl->Next(en, 1, &item, NULL) == S_OK);
+		CHECK_NAME(bin, item, SHGDN_NORMAL, "junk.txt");
+		ILFree(item);
+		CHECK(en->lpVtbl->Next(en, 1, &item, NULL) == S_FALSE);
+		en->lpVtbl->Release(en);
+		bin->lpVtbl->Release(bin);
+	}
+	desk->lpVtbl->Release(desk);
+
+	CHECK(SHEmptyRecycleBinA(NULL, NULL, SHERB_NOCONFIRMATION) == S_OK);
+	info.cbSize = sizeof(info);
+	CHECK(SHQueryRecycleBinA(NULL, &info) == S_OK && !info.i64NumItems &&
+	      !info.i64Size);
+}
+
+static void test_shell_link(void)
+{
+	HRESULT (WINAPI *init)(void *) = get_from(ole, "CoInitialize");
+	void (WINAPI *uninit)(void) = get_from(ole, "CoUninitialize");
+	HRESULT (WINAPI *create)(REFCLSID, IUnknown *, DWORD, REFIID, void **) =
+		get_from(ole, "CoCreateInstance");
+	IShellLinkA *la = NULL;
+	IShellLinkW *lw = NULL;
+	IPersistFile *pf = NULL;
+	char buf[MAX_PATH];
+	int idx = 0;
+
+	CHECK(SUCCEEDED(init(NULL)));
+	CHECK(create(&CLSID_ShellLink, NULL, 1, &IID_IShellLinkA, (void **)&la) ==
+	      S_OK && la);
+	if (!la)
+		return;
+	write_file("target.exe", "MZ");
+	CHECK(la->lpVtbl->SetPath(la, "C:\\target.exe") == S_OK);
+	CHECK(la->lpVtbl->SetPath(la, "C:\\nowhere.exe") == S_FALSE);
+	CHECK(la->lpVtbl->SetPath(la, "C:\\target.exe") == S_OK);
+	CHECK(la->lpVtbl->SetArguments(la, "-x \"y z\"") == S_OK);
+	CHECK(la->lpVtbl->SetDescription(la, "A target") == S_OK);
+	CHECK(la->lpVtbl->SetWorkingDirectory(la, "C:\\") == S_OK);
+	CHECK(la->lpVtbl->SetIconLocation(la, "C:\\target.exe", 2) == S_OK);
+	CHECK(la->lpVtbl->SetHotkey(la, 0x0241) == S_OK);
+	CHECK(la->lpVtbl->SetShowCmd(la, 3) == S_OK);
+	CHECK(la->lpVtbl->QueryInterface(la, &IID_IPersistFile, (void **)&pf) ==
+	      S_OK && pf);
+	CHECK(pf->lpVtbl->IsDirty(pf) == S_OK);
+	WCHAR *file = w16("C:\\link.lnk");
+	CHECK(pf->lpVtbl->Save(pf, file, TRUE) == S_OK);
+	CHECK(pf->lpVtbl->IsDirty(pf) == S_FALSE);
+	pf->lpVtbl->Release(pf);
+	la->lpVtbl->Release(la);
+
+	/* The file: the header, LinkInfo with the path, then the strings. */
+	FILE *f = fopen(on_disk("link.lnk"), "rb");
+	unsigned char data[1024];
+	size_t n = f ? fread(data, 1, sizeof(data), f) : 0;
+	if (f)
+		fclose(f);
+	CHECK(n > 0x4c && data[0] == 0x4c && data[4] == 0x01 && data[5] == 0x14 &&
+	      data[6] == 0x02 && data[0x14] == 0xf6);
+	CHECK(memmem(data, n, "C:\\target.exe", 14) != NULL);
+
+	/* Read back, through IShellLinkW. */
+	CHECK(create(&CLSID_ShellLink, NULL, 1, &IID_IPersistFile, (void **)&pf) ==
+	      S_OK && pf);
+	if (pf) {
+		CHECK(pf->lpVtbl->Load(pf, file, 0) == S_OK);
+		CHECK(pf->lpVtbl->QueryInterface(pf, &IID_IShellLinkW,
+						 (void **)&lw) == S_OK);
+		LPOLESTR cur = NULL;
+		CHECK(pf->lpVtbl->GetCurFile(pf, &cur) == S_OK && cur);
+		task_free(cur);
+		pf->lpVtbl->Release(pf);
+	}
+	if (lw) {
+		WCHAR w[MAX_PATH];
+		WIN32_FIND_DATAW fd;
+		CHECK(lw->lpVtbl->GetPath(lw, w, MAX_PATH, &fd, 0) == S_OK);
+		char *s = utf16_to_utf8_dup(w);
+		CHECK_STR(s, "C:\\target.exe");
+		free(s);
+		s = utf16_to_utf8_dup(fd.cFileName);
+		CHECK_STR(s, "target.exe");
+		CHECK_EQ(fd.nFileSizeLow, 2);
+		free(s);
+		CHECK(lw->lpVtbl->GetArguments(lw, w, MAX_PATH) == S_OK);
+		s = utf16_to_utf8_dup(w);
+		CHECK_STR(s, "-x \"y z\"");
+		free(s);
+		CHECK(lw->lpVtbl->QueryInterface(lw, &IID_IShellLinkA,
+						 (void **)&la) == S_OK);
+		lw->lpVtbl->Release(lw);
+	}
+	if (la) {
+		WORD key = 0;
+		int show = 0;
+		CHECK(la->lpVtbl->GetDescription(la, buf, MAX_PATH) == S_OK);
+		CHECK_STR(buf, "A target");
+		CHECK(la->lpVtbl->GetWorkingDirectory(la, buf, MAX_PATH) == S_OK);
+		CHECK_STR(buf, "C:\\");
+		CHECK(la->lpVtbl->GetIconLocation(la, buf, MAX_PATH, &idx) == S_OK);
+		CHECK(!strcmp(buf, "C:\\target.exe") && idx == 2);
+		CHECK(la->lpVtbl->GetHotkey(la, &key) == S_OK && key == 0x0241);
+		CHECK(la->lpVtbl->GetShowCmd(la, &show) == S_OK && show == 3);
+		/* Truncated to the buffer. */
+		CHECK(la->lpVtbl->GetPath(la, buf, 5, NULL, 0) == S_OK);
+		CHECK_STR(buf, "C:\\t");
+		CHECK(la->lpVtbl->Resolve(la, NULL, SLR_NO_UI) == S_OK);
+		LPITEMIDLIST pidl = NULL;
+		CHECK(la->lpVtbl->GetIDList(la, &pidl) == S_OK && pidl);
+		FN(BOOL, SHGetPathFromIDListA, LPCITEMIDLIST, LPSTR);
+		FN(void, ILFree, LPITEMIDLIST);
+		CHECK(SHGetPathFromIDListA(pidl, buf));
+		CHECK_STR(buf, "C:\\target.exe");
+		ILFree(pidl);
+		/* A stream round trip. */
+		IPersistStream *ps = NULL;
+		CHECK(la->lpVtbl->QueryInterface(la, &IID_IPersistStream,
+						 (void **)&ps) == S_OK);
+		ULARGE_INTEGER max;
+		CHECK(ps->lpVtbl->GetSizeMax(ps, &max) == S_OK &&
+		      max.QuadPart == n);
+		ps->lpVtbl->Release(ps);
+		la->lpVtbl->Release(la);
+	}
+	/* Not a link. */
+	write_file("bad.lnk", "not a shortcut at all, no header here......");
+	CHECK(create(&CLSID_ShellLink, NULL, 1, &IID_IPersistFile, (void **)&pf) ==
+	      S_OK);
+	WCHAR *badf = w16("C:\\bad.lnk"), *missing = w16("C:\\missing.lnk");
+	CHECK(pf->lpVtbl->Load(pf, badf, 0) == E_FAIL);
+	CHECK(pf->lpVtbl->Load(pf, missing, 0) ==
+	      HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND));
+	pf->lpVtbl->Release(pf);
+	free(badf);
+	free(missing);
+	free(file);
+	uninit();
+}
+
+/* Relative paths, saving copies, Unicode targets, the default prompt. */
+static void test_shell_link_more(void)
+{
+	HRESULT (WINAPI *init)(void *) = get_from(ole, "CoInitialize");
+	void (WINAPI *uninit)(void) = get_from(ole, "CoUninitialize");
+	HRESULT (WINAPI *create)(REFCLSID, IUnknown *, DWORD, REFIID, void **) =
+		get_from(ole, "CoCreateInstance");
+	IShellLinkW *lw = NULL;
+	IPersistFile *pf = NULL;
+	WCHAR w[MAX_PATH];
+
+	CHECK(SUCCEEDED(init(NULL)));
+	CHECK(create(&CLSID_ShellLink, NULL, 1, &IID_IShellLinkW, (void **)&lw) ==
+	      S_OK && lw);
+	if (!lw)
+		return;
+	CHECK(lw->lpVtbl->QueryInterface(lw, &IID_IPersistFile, (void **)&pf) ==
+	      S_OK && pf);
+
+	/* A new link has no file: S_FALSE, with the default prompt. */
+	LPOLESTR cur = NULL;
+	CHECK(pf->lpVtbl->GetCurFile(pf, &cur) == S_FALSE && cur);
+	if (cur) {
+		char *c = utf16_to_utf8_dup(cur);
+		CHECK_STR(c, "*.lnk");
+		free(c);
+		task_free(cur);
+	}
+
+	/* A target the ANSI code page can't spell survives a reload. */
+	mkdir(on_disk("old"), 0755);
+	write_file("old/\xe6\x97\xa5.exe", "MZ");
+	WCHAR *t = w16("C:\\old\\\xe6\x97\xa5.exe");
+	WCHAR *lnk = w16("C:\\old\\run.lnk");
+	CHECK(lw->lpVtbl->SetPath(lw, t) == S_OK);
+	/* SetRelativePath takes the link's own name. */
+	CHECK(lw->lpVtbl->SetRelativePath(lw, lnk, 0) == S_OK);
+	CHECK(pf->lpVtbl->Save(pf, lnk, TRUE) == S_OK);
+
+	/* Saving a copy leaves the current file and dirty flag alone. */
+	WCHAR *d = w16("edited");
+	CHECK(lw->lpVtbl->SetDescription(lw, d) == S_OK);
+	free(d);
+	WCHAR *copy = w16("C:\\copy.lnk");
+	CHECK(pf->lpVtbl->Save(pf, copy, FALSE) == S_OK);
+	CHECK(pf->lpVtbl->IsDirty(pf) == S_OK);
+	CHECK(pf->lpVtbl->GetCurFile(pf, &cur) == S_OK && cur);
+	if (cur) {
+		char *c = utf16_to_utf8_dup(cur);
+		CHECK_STR(c, "C:\\old\\run.lnk");
+		free(c);
+		task_free(cur);
+	}
+	free(copy);
+	pf->lpVtbl->Release(pf);
+	lw->lpVtbl->Release(lw);
+	lw = NULL;
+	pf = NULL;
+	/* The copy holds what was saved. */
+	copy = w16("C:\\copy.lnk");
+	CHECK(create(&CLSID_ShellLink, NULL, 1, &IID_IPersistFile, (void **)&pf) ==
+	      S_OK && pf);
+	if (pf) {
+		CHECK(pf->lpVtbl->Load(pf, copy, 0) == S_OK);
+		CHECK(pf->lpVtbl->QueryInterface(pf, &IID_IShellLinkW,
+						 (void **)&lw) == S_OK);
+		pf->lpVtbl->Release(pf);
+		pf = NULL;
+	}
+	if (lw) {
+		CHECK(lw->lpVtbl->GetDescription(lw, w, MAX_PATH) == S_OK);
+		char *c = utf16_to_utf8_dup(w);
+		CHECK_STR(c, "edited");
+		free(c);
+		lw->lpVtbl->Release(lw);
+		lw = NULL;
+	}
+	free(copy);
+
+	/* Both moved to C:\new: Resolve finds the target beside the link. */
+	mkdir(on_disk("new"), 0755);
+	CHECK(!rename(on_disk("old/\xe6\x97\xa5.exe"),
+		      on_disk("new/\xe6\x97\xa5.exe")));
+	CHECK(!rename(on_disk("old/run.lnk"), on_disk("new/run.lnk")));
+	/* Loaded by a name with forward slashes; and the link file is
+	 * private, which a save keeps it. */
+	WCHAR *nlnk = w16("C:/new/run.lnk");
+	CHECK(!chmod(on_disk("new/run.lnk"), 0600));
+	CHECK(create(&CLSID_ShellLink, NULL, 1, &IID_IPersistFile, (void **)&pf) ==
+	      S_OK && pf);
+	if (pf) {
+		CHECK(pf->lpVtbl->Load(pf, nlnk, 0) == S_OK);
+		CHECK(pf->lpVtbl->QueryInterface(pf, &IID_IShellLinkW,
+						 (void **)&lw) == S_OK);
+	}
+	if (lw) {
+		CHECK(lw->lpVtbl->GetPath(lw, w, MAX_PATH, NULL, 0) == S_OK);
+		char *c = utf16_to_utf8_dup(w);
+		CHECK_STR(c, "C:\\old\\\xe6\x97\xa5.exe");
+		free(c);
+		CHECK(lw->lpVtbl->Resolve(lw, NULL, SLR_NO_UI) == S_OK);
+		CHECK(lw->lpVtbl->GetPath(lw, w, MAX_PATH, NULL, 0) == S_OK);
+		c = utf16_to_utf8_dup(w);
+		CHECK_STR(c, "C:\\new\\\xe6\x97\xa5.exe");
+		free(c);
+		/* The ID list names the new place too. */
+		LPITEMIDLIST pidl = NULL;
+		FN(BOOL, SHGetPathFromIDListW, LPCITEMIDLIST, LPWSTR);
+		FN(void, ILFree, LPITEMIDLIST);
+		CHECK(lw->lpVtbl->GetIDList(lw, &pidl) == S_OK && pidl);
+		if (pidl) {
+			CHECK(SHGetPathFromIDListW(pidl, w));
+			c = utf16_to_utf8_dup(w);
+			CHECK_STR(c, "C:\\new\\\xe6\x97\xa5.exe");
+			free(c);
+			ILFree(pidl);
+		}
+		if (pf) {
+			struct stat st;
+			CHECK(pf->lpVtbl->Save(pf, NULL, TRUE) == S_OK);
+			CHECK(!stat(on_disk("new/run.lnk"), &st) &&
+			      (st.st_mode & 0777) == 0600);
+		}
+		lw->lpVtbl->Release(lw);
+	}
+	if (pf)
+		pf->lpVtbl->Release(pf);
+	free(nlnk);
+	free(t);
+	free(lnk);
+	uninit();
+}
+
 int main(void)
 {
 	const char *tmpdir = getenv("TMPDIR");
@@ -536,6 +1178,7 @@ int main(void)
 	CHECK_EQ(runtime_enter(), 0);
 	sh = mod_load("shell32.dll", NULL);
 	k32 = mod_load("kernel32.dll", NULL);
+	ole = mod_load("ole32.dll", NULL);
 	CHECK(sh && sh->builtin && !sh->builtin->fallback && k32);
 	if (!sh || !k32)
 		return test_summary("test_shell32");
@@ -548,6 +1191,12 @@ int main(void)
 	test_file_operation();
 	test_file_info();
 	test_fixture();
+	test_known_folders();
+	test_namespace();
+	test_recycle_bin();
+	test_shell_link();
+	test_shell_link_more();
+	mod_free(ole);
 
 	mod_free(k32);
 	mod_free(sh);

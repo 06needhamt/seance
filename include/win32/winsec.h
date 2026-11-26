@@ -7,6 +7,7 @@
 #ifndef VFW_WIN32_WINSEC_H
 #define VFW_WIN32_WINSEC_H
 
+#include "objbase.h"
 #include "types.h"
 
 typedef DWORD ACCESS_MASK, *PACCESS_MASK;
@@ -22,8 +23,20 @@ typedef DWORD SECURITY_INFORMATION, *PSECURITY_INFORMATION;
 #define WRITE_OWNER              0x00080000
 #define SYNCHRONIZE              0x00100000
 #define STANDARD_RIGHTS_REQUIRED 0x000f0000
+#define STANDARD_RIGHTS_READ     READ_CONTROL
+#define STANDARD_RIGHTS_WRITE    READ_CONTROL
+#define STANDARD_RIGHTS_EXECUTE  READ_CONTROL
 #define STANDARD_RIGHTS_ALL      0x001f0000
+#define ACCESS_SYSTEM_SECURITY   0x01000000
 #define MAXIMUM_ALLOWED          0x02000000
+
+/* What each generic right means for a kind of object. */
+typedef struct _GENERIC_MAPPING {
+	ACCESS_MASK GenericRead;
+	ACCESS_MASK GenericWrite;
+	ACCESS_MASK GenericExecute;
+	ACCESS_MASK GenericAll;
+} GENERIC_MAPPING, *PGENERIC_MAPPING;
 
 /* SIDs. */
 typedef struct _SID_IDENTIFIER_AUTHORITY {
@@ -282,6 +295,12 @@ typedef struct _ACE_HEADER {
 #define ACCESS_ALLOWED_ACE_TYPE 0x0
 #define ACCESS_DENIED_ACE_TYPE  0x1
 #define SYSTEM_AUDIT_ACE_TYPE   0x2
+#define SYSTEM_ALARM_ACE_TYPE   0x3
+#define ACCESS_ALLOWED_OBJECT_ACE_TYPE  0x5
+#define ACCESS_DENIED_OBJECT_ACE_TYPE   0x6
+#define SYSTEM_AUDIT_OBJECT_ACE_TYPE    0x7
+#define SYSTEM_ALARM_OBJECT_ACE_TYPE    0x8
+#define SYSTEM_MANDATORY_LABEL_ACE_TYPE 0x11
 
 #define OBJECT_INHERIT_ACE       0x01
 #define CONTAINER_INHERIT_ACE    0x02
@@ -289,6 +308,15 @@ typedef struct _ACE_HEADER {
 #define INHERIT_ONLY_ACE         0x08
 #define INHERITED_ACE            0x10
 #define VALID_INHERIT_FLAGS      0x1f
+#define SUCCESSFUL_ACCESS_ACE_FLAG 0x40
+#define FAILED_ACCESS_ACE_FLAG     0x80
+
+#define ACE_OBJECT_TYPE_PRESENT           0x1
+#define ACE_INHERITED_OBJECT_TYPE_PRESENT 0x2
+
+#define SYSTEM_MANDATORY_LABEL_NO_WRITE_UP   0x1
+#define SYSTEM_MANDATORY_LABEL_NO_READ_UP    0x2
+#define SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP 0x4
 
 typedef struct _ACCESS_ALLOWED_ACE {
 	ACE_HEADER Header;
@@ -301,6 +329,28 @@ typedef struct _ACCESS_DENIED_ACE {
 	ACCESS_MASK Mask;
 	DWORD SidStart;
 } ACCESS_DENIED_ACE, *PACCESS_DENIED_ACE;
+
+typedef struct _SYSTEM_AUDIT_ACE {
+	ACE_HEADER Header;
+	ACCESS_MASK Mask;
+	DWORD SidStart;
+} SYSTEM_AUDIT_ACE, *PSYSTEM_AUDIT_ACE;
+
+typedef struct _SYSTEM_MANDATORY_LABEL_ACE {
+	ACE_HEADER Header;
+	ACCESS_MASK Mask;
+	DWORD SidStart;
+} SYSTEM_MANDATORY_LABEL_ACE, *PSYSTEM_MANDATORY_LABEL_ACE;
+
+/* The directory service's: the GUIDs present per Flags, then the SID. */
+typedef struct _ACCESS_ALLOWED_OBJECT_ACE {
+	ACE_HEADER Header;
+	ACCESS_MASK Mask;
+	DWORD Flags;
+	GUID ObjectType;
+	GUID InheritedObjectType;
+	DWORD SidStart;
+} ACCESS_ALLOWED_OBJECT_ACE, *PACCESS_ALLOWED_OBJECT_ACE;
 
 typedef enum _ACL_INFORMATION_CLASS {
 	AclRevisionInformation = 1,
@@ -361,6 +411,9 @@ typedef struct _SECURITY_DESCRIPTOR_RELATIVE {
 #define DACL_SECURITY_INFORMATION  0x00000004
 #define SACL_SECURITY_INFORMATION  0x00000008
 #define LABEL_SECURITY_INFORMATION 0x00000010
+
+/* sddl.h */
+#define SDDL_REVISION_1 1
 
 /* GetNamedSecurityInfo's object types (accctrl.h). */
 typedef enum _SE_OBJECT_TYPE {

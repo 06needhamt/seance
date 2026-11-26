@@ -1168,11 +1168,14 @@ static HRESULT coerce(VARIANT *dst, const VARIANT *src, LCID lcid,
 	INT_TARGET(VT_UI8, ullVal, uint64_t, 0, UINT64_MAX, 64)
 #undef INT_TARGET
 	case VT_R4:
-		if (fabs(n.d) > FLT_MAX && !isinf(n.d))
+		/* An infinity carries over, but text can't be one. */
+		if (fabs(n.d) > FLT_MAX && (!isinf(n.d) || n.text))
 			return DISP_E_OVERFLOW;
 		dst->fltVal = (FLOAT)n.d;
 		break;
 	case VT_R8:
+		if (isinf(n.d) && n.text)
+			return DISP_E_OVERFLOW;
 		dst->dblVal = n.d;
 		break;
 	case VT_DATE:
@@ -1495,7 +1498,7 @@ WINFN(HRESULT) oa_VarBstrFromDisp(IDispatch *disp, LCID lcid, ULONG flags,
 
 /* DECIMAL arithmetic. */
 
-WINFN(HRESULT) oa_VarDecAbs(const DECIMAL *in, DECIMAL *out)
+HRESULT STUB_WINAPI oa_VarDecAbs(const DECIMAL *in, DECIMAL *out)
 {
 	if (!in || !out)
 		return E_INVALIDARG;
@@ -1504,7 +1507,7 @@ WINFN(HRESULT) oa_VarDecAbs(const DECIMAL *in, DECIMAL *out)
 	return S_OK;
 }
 
-WINFN(HRESULT) oa_VarDecNeg(const DECIMAL *in, DECIMAL *out)
+HRESULT STUB_WINAPI oa_VarDecNeg(const DECIMAL *in, DECIMAL *out)
 {
 	if (!in || !out)
 		return E_INVALIDARG;
@@ -1543,17 +1546,17 @@ static HRESULT dec_round(const DECIMAL *in, int dp, int how, DECIMAL *out)
 	return S_OK;
 }
 
-WINFN(HRESULT) oa_VarDecRound(const DECIMAL *in, int dp, DECIMAL *out)
+HRESULT STUB_WINAPI oa_VarDecRound(const DECIMAL *in, int dp, DECIMAL *out)
 {
 	return dec_round(in, dp, R_EVEN, out);
 }
 
-WINFN(HRESULT) oa_VarDecFix(const DECIMAL *in, DECIMAL *out)
+HRESULT STUB_WINAPI oa_VarDecFix(const DECIMAL *in, DECIMAL *out)
 {
 	return dec_round(in, 0, R_ZERO, out);
 }
 
-WINFN(HRESULT) oa_VarDecInt(const DECIMAL *in, DECIMAL *out)
+HRESULT STUB_WINAPI oa_VarDecInt(const DECIMAL *in, DECIMAL *out)
 {
 	return dec_round(in, 0, R_FLOOR, out);
 }
@@ -1705,7 +1708,7 @@ static int dec_neg(const DECIMAL *d)
 	return (d->sign & DEC_NEG) != 0;
 }
 
-WINFN(HRESULT) oa_VarDecCmp(const DECIMAL *a, const DECIMAL *b)
+HRESULT STUB_WINAPI oa_VarDecCmp(const DECIMAL *a, const DECIMAL *b)
 {
 	uint32_t wa[WIDE], wb[WIDE];
 
@@ -1764,18 +1767,18 @@ static HRESULT dec_add(const DECIMAL *a, const DECIMAL *b, int negate_b,
 	return wide_to_dec(wa, scale, na, 0, out, NULL);
 }
 
-WINFN(HRESULT) oa_VarDecAdd(const DECIMAL *a, const DECIMAL *b, DECIMAL *out)
+HRESULT STUB_WINAPI oa_VarDecAdd(const DECIMAL *a, const DECIMAL *b, DECIMAL *out)
 {
 	return dec_add(a, b, 0, out);
 }
 
-WINFN(HRESULT) oa_VarDecSub(const DECIMAL *a, const DECIMAL *b, DECIMAL *out)
+HRESULT STUB_WINAPI oa_VarDecSub(const DECIMAL *a, const DECIMAL *b, DECIMAL *out)
 {
 	return dec_add(a, b, 1, out);
 }
 
 /* The product's scale is the two added, then rounded to fit. */
-WINFN(HRESULT) oa_VarDecMul(const DECIMAL *a, const DECIMAL *b, DECIMAL *out)
+HRESULT STUB_WINAPI oa_VarDecMul(const DECIMAL *a, const DECIMAL *b, DECIMAL *out)
 {
 	uint32_t ma[3], mb[3], p[WIDE];
 
@@ -1804,7 +1807,7 @@ WINFN(HRESULT) oa_VarDecMul(const DECIMAL *a, const DECIMAL *b, DECIMAL *out)
  * to fit, then without trailing zeros if it came out exact: 1 / 4 is
  * 0.25, 1 / 3 is 0.3333333333333333333333333333.
  */
-WINFN(HRESULT) oa_VarDecDiv(const DECIMAL *a, const DECIMAL *b, DECIMAL *out)
+HRESULT STUB_WINAPI oa_VarDecDiv(const DECIMAL *a, const DECIMAL *b, DECIMAL *out)
 {
 	uint32_t n[WIDE], d[WIDE], r[WIDE];
 	HRESULT hr;

@@ -33,10 +33,32 @@ HRESULT STUB_WINAPI oa_VariantChangeTypeEx(VARIANTARG *dst,
 /* S_OK, or DISP_E_BADVARTYPE for a type no VARIANT may have. */
 HRESULT oa_validate_vt(VARTYPE vt);
 
+/* DECIMAL arithmetic (oleaut_conv.c). */
+HRESULT STUB_WINAPI oa_VarDecAbs(const DECIMAL *in, DECIMAL *out);
+HRESULT STUB_WINAPI oa_VarDecNeg(const DECIMAL *in, DECIMAL *out);
+HRESULT STUB_WINAPI oa_VarDecRound(const DECIMAL *in, int dp, DECIMAL *out);
+HRESULT STUB_WINAPI oa_VarDecFix(const DECIMAL *in, DECIMAL *out);
+HRESULT STUB_WINAPI oa_VarDecInt(const DECIMAL *in, DECIMAL *out);
+HRESULT STUB_WINAPI oa_VarDecCmp(const DECIMAL *a, const DECIMAL *b);
+HRESULT STUB_WINAPI oa_VarDecAdd(const DECIMAL *a, const DECIMAL *b,
+				 DECIMAL *out);
+HRESULT STUB_WINAPI oa_VarDecSub(const DECIMAL *a, const DECIMAL *b,
+				 DECIMAL *out);
+HRESULT STUB_WINAPI oa_VarDecMul(const DECIMAL *a, const DECIMAL *b,
+				 DECIMAL *out);
+HRESULT STUB_WINAPI oa_VarDecDiv(const DECIMAL *a, const DECIMAL *b,
+				 DECIMAL *out);
+
 /* SAFEARRAYs. */
 SAFEARRAY *STUB_WINAPI oa_SafeArrayCreateVector(VARTYPE vt, LONG lbound,
 					    ULONG count);
 HRESULT STUB_WINAPI oa_SafeArrayDestroy(SAFEARRAY *psa);
+HRESULT STUB_WINAPI oa_SafeArrayAllocDescriptorEx(VARTYPE vt, UINT dims,
+					      SAFEARRAY **out);
+HRESULT STUB_WINAPI oa_SafeArrayAllocData(SAFEARRAY *psa);
+HRESULT STUB_WINAPI oa_SafeArraySetIID(SAFEARRAY *psa, REFGUID iid);
+HRESULT STUB_WINAPI oa_SafeArrayGetIID(SAFEARRAY *psa, GUID *out);
+HRESULT STUB_WINAPI oa_SafeArrayGetVartype(SAFEARRAY *psa, VARTYPE *out);
 HRESULT STUB_WINAPI oa_SafeArrayCopy(SAFEARRAY *psa, SAFEARRAY **out);
 HRESULT STUB_WINAPI oa_VectorFromBstr(BSTR b, SAFEARRAY **out);
 HRESULT STUB_WINAPI oa_BstrFromVector(SAFEARRAY *psa, BSTR *out);
@@ -58,6 +80,36 @@ HRESULT STUB_WINAPI oa_DispCallFunc(void *instance, ULONG_PTR offset,
 				    CALLCONV cc, VARTYPE ret, UINT count,
 				    VARTYPE *types, VARIANTARG **args,
 				    VARIANT *result);
+
+/* A library parsed from an MSFT image in memory, not cached. */
+HRESULT oa_typelib_from_bytes(const void *d, size_t len, ITypeLib **out);
+
+/*
+ * The same, as a view of another object (ICreateTypeLib2's): the library
+ * holds outer, and asks it, through qi, for IUnknown and any interface it
+ * has not got itself, with -1 for the library or, for a type, ids[its
+ * index] (its index if ids is NULL): the maker's own name for it, which
+ * stays the same as its types come and go. So the view and its maker are
+ * one COM object.
+ */
+typedef HRESULT (*oa_outer_qi)(IUnknown *outer, int id, REFIID riid,
+			       void **ppv);
+HRESULT oa_typelib_view(const void *d, size_t len, IUnknown *outer,
+			oa_outer_qi qi, const UINT *ids, UINT nids,
+			ITypeLib **out);
+
+/* Building a library for another reader (oleaut_create.c). */
+HRESULT oa_ctl_new(SYSKIND sys, ICreateTypeLib2 **out);
+HRESULT oa_ctl_import(ICreateTypeLib2 *self, const GUID *libid, WORD major,
+		      WORD minor, LCID lcid, const char *file,
+		      const GUID *guid, UINT index, HREFTYPE *out);
+void oa_cti_fix_layout(ICreateTypeInfo2 *self, ULONG size, WORD align,
+		       WORD vft);
+HRESULT oa_ctl_serialize(ICreateTypeLib2 *self, BYTE **out, size_t *len);
+
+/* An SLTG library as an MSFT one (oleaut_sltg.c). */
+HRESULT oa_sltg_to_msft(const BYTE *d, size_t len, BYTE **out,
+			size_t *out_len);
 
 /* Type library registration (oleaut_typereg.c). */
 HRESULT STUB_WINAPI oa_QueryPathOfRegTypeLib(REFGUID guid, WORD major,
@@ -82,6 +134,14 @@ extern const struct builtin_export oa_array_exports[];
 extern const struct builtin_export oa_typelib_exports[];
 extern const struct builtin_export oa_typereg_exports[];
 extern const struct builtin_export oa_dispatch_exports[];
+extern const struct builtin_export oa_var_exports[];
+extern const struct builtin_export oa_format_exports[];
+extern const struct builtin_export oa_create_exports[];
+extern const struct builtin_export oa_marshal_exports[];
+extern const struct builtin_export oa_record_exports[];
+/* GetRecordInfoFromTypeInfo (oleaut_record.c). */
+HRESULT STUB_WINAPI oa_GetRecordInfoFromTypeInfo(ITypeInfo *ti,
+						 IRecordInfo **out);
 extern const struct builtin_export oa_errinfo_ole32_exports[];
 
 #endif /* VFW_WIN32_OLEAUT_H */

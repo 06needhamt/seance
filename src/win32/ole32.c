@@ -92,6 +92,7 @@ WINFN(void) ole_CoUninitialize(void)
 {
 	if (!apt_count || --apt_count)
 		return;
+	ole_message_filter_drop();
 	TRACE("CoUninitialize: thread %lu leaves the %s", (unsigned long)
 	      thread_current_id(), apt_sta ? "STA" : "MTA");
 	if (!apt_sta) {
@@ -337,7 +338,7 @@ WINFN(HRESULT) ole_CoCreateGuid(GUID *out)
  * the value "" for the default), as UTF-8, malloc()ed; the per-user
  * classes win over the machine's, as on Windows. NULL if there is none.
  */
-static char *classes_value(const char *sub, const char *name)
+char *ole_classes_value(const char *sub, const char *name)
 {
 	static const char *const roots[] = {
 		"HKEY_CURRENT_USER\\Software\\Classes",
@@ -374,7 +375,7 @@ WINFN(HRESULT) ole_CLSIDFromProgID(LPCOLESTR progid, LPCLSID clsid)
 	char *name = utf16_to_utf8_dup(progid), sub[300];
 	snprintf(sub, sizeof(sub), "%s\\CLSID", name ? name : "");
 	free(name);
-	char *value = classes_value(sub, "");
+	char *value = ole_classes_value(sub, "");
 	WCHAR *w = utf8_to_utf16_dup(value);
 	free(value);
 	int bad = !w || ole_guid_parse(w, clsid);
@@ -428,7 +429,7 @@ WINFN(HRESULT) ole_ProgIDFromCLSID(REFCLSID clsid, LPOLESTR *out)
 		return E_INVALIDARG;
 	ole_guid_format(clsid, g);
 	snprintf(sub, sizeof(sub), "CLSID\\%s\\ProgID", g);
-	char *value = classes_value(sub, "");
+	char *value = ole_classes_value(sub, "");
 	if (!value)
 		return REGDB_E_CLASSNOTREG;
 	WCHAR *w = utf8_to_utf16_dup(value);
@@ -604,6 +605,7 @@ static const struct {
 	{ &CLSID_FilterMapper2, "quartz.dll" },
 	{ &CLSID_SystemDeviceEnum, "quartz.dll" },
 	{ &CLSID_MemoryAllocator, "quartz.dll" },
+	{ &CLSID_ShellLink, "shell32.dll" },
 };
 
 static char *system_class_dll(REFCLSID clsid)
@@ -622,7 +624,7 @@ static HRESULT inproc_class_object(REFCLSID clsid, REFIID riid, void **ppv,
 
 	ole_guid_format(clsid, g);
 	snprintf(sub, sizeof(sub), "CLSID\\%s\\InprocServer32", g);
-	char *dll = classes_value(sub, "");
+	char *dll = ole_classes_value(sub, "");
 	if (!dll || !*dll) {
 		free(dll);
 		dll = system_class_dll(clsid);
@@ -666,15 +668,22 @@ static HRESULT get_class_object(REFCLSID clsid, DWORD context, REFIID riid,
 		return CO_E_NOTINITIALIZED;
 	}
 
+	CLSID treat;
+	ole_treat_as(clsid, &treat);
+	clsid = &treat;
 	IUnknown *obj = registered(clsid, context);
 	if (obj) {
 		HRESULT hr = obj->lpVtbl->QueryInterface(obj, riid, ppv);
 		obj->lpVtbl->Release(obj);
 		return hr;
 	}
-	if (context & CLSCTX_INPROC)
+	if (context & CLSCTX_INPROC) {
+		HRESULT hr = ole_moniker_class_object(clsid, riid, ppv);
+		if (hr != REGDB_E_CLASSNOTREG)
+			return hr;
 		return inproc_class_object(clsid, riid, ppv,
 					   win_caller_module(ret));
+	}
 	return REGDB_E_CLASSNOTREG;
 }
 
@@ -887,7 +896,8 @@ static const struct builtin_export exports[] = {
 };
 
 static const struct builtin_export *const tables[] = {
-	exports, oa_errinfo_ole32_exports, ole_stream_exports, NULL
+	exports, oa_errinfo_ole32_exports, ole_stream_exports,
+	ole_storage_exports, ole_moniker_exports, ole_misc_exports, NULL
 };
 
 const struct builtin_dll builtin_ole32 = { "ole32.dll", NULL, tables, 0 };

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #include <dirent.h>
+#include <fcntl.h>
 #include <errno.h>
 #include <limits.h>
 #include <pthread.h>
@@ -8,6 +9,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include "win32/path.h"
@@ -286,4 +288,75 @@ int path_chdir(const char *win)
 	pthread_mutex_unlock(&cwd_lock);
 	free(w);
 	return 0;
+}
+
+int path_rename_noreplace(const char *from, const char *to)
+{
+#ifdef SYS_renameat2
+	if (!syscall(SYS_renameat2, AT_FDCWD, from, AT_FDCWD, to,
+		     1 /* RENAME_NOREPLACE */))
+		return 0;
+	if (errno != EINVAL && errno != ENOSYS)
+		return -1;
+#endif
+	struct stat st;
+	if (lstat(from, &st))
+		return -1;
+	if (!S_ISDIR(st.st_mode)) {
+		/* link() won't replace; the old name goes once the new one is
+		 * there. */
+		if (link(from, to))
+			return -1;
+		if (unlink(from)) {
+			int e = errno;
+			unlink(to);
+			errno = e;
+			return -1;
+		}
+		return 0;
+	}
+	/* A directory: claim the name with an empty one, which nothing
+	 * else can then take, and rename over it; rename() replaces only
+	 * an empty directory, so one that gains entries meanwhile stays. */
+	if (mkdir(to, 0700))
+		return -1;
+	if (rename(from, to)) {
+		int e = errno;
+		rmdir(to);
+		errno = e == ENOTEMPTY ? EEXIST : e;
+		return -1;
+	}
+	return 0;
+}
+
+/* The process's umask, without changing it, or -1 when it can't be read
+ * (no /proc, or no descriptor to read it with). */
+static int current_umask(void)
+{
+	FILE *f = fopen("/proc/self/status", "r");
+	char line[128];
+	unsigned m;
+
+	if (f) {
+		while (fgets(line, sizeof(line), f))
+			if (sscanf(line, "Umask: %o", &m) == 1) {
+				fclose(f);
+				return (int)(m & 0777);
+			}
+		fclose(f);
+	}
+	errno = EACCES;
+	return -1;
+}
+
+/* Fails, rather than guess, when a new file's mask can't be known. */
+int path_replace_mode(int fd, const char *dest)
+{
+	struct stat st;
+	if (!stat(dest, &st))
+		return fchmod(fd, st.st_mode & 07777);
+	int mask = current_umask();
+	if (mask < 0)
+		return -1;
+	return fchmod(fd, 0666 & ~(mode_t)mask);
 }

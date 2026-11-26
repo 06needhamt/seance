@@ -875,7 +875,7 @@ static void test_misc(void)
 	CHECK(MapDialogRect(NULL, &legacy));
 	CHECK(legacy.left == 2 && legacy.top == 4 &&
 	      legacy.right == 6 && legacy.bottom == 8);
-	CHECK_EQ(SetScrollPos(NULL, 0, 37, FALSE), 37);
+	CHECK_EQ(SetScrollPos(NULL, 0, 37, FALSE), 0);	/* no window */
 
 	/* pe_basic's own strings, through LoadString. */
 	const char *d = getenv("VFW_FIXTURES");

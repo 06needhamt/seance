@@ -48,3 +48,8 @@ UWOP_EPILOG
 UWOP_SAVE_XMM128
 UWOP_SAVE_XMM128_FAR
 UWOP_PUSH_MACHFRAME
+# The MRU list flags: comctl32 exports the MRU functions by ordinal only,
+# and mingw-w64 has no header for them.
+MRU_STRING
+MRU_BINARY
+MRU_CACHEWRITE

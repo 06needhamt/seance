@@ -264,20 +264,6 @@ WINFN(HWND) user_GetNextDlgTabItem(HWND dialog, HWND control, BOOL previous)
 	return NULL;
 }
 
-WINFN(int) user_GetScrollPos(HWND hwnd, int bar)
-{
-	return 0;
-}
-
-WINFN(BOOL) user_GetScrollRange(HWND hwnd, int bar, int *min, int *max)
-{
-	(void)bar;
-	if (!user_is_window(hwnd)) return FALSE;
-	if (min) *min = 0;
-	if (max) *max = 100;
-	return TRUE;
-}
-
 WINFN(WORD) user_GetWindowWord(HWND hwnd, int index)
 {
 	if (!user_is_window(hwnd)) return 0;
@@ -366,17 +352,6 @@ WINFN(BOOL) user_SetMenuItemBitmaps(HMENU menu, UINT position, UINT flags,
 	return FALSE;
 }
 
-WINFN(int) user_SetScrollPos(HWND hwnd, int bar, int position, BOOL redraw)
-{
-	return position;
-}
-
-WINFN(BOOL) user_SetScrollRange(HWND hwnd, int bar, int min, int max,
-				 BOOL redraw)
-{
-	return TRUE;
-}
-
 WINFN(HHOOK) user_SetWindowsHookExA(int id, HOOKPROC callback,
 				     HINSTANCE module, DWORD thread)
 {
@@ -439,8 +414,6 @@ const struct builtin_export u32_legacy_exports[] = {
 	E(GetMenuItemID),
 	E(GetMenuState),
 	E(GetNextDlgTabItem),
-	E(GetScrollPos),
-	E(GetScrollRange),
 	E(GetShellWindow),
 	E(GetSubMenu),
 	E(GetTopWindow),
@@ -456,8 +429,6 @@ const struct builtin_export u32_legacy_exports[] = {
 	E(ModifyMenuA),
 	E(RedrawWindow),
 	E(SetMenuItemBitmaps),
-	E(SetScrollPos),
-	E(SetScrollRange),
 	E(SetWindowsHookExA),
 	E(TabbedTextOutA),
 	E(TrackPopupMenu),

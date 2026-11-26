@@ -10,6 +10,7 @@
 #include <vfw.h>
 #include <shlobj.h>
 #include <aclapi.h>
+#include <sddl.h>
 #include <oleauto.h>
 #include <olectl.h>
 #include <commctrl.h>

@@ -68,6 +68,23 @@ typedef struct tagWNDCLASSEXW {
 	HICON hIconSm;
 } WNDCLASSEXW, *PWNDCLASSEXW, *LPWNDCLASSEXW;
 
+/* Accelerator tables. */
+DECLARE_HANDLE(HACCEL);
+typedef struct tagACCEL {
+	BYTE fVirt;
+	WORD key;
+	WORD cmd;
+} ACCEL, *LPACCEL;
+#define FVIRTKEY  0x01
+#define FNOINVERT 0x02
+#define FSHIFT    0x04
+#define FCONTROL  0x08
+#define FALT      0x10
+
+#define VK_SHIFT   0x10
+#define VK_CONTROL 0x11
+#define VK_MENU    0x12
+
 typedef struct tagMSG {
 	HWND hwnd;
 	UINT message;
@@ -256,6 +273,13 @@ typedef struct tagMONITORINFO {
 #define WM_SETFONT           0x0030
 #define WM_GETFONT           0x0031
 #define WM_NOTIFY            0x004E
+#define WM_NOTIFYFORMAT      0x0055
+#define WM_STYLECHANGING     0x007C
+#define WM_STYLECHANGED      0x007D
+#define NFR_ANSI             1
+#define NFR_UNICODE          2
+#define NF_QUERY             3
+#define NF_REQUERY           4
 #define WM_WINDOWPOSCHANGING 0x0046
 #define WM_WINDOWPOSCHANGED  0x0047
 #define WM_NCCREATE          0x0081
@@ -263,6 +287,15 @@ typedef struct tagMONITORINFO {
 #define WM_NCCALCSIZE        0x0083
 #define WM_INITDIALOG        0x0110
 #define WM_COMMAND           0x0111
+#define WM_KEYDOWN           0x0100
+#define WM_KEYUP             0x0101
+#define WM_CHAR              0x0102
+#define WM_SYSKEYDOWN        0x0104
+#define WM_SYSKEYUP          0x0105
+#define WM_SYSCHAR           0x0106
+#define WM_SYSCOMMAND        0x0112
+#define WM_RENDERFORMAT      0x0305
+#define WM_RENDERALLFORMATS  0x0306
 #define WM_TIMER             0x0113
 #define WM_USER              0x0400
 #define WM_APP               0x8000
@@ -313,6 +346,37 @@ typedef struct tagMONITORINFO {
 #define WS_CAPTION          0x00c00000
 #define WS_SYSMENU          0x00080000
 #define WS_OVERLAPPEDWINDOW 0x00cf0000
+#define WS_VSCROLL          0x00200000
+#define WS_HSCROLL          0x00100000
+
+/* Scroll bars. */
+#define SB_HORZ 0
+#define SB_VERT 1
+#define SB_CTL  2
+#define SB_BOTH 3
+
+#define SIF_RANGE           0x0001
+#define SIF_PAGE            0x0002
+#define SIF_POS             0x0004
+#define SIF_DISABLENOSCROLL 0x0008
+#define SIF_TRACKPOS        0x0010
+#define SIF_ALL             (SIF_RANGE | SIF_PAGE | SIF_POS | SIF_TRACKPOS)
+
+#define ESB_ENABLE_BOTH  0x0000
+#define ESB_DISABLE_LTUP 0x0001
+#define ESB_DISABLE_RTDN 0x0002
+#define ESB_DISABLE_BOTH 0x0003
+
+typedef struct tagSCROLLINFO {
+	UINT cbSize;
+	UINT fMask;
+	int nMin;
+	int nMax;
+	UINT nPage;
+	int nPos;
+	int nTrackPos;
+} SCROLLINFO, *LPSCROLLINFO;
+typedef const SCROLLINFO *LPCSCROLLINFO;
 
 #define CW_USEDEFAULT ((int)0x80000000)
 
@@ -401,6 +465,17 @@ typedef struct tagMONITORINFO {
 #define UOI_NAME    2
 #define UOI_TYPE    3
 #define WSF_VISIBLE 0x0001
+
+/* WM_WINDOWPOSCHANGING/CHANGED, and HDM_LAYOUT's answer. */
+typedef struct tagWINDOWPOS {
+	HWND hwnd;
+	HWND hwndInsertAfter;
+	int x;
+	int y;
+	int cx;
+	int cy;
+	UINT flags;
+} WINDOWPOS, *LPWINDOWPOS, *PWINDOWPOS;
 
 /* WM_NOTIFY's header, and _TrackMouseEvent's request. */
 typedef struct tagNMHDR {

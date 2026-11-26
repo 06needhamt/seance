@@ -11,6 +11,9 @@
 #include "runtime/runtime.h"
 #include "test.h"
 #include "win32/codepage.h"
+#include "win32/commctrl.h"
+#include "win32/objbase.h"
+#include "win32/winreg.h"
 
 static struct module *cc, *u32, *gdi;
 
@@ -173,6 +176,151 @@ static void test_dpa(void)
 	CHECK(DPA_Destroy(d));
 	CHECK(!DPA_Destroy(NULL));
 	CHECK(DPA_GetPtr(NULL, 0) == NULL);
+}
+
+/* DPA_Merge and the stream form. */
+
+static int merged, inserted, deleted;
+
+static int WINAPI cmp_exact(void *x, void *y, LPARAM lp)
+{
+	INT_PTR a = (INT_PTR)x, b = (INT_PTR)y;
+	return (a > b) - (a < b);
+}
+
+static PVOID WINAPI merge_cb(UINT msg, PVOID d, PVOID s, LPARAM lp)
+{
+	switch (msg) {
+	case DPAMM_MERGE:
+		merged++;
+		return (PVOID)((INT_PTR)d + (INT_PTR)lp);	/* marks it */
+	case DPAMM_INSERT:
+		inserted++;
+		return d;
+	case DPAMM_DELETE:
+		deleted++;
+		return NULL;
+	}
+	return NULL;
+}
+
+static HRESULT WINAPI save_item(DPASTREAMINFO *info, IStream *s, void *data)
+{
+	INT_PTR v = (INT_PTR)info->pvItem;
+	DWORD x = (DWORD)v;
+	return s->lpVtbl->Write(s, &x, sizeof(x), NULL);
+}
+
+static HRESULT WINAPI load_item(DPASTREAMINFO *info, IStream *s, void *data)
+{
+	DWORD x = 0;
+	ULONG got = 0;
+	HRESULT hr = s->lpVtbl->Read(s, &x, sizeof(x), &got);
+	if (FAILED(hr) || got != sizeof(x))
+		return E_FAIL;
+	if (data && x == *(DWORD *)data)
+		return S_FALSE;		/* stop here */
+	info->pvItem = (void *)(INT_PTR)x;
+	return S_OK;
+}
+
+static void test_dpa_merge_stream(void)
+{
+	FN(HDPA, DPA_Create, INT);
+	FN(BOOL, DPA_Destroy, HDPA);
+	FN(INT, DPA_InsertPtr, HDPA, INT, LPVOID);
+	FN(LPVOID, DPA_GetPtr, HDPA, INT_PTR);
+	FN(BOOL, DPA_Merge, HDPA, HDPA, DWORD, PFNDACOMPARE, PFNDPAMERGE,
+	   LPARAM);
+	FN(HRESULT, DPA_SaveStream, HDPA, PFNDPASTREAM, IStream *, void *);
+	FN(HRESULT, DPA_LoadStream, HDPA *, PFNDPASTREAM, IStream *, void *);
+	CHECK(DPA_Merge == mod_get_ordinal(cc, 11));
+	CHECK(DPA_SaveStream == mod_get_ordinal(cc, 10));
+	CHECK(DPA_LoadStream == mod_get_ordinal(cc, 9));
+
+	/* Union: in both merged, only in src inserted; unsorted input is
+	 * sorted first. */
+	HDPA d = DPA_Create(4), s = DPA_Create(4);
+	static const int dv[] = { 30, 10, 50 }, sv[] = { 40, 10, 50, 60 };
+	for (int i = 0; i < 3; i++)
+		DPA_InsertPtr(d, DA_LAST, (void *)(INT_PTR)dv[i]);
+	for (int i = 0; i < 4; i++)
+		DPA_InsertPtr(s, DA_LAST, (void *)(INT_PTR)sv[i]);
+	merged = inserted = deleted = 0;
+	CHECK(DPA_Merge(d, s, DPAM_UNION, cmp_exact, merge_cb, 1));
+	CHECK(merged == 2 && inserted == 2 && deleted == 0);
+	static const int want_u[] = { 11, 30, 40, 51, 60 };
+	CHECK_EQ(*(int *)d, 5);
+	for (int i = 0; i < 5; i++)
+		CHECK(DPA_GetPtr(d, i) == (void *)(INT_PTR)want_u[i]);
+	DPA_Destroy(d);
+
+	/* Intersect, both sorted already: only what is in both stays. */
+	d = DPA_Create(4);
+	static const int dv2[] = { 10, 40, 60, 70 };
+	for (int i = 0; i < 4; i++)
+		DPA_InsertPtr(d, DA_LAST, (void *)(INT_PTR)dv2[i]);
+	DPA_Destroy(s);
+	s = DPA_Create(4);
+	for (int i = 0; i < 4; i++)
+		DPA_InsertPtr(s, DA_LAST, (void *)(INT_PTR)(10 + i * 20));
+	merged = inserted = deleted = 0;	/* s: 10 30 50 70 */
+	CHECK(DPA_Merge(d, s, DPAM_SORTED | DPAM_INTERSECT, cmp_exact,
+			merge_cb, 0));
+	CHECK(merged == 2 && inserted == 0 && deleted == 2);
+	CHECK(*(int *)d == 2 && DPA_GetPtr(d, 0) == (void *)10 &&
+	      DPA_GetPtr(d, 1) == (void *)70);
+	CHECK(!DPA_Merge(NULL, s, 0, cmp_exact, merge_cb, 0));
+
+	/* Saved and loaded back, through a stream on global memory. */
+	struct module *ole = mod_load("ole32.dll", NULL);
+	CHECK(ole != NULL);
+	if (ole) {
+		HRESULT (WINAPI *CreateStreamOnHGlobal)(HGLOBAL, BOOL,
+							IStream **) =
+			(HRESULT (WINAPI *)(HGLOBAL, BOOL, IStream **))
+			get_from(ole, "CreateStreamOnHGlobal");
+		IStream *st = NULL;
+		CHECK_EQ(CreateStreamOnHGlobal(NULL, TRUE, &st), S_OK);
+		if (st) {
+			DWORD junk = 0xabcd;
+			st->lpVtbl->Write(st, &junk, 4, NULL); /* not at 0 */
+			CHECK_EQ(DPA_SaveStream(s, save_item, st, NULL), S_OK);
+			ULARGE_INTEGER at;
+			LARGE_INTEGER z = { .QuadPart = 0 };
+			st->lpVtbl->Seek(st, z, STREAM_SEEK_CUR, &at);
+			CHECK_EQ(at.QuadPart, 4 + 12 + 16);
+			LARGE_INTEGER four = { .QuadPart = 4 };
+			st->lpVtbl->Seek(st, four, STREAM_SEEK_SET, NULL);
+			DWORD head[3];
+			st->lpVtbl->Read(st, head, sizeof(head), NULL);
+			CHECK(head[0] == 28 && head[1] == 1 && head[2] == 4);
+			st->lpVtbl->Seek(st, four, STREAM_SEEK_SET, NULL);
+			HDPA l = NULL;
+			CHECK_EQ(DPA_LoadStream(&l, load_item, st, NULL), S_OK);
+			CHECK(l && *(int *)l == 4 &&
+			      DPA_GetPtr(l, 3) == (void *)70);
+			DPA_Destroy(l);
+			/* A callback that stops: what loaded is kept. */
+			st->lpVtbl->Seek(st, four, STREAM_SEEK_SET, NULL);
+			DWORD stop = 50;
+			l = NULL;
+			CHECK_EQ(DPA_LoadStream(&l, load_item, st, &stop),
+				 S_FALSE);
+			CHECK(l && *(int *)l == 2);
+			DPA_Destroy(l);
+			/* Not a saved array. */
+			st->lpVtbl->Seek(st, z, STREAM_SEEK_SET, NULL);
+			l = (HDPA)1;
+			CHECK_EQ(DPA_LoadStream(&l, load_item, st, NULL),
+				 E_FAIL);
+			CHECK(l == NULL);
+			st->lpVtbl->Release(st);
+		}
+		mod_free(ole);
+	}
+	DPA_Destroy(d);
+	DPA_Destroy(s);
 }
 
 struct item {
@@ -767,6 +915,68 @@ static void test_imagelist(void)
 	CHECK(m && ImageList_GetIconSize(m, &cx, &cy) && cx == 6 && cy == 2);
 	CHECK(ImageList_Destroy(m));
 
+	/* Written to a stream and read back: the same images and mask. */
+	struct module *ole = mod_load("ole32.dll", NULL);
+	CHECK(ole != NULL);
+	if (ole) {
+		FN(BOOL, ImageList_Write, HIMAGELIST, IStream *);
+		FN(HRESULT, ImageList_WriteEx, HIMAGELIST, DWORD, IStream *);
+		FN(HIMAGELIST, ImageList_Read, IStream *);
+		HRESULT (WINAPI *CreateStreamOnHGlobal)(HGLOBAL, BOOL,
+							IStream **) =
+			(HRESULT (WINAPI *)(HGLOBAL, BOOL, IStream **))
+			get_from(ole, "CreateStreamOnHGlobal");
+		IStream *st = NULL;
+		CHECK_EQ(CreateStreamOnHGlobal(NULL, TRUE, &st), S_OK);
+		LARGE_INTEGER z = { .QuadPart = 0 };
+		if (st) {
+			ImageList_SetBkColor(il, RGB(9, 8, 7));
+			CHECK(ImageList_Write(il, st));
+			CHECK_EQ(ImageList_WriteEx(il, 1, st), S_OK);
+			CHECK_EQ(ImageList_WriteEx(il, 2, st), E_INVALIDARG);
+			st->lpVtbl->Seek(st, z, STREAM_SEEK_SET, NULL);
+			WORD head[7];
+			st->lpVtbl->Read(st, head, sizeof(head), NULL);
+			CHECK(head[0] == 0x4c49 && head[1] == 0x101 &&
+			      head[2] == 3 && head[5] == 4 && head[6] == 2);
+			st->lpVtbl->Seek(st, z, STREAM_SEEK_SET, NULL);
+			for (int k = 0; k < 2; k++) {	/* Write, WriteEx */
+				HIMAGELIST r = ImageList_Read(st);
+				CHECK(r != NULL);
+				if (!r)
+					break;
+				CHECK_EQ(ImageList_GetImageCount(r), 3);
+				CHECK(ImageList_GetIconSize(r, &cx, &cy) &&
+				      cx == 4 && cy == 2);
+				CHECK_EQ(ImageList_SetBkColor(r, CLR_NONE),
+					 RGB(9, 8, 7));
+				for (int i = 0; i < 3; i++) {
+					DWORD want[16];
+					for (int j = 0; j < 32; j++)
+						dst[j] = 0x00ff00;
+					ImageList_Draw(il, i, dc, 0, 0,
+						       ILD_TRANSPARENT);
+					memcpy(want, dst, sizeof(want));
+					for (int j = 0; j < 32; j++)
+						dst[j] = 0x00ff00;
+					ImageList_Draw(r, i, dc, 0, 0,
+						       ILD_TRANSPARENT);
+					CHECK(!memcmp(want, dst, sizeof(want)));
+				}
+				ImageList_Destroy(r);
+			}
+			/* Not an image list. */
+			st->lpVtbl->Seek(st, z, STREAM_SEEK_SET, NULL);
+			DWORD junk = 0x12345678;
+			st->lpVtbl->Write(st, &junk, 4, NULL);
+			st->lpVtbl->Seek(st, z, STREAM_SEEK_SET, NULL);
+			CHECK(ImageList_Read(st) == NULL);
+			CHECK(!ImageList_Write(NULL, st));
+			st->lpVtbl->Release(st);
+			ImageList_SetBkColor(il, CLR_NONE);
+		}
+	}
+
 	/* Icons: blank and transparent. A new size drops every image. */
 	HICON icon = LoadIconW(NULL, (LPCWSTR)(ULONG_PTR)32512);
 	CHECK_EQ(ImageList_AddIcon(il, icon), 3);
@@ -1002,6 +1212,575 @@ static void test_misc(void)
 	CHECK_EQ(LBItemFromPt(NULL, pt, FALSE), -1);
 }
 
+
+static int CALLBACK by_param_desc(LPARAM a1, LPARAM a2, LPARAM sort)
+{
+	return a1 < a2 ? 1 : a1 > a2 ? -1 : 0;
+}
+
+static int CALLBACK tv_by_param_desc(LPARAM a1, LPARAM a2, LPARAM sort)
+{
+	return a1 < a2 ? 1 : a1 > a2 ? -1 : 0;
+}
+
+/* Header, list view and tree view: a parent that records notifications,
+ * refuses changes when asked to, and answers GETDISPINFO. */
+
+static UINT codes[64];
+static int ncodes;
+static BOOL refuse;		/* ITEMCHANGING, SELCHANGING, ITEMEXPANDING */
+static NMLISTVIEW last_lv;
+static NMTREEVIEWW last_tv;
+static int deleted_tv;
+
+static int seen(UINT code)
+{
+	int n = 0;
+
+	for (int i = 0; i < ncodes; i++)
+		n += codes[i] == code;
+	return n;
+}
+
+static LRESULT WINAPI record_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
+{
+	USER(LRESULT, DefWindowProcW, HWND, UINT, WPARAM, LPARAM);
+	if (m != WM_NOTIFY)
+		return DefWindowProcW(h, m, wp, lp);
+	NMHDR *hdr = (NMHDR *)lp;
+	if (ncodes < 64)
+		codes[ncodes++] = hdr->code;
+	switch (hdr->code) {
+	case LVN_ITEMCHANGING:
+		last_lv = *(NMLISTVIEW *)lp;
+		return refuse;
+	case LVN_ITEMCHANGED:
+	case LVN_INSERTITEM:
+	case LVN_DELETEITEM:
+		last_lv = *(NMLISTVIEW *)lp;
+		return 0;
+	case LVN_GETDISPINFOW: {
+		NMLVDISPINFOW *d = (NMLVDISPINFOW *)lp;
+		if (d->item.mask & LVIF_TEXT) {
+			static WCHAR t[16];
+			t[0] = 'c';
+			t[1] = '0' + (WCHAR)d->item.iItem;
+			t[2] = '0' + (WCHAR)d->item.iSubItem;
+			t[3] = 0;
+			d->item.pszText = t;	/* (its own string) */
+		}
+		if (d->item.mask & LVIF_IMAGE)
+			d->item.iImage = 7;
+		return 0;
+	}
+	case TVN_SELCHANGINGW:
+	case TVN_ITEMEXPANDINGW:
+		last_tv = *(NMTREEVIEWW *)lp;
+		return refuse;
+	case TVN_SELCHANGEDW:
+	case TVN_ITEMEXPANDEDW:
+		last_tv = *(NMTREEVIEWW *)lp;
+		return 0;
+	case TVN_DELETEITEMW:
+		deleted_tv++;
+		return 0;
+	case TVN_GETDISPINFOW: {
+		NMTVDISPINFOW *d = (NMTVDISPINFOW *)lp;
+		if (d->item.mask & TVIF_TEXT) {
+			WCHAR *t = d->item.pszText;
+			if (t && d->item.cchTextMax >= 4) {
+				t[0] = 'c';
+				t[1] = 'b';
+				t[2] = (WCHAR)('0' + d->item.lParam);
+				t[3] = 0;
+			}
+		}
+		if (d->item.mask & TVIF_CHILDREN)
+			d->item.cChildren = 1;
+		return 0;
+	}
+	case HDN_ITEMCHANGINGW:
+		return refuse;
+	}
+	return 0;
+}
+
+static void test_header(void)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	USER(LRESULT, SendMessageA, HWND, UINT, WPARAM, LPARAM);
+	USER(BOOL, DestroyWindow, HWND);
+	HWND h = make("SysHeader32", HDS_BUTTONS, 300, 20);
+	HDITEMW it;
+	WCHAR buf[32];
+
+	CHECK(h != NULL);
+	if (!h)
+		return;
+	CHECK_EQ(SendMessageW(h, HDM_GETITEMCOUNT, 0, 0), 0);
+	static const char *const names[3] = { "Name", "Size", "Type" };
+	for (int i = 0; i < 3; i++) {
+		memset(&it, 0, sizeof(it));
+		it.mask = HDI_TEXT | HDI_WIDTH | HDI_FORMAT | HDI_LPARAM;
+		it.pszText = w(names[i]);
+		it.cxy = 50 + 10 * i;
+		it.fmt = HDF_STRING | HDF_LEFT;
+		it.lParam = 100 + i;
+		CHECK_EQ(SendMessageW(h, HDM_INSERTITEMW, 10, (LPARAM)&it), i);
+	}
+	/* An ANSI one in front. */
+	HDITEMA ia;
+	memset(&ia, 0, sizeof(ia));
+	ia.mask = HDI_TEXT | HDI_WIDTH;
+	ia.pszText = (LPSTR)"First";
+	ia.cxy = 40;
+	CHECK_EQ(SendMessageA(h, HDM_INSERTITEMA, 0, (LPARAM)&ia), 0);
+	CHECK_EQ(SendMessageW(h, HDM_GETITEMCOUNT, 0, 0), 4);
+
+	memset(&it, 0, sizeof(it));
+	it.mask = HDI_TEXT | HDI_WIDTH | HDI_LPARAM | HDI_ORDER;
+	it.pszText = buf;
+	it.cchTextMax = 32;
+	CHECK(SendMessageW(h, HDM_GETITEMW, 2, (LPARAM)&it));
+	CHECK(!strcmp(a(buf), "Size") && it.cxy == 60 && it.lParam == 101 &&
+	      it.iOrder == 2);
+	char abuf[32];
+	ia.mask = HDI_TEXT;
+	ia.pszText = abuf;
+	ia.cchTextMax = 3;
+	CHECK(SendMessageA(h, HDM_GETITEMA, 0, (LPARAM)&ia));
+	CHECK(!strcmp(abuf, "Fi"));
+
+	RECT rc;
+	CHECK(SendMessageW(h, HDM_GETITEMRECT, 2, (LPARAM)&rc));
+	CHECK(rc.left == 90 && rc.right == 150);
+
+	/* Order: Type first. */
+	int order[4] = { 3, 0, 1, 2 }, got[4];
+	CHECK(SendMessageW(h, HDM_SETORDERARRAY, 4, (LPARAM)order));
+	CHECK(SendMessageW(h, HDM_GETORDERARRAY, 4, (LPARAM)got));
+	CHECK(!memcmp(order, got, sizeof(got)));
+	CHECK_EQ(SendMessageW(h, HDM_ORDERTOINDEX, 0, 0), 3);
+	int bad[4] = { 0, 0, 1, 2 };
+	CHECK(!SendMessageW(h, HDM_SETORDERARRAY, 4, (LPARAM)bad));
+	CHECK(SendMessageW(h, HDM_GETITEMRECT, 3, (LPARAM)&rc));
+	CHECK(rc.left == 0 && rc.right == 70);
+	CHECK(SendMessageW(h, HDM_GETITEMRECT, 0, (LPARAM)&rc));
+	CHECK(rc.left == 70 && rc.right == 110);
+
+	HDHITTESTINFO ht;
+	ht.pt.x = 80;
+	ht.pt.y = 5;
+	CHECK_EQ(SendMessageW(h, HDM_HITTEST, 0, (LPARAM)&ht), 0);
+	CHECK(ht.flags == HHT_ONHEADER && ht.iItem == 0);
+	ht.pt.x = 109;
+	SendMessageW(h, HDM_HITTEST, 0, (LPARAM)&ht);
+	CHECK(ht.flags == HHT_ONDIVIDER && ht.iItem == 0);
+	ht.pt.x = 290;
+	CHECK_EQ(SendMessageW(h, HDM_HITTEST, 0, (LPARAM)&ht), -1);
+	CHECK_EQ(ht.flags, HHT_NOWHERE);
+
+	/* Setting tells the parent, which can refuse. */
+	ncodes = 0;
+	memset(&it, 0, sizeof(it));
+	it.mask = HDI_WIDTH;
+	it.cxy = 99;
+	CHECK(SendMessageW(h, HDM_SETITEMW, 1, (LPARAM)&it));
+	CHECK(seen(HDN_ITEMCHANGINGW) == 1 && seen(HDN_ITEMCHANGEDW) == 1);
+	refuse = TRUE;
+	it.cxy = 5;
+	CHECK(!SendMessageW(h, HDM_SETITEMW, 1, (LPARAM)&it));
+	refuse = FALSE;
+	it.mask = HDI_WIDTH;
+	SendMessageW(h, HDM_GETITEMW, 1, (LPARAM)&it);
+	CHECK_EQ(it.cxy, 99);
+
+	/* Deleting keeps the order of the rest. */
+	CHECK(SendMessageW(h, HDM_DELETEITEM, 0, 0));
+	CHECK_EQ(SendMessageW(h, HDM_GETITEMCOUNT, 0, 0), 3);
+	CHECK(SendMessageW(h, HDM_GETORDERARRAY, 3, (LPARAM)got));
+	CHECK(got[0] == 2 && got[1] == 0 && got[2] == 1);
+	CHECK(!SendMessageW(h, HDM_DELETEITEM, 7, 0));
+
+	RECT lr = { 0, 0, 300, 200 };
+	WINDOWPOS wpos;
+	HDLAYOUT lay = { &lr, &wpos };
+	CHECK(SendMessageW(h, HDM_LAYOUT, 0, (LPARAM)&lay));
+	CHECK(wpos.cy > 0 && lr.top == wpos.cy && wpos.cx == 300);
+	CHECK_EQ(SendMessageW(h, HDM_GETBITMAPMARGIN, 0, 0), 6);
+	CHECK(DestroyWindow(h));
+}
+
+static void test_listview(void)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	USER(LRESULT, SendMessageA, HWND, UINT, WPARAM, LPARAM);
+	USER(BOOL, DestroyWindow, HWND);
+	HWND h = make("SysListView32", LVS_REPORT, 300, 200);
+	LVITEMW it;
+	WCHAR buf[32];
+
+	CHECK(h != NULL);
+	if (!h)
+		return;
+	HWND hdr = (HWND)SendMessageW(h, LVM_GETHEADER, 0, 0);
+	CHECK(hdr != NULL);
+	LVCOLUMNW col;
+	memset(&col, 0, sizeof(col));
+	col.mask = LVCF_TEXT | LVCF_WIDTH;
+	col.pszText = w("Name");
+	col.cx = 100;
+	CHECK_EQ(SendMessageW(h, LVM_INSERTCOLUMNW, 0, (LPARAM)&col), 0);
+	col.pszText = w("Size");
+	col.cx = 60;
+	CHECK_EQ(SendMessageW(h, LVM_INSERTCOLUMNW, 1, (LPARAM)&col), 1);
+	CHECK_EQ(SendMessageW(hdr, HDM_GETITEMCOUNT, 0, 0), 2);
+
+	ncodes = 0;
+	static const char *const names[3] = { "beta", "alpha", "gamma" };
+	for (int i = 0; i < 3; i++) {
+		memset(&it, 0, sizeof(it));
+		it.mask = LVIF_TEXT | LVIF_PARAM;
+		it.iItem = i;
+		it.pszText = w(names[i]);
+		it.lParam = 10 + i;
+		CHECK_EQ(SendMessageW(h, LVM_INSERTITEMW, 0, (LPARAM)&it), i);
+	}
+	CHECK_EQ(seen(LVN_INSERTITEM), 3);
+	CHECK_EQ(last_lv.lParam, 12);
+	CHECK_EQ(SendMessageW(h, LVM_GETITEMCOUNT, 0, 0), 3);
+
+	/* Subitem text, A and W. */
+	memset(&it, 0, sizeof(it));
+	it.iSubItem = 1;
+	it.pszText = w("12 KB");
+	CHECK(SendMessageW(h, LVM_SETITEMTEXTW, 0, (LPARAM)&it));
+	LVITEMA ia;
+	char abuf[32];
+	memset(&ia, 0, sizeof(ia));
+	ia.iSubItem = 1;
+	ia.pszText = abuf;
+	ia.cchTextMax = 32;
+	CHECK_EQ(SendMessageA(h, LVM_GETITEMTEXTA, 0, (LPARAM)&ia), 5);
+	CHECK(!strcmp(abuf, "12 KB"));
+	ia.iSubItem = 0;
+	ia.cchTextMax = 3;
+	CHECK_EQ(SendMessageA(h, LVM_GETITEMTEXTA, 2, (LPARAM)&ia), 2);
+	CHECK(!strcmp(abuf, "ga"));
+
+	/* States: ITEMCHANGING can refuse; single selection. */
+	ncodes = 0;
+	memset(&it, 0, sizeof(it));
+	it.state = LVIS_SELECTED | LVIS_FOCUSED;
+	it.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
+	CHECK(SendMessageW(h, LVM_SETITEMSTATE, 1, (LPARAM)&it));
+	CHECK(seen(LVN_ITEMCHANGING) == 1 && seen(LVN_ITEMCHANGED) == 1);
+	CHECK(last_lv.iItem == 1 && last_lv.uNewState == it.state &&
+	      last_lv.uOldState == 0 && last_lv.uChanged == LVIF_STATE);
+	CHECK_EQ(SendMessageW(h, LVM_GETITEMSTATE, 1, LVIS_SELECTED),
+		 LVIS_SELECTED);
+	it.state = it.stateMask = LVIS_SELECTED;
+	SendMessageW(h, LVM_SETITEMSTATE, 2, (LPARAM)&it);
+	CHECK_EQ(SendMessageW(h, LVM_GETSELECTEDCOUNT, 0, 0), 2);
+	refuse = TRUE;
+	it.state = 0;
+	CHECK(!SendMessageW(h, LVM_SETITEMSTATE, 2, (LPARAM)&it));
+	refuse = FALSE;
+	CHECK_EQ(SendMessageW(h, LVM_GETSELECTEDCOUNT, 0, 0), 2);
+	CHECK_EQ(SendMessageW(h, LVM_GETNEXTITEM, -1, LVNI_SELECTED), 1);
+	CHECK_EQ(SendMessageW(h, LVM_GETNEXTITEM, 1, LVNI_SELECTED), 2);
+	CHECK_EQ(SendMessageW(h, LVM_GETNEXTITEM, 2, LVNI_SELECTED), -1);
+	CHECK_EQ(SendMessageW(h, LVM_GETNEXTITEM, -1, LVNI_FOCUSED), 1);
+	CHECK_EQ(SendMessageW(h, LVM_GETNEXTITEM, 2, LVNI_ABOVE), 1);
+	/* Clearing them all. */
+	it.state = 0;
+	it.stateMask = LVIS_SELECTED;
+	CHECK(SendMessageW(h, LVM_SETITEMSTATE, -1, (LPARAM)&it));
+	CHECK_EQ(SendMessageW(h, LVM_GETSELECTEDCOUNT, 0, 0), 0);
+
+	/* Finding. */
+	LVFINDINFOW f;
+	memset(&f, 0, sizeof(f));
+	f.flags = LVFI_STRING;
+	f.psz = w("ALPHA");
+	CHECK_EQ(SendMessageW(h, LVM_FINDITEMW, -1, (LPARAM)&f), 1);
+	f.flags = LVFI_PARTIAL | LVFI_STRING;
+	f.psz = w("g");
+	CHECK_EQ(SendMessageW(h, LVM_FINDITEMW, -1, (LPARAM)&f), 2);
+	f.flags = LVFI_PARAM;
+	f.lParam = 10;
+	CHECK_EQ(SendMessageW(h, LVM_FINDITEMW, 0, (LPARAM)&f), -1);
+	f.flags = LVFI_PARAM | LVFI_WRAP;
+	CHECK_EQ(SendMessageW(h, LVM_FINDITEMW, 0, (LPARAM)&f), 0);
+
+	/* Sorting by lParam, descending. */
+	CHECK(SendMessageW(h, LVM_SORTITEMS, 0, (LPARAM)by_param_desc));
+	memset(&it, 0, sizeof(it));
+	it.mask = LVIF_PARAM | LVIF_TEXT;
+	it.pszText = buf;
+	it.cchTextMax = 32;
+	SendMessageW(h, LVM_GETITEMW, 0, (LPARAM)&it);
+	CHECK(it.lParam == 12 && !strcmp(a(buf), "gamma"));
+	it.iItem = 2;
+	SendMessageW(h, LVM_GETITEMW, 0, (LPARAM)&it);
+	CHECK_EQ(it.lParam, 10);
+
+	/* A callback item asks the parent. */
+	memset(&it, 0, sizeof(it));
+	it.mask = LVIF_TEXT | LVIF_IMAGE;
+	it.iItem = 3;
+	it.pszText = LPSTR_TEXTCALLBACKW;
+	it.iImage = I_IMAGECALLBACK;
+	CHECK_EQ(SendMessageW(h, LVM_INSERTITEMW, 0, (LPARAM)&it), 3);
+	it.pszText = buf;
+	it.cchTextMax = 32;
+	it.iImage = 0;
+	CHECK(SendMessageW(h, LVM_GETITEMW, 0, (LPARAM)&it));
+	CHECK(!strcmp(a(buf), "c30") && it.iImage == 7);
+	CHECK_EQ(SendMessageA(h, LVM_GETITEMTEXTA, 3, (LPARAM)&ia), 2);
+
+	/* Geometry: report rows under the header. */
+	RECT r0, r1;
+	r0.left = r1.left = LVIR_BOUNDS;
+	CHECK(SendMessageW(h, LVM_GETITEMRECT, 0, (LPARAM)&r0));
+	CHECK(SendMessageW(h, LVM_GETITEMRECT, 1, (LPARAM)&r1));
+	CHECK(r0.top > 0 && r1.top == r0.bottom && r0.right == 160);
+	LVHITTESTINFO ht;
+	memset(&ht, 0, sizeof(ht));
+	ht.pt.x = 120;
+	ht.pt.y = r1.top + 1;
+	CHECK_EQ(SendMessageW(h, LVM_SUBITEMHITTEST, 0, (LPARAM)&ht), 1);
+	CHECK(ht.iSubItem == 1 && (ht.flags & LVHT_ONITEM));
+	ht.pt.y = 190;
+	CHECK_EQ(SendMessageW(h, LVM_HITTEST, 0, (LPARAM)&ht), -1);
+	CHECK_EQ(SendMessageW(h, LVM_GETCOLUMNWIDTH, 1, 0), 60);
+	CHECK(SendMessageW(h, LVM_SETCOLUMNWIDTH, 1, 80));
+	HDITEMW hi;
+	memset(&hi, 0, sizeof(hi));
+	hi.mask = HDI_WIDTH;
+	SendMessageW(hdr, HDM_GETITEMW, 1, (LPARAM)&hi);
+	CHECK_EQ(hi.cxy, 80);
+
+	/* Views and styles. */
+	CHECK_EQ(SendMessageW(h, LVM_GETVIEW, 0, 0), LV_VIEW_DETAILS);
+	CHECK_EQ(SendMessageW(h, LVM_SETVIEW, LV_VIEW_LIST, 0), 1);
+	CHECK_EQ(SendMessageW(h, LVM_GETVIEW, 0, 0), LV_VIEW_LIST);
+	CHECK_EQ(SendMessageW(h, LVM_SETEXTENDEDLISTVIEWSTYLE,
+			      LVS_EX_FULLROWSELECT, LVS_EX_FULLROWSELECT |
+			      LVS_EX_GRIDLINES), 0);
+	CHECK_EQ(SendMessageW(h, LVM_GETEXTENDEDLISTVIEWSTYLE, 0, 0),
+		 LVS_EX_FULLROWSELECT);
+	CHECK_EQ(SendMessageW(h, LVM_SETVIEW, LV_VIEW_ICON, 0), 1);
+	POINT pt = { 33, 44 };
+	CHECK(SendMessageW(h, LVM_SETITEMPOSITION32, 1, (LPARAM)&pt));
+	pt.x = pt.y = 0;
+	CHECK(SendMessageW(h, LVM_GETITEMPOSITION, 1, (LPARAM)&pt));
+	CHECK(pt.x == 33 && pt.y == 44);
+	SendMessageW(h, LVM_SETVIEW, LV_VIEW_DETAILS, 0);
+
+	/* Deleting tells the parent; DELETEALLITEMS can say not to. */
+	ncodes = 0;
+	CHECK(SendMessageW(h, LVM_DELETEITEM, 0, 0));
+	CHECK(seen(LVN_DELETEITEM) == 1 && last_lv.lParam == 12);
+	CHECK(!SendMessageW(h, LVM_DELETEITEM, 9, 0));
+	ncodes = 0;
+	CHECK(SendMessageW(h, LVM_DELETEALLITEMS, 0, 0));
+	CHECK(seen(LVN_DELETEALLITEMS) == 1 && seen(LVN_DELETEITEM) == 3);
+	CHECK_EQ(SendMessageW(h, LVM_GETITEMCOUNT, 0, 0), 0);
+	CHECK(SendMessageW(h, LVM_DELETECOLUMN, 0, 0));
+	CHECK_EQ(SendMessageW(hdr, HDM_GETITEMCOUNT, 0, 0), 1);
+	CHECK(DestroyWindow(h));
+
+	/* An owner-data list view keeps only its count and states. */
+	h = make("SysListView32", LVS_REPORT | LVS_OWNERDATA, 300, 200);
+	CHECK(SendMessageW(h, LVM_SETITEMCOUNT, 1000, 0));
+	CHECK_EQ(SendMessageW(h, LVM_GETITEMCOUNT, 0, 0), 1000);
+	memset(&it, 0, sizeof(it));
+	it.state = it.stateMask = LVIS_SELECTED;
+	CHECK(SendMessageW(h, LVM_SETITEMSTATE, 500, (LPARAM)&it));
+	CHECK_EQ(SendMessageW(h, LVM_GETNEXTITEM, -1, LVNI_SELECTED), 500);
+	memset(&it, 0, sizeof(it));
+	it.mask = LVIF_TEXT;
+	it.iItem = 5;
+	it.iSubItem = 2;
+	it.pszText = buf;
+	it.cchTextMax = 32;
+	CHECK(SendMessageW(h, LVM_GETITEMW, 0, (LPARAM)&it));
+	CHECK(!strcmp(a(buf), "c52"));
+	CHECK(DestroyWindow(h));
+}
+
+static void test_treeview(void)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	USER(LRESULT, SendMessageA, HWND, UINT, WPARAM, LPARAM);
+	USER(BOOL, DestroyWindow, HWND);
+	HWND h = make("SysTreeView32", TVS_HASBUTTONS | TVS_HASLINES, 200,
+		      160);
+	TVINSERTSTRUCTW ins;
+	WCHAR buf[32];
+
+	CHECK(h != NULL);
+	if (!h)
+		return;
+#define ADD(par, after, txt, param) \
+	(memset(&ins, 0, sizeof(ins)), ins.hParent = (par), \
+	 ins.hInsertAfter = (after), \
+	 ins.item.mask = TVIF_TEXT | TVIF_PARAM, ins.item.pszText = w(txt), \
+	 ins.item.lParam = (param), \
+	 (HTREEITEM)SendMessageW(h, TVM_INSERTITEMW, 0, (LPARAM)&ins))
+	HTREEITEM fruit = ADD(TVI_ROOT, TVI_LAST, "fruit", 1);
+	HTREEITEM veg = ADD(TVI_ROOT, TVI_LAST, "veg", 2);
+	HTREEITEM pear = ADD(fruit, TVI_LAST, "pear", 3);
+	HTREEITEM apple = ADD(fruit, TVI_SORT, "apple", 4);
+	HTREEITEM fig = ADD(fruit, TVI_SORT, "fig", 5);
+	HTREEITEM top = ADD(TVI_ROOT, TVI_FIRST, "top", 6);
+	CHECK(fruit && veg && pear && apple && fig && top);
+	CHECK_EQ(SendMessageW(h, TVM_GETCOUNT, 0, 0), 6);
+
+	/* Order and navigation. */
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_ROOT, 0) == top);
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_NEXT,
+				      (LPARAM)top) == fruit);
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_CHILD,
+				      (LPARAM)fruit) == apple);
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_NEXT,
+				      (LPARAM)apple) == fig);
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_NEXT,
+				      (LPARAM)fig) == pear);
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_PARENT,
+				      (LPARAM)fig) == fruit);
+	CHECK(!SendMessageW(h, TVM_GETNEXTITEM, TVGN_PARENT, (LPARAM)fruit));
+	/* Children are hidden until fruit is expanded. */
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_NEXTVISIBLE,
+				      (LPARAM)fruit) == veg);
+
+	TVITEMW it;
+	memset(&it, 0, sizeof(it));
+	it.mask = TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN;
+	it.hItem = fruit;
+	it.pszText = buf;
+	it.cchTextMax = 32;
+	CHECK(SendMessageW(h, TVM_GETITEMW, 0, (LPARAM)&it));
+	CHECK(!strcmp(a(buf), "fruit") && it.lParam == 1 && it.cChildren == 1);
+	TVITEMA ia;
+	char abuf[8];
+	memset(&ia, 0, sizeof(ia));
+	ia.mask = TVIF_TEXT;
+	ia.hItem = apple;
+	ia.pszText = abuf;
+	ia.cchTextMax = 4;
+	CHECK(SendMessageA(h, TVM_GETITEMA, 0, (LPARAM)&ia));
+	CHECK(!strcmp(abuf, "app"));
+	it.hItem = (HTREEITEM)(ULONG_PTR)0x1234;
+	CHECK(!SendMessageW(h, TVM_GETITEMW, 0, (LPARAM)&it));
+
+	/* Expanding: refused, then told once. */
+	ncodes = 0;
+	refuse = TRUE;
+	CHECK(!SendMessageW(h, TVM_EXPAND, TVE_EXPAND, (LPARAM)fruit));
+	refuse = FALSE;
+	CHECK(SendMessageW(h, TVM_EXPAND, TVE_EXPAND, (LPARAM)fruit));
+	CHECK(seen(TVN_ITEMEXPANDINGW) == 2 && seen(TVN_ITEMEXPANDEDW) == 1);
+	CHECK(last_tv.action == TVE_EXPAND && last_tv.itemNew.hItem == fruit &&
+	      last_tv.itemNew.lParam == 1);
+	CHECK_EQ(SendMessageW(h, TVM_GETITEMSTATE, (WPARAM)fruit,
+			      TVIS_EXPANDED | TVIS_EXPANDEDONCE),
+		 TVIS_EXPANDED | TVIS_EXPANDEDONCE);
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_NEXTVISIBLE,
+				      (LPARAM)fruit) == apple);
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_PREVIOUSVISIBLE,
+				      (LPARAM)veg) == pear);
+	CHECK(!SendMessageW(h, TVM_EXPAND, TVE_EXPAND, (LPARAM)veg));
+	ncodes = 0;
+	CHECK(SendMessageW(h, TVM_EXPAND, TVE_COLLAPSE, (LPARAM)fruit));
+	CHECK(SendMessageW(h, TVM_EXPAND, TVE_TOGGLE, (LPARAM)fruit));
+	CHECK_EQ(ncodes, 0);	/* (expanded once) */
+
+	/* The caret: SELCHANGING can refuse. */
+	ncodes = 0;
+	CHECK(SendMessageW(h, TVM_SELECTITEM, TVGN_CARET, (LPARAM)fig));
+	CHECK(seen(TVN_SELCHANGINGW) == 1 && seen(TVN_SELCHANGEDW) == 1);
+	CHECK(last_tv.itemNew.hItem == fig && !last_tv.itemOld.hItem);
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_CARET, 0) == fig);
+	CHECK(SendMessageW(h, TVM_GETITEMSTATE, (WPARAM)fig, TVIS_SELECTED));
+	refuse = TRUE;
+	CHECK(!SendMessageW(h, TVM_SELECTITEM, TVGN_CARET, (LPARAM)veg));
+	refuse = FALSE;
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_CARET, 0) == fig);
+	/* Collapsing fruit moves it there. */
+	CHECK(SendMessageW(h, TVM_EXPAND, TVE_COLLAPSE, (LPARAM)fruit));
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_CARET, 0) ==
+	      fruit);
+
+	/* Rectangles: rows from the top, the text indented. */
+	SendMessageW(h, TVM_EXPAND, TVE_EXPAND, (LPARAM)fruit);
+	RECT rc;
+	memcpy(&rc, &fig, sizeof(fig));
+	CHECK(SendMessageW(h, TVM_GETITEMRECT, TRUE, (LPARAM)&rc));
+	CHECK(rc.top == 3 * 16 && rc.left == 19);
+	memcpy(&rc, &veg, sizeof(veg));
+	CHECK(SendMessageW(h, TVM_GETITEMRECT, FALSE, (LPARAM)&rc));
+	CHECK(rc.top == 5 * 16 && rc.left == 0 && rc.right == 200);
+	TVHITTESTINFO ht;
+	ht.pt.x = 30;
+	ht.pt.y = 3 * 16 + 4;
+	CHECK((HTREEITEM)SendMessageW(h, TVM_HITTEST, 0, (LPARAM)&ht) == fig);
+	CHECK(ht.flags & TVHT_ONITEMLABEL);
+	CHECK_EQ(SendMessageW(h, TVM_GETVISIBLECOUNT, 0, 0), 10);
+	CHECK_EQ(SendMessageW(h, TVM_SETITEMHEIGHT, 21, 0), 16);
+	CHECK_EQ(SendMessageW(h, TVM_GETITEMHEIGHT, 0, 0), 20);
+
+	/* Sorting by lParam, descending. */
+	TVSORTCB sc = { fruit, tv_by_param_desc, 0 };
+	CHECK(SendMessageW(h, TVM_SORTCHILDRENCB, FALSE, (LPARAM)&sc));
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_CHILD,
+				      (LPARAM)fruit) == fig);
+	CHECK(SendMessageW(h, TVM_SORTCHILDREN, FALSE, (LPARAM)fruit));
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_CHILD,
+				      (LPARAM)fruit) == apple);
+
+	/* A callback item. */
+	memset(&ins, 0, sizeof(ins));
+	ins.hParent = veg;
+	ins.hInsertAfter = TVI_LAST;
+	ins.item.mask = TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN;
+	ins.item.pszText = LPSTR_TEXTCALLBACKW;
+	ins.item.lParam = 7;
+	ins.item.cChildren = I_CHILDRENCALLBACK;
+	HTREEITEM cb = (HTREEITEM)SendMessageW(h, TVM_INSERTITEMW, 0,
+					       (LPARAM)&ins);
+	memset(&it, 0, sizeof(it));
+	it.mask = TVIF_TEXT | TVIF_CHILDREN;
+	it.hItem = cb;
+	it.pszText = buf;
+	it.cchTextMax = 32;
+	CHECK(SendMessageW(h, TVM_GETITEMW, 0, (LPARAM)&it));
+	CHECK(!strcmp(a(buf), "cb7") && it.cChildren == 1);
+
+	/* Deleting: each item, children too, tells the parent. */
+	deleted_tv = 0;
+	CHECK(SendMessageW(h, TVM_DELETEITEM, 0, (LPARAM)fruit));
+	CHECK_EQ(deleted_tv, 4);
+	CHECK_EQ(SendMessageW(h, TVM_GETCOUNT, 0, 0), 3);
+	CHECK(!SendMessageW(h, TVM_GETNEXTITEM, TVGN_CARET, 0));
+	CHECK(!SendMessageW(h, TVM_DELETEITEM, 0, (LPARAM)fruit));
+	CHECK(SendMessageW(h, TVM_DELETEITEM, 0, (LPARAM)TVI_ROOT));
+	CHECK_EQ(deleted_tv, 7);
+	CHECK_EQ(SendMessageW(h, TVM_GETCOUNT, 0, 0), 0);
+	CHECK(DestroyWindow(h));
+#undef ADD
+}
+
+static void test_list_controls(void)
+{
+	USER_WLP(Set, HWND, int, LONG_PTR);
+	SetWindowLongPtrW(parent, GWLP_WNDPROC, (LONG_PTR)record_proc);
+	test_header();
+	test_listview();
+	test_treeview();
+}
+
 static void test_ordinals(void)
 {
 	static const struct {
@@ -1059,6 +1838,238 @@ static void test_fixture(void)
 	mod_free(m);
 }
 
+/* Flat scroll bars, over user32's scroll bar state. */
+static void test_flatsb(void)
+{
+	FN(BOOL, InitializeFlatSB, HWND);
+	FN(HRESULT, UninitializeFlatSB, HWND);
+	FN(BOOL, FlatSB_GetScrollProp, HWND, INT, int *);
+	FN(BOOL, FlatSB_SetScrollProp, HWND, UINT, INT_PTR, BOOL);
+	FN(int, FlatSB_SetScrollInfo, HWND, int, LPSCROLLINFO, BOOL);
+	FN(BOOL, FlatSB_GetScrollInfo, HWND, int, LPSCROLLINFO);
+	FN(int, FlatSB_SetScrollPos, HWND, int, int, BOOL);
+	FN(int, FlatSB_GetScrollPos, HWND, int);
+	FN(BOOL, FlatSB_SetScrollRange, HWND, int, int, int, BOOL);
+	FN(BOOL, FlatSB_GetScrollRange, HWND, int, int *, int *);
+	FN(BOOL, FlatSB_ShowScrollBar, HWND, int, BOOL);
+	FN(BOOL, FlatSB_EnableScrollBar, HWND, int, UINT);
+	USER(HWND, CreateWindowExW, DWORD, LPCWSTR, LPCWSTR, DWORD, int, int,
+	     int, int, HWND, HMENU, HINSTANCE, LPVOID);
+	USER(BOOL, DestroyWindow, HWND);
+	USER(int, GetSystemMetrics, int);
+
+	HWND h = CreateWindowExW(0, w("STATIC"), NULL, WS_CHILD | WS_VSCROLL,
+				 0, 0, 50, 50, parent, NULL, NULL, NULL);
+	CHECK(h != NULL);
+	int v = -1, lo = -1, hi = -1;
+	CHECK(!FlatSB_GetScrollProp(h, WSB_PROP_CYVSCROLL, &v));
+	CHECK(InitializeFlatSB(h) && InitializeFlatSB(h));
+	CHECK(FlatSB_GetScrollProp(h, WSB_PROP_CYVSCROLL, &v) &&
+	      v == GetSystemMetrics(20));
+	CHECK(FlatSB_GetScrollProp(h, WSB_PROP_VSTYLE, &v) &&
+	      v == FSB_REGULAR_MODE);
+	CHECK(FlatSB_SetScrollProp(h, WSB_PROP_VSTYLE, FSB_FLAT_MODE, FALSE));
+	CHECK(FlatSB_GetScrollProp(h, WSB_PROP_VSTYLE, &v) &&
+	      v == FSB_FLAT_MODE);
+	CHECK(!FlatSB_SetScrollProp(h, WSB_PROP_VSTYLE, 7, FALSE));
+	CHECK(!FlatSB_SetScrollProp(h, WSB_PROP_WINSTYLE, 0, FALSE));
+	CHECK(!FlatSB_SetScrollProp(h, 3, 0, FALSE));	/* two bits */
+	CHECK(FlatSB_GetScrollProp(h, WSB_PROP_WINSTYLE, &v) &&
+	      v == WS_VSCROLL);
+
+	/* The default range, then a page that holds the position back. */
+	CHECK(FlatSB_GetScrollRange(h, SB_VERT, &lo, &hi) && lo == 0 &&
+	      hi == 100);
+	CHECK(FlatSB_GetScrollRange(h, SB_CTL, &lo, &hi) && lo == 0 &&
+	      hi == 0);
+	SCROLLINFO si = { sizeof(si), SIF_ALL, 0, 99, 10, 95, 0 };
+	CHECK_EQ(FlatSB_SetScrollInfo(h, SB_VERT, &si, FALSE), 90);
+	memset(&si, 0, sizeof(si));
+	si.cbSize = sizeof(si);
+	si.fMask = SIF_ALL;
+	CHECK(FlatSB_GetScrollInfo(h, SB_VERT, &si));
+	CHECK(si.nMin == 0 && si.nMax == 99 && si.nPage == 10 &&
+	      si.nPos == 90 && si.nTrackPos == 90);
+	si.fMask = 0;
+	CHECK(!FlatSB_GetScrollInfo(h, SB_VERT, &si));
+	CHECK_EQ(FlatSB_SetScrollPos(h, SB_VERT, -5, FALSE), 90);
+	CHECK_EQ(FlatSB_GetScrollPos(h, SB_VERT), 0);
+	si = (SCROLLINFO){ sizeof(si), SIF_PAGE, 0, 0, 500, 0, 0 };
+	FlatSB_SetScrollInfo(h, SB_VERT, &si, FALSE);	/* the whole range */
+	si.fMask = SIF_PAGE;
+	CHECK(FlatSB_GetScrollInfo(h, SB_VERT, &si) && si.nPage == 100);
+	CHECK(FlatSB_SetScrollRange(h, SB_HORZ, 10, 20, FALSE));
+	CHECK_EQ(FlatSB_GetScrollPos(h, SB_HORZ), 10);
+	CHECK(!FlatSB_SetScrollRange(h, SB_HORZ, -0x7fffffff - 1, 0x7fffffff,
+				     FALSE));
+	CHECK(!FlatSB_GetScrollRange(h, 5, &lo, &hi));
+
+	/* Shown and enabled. */
+	CHECK(FlatSB_ShowScrollBar(h, SB_BOTH, TRUE));
+	CHECK(FlatSB_GetScrollProp(h, WSB_PROP_WINSTYLE, &v) &&
+	      v == (WS_HSCROLL | WS_VSCROLL));
+	CHECK(FlatSB_ShowScrollBar(h, SB_VERT, FALSE));
+	CHECK(FlatSB_GetScrollProp(h, WSB_PROP_WINSTYLE, &v) &&
+	      v == WS_HSCROLL);
+	CHECK(FlatSB_EnableScrollBar(h, SB_BOTH, ESB_DISABLE_LTUP));
+	CHECK(!FlatSB_EnableScrollBar(h, SB_BOTH, ESB_DISABLE_LTUP));
+	CHECK(FlatSB_EnableScrollBar(h, SB_VERT, ESB_ENABLE_BOTH));
+	CHECK(!FlatSB_EnableScrollBar(h, SB_VERT, ESB_ENABLE_BOTH));
+	CHECK(FlatSB_EnableScrollBar(h, SB_VERT, ESB_DISABLE_BOTH));
+
+	CHECK_EQ(UninitializeFlatSB(h), S_OK);
+	CHECK(!FlatSB_GetScrollProp(h, WSB_PROP_VSTYLE, &v));
+	CHECK(!InitializeFlatSB(NULL));
+	CHECK_EQ(FlatSB_GetScrollPos(NULL, SB_VERT), 0);
+	DestroyWindow(h);
+}
+
+/* MRU lists, in the registry. */
+static int WINAPI by_first(LPCVOID a, LPCVOID b, DWORD n)
+{
+	return *(const BYTE *)a != *(const BYTE *)b;
+}
+
+static void test_mru(void)
+{
+	FN(HANDLE, CreateMRUListA, const MRUINFOA *);
+	FN(HANDLE, CreateMRUListW, const MRUINFOW *);
+	FN(void, FreeMRUList, HANDLE);
+	FN(INT, AddMRUStringA, HANDLE, LPCSTR);
+	FN(INT, AddMRUStringW, HANDLE, LPCWSTR);
+	FN(INT, FindMRUStringA, HANDLE, LPCSTR, int *);
+	FN(INT, FindMRUStringW, HANDLE, LPCWSTR, int *);
+	FN(INT, EnumMRUListA, HANDLE, INT, LPVOID, DWORD);
+	FN(INT, EnumMRUListW, HANDLE, INT, LPVOID, DWORD);
+	FN(BOOL, DelMRUString, HANDLE, INT);
+	FN(INT, AddMRUData, HANDLE, LPCVOID, DWORD);
+	FN(INT, FindMRUData, HANDLE, LPCVOID, DWORD, int *);
+	CHECK(CreateMRUListA == mod_get_ordinal(cc, 151));
+	CHECK(AddMRUStringW == mod_get_ordinal(cc, 401));
+	CHECK(FindMRUData == mod_get_ordinal(cc, 169));
+
+	struct module *adv = mod_load("advapi32.dll", NULL);
+	CHECK(adv != NULL);
+	if (!adv)
+		return;
+	LONG (WINAPI *RegOpenKeyExA)(HKEY, LPCSTR, DWORD, REGSAM, PHKEY) =
+		(LONG (WINAPI *)(HKEY, LPCSTR, DWORD, REGSAM, PHKEY))
+		get_from(adv, "RegOpenKeyExA");
+	LONG (WINAPI *RegQueryValueExA)(HKEY, LPCSTR, LPDWORD, LPDWORD, LPBYTE,
+					LPDWORD) =
+		(LONG (WINAPI *)(HKEY, LPCSTR, LPDWORD, LPDWORD, LPBYTE,
+				 LPDWORD))get_from(adv, "RegQueryValueExA");
+	LONG (WINAPI *RegCloseKey)(HKEY) =
+		(LONG (WINAPI *)(HKEY))get_from(adv, "RegCloseKey");
+	LONG (WINAPI *RegDeleteTreeA)(HKEY, LPCSTR) =
+		(LONG (WINAPI *)(HKEY, LPCSTR))get_from(adv, "RegDeleteTreeA");
+	static const char sub[] = "Software\\seance-test\\MRU";
+	RegDeleteTreeA(HKEY_CURRENT_USER, sub);
+
+	MRUINFOA info = { sizeof(info), 3, MRU_STRING, HKEY_CURRENT_USER, sub,
+			  { NULL } };
+	HANDLE m = CreateMRUListA(&info);
+	CHECK(m != NULL);
+	if (!m)
+		return;
+	CHECK_EQ(EnumMRUListA(m, -1, NULL, 0), 0);
+	CHECK_EQ(AddMRUStringA(m, "one"), 0);
+	CHECK_EQ(AddMRUStringA(m, "two"), 1);
+	CHECK_EQ(AddMRUStringA(m, "three"), 2);
+	CHECK_EQ(AddMRUStringA(m, "ONE"), 0);	/* moves up */
+	CHECK_EQ(AddMRUStringA(m, "four"), 1);	/* takes two's place */
+	int slot = -1;
+	CHECK_EQ(FindMRUStringA(m, "two", &slot), -1);
+	CHECK(FindMRUStringA(m, "Three", &slot) == 2 && slot == 2);
+	CHECK_EQ(EnumMRUListA(m, -1, NULL, 0), 3);
+	char buf[16];
+	CHECK(EnumMRUListA(m, 1, buf, sizeof(buf)) == 3 && !strcmp(buf, "one"));
+	CHECK(EnumMRUListA(m, 0, buf, 3) == 2 && !strcmp(buf, "fo"));
+	CHECK_EQ(EnumMRUListA(m, 3, buf, sizeof(buf)), -1);
+	CHECK_EQ(AddMRUStringW(m, w("x")), -1);		/* the wrong kind */
+	CHECK_EQ(AddMRUData(m, "x", 1), -1);
+
+	HKEY k = NULL;
+	DWORD type, n = sizeof(buf);
+	CHECK_EQ(RegOpenKeyExA(HKEY_CURRENT_USER, sub, 0, KEY_READ, &k),
+		 ERROR_SUCCESS);
+	CHECK(RegQueryValueExA(k, "MRUList", NULL, &type, (BYTE *)buf, &n) ==
+		      ERROR_SUCCESS && type == REG_SZ && !strcmp(buf, "bac"));
+	n = sizeof(buf);
+	CHECK(RegQueryValueExA(k, "b", NULL, &type, (BYTE *)buf, &n) ==
+		      ERROR_SUCCESS && !strcmp(buf, "four"));
+	FreeMRUList(m);
+
+	/* Read back as it was; then one deleted. */
+	m = CreateMRUListA(&info);
+	CHECK(m && EnumMRUListA(m, -1, NULL, 0) == 3);
+	CHECK(EnumMRUListA(m, 2, buf, sizeof(buf)) == 5 &&
+	      !strcmp(buf, "three"));
+	CHECK(DelMRUString(m, 0));
+	CHECK(!DelMRUString(m, 2));
+	CHECK(EnumMRUListA(m, 0, buf, sizeof(buf)) == 3 && !strcmp(buf, "one"));
+	n = sizeof(buf);
+	CHECK(RegQueryValueExA(k, "MRUList", NULL, &type, (BYTE *)buf, &n) ==
+		      ERROR_SUCCESS && !strcmp(buf, "ac"));
+	n = sizeof(buf);
+	CHECK(RegQueryValueExA(k, "b", NULL, &type, (BYTE *)buf, &n) != 
+	      ERROR_SUCCESS);
+	FreeMRUList(m);
+	RegCloseKey(k);
+	RegDeleteTreeA(HKEY_CURRENT_USER, sub);
+
+	/* Wide strings, written only when freed. */
+	MRUINFOW wi = { sizeof(wi), 2, MRU_STRING | MRU_CACHEWRITE,
+			HKEY_CURRENT_USER, w("Software\\seance-test\\MRU"),
+			{ NULL } };
+	m = CreateMRUListW(&wi);
+	CHECK(m != NULL);
+	CHECK_EQ(AddMRUStringW(m, w("Alpha")), 0);
+	CHECK_EQ(AddMRUStringW(m, w("beta")), 1);
+	CHECK(FindMRUStringW(m, w("ALPHA"), &slot) == 1 && slot == 0);
+	WCHAR wb[8];
+	CHECK(EnumMRUListW(m, 0, wb, 8) == 4 && wb[0] == 'b' && wb[4] == 0);
+	CHECK(RegOpenKeyExA(HKEY_CURRENT_USER, sub, 0, KEY_READ, &k) ==
+	      ERROR_SUCCESS);
+	n = sizeof(buf);
+	CHECK(RegQueryValueExA(k, "MRUList", NULL, &type, (BYTE *)buf, &n) !=
+	      ERROR_SUCCESS);
+	FreeMRUList(m);
+	n = sizeof(buf);
+	CHECK(RegQueryValueExA(k, "MRUList", NULL, &type, (BYTE *)buf, &n) ==
+		      ERROR_SUCCESS && !strcmp(buf, "ba"));
+	m = CreateMRUListW(&wi);
+	CHECK(m && EnumMRUListW(m, 1, wb, 8) == 5 && wb[0] == 'A');
+	FreeMRUList(m);
+	RegCloseKey(k);
+	RegDeleteTreeA(HKEY_CURRENT_USER, sub);
+
+	/* Data, with a comparison of the first byte only. */
+	info.fFlags = MRU_BINARY;
+	info.u.binary_cmpfn = by_first;
+	m = CreateMRUListA(&info);
+	CHECK(m != NULL);
+	static const BYTE d1[] = { 1, 2, 3 }, d2[] = { 2, 0 }, d3[] = { 1, 9 };
+	CHECK_EQ(AddMRUData(m, d1, sizeof(d1)), 0);
+	CHECK_EQ(AddMRUData(m, d2, sizeof(d2)), 1);
+	CHECK(FindMRUData(m, d3, sizeof(d3), &slot) == 1 && slot == 0);
+	BYTE db[4] = { 0 };
+	CHECK(EnumMRUListA(m, 1, db, 2) == 3 && db[0] == 1 && db[1] == 2 &&
+	      db[2] == 0);
+	CHECK_EQ(AddMRUStringA(m, "x"), -1);
+	FreeMRUList(m);
+	m = CreateMRUListA(&info);
+	CHECK(m && FindMRUData(m, d2, sizeof(d2), NULL) == 0);
+	FreeMRUList(m);
+	RegDeleteTreeA(HKEY_CURRENT_USER, "Software\\seance-test");
+
+	info.cbSize = 8;
+	CHECK(CreateMRUListA(&info) == NULL);
+	CHECK_EQ(AddMRUStringA(NULL, "x"), -1);
+	FreeMRUList(NULL);
+	mod_free(adv);
+}
+
 int main(void)
 {
 	CHECK_EQ(runtime_enter(), 0);
@@ -1073,7 +2084,9 @@ int main(void)
 	mod_free(ocx);
 
 	test_dpa();
+	test_dpa_merge_stream();
 	test_dsa();
+	test_mru();
 	test_alloc_str();
 	test_classes();
 
@@ -1089,9 +2102,11 @@ int main(void)
 	test_status();
 	test_subclass();
 	test_imagelist();
+	test_flatsb();
 	test_sheets();
 	test_task_dialog();
 	test_misc();
+	test_list_controls();
 	DestroyWindow(parent);
 	test_ordinals();
 	test_fixture();

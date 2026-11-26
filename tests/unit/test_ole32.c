@@ -2,7 +2,8 @@
 /*
  * ole32, called through its export table: apartments, task memory, GUID
  * strings, and class objects, both registered in-process and loaded from
- * an InprocServer32 DLL (the pe_com fixture) found in the registry.
+ * an InprocServer32 DLL (the pe_com fixture) found in the registry; streams,
+ * marshalling and structured storage (compound files).
  */
 #include <stdint.h>
 #include <stdlib.h>
@@ -637,6 +638,743 @@ static void test_inproc_server(void)
 	mod_free(m);
 }
 
+static const CLSID clsid_doc = { 0x11223344, 0x5566, 0x7788,
+	{ 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00 } };
+
+#define EXCL (STGM_SHARE_EXCLUSIVE)
+#define RW (STGM_READWRITE | STGM_SHARE_EXCLUSIVE)
+
+/* Writes n bytes of a pattern seeded by seed into a new stream. */
+static void put_stream(IStorage *stg, const char *name, ULONG n, int seed)
+{
+	WCHAR *w = wide(name);
+	IStream *s = NULL;
+	CHECK_EQ(stg->lpVtbl->CreateStream(stg, w, RW | STGM_CREATE, 0, 0, &s),
+		 S_OK);
+	free(w);
+	if (!s)
+		return;
+	unsigned char *b = malloc(n ? n : 1);
+	for (ULONG i = 0; i < n; i++)
+		b[i] = (unsigned char)(i * 7 + seed);
+	ULONG put = 0;
+	CHECK_EQ(s->lpVtbl->Write(s, b, n, &put), S_OK);
+	CHECK_EQ(put, n);
+	free(b);
+	s->lpVtbl->Release(s);
+}
+
+/* Checks a stream put_stream() wrote. */
+static int got_stream(IStorage *stg, const char *name, ULONG n, int seed)
+{
+	WCHAR *w = wide(name);
+	IStream *s = NULL;
+	HRESULT hr = stg->lpVtbl->OpenStream(stg, w, NULL, STGM_READ | EXCL, 0,
+					     &s);
+	free(w);
+	if (hr != S_OK)
+		return 0;
+	STATSTG st;
+	int ok = s->lpVtbl->Stat(s, &st, STATFLAG_NONAME) == S_OK &&
+		 st.cbSize.QuadPart == n && st.type == STGTY_STREAM;
+	unsigned char *b = malloc(n + 16);
+	ULONG got = 0;
+	ok = ok && s->lpVtbl->Read(s, b, n + 16, &got) == S_OK && got == n;
+	for (ULONG i = 0; ok && i < n; i++)
+		ok = b[i] == (unsigned char)(i * 7 + seed);
+	free(b);
+	s->lpVtbl->Release(s);
+	return ok;
+}
+
+static void test_storage_memory(void)
+{
+	FN(HRESULT, CreateILockBytesOnHGlobal, HGLOBAL, BOOL, ILockBytes **);
+	FN(HRESULT, GetHGlobalFromILockBytes, ILockBytes *, HGLOBAL *);
+	FN(HRESULT, StgCreateDocfileOnILockBytes, ILockBytes *, DWORD, DWORD,
+	   IStorage **);
+	FN(HRESULT, StgOpenStorageOnILockBytes, ILockBytes *, IStorage *, DWORD,
+	   SNB, DWORD, IStorage **);
+	FN(HRESULT, StgIsStorageILockBytes, ILockBytes *);
+	FN(void, CoTaskMemFree, void *);
+	K32(LPVOID, GlobalLock, HGLOBAL);
+	K32(BOOL, GlobalUnlock, HGLOBAL);
+	K32(SIZE_T, GlobalSize, HGLOBAL);
+	ILockBytes *lb = NULL;
+	IStorage *root = NULL, *sub = NULL;
+	char name[16];
+
+	CHECK_EQ(CreateILockBytesOnHGlobal(NULL, TRUE, &lb), S_OK);
+	if (!lb)
+		return;
+	CHECK_EQ(StgIsStorageILockBytes(lb), S_FALSE);
+	CHECK_EQ(StgCreateDocfileOnILockBytes(lb, RW | STGM_CREATE, 0, &root),
+		 S_OK);
+	CHECK_EQ(StgIsStorageILockBytes(lb), S_OK);
+	if (!root)
+		return;
+	put_stream(root, "Small", 100, 1);
+	put_stream(root, "Big", 10000, 2);
+	put_stream(root, "Empty", 0, 0);
+	for (int i = 0; i < 20; i++) {
+		snprintf(name, sizeof(name), "s%02d", i);
+		put_stream(root, name, (ULONG)(i * 300), i);
+	}
+	WCHAR *w = wide("Sub");
+	CHECK_EQ(root->lpVtbl->CreateStorage(root, w, RW, 0, 0, &sub), S_OK);
+	IStorage *dup = NULL;
+	CHECK_EQ(root->lpVtbl->CreateStorage(root, w, RW, 0, 0, &dup),
+		 STG_E_FILEALREADYEXISTS);
+	free(w);
+	if (sub) {
+		put_stream(sub, "Inner", 5000, 3);
+		CHECK_EQ(sub->lpVtbl->SetClass(sub, &clsid_doc), S_OK);
+		CHECK_EQ(sub->lpVtbl->SetStateBits(sub, 0xf0, 0x30), S_OK);
+		sub->lpVtbl->Release(sub);
+	}
+	/* Names: too long, or with a separator. */
+	IStream *s = NULL;
+	w = wide("0123456789012345678901234567890123");
+	CHECK_EQ(root->lpVtbl->CreateStream(root, w, RW, 0, 0, &s),
+		 STG_E_INVALIDNAME);
+	free(w);
+	w = wide("a\\b");
+	CHECK_EQ(root->lpVtbl->CreateStream(root, w, RW, 0, 0, &s),
+		 STG_E_INVALIDNAME);
+	free(w);
+	/* Elements are opened exclusively. */
+	w = wide("Small");
+	CHECK_EQ(root->lpVtbl->OpenStream(root, w, NULL, STGM_READ |
+					  STGM_SHARE_DENY_NONE, 0, &s),
+		 STG_E_INVALIDFLAG);
+	CHECK_EQ(root->lpVtbl->CreateStream(root, w, RW, 0, 0, &s),
+		 STG_E_FILEALREADYEXISTS);
+	free(w);
+	CHECK_EQ(root->lpVtbl->Commit(root, STGC_DEFAULT), S_OK);
+	root->lpVtbl->Release(root);
+
+	/* The bytes: a version 3 header. */
+	HGLOBAL h = NULL;
+	CHECK_EQ(GetHGlobalFromILockBytes(lb, &h), S_OK);
+	const unsigned char *p = h ? GlobalLock(h) : NULL;
+	CHECK(p && GlobalSize(h) >= 1536 && GlobalSize(h) % 512 == 0);
+	CHECK(p && p[0] == 0xd0 && p[1] == 0xcf && p[0x1a] == 3 && p[0x1e] == 9 &&
+	      p[0x38] == 0 && p[0x39] == 0x10);
+	if (h)
+		GlobalUnlock(h);
+
+	/* Read it back, read-only. */
+	CHECK_EQ(StgOpenStorageOnILockBytes(lb, NULL, STGM_READ | EXCL, NULL, 0,
+					    &root), S_OK);
+	if (!root)
+		return;
+	CHECK(got_stream(root, "Small", 100, 1));
+	CHECK(got_stream(root, "BIG", 10000, 2));	/* any case */
+	CHECK(got_stream(root, "Empty", 0, 0));
+	for (int i = 0; i < 20; i++) {
+		snprintf(name, sizeof(name), "s%02d", i);
+		CHECK(got_stream(root, name, (ULONG)(i * 300), i));
+	}
+	w = wide("Sub");
+	CHECK_EQ(root->lpVtbl->OpenStorage(root, w, NULL, STGM_READ | EXCL, NULL,
+					   0, &sub), S_OK);
+	IStorage *again = NULL;
+	CHECK_EQ(root->lpVtbl->OpenStorage(root, w, NULL, STGM_READ | EXCL, NULL,
+					   0, &again), STG_E_ACCESSDENIED);
+	CHECK_EQ(root->lpVtbl->OpenStream(root, w, NULL, STGM_READ | EXCL, 0, &s),
+		 STG_E_FILENOTFOUND);
+	free(w);
+	if (sub) {
+		STATSTG st;
+		CHECK(got_stream(sub, "Inner", 5000, 3));
+		CHECK_EQ(sub->lpVtbl->Stat(sub, &st, STATFLAG_DEFAULT), S_OK);
+		CHECK(!memcmp(&st.clsid, &clsid_doc, sizeof(CLSID)));
+		CHECK_EQ(st.grfStateBits, 0x30);
+		CHECK_EQ(st.type, STGTY_STORAGE);
+		char *n = narrow(st.pwcsName);
+		CHECK_STR(n, "Sub");
+		free(n);
+		CoTaskMemFree(st.pwcsName);
+		sub->lpVtbl->Release(sub);
+	}
+	/* Read-only. */
+	w = wide("New");
+	CHECK_EQ(root->lpVtbl->CreateStream(root, w, RW, 0, 0, &s),
+		 STG_E_ACCESSDENIED);
+	free(w);
+	w = wide("Small");
+	CHECK_EQ(root->lpVtbl->OpenStream(root, w, NULL, RW, 0, &s),
+		 STG_E_ACCESSDENIED);
+	CHECK_EQ(root->lpVtbl->OpenStream(root, w, NULL, STGM_READ | EXCL, 0, &s),
+		 S_OK);
+	if (s) {
+		IStream *s2 = NULL;
+		CHECK_EQ(root->lpVtbl->OpenStream(root, w, NULL, STGM_READ | EXCL,
+						  0, &s2), STG_E_ACCESSDENIED);
+		CHECK_EQ(s->lpVtbl->Write(s, "x", 1, NULL), STG_E_ACCESSDENIED);
+		CHECK_EQ(root->lpVtbl->DestroyElement(root, w), STG_E_ACCESSDENIED);
+		s->lpVtbl->Release(s);
+	}
+	free(w);
+	w = wide("Nothing");
+	CHECK_EQ(root->lpVtbl->OpenStream(root, w, NULL, STGM_READ | EXCL, 0, &s),
+		 STG_E_FILENOTFOUND);
+	free(w);
+
+	/* Enumeration: every element, once. */
+	IEnumSTATSTG *en = NULL;
+	CHECK_EQ(root->lpVtbl->EnumElements(root, 0, NULL, 0, &en), S_OK);
+	if (en) {
+		STATSTG st[32];
+		ULONG got = 0;
+		int streams = 0, storages = 0, big = 0;
+		CHECK_EQ(en->lpVtbl->Next(en, 32, st, &got), S_FALSE);
+		CHECK_EQ(got, 24);
+		for (ULONG i = 0; i < got; i++) {
+			char *n = narrow(st[i].pwcsName);
+			streams += st[i].type == STGTY_STREAM;
+			storages += st[i].type == STGTY_STORAGE;
+			if (n && !strcmp(n, "Big"))
+				big = st[i].cbSize.QuadPart == 10000;
+			free(n);
+			CoTaskMemFree(st[i].pwcsName);
+		}
+		CHECK(streams == 23 && storages == 1 && big);
+		IEnumSTATSTG *c = NULL;
+		CHECK_EQ(en->lpVtbl->Reset(en), S_OK);
+		CHECK_EQ(en->lpVtbl->Skip(en, 23), S_OK);
+		CHECK_EQ(en->lpVtbl->Clone(en, &c), S_OK);
+		if (c) {
+			CHECK_EQ(c->lpVtbl->Next(c, 1, st, NULL), S_OK);
+			CoTaskMemFree(st[0].pwcsName);
+			CHECK_EQ(c->lpVtbl->Next(c, 1, st, NULL), S_FALSE);
+			c->lpVtbl->Release(c);
+		}
+		en->lpVtbl->Release(en);
+	}
+	root->lpVtbl->Release(root);
+
+	/* Not a storage. */
+	ILockBytes *junk = NULL;
+	CHECK_EQ(CreateILockBytesOnHGlobal(NULL, TRUE, &junk), S_OK);
+	ULARGE_INTEGER zero = { 0 };
+	char text[600];
+	memset(text, 'x', sizeof(text));
+	CHECK_EQ(junk->lpVtbl->WriteAt(junk, zero, text, sizeof(text), NULL),
+		 S_OK);
+	CHECK_EQ(StgOpenStorageOnILockBytes(junk, NULL, STGM_READ | EXCL, NULL, 0,
+					    &root), STG_E_FILEALREADYEXISTS);
+	CHECK_EQ(StgCreateDocfileOnILockBytes(lb, RW, 0, &root),
+		 STG_E_FILEALREADYEXISTS);
+	junk->lpVtbl->Release(junk);
+	lb->lpVtbl->Release(lb);
+}
+
+/* Big enough that the FAT needs more than the header's 109 sectors. */
+static void test_storage_big(void)
+{
+	FN(HRESULT, StgCreateDocfile, LPCOLESTR, DWORD, DWORD, IStorage **);
+	FN(HRESULT, StgOpenStorage, LPCOLESTR, IStorage *, DWORD, SNB, DWORD,
+	   IStorage **);
+	IStorage *root = NULL;
+	WCHAR *file = wide("C:\\big.stg");
+
+	CHECK_EQ(StgCreateDocfile(file, RW | STGM_CREATE, 0, &root), S_OK);
+	if (root) {
+		put_stream(root, "Huge", 8u << 20, 5);
+		put_stream(root, "Tiny", 10, 6);
+		root->lpVtbl->Release(root);
+	}
+	CHECK_EQ(StgOpenStorage(file, NULL, STGM_READ | EXCL, NULL, 0, &root),
+		 S_OK);
+	if (root) {
+		CHECK(got_stream(root, "Huge", 8u << 20, 5));
+		CHECK(got_stream(root, "Tiny", 10, 6));
+		root->lpVtbl->Release(root);
+	}
+	free(file);
+}
+
+static void test_storage_file(void)
+{
+	FN(HRESULT, StgCreateDocfile, LPCOLESTR, DWORD, DWORD, IStorage **);
+	FN(HRESULT, StgOpenStorage, LPCOLESTR, IStorage *, DWORD, SNB, DWORD,
+	   IStorage **);
+	FN(HRESULT, StgIsStorageFile, LPCOLESTR);
+	FN(HRESULT, StgCreateStorageEx, LPCOLESTR, DWORD, DWORD, DWORD, void *,
+	   void *, REFIID, void **);
+	FN(HRESULT, WriteClassStg, IStorage *, REFCLSID);
+	FN(HRESULT, ReadClassStg, IStorage *, CLSID *);
+	FN(HRESULT, WriteFmtUserTypeStg, IStorage *, CLIPFORMAT, LPOLESTR);
+	FN(HRESULT, ReadFmtUserTypeStg, IStorage *, CLIPFORMAT *, LPOLESTR *);
+	FN(HRESULT, SetConvertStg, IStorage *, BOOL);
+	FN(HRESULT, GetConvertStg, IStorage *);
+	FN(void, CoTaskMemFree, void *);
+	IStorage *root = NULL;
+	WCHAR *file = wide("C:\\doc.stg"), *plain = wide("C:\\plain.txt");
+	WCHAR *missing = wide("C:\\missing.stg");
+	char *unix_plain = path_to_unix("C:\\plain.txt");
+
+	CHECK_EQ(StgCreateDocfile(file, STGM_READ | EXCL | STGM_CREATE, 0, &root),
+		 STG_E_INVALIDFLAG);
+	CHECK_EQ(StgCreateDocfile(file, RW | STGM_CREATE, 0, &root), S_OK);
+	if (!root)
+		return;
+	/* Without STGM_CREATE, an existing file isn't replaced. */
+	IStorage *other = NULL;
+	CHECK_EQ(StgCreateDocfile(file, RW, 0, &other), STG_E_FILEALREADYEXISTS);
+	CHECK_EQ(WriteClassStg(root, &clsid_doc), S_OK);
+	WCHAR *type = wide("Test Document");
+	CHECK_EQ(WriteFmtUserTypeStg(root, 1 /* CF_TEXT */, type), S_OK);
+	free(type);
+	CHECK_EQ(GetConvertStg(root), S_FALSE);
+	CHECK_EQ(SetConvertStg(root, TRUE), S_OK);
+	CHECK_EQ(GetConvertStg(root), S_OK);
+	put_stream(root, "Data", 3000, 9);
+	put_stream(root, "Old", 10, 4);
+	STATSTG st;
+	CHECK_EQ(root->lpVtbl->Stat(root, &st, STATFLAG_DEFAULT), S_OK);
+	char *n = narrow(st.pwcsName);
+	CHECK_STR(n, "C:\\doc.stg");
+	free(n);
+	CoTaskMemFree(st.pwcsName);
+	root->lpVtbl->Release(root);
+
+	FILE *f = fopen(unix_plain, "w");
+	if (f) {
+		fputs("this is not a compound file, it is text and some more of"
+		      " it to pass the length of a header .....................",
+		      f);
+		for (int i = 0; i < 20; i++)
+			fputs("................................", f);
+		fclose(f);
+	}
+	CHECK_EQ(StgIsStorageFile(file), S_OK);
+	CHECK_EQ(StgIsStorageFile(plain), S_FALSE);
+	CHECK_EQ(StgIsStorageFile(missing), STG_E_FILENOTFOUND);
+	CHECK_EQ(StgOpenStorage(plain, NULL, STGM_READ | EXCL, NULL, 0, &root),
+		 STG_E_FILEALREADYEXISTS);
+	CHECK_EQ(StgOpenStorage(missing, NULL, STGM_READ | EXCL, NULL, 0, &root),
+		 STG_E_FILENOTFOUND);
+
+	/* Back again: the class, the user type, then changes. */
+	CHECK_EQ(StgOpenStorage(file, NULL, RW, NULL, 0, &root), S_OK);
+	if (!root)
+		return;
+	CLSID c;
+	CHECK_EQ(ReadClassStg(root, &c), S_OK);
+	CHECK(!memcmp(&c, &clsid_doc, sizeof(c)));
+	CLIPFORMAT cf = 0;
+	LPOLESTR ut = NULL;
+	CHECK_EQ(ReadFmtUserTypeStg(root, &cf, &ut), S_OK);
+	CHECK_EQ(cf, 1);
+	n = ut ? narrow(ut) : NULL;
+	CHECK_STR(n, "Test Document");
+	free(n);
+	CoTaskMemFree(ut);
+	CHECK(got_stream(root, "Data", 3000, 9));
+	WCHAR *old = wide("Old"), *renamed = wide("Renamed"), *data = wide("Data");
+	CHECK_EQ(root->lpVtbl->RenameElement(root, old, data),
+		 STG_E_FILEALREADYEXISTS);
+	CHECK_EQ(root->lpVtbl->RenameElement(root, old, renamed), S_OK);
+	CHECK_EQ(root->lpVtbl->DestroyElement(root, data), S_OK);
+	CHECK_EQ(root->lpVtbl->DestroyElement(root, data), STG_E_FILENOTFOUND);
+	root->lpVtbl->Release(root);	/* direct: written on release */
+	CHECK_EQ(StgOpenStorage(file, NULL, STGM_READ | EXCL, NULL, 0, &root),
+		 S_OK);
+	if (root) {
+		CHECK(got_stream(root, "Renamed", 10, 4));
+		CHECK(!got_stream(root, "Data", 3000, 9));
+		CHECK(!got_stream(root, "Old", 10, 4));
+		root->lpVtbl->Release(root);
+	}
+
+	/* Transacted: nothing is written until Commit; Revert undoes. */
+	CHECK_EQ(StgOpenStorage(file, NULL, RW | STGM_TRANSACTED, NULL, 0, &root),
+		 S_OK);
+	if (root) {
+		IStream *s = NULL;
+		put_stream(root, "Later", 50, 7);
+		CHECK_EQ(root->lpVtbl->OpenStream(root, renamed, NULL, RW, 0, &s),
+			 S_OK);
+		CHECK_EQ(root->lpVtbl->Revert(root), S_OK);
+		CHECK(!got_stream(root, "Later", 50, 7));
+		CHECK(got_stream(root, "Renamed", 10, 4));
+		if (s) {
+			CHECK_EQ(s->lpVtbl->Write(s, "x", 1, NULL), STG_E_REVERTED);
+			s->lpVtbl->Release(s);
+		}
+		put_stream(root, "Later", 50, 7);
+		CHECK_EQ(root->lpVtbl->Commit(root, STGC_DEFAULT), S_OK);
+		put_stream(root, "Uncommitted", 50, 8);
+		root->lpVtbl->Release(root);
+	}
+	CHECK_EQ(StgOpenStorage(file, NULL, STGM_READ | EXCL, NULL, 0, &root),
+		 S_OK);
+	if (root) {
+		CHECK(got_stream(root, "Later", 50, 7));
+		CHECK(!got_stream(root, "Uncommitted", 50, 8));
+		root->lpVtbl->Release(root);
+	}
+
+	/* STGM_CONVERT keeps what was there in a CONTENTS stream. */
+	CHECK_EQ(StgCreateDocfile(plain, RW | STGM_CONVERT, 0, &root),
+		 STG_S_CONVERTED);
+	if (root) {
+		static const WCHAR contents[] = { 3, 'C', 'O', 'N', 'T', 'E', 'N',
+						  'T', 'S', 0 };
+		IStream *s = NULL;
+		CHECK_EQ(root->lpVtbl->OpenStream(root, contents, NULL,
+						  STGM_READ | EXCL, 0, &s), S_OK);
+		char buf[8] = { 0 };
+		if (s) {
+			s->lpVtbl->Read(s, buf, 7, NULL);
+			s->lpVtbl->Release(s);
+		}
+		CHECK_STR(buf, "this is");
+		root->lpVtbl->Release(root);
+	}
+	CHECK_EQ(StgIsStorageFile(plain), S_OK);
+
+	IStorage *ex = NULL;
+	CHECK_EQ(StgCreateStorageEx(missing, RW | STGM_CREATE, STGFMT_DOCFILE, 0,
+				    NULL, NULL, &IID_IStorage, (void **)&ex),
+		 S_OK);
+	if (ex)
+		ex->lpVtbl->Release(ex);
+	CHECK_EQ(StgIsStorageFile(missing), S_OK);
+	free(old);
+	free(renamed);
+	free(data);
+	free(file);
+	free(plain);
+	free(missing);
+	free(unix_plain);
+}
+
+static void test_storage_copy(void)
+{
+	FN(HRESULT, StgCreateDocfile, LPCOLESTR, DWORD, DWORD, IStorage **);
+	FN(HRESULT, CreateStreamOnHGlobal, HGLOBAL, BOOL, LPSTREAM *);
+	FN(HRESULT, WriteClassStm, IStream *, REFCLSID);
+	FN(HRESULT, ReadClassStm, IStream *, CLSID *);
+	FN(HRESULT, OleSaveToStream, IPersistStream *, IStream *);
+	IStorage *a = NULL, *b = NULL, *sub = NULL;
+
+	/* NULL names: temporary storages. */
+	CHECK_EQ(StgCreateDocfile(NULL, RW | STGM_CREATE | STGM_DELETEONRELEASE,
+				  0, &a), S_OK);
+	CHECK_EQ(StgCreateDocfile(NULL, RW | STGM_CREATE | STGM_DELETEONRELEASE,
+				  0, &b), S_OK);
+	if (!a || !b)
+		return;
+	put_stream(a, "One", 20, 1);
+	put_stream(a, "Two", 5000, 2);
+	WCHAR *w = wide("Dir");
+	CHECK_EQ(a->lpVtbl->CreateStorage(a, w, RW, 0, 0, &sub), S_OK);
+	free(w);
+	if (sub) {
+		put_stream(sub, "Three", 30, 3);
+		sub->lpVtbl->Release(sub);
+	}
+	CHECK_EQ(a->lpVtbl->SetClass(a, &clsid_doc), S_OK);
+	WCHAR *two = wide("Two");
+	LPOLESTR excl[] = { two, NULL };
+	CHECK_EQ(a->lpVtbl->CopyTo(a, 0, NULL, excl, b), S_OK);
+	CHECK(got_stream(b, "One", 20, 1));
+	CHECK(!got_stream(b, "Two", 5000, 2));
+	w = wide("Dir");
+	CHECK_EQ(b->lpVtbl->OpenStorage(b, w, NULL, STGM_READ | EXCL, NULL, 0,
+					&sub), S_OK);
+	free(w);
+	if (sub) {
+		CHECK(got_stream(sub, "Three", 30, 3));
+		sub->lpVtbl->Release(sub);
+	}
+	STATSTG st;
+	CHECK_EQ(b->lpVtbl->Stat(b, &st, STATFLAG_NONAME), S_OK);
+	CHECK(!memcmp(&st.clsid, &clsid_doc, sizeof(CLSID)));
+	/* Moving takes it away. */
+	WCHAR *moved = wide("Moved");
+	CHECK_EQ(a->lpVtbl->MoveElementTo(a, two, b, moved, STGMOVE_MOVE), S_OK);
+	CHECK(got_stream(b, "Moved", 5000, 2));
+	CHECK(!got_stream(a, "Two", 5000, 2));
+	free(moved);
+	free(two);
+	a->lpVtbl->Release(a);
+	b->lpVtbl->Release(b);
+
+	/* Class IDs in streams. */
+	IStream *s = NULL;
+	CLSID c;
+	CHECK_EQ(CreateStreamOnHGlobal(NULL, TRUE, &s), S_OK);
+	if (!s)
+		return;
+	CHECK_EQ(WriteClassStm(s, &clsid_doc), S_OK);
+	CHECK_EQ(OleSaveToStream(NULL, s), S_OK);
+	LARGE_INTEGER zero = { 0 };
+	s->lpVtbl->Seek(s, zero, STREAM_SEEK_SET, NULL);
+	CHECK_EQ(ReadClassStm(s, &c), S_OK);
+	CHECK(!memcmp(&c, &clsid_doc, sizeof(c)));
+	CHECK_EQ(ReadClassStm(s, &c), S_OK);
+	CHECK(!memcmp(&c, &(CLSID){ 0 }, sizeof(c)));
+	CHECK_EQ(ReadClassStm(s, &c), STG_E_READFAULT);
+	s->lpVtbl->Release(s);
+}
+
+/* Copies and moves don't destroy what they shouldn't. */
+static void test_storage_copy_rules(void)
+{
+	FN(HRESULT, StgCreateDocfile, LPCOLESTR, DWORD, DWORD, IStorage **);
+	IStorage *a = NULL, *b = NULL, *sub = NULL;
+
+	CHECK_EQ(StgCreateDocfile(NULL, RW | STGM_CREATE | STGM_DELETEONRELEASE,
+				  0, &a), S_OK);
+	CHECK_EQ(StgCreateDocfile(NULL, RW | STGM_CREATE | STGM_DELETEONRELEASE,
+				  0, &b), S_OK);
+	if (!a || !b)
+		return;
+	/* MoveElementTo doesn't replace an element already there. */
+	put_stream(a, "X", 10, 7);
+	put_stream(b, "X", 10, 8);
+	WCHAR *x = wide("X");
+	CHECK_EQ(a->lpVtbl->MoveElementTo(a, x, b, x, STGMOVE_MOVE),
+		 STG_E_FILEALREADYEXISTS);
+	CHECK(got_stream(a, "X", 10, 7));
+	CHECK(got_stream(b, "X", 10, 8));
+	free(x);
+
+	/* CopyTo merges into a storage of the same name. */
+	WCHAR *dir = wide("Dir");
+	CHECK_EQ(a->lpVtbl->CreateStorage(a, dir, RW, 0, 0, &sub), S_OK);
+	if (sub) {
+		put_stream(sub, "New", 5, 1);
+		sub->lpVtbl->Release(sub);
+		sub = NULL;
+	}
+	CHECK_EQ(b->lpVtbl->CreateStorage(b, dir, RW, 0, 0, &sub), S_OK);
+	if (sub) {
+		put_stream(sub, "Keep", 5, 2);
+		sub->lpVtbl->Release(sub);
+		sub = NULL;
+	}
+	CHECK_EQ(a->lpVtbl->CopyTo(a, 0, NULL, NULL, b), S_OK);
+	CHECK_EQ(b->lpVtbl->OpenStorage(b, dir, NULL, STGM_READ | EXCL, NULL, 0,
+					&sub), S_OK);
+	if (sub) {
+		CHECK(got_stream(sub, "New", 5, 1));
+		CHECK(got_stream(sub, "Keep", 5, 2));
+		sub->lpVtbl->Release(sub);
+		sub = NULL;
+	}
+	/* A storage can't be copied into itself or below itself. */
+	CHECK_EQ(a->lpVtbl->CopyTo(a, 0, NULL, NULL, a), STG_E_ACCESSDENIED);
+	CHECK_EQ(a->lpVtbl->OpenStorage(a, dir, NULL, RW, NULL, 0, &sub), S_OK);
+	if (sub) {
+		CHECK_EQ(a->lpVtbl->CopyTo(a, 0, NULL, NULL, sub),
+			 STG_E_ACCESSDENIED);
+		sub->lpVtbl->Release(sub);
+	}
+	free(dir);
+
+	/* Names compare without case beyond Latin-1, as the format says. */
+	put_stream(a, "\xce\xb1\xd0\xb4", 4, 3);	/* Greek alpha, Cyrillic de */
+	CHECK(got_stream(a, "\xce\x91\xd0\x94", 4, 3));
+	a->lpVtbl->Release(a);
+	b->lpVtbl->Release(b);
+}
+
+/* Sharing modes, STGC_ONLYIFCURRENT and STGM_CONVERT on a byte array. */
+static void test_storage_share(void)
+{
+	FN(HRESULT, StgCreateDocfile, LPCOLESTR, DWORD, DWORD, IStorage **);
+	FN(HRESULT, StgOpenStorage, LPCOLESTR, IStorage *, DWORD, SNB, DWORD,
+	   IStorage **);
+	FN(HRESULT, CreateILockBytesOnHGlobal, HGLOBAL, BOOL, ILockBytes **);
+	FN(HRESULT, StgCreateDocfileOnILockBytes, ILockBytes *, DWORD, DWORD,
+	   IStorage **);
+	FN(HRESULT, StgOpenStorageOnILockBytes, ILockBytes *, IStorage *, DWORD,
+	   SNB, DWORD, IStorage **);
+	WCHAR *file = wide("C:\\shared.stg");
+	IStorage *r1 = NULL, *r2 = NULL;
+	const DWORD TX = STGM_READWRITE | STGM_TRANSACTED |
+			 STGM_SHARE_DENY_NONE;
+
+	CHECK_EQ(StgCreateDocfile(file, RW | STGM_CREATE, 0, &r1), S_OK);
+	if (!r1)
+		return;
+	/* An exclusive root keeps other opens, and truncation, out. */
+	CHECK_EQ(StgOpenStorage(file, NULL, STGM_READ | STGM_SHARE_DENY_NONE,
+				NULL, 0, &r2), STG_E_SHAREVIOLATION);
+	CHECK_EQ(StgCreateDocfile(file, RW | STGM_CREATE, 0, &r2),
+		 STG_E_SHAREVIOLATION);
+	put_stream(r1, "Base", 8, 1);
+	CHECK_EQ(r1->lpVtbl->Commit(r1, 0), S_OK);
+	r1->lpVtbl->Release(r1);
+
+	/* Two transacted roots: the second commit only if current fails. */
+	CHECK_EQ(StgOpenStorage(file, NULL, TX, NULL, 0, &r1), S_OK);
+	CHECK_EQ(StgOpenStorage(file, NULL, TX, NULL, 0, &r2), S_OK);
+	if (r1 && r2) {
+		put_stream(r1, "First", 8, 2);
+		put_stream(r2, "Second", 8, 3);
+		CHECK_EQ(r1->lpVtbl->Commit(r1, STGC_ONLYIFCURRENT), S_OK);
+		CHECK_EQ(r2->lpVtbl->Commit(r2, STGC_ONLYIFCURRENT),
+			 STG_E_NOTCURRENT);
+		/* Without the flag it goes ahead. */
+		CHECK_EQ(r2->lpVtbl->Commit(r2, STGC_DEFAULT), S_OK);
+	}
+	if (r1)
+		r1->lpVtbl->Release(r1);
+	if (r2)
+		r2->lpVtbl->Release(r2);
+	r1 = r2 = NULL;
+	CHECK_EQ(StgOpenStorage(file, NULL, STGM_READ | EXCL, NULL, 0, &r1),
+		 S_OK);
+	if (r1) {
+		CHECK(got_stream(r1, "Second", 8, 3));
+		/* First is gone, not left behind damaged. */
+		WCHAR *fn = wide("First");
+		IStream *fs = NULL;
+		CHECK_EQ(r1->lpVtbl->OpenStream(r1, fn, NULL, STGM_READ | EXCL,
+						0, &fs), STG_E_FILENOTFOUND);
+		if (fs)
+			fs->lpVtbl->Release(fs);
+		free(fn);
+		r1->lpVtbl->Release(r1);
+		r1 = NULL;
+	}
+	/* A transacted create over it, released uncommitted, leaves it;
+	 * committed, replaces it. */
+	CHECK_EQ(StgCreateDocfile(file, RW | STGM_CREATE | STGM_TRANSACTED, 0,
+				  &r1), S_OK);
+	if (r1) {
+		CHECK(!got_stream(r1, "Second", 8, 3));
+		put_stream(r1, "New", 8, 4);
+		r1->lpVtbl->Release(r1);
+		r1 = NULL;
+	}
+	CHECK_EQ(StgOpenStorage(file, NULL, STGM_READ | EXCL, NULL, 0, &r1),
+		 S_OK);
+	if (r1) {
+		CHECK(got_stream(r1, "Second", 8, 3));
+		CHECK(!got_stream(r1, "New", 8, 4));
+		r1->lpVtbl->Release(r1);
+		r1 = NULL;
+	}
+	CHECK_EQ(StgCreateDocfile(file, RW | STGM_CREATE | STGM_TRANSACTED, 0,
+				  &r1), S_OK);
+	if (r1) {
+		put_stream(r1, "New", 8, 4);
+		CHECK_EQ(r1->lpVtbl->Revert(r1), S_OK);
+		CHECK(!got_stream(r1, "New", 8, 4));
+		CHECK(!got_stream(r1, "Second", 8, 3));
+		put_stream(r1, "New", 8, 4);
+		CHECK_EQ(r1->lpVtbl->Commit(r1, STGC_DEFAULT), S_OK);
+		r1->lpVtbl->Release(r1);
+		r1 = NULL;
+	}
+	CHECK_EQ(StgOpenStorage(file, NULL, STGM_READ | EXCL, NULL, 0, &r1),
+		 S_OK);
+	if (r1) {
+		CHECK(!got_stream(r1, "Second", 8, 3));
+		CHECK(got_stream(r1, "New", 8, 4));
+		r1->lpVtbl->Release(r1);
+	}
+	free(file);
+
+	/* STGM_CONVERT on a byte array keeps its bytes in CONTENTS. */
+	ILockBytes *lb = NULL;
+	IStorage *stg = NULL;
+	CHECK_EQ(CreateILockBytesOnHGlobal(NULL, TRUE, &lb), S_OK);
+	if (!lb)
+		return;
+	ULARGE_INTEGER zero = { 0 };
+	CHECK_EQ(lb->lpVtbl->WriteAt(lb, zero, "plain text", 10, NULL), S_OK);
+	CHECK_EQ(StgCreateDocfileOnILockBytes(lb, RW | STGM_CONVERT, 0, &stg),
+		 STG_S_CONVERTED);
+	if (stg) {
+		WCHAR *cn = wide("\x03" "CONTENTS");
+		IStream *s = NULL;
+		CHECK_EQ(stg->lpVtbl->OpenStream(stg, cn, NULL, STGM_READ | EXCL,
+						 0, &s), S_OK);
+		if (s) {
+			char buf[16] = { 0 };
+			ULONG got = 0;
+			CHECK_EQ(s->lpVtbl->Read(s, buf, sizeof(buf), &got), S_OK);
+			CHECK_EQ(got, 10);
+			CHECK(!memcmp(buf, "plain text", 10));
+			s->lpVtbl->Release(s);
+		}
+		free(cn);
+		stg->lpVtbl->Release(stg);
+	}
+	lb->lpVtbl->Release(lb);
+
+	/* A transacted conversion reverts to the converted tree, and
+	 * released uncommitted leaves the bytes as they were. */
+	lb = NULL;
+	stg = NULL;
+	CHECK_EQ(CreateILockBytesOnHGlobal(NULL, TRUE, &lb), S_OK);
+	if (!lb)
+		return;
+	CHECK_EQ(lb->lpVtbl->WriteAt(lb, zero, "plain text", 10, NULL), S_OK);
+	CHECK_EQ(StgCreateDocfileOnILockBytes(lb, RW | STGM_CONVERT |
+					      STGM_TRANSACTED, 0, &stg),
+		 STG_S_CONVERTED);
+	if (stg) {
+		WCHAR *cn = wide("\x03" "CONTENTS");
+		put_stream(stg, "Added", 8, 5);
+		CHECK_EQ(stg->lpVtbl->Revert(stg), S_OK);
+		CHECK(!got_stream(stg, "Added", 8, 5));
+		IStream *s = NULL;
+		CHECK_EQ(stg->lpVtbl->OpenStream(stg, cn, NULL, STGM_READ | EXCL,
+						 0, &s), S_OK);
+		if (s)
+			s->lpVtbl->Release(s);
+		free(cn);
+		stg->lpVtbl->Release(stg);
+	}
+	char head[10] = { 0 };
+	ULONG got = 0;
+	CHECK_EQ(lb->lpVtbl->ReadAt(lb, zero, head, 10, &got), S_OK);
+	CHECK(got == 10 && !memcmp(head, "plain text", 10));
+
+	/* Reverted, then committed with no other change: the converted
+	 * tree is still what Commit writes. */
+	stg = NULL;
+	CHECK_EQ(StgCreateDocfileOnILockBytes(lb, RW | STGM_CONVERT |
+					      STGM_TRANSACTED, 0, &stg),
+		 STG_S_CONVERTED);
+	if (stg) {
+		CHECK_EQ(stg->lpVtbl->Revert(stg), S_OK);
+		CHECK_EQ(stg->lpVtbl->Commit(stg, STGC_DEFAULT), S_OK);
+		stg->lpVtbl->Release(stg);
+	}
+	static const BYTE cf[4] = { 0xd0, 0xcf, 0x11, 0xe0 };
+	CHECK_EQ(lb->lpVtbl->ReadAt(lb, zero, head, 4, &got), S_OK);
+	CHECK(got == 4 && !memcmp(head, cf, 4));
+	stg = NULL;
+	CHECK_EQ(StgOpenStorageOnILockBytes(lb, NULL, RW, NULL, 0, &stg),
+		 S_OK);
+	if (stg) {
+		WCHAR *cn = wide("\x03" "CONTENTS");
+		IStream *s = NULL;
+		CHECK_EQ(stg->lpVtbl->OpenStream(stg, cn, NULL, STGM_READ | EXCL,
+						 0, &s), S_OK);
+		if (s) {
+			char buf[16] = { 0 };
+			CHECK_EQ(s->lpVtbl->Read(s, buf, sizeof(buf), &got),
+				 S_OK);
+			CHECK(got == 10 && !memcmp(buf, "plain text", 10));
+			s->lpVtbl->Release(s);
+		}
+		free(cn);
+		stg->lpVtbl->Release(stg);
+	}
+	lb->lpVtbl->Release(lb);
+}
+
 int main(void)
 {
 	char dir[] = "/tmp/vfw-ole-XXXXXX";
@@ -663,6 +1401,12 @@ int main(void)
 	test_inproc_server();
 	test_streams();
 	test_marshal();
+	test_storage_memory();
+	test_storage_file();
+	test_storage_big();
+	test_storage_copy();
+	test_storage_copy_rules();
+	test_storage_share();
 
 	mod_free(k32);
 	mod_free(ole);

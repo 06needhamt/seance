@@ -18,7 +18,7 @@ guids() {
 		printf '#include <%s>\n' "$h"
 	done
 }
-for set in "dshow.h dvdmedia.h ocidl.h mediaobj.h dmoreg.h" "icodecapi.h"; do
+for set in "dshow.h dvdmedia.h ocidl.h mediaobj.h dmoreg.h" "icodecapi.h" "shlobj.h shobjidl.h knownfolders.h"; do
 	# shellcheck disable=SC2086
 	guids $set | "$cc" -std=c11 -E -P -x c - |
 		tr '\n' ' ' | tr ';' '\n' |
