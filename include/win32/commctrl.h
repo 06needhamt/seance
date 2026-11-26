@@ -218,6 +218,365 @@ typedef struct _COLORMAP {
 #define TB_ADDBUTTONSA       (WM_USER + 20)
 #define TB_SETBITMAPSIZE     (WM_USER + 32)
 #define TB_SETBUTTONSIZE     (WM_USER + 31)
+#define TB_ENABLEBUTTON      (WM_USER + 1)
+#define TB_CHECKBUTTON       (WM_USER + 2)
+#define TB_PRESSBUTTON       (WM_USER + 3)
+#define TB_HIDEBUTTON        (WM_USER + 4)
+#define TB_INDETERMINATE     (WM_USER + 5)
+#define TB_MARKBUTTON        (WM_USER + 6)
+#define TB_ISBUTTONENABLED   (WM_USER + 9)
+#define TB_ISBUTTONCHECKED   (WM_USER + 10)
+#define TB_ISBUTTONPRESSED   (WM_USER + 11)
+#define TB_ISBUTTONHIDDEN    (WM_USER + 12)
+#define TB_ISBUTTONINDETERMINATE (WM_USER + 13)
+#define TB_ISBUTTONHIGHLIGHTED (WM_USER + 14)
+#define TB_SETSTATE          (WM_USER + 17)
+#define TB_GETSTATE          (WM_USER + 18)
+#define TB_INSERTBUTTONA     (WM_USER + 21)
+#define TB_DELETEBUTTON      (WM_USER + 22)
+#define TB_GETBUTTON         (WM_USER + 23)
+#define TB_BUTTONCOUNT       (WM_USER + 24)
+#define TB_COMMANDTOINDEX    (WM_USER + 25)
+#define TB_SAVERESTOREA      (WM_USER + 26)
+#define TB_CUSTOMIZE         (WM_USER + 27)
+#define TB_ADDSTRINGA        (WM_USER + 28)
+#define TB_GETITEMRECT       (WM_USER + 29)
+#define TB_AUTOSIZE          (WM_USER + 33)
+#define TB_GETTOOLTIPS       (WM_USER + 35)
+#define TB_SETTOOLTIPS       (WM_USER + 36)
+#define TB_SETPARENT         (WM_USER + 37)
+#define TB_SETROWS           (WM_USER + 39)
+#define TB_GETROWS           (WM_USER + 40)
+#define TB_GETBITMAPFLAGS    (WM_USER + 41)
+#define TB_SETCMDID          (WM_USER + 42)
+#define TB_CHANGEBITMAP      (WM_USER + 43)
+#define TB_GETBITMAP         (WM_USER + 44)
+#define TB_GETBUTTONTEXTA    (WM_USER + 45)
+#define TB_REPLACEBITMAP     (WM_USER + 46)
+#define TB_SETINDENT         (WM_USER + 47)
+#define TB_SETIMAGELIST      (WM_USER + 48)
+#define TB_GETIMAGELIST      (WM_USER + 49)
+#define TB_LOADIMAGES        (WM_USER + 50)
+#define TB_GETRECT           (WM_USER + 51)
+#define TB_SETHOTIMAGELIST   (WM_USER + 52)
+#define TB_GETHOTIMAGELIST   (WM_USER + 53)
+#define TB_SETDISABLEDIMAGELIST (WM_USER + 54)
+#define TB_GETDISABLEDIMAGELIST (WM_USER + 55)
+#define TB_SETSTYLE          (WM_USER + 56)
+#define TB_GETSTYLE          (WM_USER + 57)
+#define TB_GETBUTTONSIZE     (WM_USER + 58)
+#define TB_SETBUTTONWIDTH    (WM_USER + 59)
+#define TB_SETMAXTEXTROWS    (WM_USER + 60)
+#define TB_GETTEXTROWS       (WM_USER + 61)
+#define TB_GETBUTTONINFOW    (WM_USER + 63)
+#define TB_SETBUTTONINFOW    (WM_USER + 64)
+#define TB_GETBUTTONINFOA    (WM_USER + 65)
+#define TB_SETBUTTONINFOA    (WM_USER + 66)
+#define TB_INSERTBUTTONW     (WM_USER + 67)
+#define TB_ADDBUTTONSW       (WM_USER + 68)
+#define TB_HITTEST           (WM_USER + 69)
+#define TB_SETDRAWTEXTFLAGS  (WM_USER + 70)
+#define TB_GETHOTITEM        (WM_USER + 71)
+#define TB_SETHOTITEM        (WM_USER + 72)
+#define TB_SETANCHORHIGHLIGHT (WM_USER + 73)
+#define TB_GETANCHORHIGHLIGHT (WM_USER + 74)
+#define TB_GETBUTTONTEXTW    (WM_USER + 75)
+#define TB_SAVERESTOREW      (WM_USER + 76)
+#define TB_ADDSTRINGW        (WM_USER + 77)
+#define TB_GETINSERTMARK     (WM_USER + 79)
+#define TB_SETINSERTMARK     (WM_USER + 80)
+#define TB_INSERTMARKHITTEST (WM_USER + 81)
+#define TB_MOVEBUTTON        (WM_USER + 82)
+#define TB_GETMAXSIZE        (WM_USER + 83)
+#define TB_SETEXTENDEDSTYLE  (WM_USER + 84)
+#define TB_GETEXTENDEDSTYLE  (WM_USER + 85)
+#define TB_GETPADDING        (WM_USER + 86)
+#define TB_SETPADDING        (WM_USER + 87)
+#define TB_SETINSERTMARKCOLOR (WM_USER + 88)
+#define TB_GETINSERTMARKCOLOR (WM_USER + 89)
+#define TB_GETSTRINGW        (WM_USER + 91)
+#define TB_GETSTRINGA        (WM_USER + 92)
+#define TB_SETUNICODEFORMAT  CCM_SETUNICODEFORMAT
+#define TB_GETUNICODEFORMAT  CCM_GETUNICODEFORMAT
+
+#define TBSTATE_CHECKED      0x1
+#define TBSTATE_PRESSED      0x2
+#define TBSTATE_ENABLED      0x4
+#define TBSTATE_HIDDEN       0x8
+#define TBSTATE_INDETERMINATE 0x10
+#define TBSTATE_WRAP         0x20
+#define TBSTATE_ELLIPSES     0x40
+#define TBSTATE_MARKED       0x80
+
+#define TBSTYLE_BUTTON       0x0
+#define TBSTYLE_SEP          0x1
+#define TBSTYLE_CHECK        0x2
+#define TBSTYLE_GROUP        0x4
+#define TBSTYLE_CHECKGROUP   (TBSTYLE_GROUP | TBSTYLE_CHECK)
+#define TBSTYLE_DROPDOWN     0x8
+#define TBSTYLE_AUTOSIZE     0x10
+#define TBSTYLE_NOPREFIX     0x20
+#define TBSTYLE_TOOLTIPS     0x100
+#define TBSTYLE_WRAPABLE     0x200
+#define TBSTYLE_ALTDRAG      0x400
+#define TBSTYLE_FLAT         0x800
+#define TBSTYLE_LIST         0x1000
+#define TBSTYLE_CUSTOMERASE  0x2000
+#define TBSTYLE_REGISTERDROP 0x4000
+#define TBSTYLE_TRANSPARENT  0x8000
+#define BTNS_BUTTON          TBSTYLE_BUTTON
+#define BTNS_SEP             TBSTYLE_SEP
+#define BTNS_CHECK           TBSTYLE_CHECK
+#define BTNS_GROUP           TBSTYLE_GROUP
+#define BTNS_CHECKGROUP      TBSTYLE_CHECKGROUP
+#define BTNS_DROPDOWN        TBSTYLE_DROPDOWN
+#define BTNS_AUTOSIZE        TBSTYLE_AUTOSIZE
+#define BTNS_NOPREFIX        TBSTYLE_NOPREFIX
+#define BTNS_SHOWTEXT        0x40
+#define BTNS_WHOLEDROPDOWN   0x80
+#define TBSTYLE_EX_DRAWDDARROWS 0x1
+#define TBSTYLE_EX_MIXEDBUTTONS 0x8
+#define TBSTYLE_EX_HIDECLIPPEDBUTTONS 0x10
+#define TBSTYLE_EX_DOUBLEBUFFER 0x80
+
+#define TBIF_IMAGE           0x1
+#define TBIF_TEXT            0x2
+#define TBIF_STATE           0x4
+#define TBIF_STYLE           0x8
+#define TBIF_LPARAM          0x10
+#define TBIF_COMMAND         0x20
+#define TBIF_SIZE            0x40
+#define TBIF_BYINDEX         0x80000000
+
+#define IDB_STD_SMALL_COLOR  0
+#define IDB_STD_LARGE_COLOR  1
+#define IDB_VIEW_SMALL_COLOR 4
+#define IDB_VIEW_LARGE_COLOR 5
+#define IDB_HIST_SMALL_COLOR 8
+#define IDB_HIST_LARGE_COLOR 9
+
+typedef struct tagTBADDBITMAP {
+	HINSTANCE hInst;
+	UINT_PTR nID;
+} TBADDBITMAP, *LPTBADDBITMAP;
+
+typedef struct {
+	UINT cbSize;
+	DWORD dwMask;
+	int idCommand;
+	int iImage;
+	BYTE fsState;
+	BYTE fsStyle;
+	WORD cx;
+	DWORD_PTR lParam;
+	LPSTR pszText;
+	int cchText;
+} TBBUTTONINFOA, *LPTBBUTTONINFOA;
+
+typedef struct {
+	UINT cbSize;
+	DWORD dwMask;
+	int idCommand;
+	int iImage;
+	BYTE fsState;
+	BYTE fsStyle;
+	WORD cx;
+	DWORD_PTR lParam;
+	LPWSTR pszText;
+	int cchText;
+} TBBUTTONINFOW, *LPTBBUTTONINFOW;
+
+#define TBN_FIRST            (0U - 700U)
+#define TBN_DROPDOWN         (TBN_FIRST - 10)
+#define TBN_HOTITEMCHANGE    (TBN_FIRST - 13)
+#define TBN_DELETINGBUTTON   (TBN_FIRST - 15)
+
+typedef struct {
+	HINSTANCE hInstOld;
+	UINT_PTR nIDOld;
+	HINSTANCE hInstNew;
+	UINT_PTR nIDNew;
+	int nButtons;
+} TBREPLACEBITMAP, *LPTBREPLACEBITMAP;
+
+typedef struct {
+	int iButton;
+	DWORD dwFlags;
+} TBINSERTMARK, *LPTBINSERTMARK;
+#define TBIMHT_AFTER         0x1
+#define TBIMHT_BACKGROUND    0x2
+
+typedef struct tagNMTBHOTITEM {
+	NMHDR hdr;
+	int idOld;
+	int idNew;
+	DWORD dwFlags;
+} NMTBHOTITEM, *LPNMTBHOTITEM;
+#define HICF_OTHER           0x0
+#define HICF_MOUSE           0x1
+#define HICF_ARROWKEYS       0x2
+#define HICF_ACCELERATOR     0x4
+#define HICF_ENTERING        0x10
+#define HICF_LEAVING         0x20
+
+typedef struct tagNMTOOLBARA {
+	NMHDR hdr;
+	int iItem;
+	TBBUTTON tbButton;
+	int cchText;
+	LPSTR pszText;
+	RECT rcButton;
+} NMTOOLBARA, *LPNMTOOLBARA;
+
+typedef struct tagNMTOOLBARW {
+	NMHDR hdr;
+	int iItem;
+	TBBUTTON tbButton;
+	int cchText;
+	LPWSTR pszText;
+	RECT rcButton;
+} NMTOOLBARW, *LPNMTOOLBARW;
+
+/* Tooltips. */
+#define TTS_ALWAYSTIP        0x1
+#define TTS_NOPREFIX         0x2
+#define TTS_NOANIMATE        0x10
+#define TTS_NOFADE           0x20
+#define TTS_BALLOON          0x40
+#define TTS_CLOSE            0x80
+
+#define TTF_IDISHWND         0x1
+#define TTF_CENTERTIP        0x2
+#define TTF_RTLREADING       0x4
+#define TTF_SUBCLASS         0x10
+#define TTF_TRACK            0x20
+#define TTF_ABSOLUTE         0x80
+#define TTF_TRANSPARENT      0x100
+#define TTF_PARSELINKS       0x1000
+#define TTF_DI_SETITEM       0x8000
+
+#define TTI_NONE             0
+#define TTI_INFO             1
+#define TTI_WARNING          2
+#define TTI_ERROR            3
+
+#define TTDT_AUTOMATIC       0
+#define TTDT_RESHOW          1
+#define TTDT_AUTOPOP         2
+#define TTDT_INITIAL         3
+
+#define TTM_ACTIVATE         (WM_USER + 1)
+#define TTM_SETDELAYTIME     (WM_USER + 3)
+#define TTM_ADDTOOLA         (WM_USER + 4)
+#define TTM_DELTOOLA         (WM_USER + 5)
+#define TTM_NEWTOOLRECTA     (WM_USER + 6)
+#define TTM_RELAYEVENT       (WM_USER + 7)
+#define TTM_GETTOOLINFOA     (WM_USER + 8)
+#define TTM_SETTOOLINFOA     (WM_USER + 9)
+#define TTM_HITTESTA         (WM_USER + 10)
+#define TTM_GETTEXTA         (WM_USER + 11)
+#define TTM_UPDATETIPTEXTA   (WM_USER + 12)
+#define TTM_GETTOOLCOUNT     (WM_USER + 13)
+#define TTM_ENUMTOOLSA       (WM_USER + 14)
+#define TTM_GETCURRENTTOOLA  (WM_USER + 15)
+#define TTM_WINDOWFROMPOINT  (WM_USER + 16)
+#define TTM_TRACKACTIVATE    (WM_USER + 17)
+#define TTM_TRACKPOSITION    (WM_USER + 18)
+#define TTM_SETTIPBKCOLOR    (WM_USER + 19)
+#define TTM_SETTIPTEXTCOLOR  (WM_USER + 20)
+#define TTM_GETDELAYTIME     (WM_USER + 21)
+#define TTM_GETTIPBKCOLOR    (WM_USER + 22)
+#define TTM_GETTIPTEXTCOLOR  (WM_USER + 23)
+#define TTM_SETMAXTIPWIDTH   (WM_USER + 24)
+#define TTM_GETMAXTIPWIDTH   (WM_USER + 25)
+#define TTM_SETMARGIN        (WM_USER + 26)
+#define TTM_GETMARGIN        (WM_USER + 27)
+#define TTM_POP              (WM_USER + 28)
+#define TTM_UPDATE           (WM_USER + 29)
+#define TTM_GETBUBBLESIZE    (WM_USER + 30)
+#define TTM_ADJUSTRECT       (WM_USER + 31)
+#define TTM_SETTITLEA        (WM_USER + 32)
+#define TTM_SETTITLEW        (WM_USER + 33)
+#define TTM_POPUP            (WM_USER + 34)
+#define TTM_GETTITLE         (WM_USER + 35)
+#define TTM_ADDTOOLW         (WM_USER + 50)
+#define TTM_DELTOOLW         (WM_USER + 51)
+#define TTM_NEWTOOLRECTW     (WM_USER + 52)
+#define TTM_GETTOOLINFOW     (WM_USER + 53)
+#define TTM_SETTOOLINFOW     (WM_USER + 54)
+#define TTM_HITTESTW         (WM_USER + 55)
+#define TTM_GETTEXTW         (WM_USER + 56)
+#define TTM_UPDATETIPTEXTW   (WM_USER + 57)
+#define TTM_ENUMTOOLSW       (WM_USER + 58)
+#define TTM_GETCURRENTTOOLW  (WM_USER + 59)
+
+#define TTN_FIRST            (0U - 520U)
+#define TTN_GETDISPINFOA     (TTN_FIRST - 0)
+#define TTN_SHOW             (TTN_FIRST - 1)
+#define TTN_POP              (TTN_FIRST - 2)
+#define TTN_LINKCLICK        (TTN_FIRST - 3)
+#define TTN_GETDISPINFOW     (TTN_FIRST - 10)
+
+typedef struct tagTOOLINFOA {
+	UINT cbSize;
+	UINT uFlags;
+	HWND hwnd;
+	UINT_PTR uId;
+	RECT rect;
+	HINSTANCE hinst;
+	LPSTR lpszText;
+	LPARAM lParam;
+	void *lpReserved;
+} TTTOOLINFOA, *LPTTTOOLINFOA, TOOLINFOA, *LPTOOLINFOA;
+
+typedef struct tagTOOLINFOW {
+	UINT cbSize;
+	UINT uFlags;
+	HWND hwnd;
+	UINT_PTR uId;
+	RECT rect;
+	HINSTANCE hinst;
+	LPWSTR lpszText;
+	LPARAM lParam;
+	void *lpReserved;
+} TTTOOLINFOW, *LPTTTOOLINFOW, TOOLINFOW, *LPTOOLINFOW;
+
+typedef struct _TT_HITTESTINFOA {
+	HWND hwnd;
+	POINT pt;
+	TTTOOLINFOA ti;
+} TTHITTESTINFOA, *LPTTHITTESTINFOA;
+
+typedef struct _TT_HITTESTINFOW {
+	HWND hwnd;
+	POINT pt;
+	TTTOOLINFOW ti;
+} TTHITTESTINFOW, *LPTTHITTESTINFOW;
+
+typedef struct _TTGETTITLE {
+	DWORD dwSize;
+	UINT uTitleBitmap;
+	UINT cch;
+	WCHAR *pszTitle;
+} TTGETTITLE, *PTTGETTITLE;
+
+typedef struct tagNMTTDISPINFOA {
+	NMHDR hdr;
+	LPSTR lpszText;
+	char szText[80];
+	HINSTANCE hinst;
+	UINT uFlags;
+	LPARAM lParam;
+} NMTTDISPINFOA, *LPNMTTDISPINFOA;
+
+typedef struct tagNMTTDISPINFOW {
+	NMHDR hdr;
+	LPWSTR lpszText;
+	WCHAR szText[80];
+	HINSTANCE hinst;
+	UINT uFlags;
+	LPARAM lParam;
+} NMTTDISPINFOW, *LPNMTTDISPINFOW;
 
 /* Image lists. */
 struct _IMAGELIST;

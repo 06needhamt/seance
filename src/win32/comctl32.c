@@ -17,6 +17,7 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stddef.h>
 #include <string.h>
 #include <strings.h>
 
@@ -274,6 +275,11 @@ static LRESULT notify(HWND to, HWND from, UINT code, NMHDR *hdr);
 LRESULT comctl_notify(HWND from, UINT code, NMHDR *hdr)
 {
 	return notify(NULL, from, code, hdr);
+}
+
+LRESULT comctl_notify_to(HWND to, HWND from, UINT code, NMHDR *hdr)
+{
+	return notify(to, from, code, hdr);
 }
 
 /* Trackbars. */
@@ -1020,8 +1026,8 @@ static const struct control_class {
 	{ "msctls_progress32", progress_proc },
 	{ "msctls_updown32", updown_proc },
 	{ "msctls_statusbar32", status_proc },
-	{ "ToolbarWindow32", NULL },
-	{ "tooltips_class32", NULL },
+	{ "ToolbarWindow32", comctl_toolbar_proc },
+	{ "tooltips_class32", comctl_tooltip_proc },
 	{ "SysListView32", comctl_listview_proc },
 	{ "SysHeader32", comctl_header_proc },
 	{ "SysTreeView32", comctl_treeview_proc },
@@ -1246,6 +1252,21 @@ WINFN(BOOL) cc_RemoveWindowSubclass(HWND h, SUBCLASSPROC proc, UINT_PTR id)
 	return FALSE;
 }
 
+BOOL comctl_set_subclass(HWND h, SUBCLASSPROC proc, UINT_PTR id, DWORD_PTR ref)
+{
+	return cc_SetWindowSubclass(h, proc, id, ref);
+}
+
+BOOL comctl_remove_subclass(HWND h, SUBCLASSPROC proc, UINT_PTR id)
+{
+	return cc_RemoveWindowSubclass(h, proc, id);
+}
+
+LRESULT comctl_def_subclass(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+	return cc_DefSubclassProc(h, msg, wp, lp);
+}
+
 /* The Create* helpers. */
 
 static HWND create(LPCWSTR cls, LPCWSTR text, DWORD style, int x, int y,
@@ -1286,15 +1307,34 @@ WINFN(HWND) cc_CreateUpDownControl(DWORD style, INT x, INT y, INT cx, INT cy,
 	return h;
 }
 
-/* A toolbar is a plain window here: its buttons are not kept. */
+/* A toolbar with its bitmap, sizes and buttons, sized to its parent. */
 WINFN(HWND) cc_CreateToolbarEx(HWND parent, DWORD style, UINT id, INT nbitmaps,
 			       HINSTANCE bm_inst, UINT_PTR bm_id,
 			       LPCTBBUTTON buttons, INT nbuttons, INT dx_button,
 			       INT dy_button, INT dx_bitmap, INT dy_bitmap,
 			       UINT struct_size)
 {
-	return create(u"ToolbarWindow32", NULL, WS_CHILD | style, 0, 0, 100,
-		      30, parent, id);
+	HWND h = create(u"ToolbarWindow32", NULL, WS_CHILD | style, 0, 0, 100,
+			30, parent, id);
+	if (!h)
+		return NULL;
+	API();
+	api.SendMessageW(h, TB_BUTTONSTRUCTSIZE, struct_size, 0);
+	if (dx_bitmap > 0 || dy_bitmap > 0)
+		api.SendMessageW(h, TB_SETBITMAPSIZE, 0,
+				 MAKELPARAM(dx_bitmap, dy_bitmap));
+	if (dx_button > 0 || dy_button > 0)
+		api.SendMessageW(h, TB_SETBUTTONSIZE, 0,
+				 MAKELPARAM(dx_button, dy_button));
+	if (nbitmaps > 0) {
+		TBADDBITMAP a = { bm_inst, bm_id };
+		api.SendMessageW(h, TB_ADDBITMAP, (WPARAM)nbitmaps, (LPARAM)&a);
+	}
+	if (buttons && nbuttons > 0)
+		api.SendMessageW(h, TB_ADDBUTTONSW, (WPARAM)nbuttons,
+				 (LPARAM)buttons);
+	api.SendMessageW(h, TB_AUTOSIZE, 0, 0);
+	return h;
 }
 
 WINFN(HWND) cc_CreateToolbar(HWND parent, DWORD style, UINT id, INT nbitmaps,
@@ -1303,7 +1343,7 @@ WINFN(HWND) cc_CreateToolbar(HWND parent, DWORD style, UINT id, INT nbitmaps,
 {
 	return cc_CreateToolbarEx(parent, style | CCS_TOP, id, nbitmaps,
 				  bm_inst, bm_id, buttons, nbuttons, 0, 0, 0, 0,
-				  12);
+				  offsetof(TBBUTTON, iString));
 }
 
 /* A bitmap resource with its colours mapped (by default to the 3-D ones). */

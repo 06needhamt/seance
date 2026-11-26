@@ -40,11 +40,20 @@ int comctl_text_width(const WCHAR *text);
 LONG comctl_set_style(HWND h, DWORD style);
 /* WM_NOTIFY to h's parent, with hdr's header filled in. */
 LRESULT comctl_notify(HWND from, UINT code, NMHDR *hdr);
+/* The same, to a given window (NULL: the parent). */
+LRESULT comctl_notify_to(HWND to, HWND from, UINT code, NMHDR *hdr);
+
+/* SetWindowSubclass, RemoveWindowSubclass and DefSubclassProc. */
+BOOL comctl_set_subclass(HWND h, SUBCLASSPROC proc, UINT_PTR id, DWORD_PTR ref);
+BOOL comctl_remove_subclass(HWND h, SUBCLASSPROC proc, UINT_PTR id);
+LRESULT comctl_def_subclass(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 
 /* The control procedures in the other source files. */
 LRESULT STUB_WINAPI comctl_header_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 LRESULT STUB_WINAPI comctl_listview_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 LRESULT STUB_WINAPI comctl_treeview_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_toolbar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_tooltip_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 
 /* The export tables of the other source files. */
 extern const struct builtin_export comctl_dpa_exports[];

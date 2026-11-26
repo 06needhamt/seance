@@ -1232,6 +1232,7 @@ static BOOL refuse;		/* ITEMCHANGING, SELCHANGING, ITEMEXPANDING */
 static NMLISTVIEW last_lv;
 static NMTREEVIEWW last_tv;
 static int deleted_tv;
+static WPARAM last_command;
 
 static int seen(UINT code)
 {
@@ -1245,6 +1246,10 @@ static int seen(UINT code)
 static LRESULT WINAPI record_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
 {
 	USER(LRESULT, DefWindowProcW, HWND, UINT, WPARAM, LPARAM);
+	if (m == WM_COMMAND) {
+		last_command = wp;
+		return 0;
+	}
 	if (m != WM_NOTIFY)
 		return DefWindowProcW(h, m, wp, lp);
 	NMHDR *hdr = (NMHDR *)lp;
@@ -1301,6 +1306,15 @@ static LRESULT WINAPI record_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
 	}
 	case HDN_ITEMCHANGINGW:
 		return refuse;
+	case TTN_GETDISPINFOW: {
+		NMTTDISPINFOW *d = (NMTTDISPINFOW *)lp;
+		d->szText[0] = 't';
+		d->szText[1] = (WCHAR)('0' + d->lParam);
+		d->szText[2] = 0;
+		if (d->lParam == 9)
+			d->uFlags |= TTF_DI_SETITEM;
+		return 0;
+	}
 	}
 	return 0;
 }
@@ -1772,6 +1786,440 @@ static void test_treeview(void)
 #undef ADD
 }
 
+
+static void test_toolbar(void)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	USER(LRESULT, SendMessageA, HWND, UINT, WPARAM, LPARAM);
+	USER(BOOL, DestroyWindow, HWND);
+	USER(BOOL, GetWindowRect, HWND, LPRECT);
+	USER(BOOL, GetClientRect, HWND, LPRECT);
+	FN(HWND, CreateToolbarEx, HWND, DWORD, UINT, INT, HINSTANCE, UINT_PTR,
+	   LPCTBBUTTON, INT, INT, INT, INT, INT, UINT);
+	HWND h = make("ToolbarWindow32", CCS_NORESIZE, 200, 30);
+	WCHAR buf[32];
+	char abuf[32];
+	RECT rc;
+
+	CHECK(h != NULL);
+	if (!h)
+		return;
+	SendMessageW(h, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
+	CHECK_EQ(SendMessageW(h, TB_GETBUTTONSIZE, 0, 0), MAKELONG(24, 22));
+	CHECK_EQ(SendMessageW(h, TB_GETPADDING, 0, 0), MAKELONG(7, 6));
+
+	/* Strings: a double-NUL run, then the standard bitmap. */
+	CHECK_EQ(SendMessageW(h, TB_ADDSTRINGW, 0,
+			      (LPARAM)u"Open\0Save\0"), 0);
+	CHECK_EQ(SendMessageA(h, TB_ADDSTRINGA, 0, (LPARAM)"Cut\0"), 2);
+	CHECK_EQ(SendMessageW(h, TB_GETSTRINGW, MAKEWPARAM(32, 1),
+			      (LPARAM)buf), 4);
+	CHECK(!strcmp(a(buf), "Save"));
+	CHECK_EQ(SendMessageW(h, TB_GETSTRINGW, MAKEWPARAM(32, 9),
+			      (LPARAM)buf), -1);
+	TBADDBITMAP ab = { HINST_COMMCTRL, IDB_STD_SMALL_COLOR };
+	CHECK_EQ(SendMessageW(h, TB_ADDBITMAP, 0, (LPARAM)&ab), 0);
+	TBADDBITMAP mine = { NULL, 0x1234 };
+	CHECK_EQ(SendMessageW(h, TB_ADDBITMAP, 4, (LPARAM)&mine), 15);
+	CHECK_EQ(SendMessageW(h, TB_ADDBITMAP, 4, (LPARAM)&mine), 15);
+
+	TBBUTTON b[6];
+	memset(b, 0, sizeof(b));
+	for (int i = 0; i < 6; i++) {
+		b[i].iBitmap = i;
+		b[i].idCommand = 100 + i;
+		b[i].fsState = TBSTATE_ENABLED;
+		b[i].iString = -1;
+	}
+	b[0].iString = 0;
+	b[1].iString = 1;
+	b[2].fsStyle = BTNS_SEP;
+	b[2].iBitmap = 0;
+	b[3].fsStyle = BTNS_CHECKGROUP;
+	b[4].fsStyle = BTNS_CHECKGROUP;
+	b[5].fsStyle = BTNS_CHECK | BTNS_DROPDOWN;
+	b[5].iString = (INT_PTR)u"Own";
+	CHECK(SendMessageW(h, TB_ADDBUTTONSW, 6, (LPARAM)b));
+	CHECK_EQ(SendMessageW(h, TB_BUTTONCOUNT, 0, 0), 6);
+	CHECK_EQ(SendMessageW(h, TB_COMMANDTOINDEX, 104, 0), 4);
+	CHECK_EQ(SendMessageW(h, TB_COMMANDTOINDEX, 999, 0), -1);
+
+	/* Geometry: 24-wide buttons, an 8-wide separator. */
+	CHECK(SendMessageW(h, TB_GETITEMRECT, 1, (LPARAM)&rc));
+	CHECK(rc.left == 24 && rc.right == 48 && rc.top == 0 &&
+	      rc.bottom == 22);
+	CHECK(SendMessageW(h, TB_GETRECT, 103, (LPARAM)&rc));
+	CHECK(rc.left == 56 && rc.right == 80);
+	POINT pt = { 50, 5 };
+	CHECK_EQ(SendMessageW(h, TB_HITTEST, 0, (LPARAM)&pt), -2);
+	pt.x = 60;
+	CHECK_EQ(SendMessageW(h, TB_HITTEST, 0, (LPARAM)&pt), 3);
+	pt.x = 190;
+	CHECK_EQ(SendMessageW(h, TB_HITTEST, 0, (LPARAM)&pt), -1);
+	SIZE sz;
+	CHECK(SendMessageW(h, TB_GETMAXSIZE, 0, (LPARAM)&sz));
+	CHECK(sz.cx == 5 * 24 + 8 && sz.cy == 22);
+
+	/* Text: from the pool or the button's own. */
+	CHECK_EQ(SendMessageW(h, TB_GETBUTTONTEXTW, 101, (LPARAM)buf), 4);
+	CHECK(!strcmp(a(buf), "Save"));
+	CHECK_EQ(SendMessageA(h, TB_GETBUTTONTEXTA, 105, 0), 3);
+	CHECK_EQ(SendMessageA(h, TB_GETBUTTONTEXTA, 105, (LPARAM)abuf), 3);
+	CHECK(!strcmp(abuf, "Own"));
+	CHECK_EQ(SendMessageW(h, TB_GETBUTTONTEXTW, 999, (LPARAM)buf), -1);
+
+	/* States. */
+	CHECK(SendMessageW(h, TB_ISBUTTONENABLED, 100, 0));
+	CHECK(SendMessageW(h, TB_ENABLEBUTTON, 100, FALSE));
+	CHECK(!SendMessageW(h, TB_ISBUTTONENABLED, 100, 0));
+	CHECK_EQ(SendMessageW(h, TB_GETSTATE, 100, 0), 0);
+	CHECK_EQ(SendMessageW(h, TB_GETSTATE, 999, 0), -1);
+	CHECK(SendMessageW(h, TB_SETSTATE, 100, TBSTATE_ENABLED |
+						TBSTATE_INDETERMINATE));
+	CHECK(SendMessageW(h, TB_ISBUTTONINDETERMINATE, 100, 0));
+	CHECK(SendMessageW(h, TB_CHECKBUTTON, 103, TRUE));
+	CHECK(SendMessageW(h, TB_CHECKBUTTON, 104, TRUE));
+	CHECK(!SendMessageW(h, TB_ISBUTTONCHECKED, 103, 0));
+	CHECK(SendMessageW(h, TB_ISBUTTONCHECKED, 104, 0));
+	CHECK(SendMessageW(h, TB_MARKBUTTON, 101, TRUE));
+	CHECK(SendMessageW(h, TB_ISBUTTONHIGHLIGHTED, 101, 0));
+
+	/* Hiding moves the later buttons left. */
+	CHECK(SendMessageW(h, TB_HIDEBUTTON, 101, TRUE));
+	CHECK(SendMessageW(h, TB_ISBUTTONHIDDEN, 101, 0));
+	CHECK(!SendMessageW(h, TB_GETITEMRECT, 1, (LPARAM)&rc));
+	CHECK(SendMessageW(h, TB_GETRECT, 103, (LPARAM)&rc) && rc.left == 32);
+	CHECK(SendMessageW(h, TB_HIDEBUTTON, 101, FALSE));
+
+	/* Clicks: a check-group button stays checked, a check button
+	 * toggles, a disabled one does nothing. */
+	ncodes = 0;
+	last_command = 0;
+	SendMessageW(h, WM_LBUTTONDOWN, 0, MAKELPARAM(60, 5));
+	CHECK(SendMessageW(h, TB_ISBUTTONPRESSED, 103, 0));
+	SendMessageW(h, WM_LBUTTONUP, 0, MAKELPARAM(60, 5));
+	CHECK(!SendMessageW(h, TB_ISBUTTONPRESSED, 103, 0));
+	CHECK_EQ(last_command, MAKEWPARAM(103, 0));
+	CHECK(SendMessageW(h, TB_ISBUTTONCHECKED, 103, 0) &&
+	      !SendMessageW(h, TB_ISBUTTONCHECKED, 104, 0));
+	last_command = 0;
+	SendMessageW(h, WM_LBUTTONDOWN, 0, MAKELPARAM(60, 5));
+	SendMessageW(h, WM_LBUTTONUP, 0, MAKELPARAM(150, 5));
+	CHECK_EQ(last_command, 0);	/* released elsewhere */
+	SendMessageW(h, TB_ENABLEBUTTON, 103, FALSE);
+	SendMessageW(h, WM_LBUTTONDOWN, 0, MAKELPARAM(60, 5));
+	SendMessageW(h, WM_LBUTTONUP, 0, MAKELPARAM(60, 5));
+	CHECK_EQ(last_command, 0);
+	SendMessageW(h, TB_ENABLEBUTTON, 103, TRUE);
+	/* The drop-down one notifies instead. */
+	SendMessageW(h, WM_LBUTTONDOWN, 0, MAKELPARAM(110, 5));
+	CHECK_EQ(seen(TBN_DROPDOWN), 1);
+	CHECK_EQ(last_command, 0);
+
+	/* The hot item, with TBN_HOTITEMCHANGE. */
+	CHECK_EQ(SendMessageW(h, TB_GETHOTITEM, 0, 0), -1);
+	CHECK_EQ(SendMessageW(h, TB_SETHOTITEM, 1, 0), -1);
+	CHECK_EQ(SendMessageW(h, TB_GETHOTITEM, 0, 0), 1);
+	CHECK_EQ(seen(TBN_HOTITEMCHANGE), 1);
+
+	/* TBBUTTONINFO by command and by index. */
+	TBBUTTONINFOW bi;
+	memset(&bi, 0, sizeof(bi));
+	bi.cbSize = sizeof(bi);
+	bi.dwMask = TBIF_TEXT | TBIF_COMMAND | TBIF_IMAGE | TBIF_SIZE;
+	bi.pszText = buf;
+	bi.cchText = 32;
+	CHECK_EQ(SendMessageW(h, TB_GETBUTTONINFOW, 100, (LPARAM)&bi), 0);
+	CHECK(!strcmp(a(buf), "Open") && bi.idCommand == 100 &&
+	      bi.iImage == 0 && bi.cx == 24);
+	bi.dwMask = TBIF_TEXT | TBIF_SIZE | TBIF_BYINDEX;
+	bi.pszText = (LPWSTR)u"New";
+	bi.cx = 40;
+	CHECK(SendMessageW(h, TB_SETBUTTONINFOW, 0, (LPARAM)&bi));
+	CHECK(SendMessageW(h, TB_GETITEMRECT, 1, (LPARAM)&rc) &&
+	      rc.left == 40);
+	CHECK_EQ(SendMessageW(h, TB_GETBUTTONTEXTW, 100, (LPARAM)buf), 3);
+	bi.cbSize = 8;
+	CHECK_EQ(SendMessageW(h, TB_GETBUTTONINFOW, 100, (LPARAM)&bi), -1);
+
+	/* Insert, move, delete (with TBN_DELETINGBUTTON). */
+	TBBUTTON nb;
+	memset(&nb, 0, sizeof(nb));
+	nb.idCommand = 200;
+	nb.fsState = TBSTATE_ENABLED;
+	nb.iString = -1;
+	CHECK(SendMessageW(h, TB_INSERTBUTTONW, 1, (LPARAM)&nb));
+	CHECK_EQ(SendMessageW(h, TB_COMMANDTOINDEX, 200, 0), 1);
+	CHECK(SendMessageW(h, TB_MOVEBUTTON, 1, 6));
+	CHECK_EQ(SendMessageW(h, TB_COMMANDTOINDEX, 200, 0), 6);
+	TBBUTTON got;
+	CHECK(SendMessageW(h, TB_GETBUTTON, 6, (LPARAM)&got) &&
+	      got.idCommand == 200 && got.iString == -1);
+	CHECK(SendMessageW(h, TB_SETCMDID, 6, 201));
+	ncodes = 0;
+	CHECK(SendMessageW(h, TB_DELETEBUTTON, 6, 0));
+	CHECK_EQ(seen(TBN_DELETINGBUTTON), 1);
+	CHECK_EQ(SendMessageW(h, TB_BUTTONCOUNT, 0, 0), 6);
+	CHECK(!SendMessageW(h, TB_DELETEBUTTON, 6, 0));
+
+	/* Rows and wrapping. */
+	CHECK_EQ(SendMessageW(h, TB_GETROWS, 0, 0), 1);
+	SendMessageW(h, TB_SETROWS, MAKEWPARAM(2, TRUE), (LPARAM)&rc);
+	CHECK_EQ(SendMessageW(h, TB_GETROWS, 0, 0), 2);
+	CHECK_EQ(rc.bottom, 44);
+	SendMessageW(h, TB_SETROWS, MAKEWPARAM(1, TRUE), 0);
+	CHECK_EQ(SendMessageW(h, TB_GETROWS, 0, 0), 1);
+	SendMessageW(h, TB_SETSTYLE, 0, WS_CHILD | CCS_NORESIZE |
+					TBSTYLE_WRAPABLE);
+	CHECK(SendMessageW(h, TB_GETSTYLE, 0, 0) & TBSTYLE_WRAPABLE);
+	SendMessageW(h, TB_SETBUTTONSIZE, 0, MAKELPARAM(60, 30));
+	/* 40 + 60 + 8 + 60 fit in 200; the fifth button starts row 2. */
+	CHECK_EQ(SendMessageW(h, TB_GETROWS, 0, 0), 2);
+	CHECK(SendMessageW(h, TB_GETITEMRECT, 4, (LPARAM)&rc) &&
+	      rc.left == 0 && rc.top == 30);
+
+	/* Sizes, styles, the insert mark, image lists. */
+	CHECK(SendMessageW(h, TB_SETBITMAPSIZE, 0, MAKELPARAM(32, 32)));
+	CHECK_EQ(SendMessageW(h, TB_GETBUTTONSIZE, 0, 0), MAKELONG(60, 39));
+	CHECK_EQ(SendMessageW(h, TB_SETEXTENDEDSTYLE, 0,
+			      TBSTYLE_EX_DRAWDDARROWS), 0);
+	CHECK_EQ(SendMessageW(h, TB_GETEXTENDEDSTYLE, 0, 0),
+		 TBSTYLE_EX_DRAWDDARROWS);
+	TBINSERTMARK mk = { 2, TBIMHT_AFTER }, mk2;
+	SendMessageW(h, TB_SETINSERTMARK, 0, (LPARAM)&mk);
+	SendMessageW(h, TB_GETINSERTMARK, 0, (LPARAM)&mk2);
+	CHECK(mk2.iButton == 2 && mk2.dwFlags == TBIMHT_AFTER);
+	pt.x = 30;
+	pt.y = 5;
+	CHECK(SendMessageW(h, TB_INSERTMARKHITTEST, (WPARAM)&pt,
+			   (LPARAM)&mk2));
+	CHECK(mk2.iButton == 0 && mk2.dwFlags == TBIMHT_AFTER);
+	CHECK_EQ(SendMessageW(h, TB_SETIMAGELIST, 0, (LPARAM)0x1234), 0);
+	CHECK_EQ(SendMessageW(h, TB_GETIMAGELIST, 0, 0), 0x1234);
+	CHECK_EQ(SendMessageW(h, TB_SETPARENT, (WPARAM)h, 0), (LRESULT)parent);
+	CHECK(DestroyWindow(h));
+
+	/* CreateToolbarEx: the buttons and bitmaps, across the parent. */
+	ncodes = 0;
+	HWND tb = CreateToolbarEx(parent, WS_CHILD, 52, 15, HINST_COMMCTRL,
+				  IDB_STD_SMALL_COLOR, b, 3, 0, 0, 16, 15,
+				  sizeof(TBBUTTON));
+	CHECK(tb != NULL);
+	CHECK_EQ(SendMessageW(tb, TB_BUTTONCOUNT, 0, 0), 3);
+	RECT pc;
+	GetClientRect(parent, &pc);
+	GetWindowRect(tb, &rc);
+	CHECK(rc.right - rc.left == pc.right && rc.bottom - rc.top == 22);
+	CHECK(DestroyWindow(tb));
+}
+
+
+static void set_rect(RECT *r, int l, int t, int rt, int b)
+{
+	r->left = l;
+	r->top = t;
+	r->right = rt;
+	r->bottom = b;
+}
+
+static void test_tooltip(void)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	USER(LRESULT, SendMessageA, HWND, UINT, WPARAM, LPARAM);
+	USER(BOOL, DestroyWindow, HWND);
+	HWND h = make("tooltips_class32", 0, 10, 10);
+	WCHAR buf[96];
+	char abuf[96];
+
+	CHECK(h != NULL);
+	if (!h)
+		return;
+	TTTOOLINFOW ti;
+	memset(&ti, 0, sizeof(ti));
+	ti.cbSize = sizeof(ti);
+	ti.hwnd = parent;
+	ti.uId = 1;
+	set_rect(&ti.rect, 0, 0, 50, 20);
+	ti.lpszText = (LPWSTR)u"First tip";
+	CHECK(SendMessageW(h, TTM_ADDTOOLW, 0, (LPARAM)&ti));
+	TTTOOLINFOA ta;
+	memset(&ta, 0, sizeof(ta));
+	ta.cbSize = offsetof(TTTOOLINFOA, lParam);	/* the oldest size */
+	ta.hwnd = parent;
+	ta.uId = 2;
+	set_rect(&ta.rect, 50, 0, 100, 20);
+	ta.lpszText = (LPSTR)"Second";
+	CHECK(SendMessageA(h, TTM_ADDTOOLA, 0, (LPARAM)&ta));
+	ti.uId = 3;
+	set_rect(&ti.rect, 100, 0, 150, 20);
+	ti.lpszText = LPSTR_TEXTCALLBACKW;
+	ti.lParam = 4;
+	CHECK(SendMessageW(h, TTM_ADDTOOLW, 0, (LPARAM)&ti));
+	ti.uId = 4;
+	set_rect(&ti.rect, 150, 0, 200, 20);
+	ti.lParam = 9;
+	CHECK(SendMessageW(h, TTM_ADDTOOLW, 0, (LPARAM)&ti));
+	ti.cbSize = 8;
+	CHECK(!SendMessageW(h, TTM_ADDTOOLW, 0, (LPARAM)&ti));
+	ti.cbSize = sizeof(ti);
+	CHECK_EQ(SendMessageW(h, TTM_GETTOOLCOUNT, 0, 0), 4);
+
+	/* Text: a string, A from W, a callback, one the owner keeps. */
+	ti.uId = 1;
+	ti.lpszText = buf;
+	SendMessageW(h, TTM_GETTEXTW, 96, (LPARAM)&ti);
+	CHECK(!strcmp(a(buf), "First tip"));
+	ta.uId = 1;
+	ta.lpszText = abuf;
+	SendMessageA(h, TTM_GETTEXTA, 96, (LPARAM)&ta);
+	CHECK(!strcmp(abuf, "First tip"));
+	ti.uId = 3;
+	ti.lpszText = buf;
+	ncodes = 0;
+	SendMessageW(h, TTM_GETTEXTW, 96, (LPARAM)&ti);
+	CHECK(!strcmp(a(buf), "t4") && seen(TTN_GETDISPINFOW) == 1);
+	ti.uId = 4;
+	SendMessageW(h, TTM_GETTEXTW, 96, (LPARAM)&ti);
+	SendMessageW(h, TTM_GETTEXTW, 96, (LPARAM)&ti);
+	CHECK(!strcmp(a(buf), "t9") && seen(TTN_GETDISPINFOW) == 2);
+
+	/* Tool info round trip, and enumeration. */
+	memset(&ti, 0, sizeof(ti));
+	ti.cbSize = sizeof(ti);
+	ti.hwnd = parent;
+	ti.uId = 2;
+	ti.lpszText = buf;
+	CHECK(SendMessageW(h, TTM_GETTOOLINFOW, 0, (LPARAM)&ti));
+	CHECK(!strcmp(a(buf), "Second") && ti.rect.left == 50);
+	ti.uId = 3;
+	CHECK(SendMessageW(h, TTM_GETTOOLINFOW, 0, (LPARAM)&ti));
+	CHECK(ti.lpszText == LPSTR_TEXTCALLBACKW && ti.lParam == 4);
+	ti.uId = 77;
+	CHECK(!SendMessageW(h, TTM_GETTOOLINFOW, 0, (LPARAM)&ti));
+	ti.lpszText = buf;
+	CHECK(SendMessageW(h, TTM_ENUMTOOLSW, 1, (LPARAM)&ti));
+	CHECK(ti.uId == 2 && !strcmp(a(buf), "Second"));
+	CHECK(!SendMessageW(h, TTM_ENUMTOOLSW, 4, (LPARAM)&ti));
+	ti.uId = 1;
+	ti.lpszText = (LPWSTR)u"Changed";
+	SendMessageW(h, TTM_UPDATETIPTEXTW, 0, (LPARAM)&ti);
+	set_rect(&ti.rect, 0, 20, 50, 40);
+	SendMessageW(h, TTM_NEWTOOLRECTW, 0, (LPARAM)&ti);
+	ti.lpszText = buf;
+	CHECK(SendMessageW(h, TTM_GETTOOLINFOW, 0, (LPARAM)&ti));
+	CHECK(!strcmp(a(buf), "Changed") && ti.rect.top == 20);
+
+	/* Hit test. */
+	TTHITTESTINFOW hi;
+	memset(&hi, 0, sizeof(hi));
+	hi.hwnd = parent;
+	hi.pt.x = 60;
+	hi.pt.y = 5;
+	hi.ti.cbSize = sizeof(hi.ti);
+	hi.ti.lpszText = buf;
+	CHECK(SendMessageW(h, TTM_HITTESTW, 0, (LPARAM)&hi));
+	CHECK(hi.ti.uId == 2);
+	hi.pt.x = 10;
+	CHECK(!SendMessageW(h, TTM_HITTESTW, 0, (LPARAM)&hi));
+
+	/* Relayed mouse moves show and hide the tip. */
+	MSG m;
+	memset(&m, 0, sizeof(m));
+	m.hwnd = parent;
+	m.message = WM_MOUSEMOVE;
+	m.lParam = MAKELPARAM(60, 5);
+	ncodes = 0;
+	SendMessageW(h, TTM_RELAYEVENT, 0, (LPARAM)&m);
+	CHECK_EQ(seen(TTN_SHOW), 1);
+	memset(&ti, 0, sizeof(ti));
+	ti.cbSize = sizeof(ti);
+	CHECK(SendMessageW(h, TTM_GETCURRENTTOOLW, 0, (LPARAM)&ti) &&
+	      ti.uId == 2);
+	m.lParam = MAKELPARAM(300, 5);
+	SendMessageW(h, TTM_RELAYEVENT, 0, (LPARAM)&m);
+	CHECK_EQ(seen(TTN_POP), 1);
+	CHECK(!SendMessageW(h, TTM_GETCURRENTTOOLW, 0, 0));
+	SendMessageW(h, TTM_ACTIVATE, FALSE, 0);
+	m.lParam = MAKELPARAM(60, 5);
+	SendMessageW(h, TTM_RELAYEVENT, 0, (LPARAM)&m);
+	CHECK_EQ(seen(TTN_SHOW), 1);
+	SendMessageW(h, TTM_ACTIVATE, TRUE, 0);
+
+	/* Settings. */
+	CHECK_EQ(SendMessageW(h, TTM_GETDELAYTIME, TTDT_INITIAL, 0), 500);
+	CHECK_EQ(SendMessageW(h, TTM_GETDELAYTIME, TTDT_AUTOPOP, 0), 5000);
+	SendMessageW(h, TTM_SETDELAYTIME, TTDT_INITIAL, 200);
+	CHECK_EQ(SendMessageW(h, TTM_GETDELAYTIME, TTDT_RESHOW, 0), 40);
+	SendMessageW(h, TTM_SETDELAYTIME, TTDT_AUTOMATIC, 1000);
+	CHECK_EQ(SendMessageW(h, TTM_GETDELAYTIME, TTDT_AUTOPOP, 0), 10000);
+	SendMessageW(h, TTM_SETDELAYTIME, TTDT_AUTOMATIC, -1);
+	CHECK_EQ(SendMessageW(h, TTM_GETDELAYTIME, TTDT_INITIAL, 0), 500);
+	CHECK_EQ(SendMessageW(h, TTM_SETMAXTIPWIDTH, 0, 120), -1);
+	CHECK_EQ(SendMessageW(h, TTM_GETMAXTIPWIDTH, 0, 0), 120);
+	SendMessageW(h, TTM_SETTIPBKCOLOR, RGB(1, 2, 3), 0);
+	CHECK_EQ(SendMessageW(h, TTM_GETTIPBKCOLOR, 0, 0), RGB(1, 2, 3));
+	RECT mg = { 1, 2, 3, 4 }, mg2;
+	SendMessageW(h, TTM_SETMARGIN, 0, (LPARAM)&mg);
+	SendMessageW(h, TTM_GETMARGIN, 0, (LPARAM)&mg2);
+	CHECK(!memcmp(&mg, &mg2, sizeof(mg)));
+	RECT r = { 10, 10, 20, 20 };
+	CHECK(SendMessageW(h, TTM_ADJUSTRECT, TRUE, (LPARAM)&r));
+	CHECK(SendMessageW(h, TTM_ADJUSTRECT, FALSE, (LPARAM)&r));
+	CHECK(r.left == 10 && r.top == 10 && r.right == 20 && r.bottom == 20);
+	CHECK(SendMessageA(h, TTM_SETTITLEA, TTI_INFO, (LPARAM)"Title"));
+	TTGETTITLE gt = { sizeof(gt), 0, 32, buf };
+	SendMessageW(h, TTM_GETTITLE, 0, (LPARAM)&gt);
+	CHECK(!strcmp(a(buf), "Title") && gt.uTitleBitmap == TTI_INFO);
+	memset(&ti, 0, sizeof(ti));
+	ti.cbSize = sizeof(ti);
+	ti.hwnd = parent;
+	ti.uId = 2;
+	LRESULT bs = SendMessageW(h, TTM_GETBUBBLESIZE, 0, (LPARAM)&ti);
+	CHECK(LOWORD(bs) > 0 && HIWORD(bs) > 16);
+
+	/* Tracking needs TTF_TRACK. */
+	ncodes = 0;
+	SendMessageW(h, TTM_TRACKACTIVATE, TRUE, (LPARAM)&ti);
+	CHECK_EQ(seen(TTN_SHOW), 0);
+	ti.uId = 5;
+	ti.uFlags = TTF_TRACK | TTF_ABSOLUTE;
+	ti.lpszText = (LPWSTR)u"Tracked";
+	CHECK(SendMessageW(h, TTM_ADDTOOLW, 0, (LPARAM)&ti));
+	SendMessageW(h, TTM_TRACKACTIVATE, TRUE, (LPARAM)&ti);
+	CHECK_EQ(seen(TTN_SHOW), 1);
+	SendMessageW(h, TTM_TRACKPOSITION, 0, MAKELPARAM(30, 40));
+	SendMessageW(h, TTM_TRACKACTIVATE, FALSE, 0);
+	CHECK_EQ(seen(TTN_POP), 1);
+
+	/* TTF_SUBCLASS: the tool window's own mouse moves are relayed. */
+	HWND child = make("STATIC", 0, 40, 40);
+	memset(&ti, 0, sizeof(ti));
+	ti.cbSize = sizeof(ti);
+	ti.hwnd = parent;
+	ti.uId = (UINT_PTR)child;
+	ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+	ti.lpszText = (LPWSTR)u"Child";
+	CHECK(SendMessageW(h, TTM_ADDTOOLW, 0, (LPARAM)&ti));
+	ncodes = 0;
+	SendMessageW(child, WM_MOUSEMOVE, 0, MAKELPARAM(5, 5));
+	CHECK_EQ(seen(TTN_SHOW), 1);
+	SendMessageW(child, WM_LBUTTONDOWN, 0, MAKELPARAM(5, 5));
+	CHECK_EQ(seen(TTN_POP), 1);
+	SendMessageW(h, TTM_DELTOOLW, 0, (LPARAM)&ti);
+	ncodes = 0;
+	SendMessageW(child, WM_MOUSEMOVE, 0, MAKELPARAM(5, 5));
+	CHECK_EQ(seen(TTN_SHOW), 0);
+	CHECK(DestroyWindow(child));
+
+	/* Deleting. */
+	ti.uId = 2;
+	ti.uFlags = 0;
+	SendMessageW(h, TTM_DELTOOLW, 0, (LPARAM)&ti);
+	CHECK_EQ(SendMessageW(h, TTM_GETTOOLCOUNT, 0, 0), 4);
+	CHECK(!SendMessageW(h, TTM_GETTOOLINFOW, 0, (LPARAM)&ti));
+	CHECK(DestroyWindow(h));
+}
+
 static void test_list_controls(void)
 {
 	USER_WLP(Set, HWND, int, LONG_PTR);
@@ -1779,6 +2227,8 @@ static void test_list_controls(void)
 	test_header();
 	test_listview();
 	test_treeview();
+	test_toolbar();
+	test_tooltip();
 }
 
 static void test_ordinals(void)

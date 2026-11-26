@@ -274,6 +274,9 @@ typedef struct tagMONITORINFO {
 #define WM_GETFONT           0x0031
 #define WM_NOTIFY            0x004E
 #define WM_NOTIFYFORMAT      0x0055
+#define WM_MOUSEMOVE         0x0200
+#define WM_LBUTTONDOWN       0x0201
+#define WM_LBUTTONUP         0x0202
 #define WM_STYLECHANGING     0x007C
 #define WM_STYLECHANGED      0x007D
 #define NFR_ANSI             1
