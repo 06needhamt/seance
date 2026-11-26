@@ -998,6 +998,7 @@ BOOL WINAPI user_DestroyWindow(HWND hwnd)
 
 /* DefWindowProc: text, WM_CLOSE, and nothing else to do headless. */
 static LRESULT def_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, int unicode);
+WINFN(BOOL) user_IsWindowUnicode(HWND hwnd);
 
 static LRESULT def_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, int unicode)
 {
@@ -1048,6 +1049,12 @@ static LRESULT def_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, int unicode)
 		return 0;
 	case WM_ERASEBKGND:
 		return 1;
+	case WM_NOTIFYFORMAT:
+		/* How the controls should notify this window. */
+		if (lp == NF_QUERY)
+			return user_IsWindowUnicode(hwnd) ? NFR_UNICODE :
+							    NFR_ANSI;
+		return 0;
 	default:
 		return 0;
 	}

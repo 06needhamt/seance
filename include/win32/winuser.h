@@ -273,6 +273,13 @@ typedef struct tagMONITORINFO {
 #define WM_SETFONT           0x0030
 #define WM_GETFONT           0x0031
 #define WM_NOTIFY            0x004E
+#define WM_NOTIFYFORMAT      0x0055
+#define WM_STYLECHANGING     0x007C
+#define WM_STYLECHANGED      0x007D
+#define NFR_ANSI             1
+#define NFR_UNICODE          2
+#define NF_QUERY             3
+#define NF_REQUERY           4
 #define WM_WINDOWPOSCHANGING 0x0046
 #define WM_WINDOWPOSCHANGED  0x0047
 #define WM_NCCREATE          0x0081
@@ -458,6 +465,17 @@ typedef const SCROLLINFO *LPCSCROLLINFO;
 #define UOI_NAME    2
 #define UOI_TYPE    3
 #define WSF_VISIBLE 0x0001
+
+/* WM_WINDOWPOSCHANGING/CHANGED, and HDM_LAYOUT's answer. */
+typedef struct tagWINDOWPOS {
+	HWND hwnd;
+	HWND hwndInsertAfter;
+	int x;
+	int y;
+	int cx;
+	int cy;
+	UINT flags;
+} WINDOWPOS, *LPWINDOWPOS, *PWINDOWPOS;
 
 /* WM_NOTIFY's header, and _TrackMouseEvent's request. */
 typedef struct tagNMHDR {

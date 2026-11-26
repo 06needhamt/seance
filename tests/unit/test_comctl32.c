@@ -1212,6 +1212,575 @@ static void test_misc(void)
 	CHECK_EQ(LBItemFromPt(NULL, pt, FALSE), -1);
 }
 
+
+static int CALLBACK by_param_desc(LPARAM a1, LPARAM a2, LPARAM sort)
+{
+	return a1 < a2 ? 1 : a1 > a2 ? -1 : 0;
+}
+
+static int CALLBACK tv_by_param_desc(LPARAM a1, LPARAM a2, LPARAM sort)
+{
+	return a1 < a2 ? 1 : a1 > a2 ? -1 : 0;
+}
+
+/* Header, list view and tree view: a parent that records notifications,
+ * refuses changes when asked to, and answers GETDISPINFO. */
+
+static UINT codes[64];
+static int ncodes;
+static BOOL refuse;		/* ITEMCHANGING, SELCHANGING, ITEMEXPANDING */
+static NMLISTVIEW last_lv;
+static NMTREEVIEWW last_tv;
+static int deleted_tv;
+
+static int seen(UINT code)
+{
+	int n = 0;
+
+	for (int i = 0; i < ncodes; i++)
+		n += codes[i] == code;
+	return n;
+}
+
+static LRESULT WINAPI record_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
+{
+	USER(LRESULT, DefWindowProcW, HWND, UINT, WPARAM, LPARAM);
+	if (m != WM_NOTIFY)
+		return DefWindowProcW(h, m, wp, lp);
+	NMHDR *hdr = (NMHDR *)lp;
+	if (ncodes < 64)
+		codes[ncodes++] = hdr->code;
+	switch (hdr->code) {
+	case LVN_ITEMCHANGING:
+		last_lv = *(NMLISTVIEW *)lp;
+		return refuse;
+	case LVN_ITEMCHANGED:
+	case LVN_INSERTITEM:
+	case LVN_DELETEITEM:
+		last_lv = *(NMLISTVIEW *)lp;
+		return 0;
+	case LVN_GETDISPINFOW: {
+		NMLVDISPINFOW *d = (NMLVDISPINFOW *)lp;
+		if (d->item.mask & LVIF_TEXT) {
+			static WCHAR t[16];
+			t[0] = 'c';
+			t[1] = '0' + (WCHAR)d->item.iItem;
+			t[2] = '0' + (WCHAR)d->item.iSubItem;
+			t[3] = 0;
+			d->item.pszText = t;	/* (its own string) */
+		}
+		if (d->item.mask & LVIF_IMAGE)
+			d->item.iImage = 7;
+		return 0;
+	}
+	case TVN_SELCHANGINGW:
+	case TVN_ITEMEXPANDINGW:
+		last_tv = *(NMTREEVIEWW *)lp;
+		return refuse;
+	case TVN_SELCHANGEDW:
+	case TVN_ITEMEXPANDEDW:
+		last_tv = *(NMTREEVIEWW *)lp;
+		return 0;
+	case TVN_DELETEITEMW:
+		deleted_tv++;
+		return 0;
+	case TVN_GETDISPINFOW: {
+		NMTVDISPINFOW *d = (NMTVDISPINFOW *)lp;
+		if (d->item.mask & TVIF_TEXT) {
+			WCHAR *t = d->item.pszText;
+			if (t && d->item.cchTextMax >= 4) {
+				t[0] = 'c';
+				t[1] = 'b';
+				t[2] = (WCHAR)('0' + d->item.lParam);
+				t[3] = 0;
+			}
+		}
+		if (d->item.mask & TVIF_CHILDREN)
+			d->item.cChildren = 1;
+		return 0;
+	}
+	case HDN_ITEMCHANGINGW:
+		return refuse;
+	}
+	return 0;
+}
+
+static void test_header(void)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	USER(LRESULT, SendMessageA, HWND, UINT, WPARAM, LPARAM);
+	USER(BOOL, DestroyWindow, HWND);
+	HWND h = make("SysHeader32", HDS_BUTTONS, 300, 20);
+	HDITEMW it;
+	WCHAR buf[32];
+
+	CHECK(h != NULL);
+	if (!h)
+		return;
+	CHECK_EQ(SendMessageW(h, HDM_GETITEMCOUNT, 0, 0), 0);
+	static const char *const names[3] = { "Name", "Size", "Type" };
+	for (int i = 0; i < 3; i++) {
+		memset(&it, 0, sizeof(it));
+		it.mask = HDI_TEXT | HDI_WIDTH | HDI_FORMAT | HDI_LPARAM;
+		it.pszText = w(names[i]);
+		it.cxy = 50 + 10 * i;
+		it.fmt = HDF_STRING | HDF_LEFT;
+		it.lParam = 100 + i;
+		CHECK_EQ(SendMessageW(h, HDM_INSERTITEMW, 10, (LPARAM)&it), i);
+	}
+	/* An ANSI one in front. */
+	HDITEMA ia;
+	memset(&ia, 0, sizeof(ia));
+	ia.mask = HDI_TEXT | HDI_WIDTH;
+	ia.pszText = (LPSTR)"First";
+	ia.cxy = 40;
+	CHECK_EQ(SendMessageA(h, HDM_INSERTITEMA, 0, (LPARAM)&ia), 0);
+	CHECK_EQ(SendMessageW(h, HDM_GETITEMCOUNT, 0, 0), 4);
+
+	memset(&it, 0, sizeof(it));
+	it.mask = HDI_TEXT | HDI_WIDTH | HDI_LPARAM | HDI_ORDER;
+	it.pszText = buf;
+	it.cchTextMax = 32;
+	CHECK(SendMessageW(h, HDM_GETITEMW, 2, (LPARAM)&it));
+	CHECK(!strcmp(a(buf), "Size") && it.cxy == 60 && it.lParam == 101 &&
+	      it.iOrder == 2);
+	char abuf[32];
+	ia.mask = HDI_TEXT;
+	ia.pszText = abuf;
+	ia.cchTextMax = 3;
+	CHECK(SendMessageA(h, HDM_GETITEMA, 0, (LPARAM)&ia));
+	CHECK(!strcmp(abuf, "Fi"));
+
+	RECT rc;
+	CHECK(SendMessageW(h, HDM_GETITEMRECT, 2, (LPARAM)&rc));
+	CHECK(rc.left == 90 && rc.right == 150);
+
+	/* Order: Type first. */
+	int order[4] = { 3, 0, 1, 2 }, got[4];
+	CHECK(SendMessageW(h, HDM_SETORDERARRAY, 4, (LPARAM)order));
+	CHECK(SendMessageW(h, HDM_GETORDERARRAY, 4, (LPARAM)got));
+	CHECK(!memcmp(order, got, sizeof(got)));
+	CHECK_EQ(SendMessageW(h, HDM_ORDERTOINDEX, 0, 0), 3);
+	int bad[4] = { 0, 0, 1, 2 };
+	CHECK(!SendMessageW(h, HDM_SETORDERARRAY, 4, (LPARAM)bad));
+	CHECK(SendMessageW(h, HDM_GETITEMRECT, 3, (LPARAM)&rc));
+	CHECK(rc.left == 0 && rc.right == 70);
+	CHECK(SendMessageW(h, HDM_GETITEMRECT, 0, (LPARAM)&rc));
+	CHECK(rc.left == 70 && rc.right == 110);
+
+	HDHITTESTINFO ht;
+	ht.pt.x = 80;
+	ht.pt.y = 5;
+	CHECK_EQ(SendMessageW(h, HDM_HITTEST, 0, (LPARAM)&ht), 0);
+	CHECK(ht.flags == HHT_ONHEADER && ht.iItem == 0);
+	ht.pt.x = 109;
+	SendMessageW(h, HDM_HITTEST, 0, (LPARAM)&ht);
+	CHECK(ht.flags == HHT_ONDIVIDER && ht.iItem == 0);
+	ht.pt.x = 290;
+	CHECK_EQ(SendMessageW(h, HDM_HITTEST, 0, (LPARAM)&ht), -1);
+	CHECK_EQ(ht.flags, HHT_NOWHERE);
+
+	/* Setting tells the parent, which can refuse. */
+	ncodes = 0;
+	memset(&it, 0, sizeof(it));
+	it.mask = HDI_WIDTH;
+	it.cxy = 99;
+	CHECK(SendMessageW(h, HDM_SETITEMW, 1, (LPARAM)&it));
+	CHECK(seen(HDN_ITEMCHANGINGW) == 1 && seen(HDN_ITEMCHANGEDW) == 1);
+	refuse = TRUE;
+	it.cxy = 5;
+	CHECK(!SendMessageW(h, HDM_SETITEMW, 1, (LPARAM)&it));
+	refuse = FALSE;
+	it.mask = HDI_WIDTH;
+	SendMessageW(h, HDM_GETITEMW, 1, (LPARAM)&it);
+	CHECK_EQ(it.cxy, 99);
+
+	/* Deleting keeps the order of the rest. */
+	CHECK(SendMessageW(h, HDM_DELETEITEM, 0, 0));
+	CHECK_EQ(SendMessageW(h, HDM_GETITEMCOUNT, 0, 0), 3);
+	CHECK(SendMessageW(h, HDM_GETORDERARRAY, 3, (LPARAM)got));
+	CHECK(got[0] == 2 && got[1] == 0 && got[2] == 1);
+	CHECK(!SendMessageW(h, HDM_DELETEITEM, 7, 0));
+
+	RECT lr = { 0, 0, 300, 200 };
+	WINDOWPOS wpos;
+	HDLAYOUT lay = { &lr, &wpos };
+	CHECK(SendMessageW(h, HDM_LAYOUT, 0, (LPARAM)&lay));
+	CHECK(wpos.cy > 0 && lr.top == wpos.cy && wpos.cx == 300);
+	CHECK_EQ(SendMessageW(h, HDM_GETBITMAPMARGIN, 0, 0), 6);
+	CHECK(DestroyWindow(h));
+}
+
+static void test_listview(void)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	USER(LRESULT, SendMessageA, HWND, UINT, WPARAM, LPARAM);
+	USER(BOOL, DestroyWindow, HWND);
+	HWND h = make("SysListView32", LVS_REPORT, 300, 200);
+	LVITEMW it;
+	WCHAR buf[32];
+
+	CHECK(h != NULL);
+	if (!h)
+		return;
+	HWND hdr = (HWND)SendMessageW(h, LVM_GETHEADER, 0, 0);
+	CHECK(hdr != NULL);
+	LVCOLUMNW col;
+	memset(&col, 0, sizeof(col));
+	col.mask = LVCF_TEXT | LVCF_WIDTH;
+	col.pszText = w("Name");
+	col.cx = 100;
+	CHECK_EQ(SendMessageW(h, LVM_INSERTCOLUMNW, 0, (LPARAM)&col), 0);
+	col.pszText = w("Size");
+	col.cx = 60;
+	CHECK_EQ(SendMessageW(h, LVM_INSERTCOLUMNW, 1, (LPARAM)&col), 1);
+	CHECK_EQ(SendMessageW(hdr, HDM_GETITEMCOUNT, 0, 0), 2);
+
+	ncodes = 0;
+	static const char *const names[3] = { "beta", "alpha", "gamma" };
+	for (int i = 0; i < 3; i++) {
+		memset(&it, 0, sizeof(it));
+		it.mask = LVIF_TEXT | LVIF_PARAM;
+		it.iItem = i;
+		it.pszText = w(names[i]);
+		it.lParam = 10 + i;
+		CHECK_EQ(SendMessageW(h, LVM_INSERTITEMW, 0, (LPARAM)&it), i);
+	}
+	CHECK_EQ(seen(LVN_INSERTITEM), 3);
+	CHECK_EQ(last_lv.lParam, 12);
+	CHECK_EQ(SendMessageW(h, LVM_GETITEMCOUNT, 0, 0), 3);
+
+	/* Subitem text, A and W. */
+	memset(&it, 0, sizeof(it));
+	it.iSubItem = 1;
+	it.pszText = w("12 KB");
+	CHECK(SendMessageW(h, LVM_SETITEMTEXTW, 0, (LPARAM)&it));
+	LVITEMA ia;
+	char abuf[32];
+	memset(&ia, 0, sizeof(ia));
+	ia.iSubItem = 1;
+	ia.pszText = abuf;
+	ia.cchTextMax = 32;
+	CHECK_EQ(SendMessageA(h, LVM_GETITEMTEXTA, 0, (LPARAM)&ia), 5);
+	CHECK(!strcmp(abuf, "12 KB"));
+	ia.iSubItem = 0;
+	ia.cchTextMax = 3;
+	CHECK_EQ(SendMessageA(h, LVM_GETITEMTEXTA, 2, (LPARAM)&ia), 2);
+	CHECK(!strcmp(abuf, "ga"));
+
+	/* States: ITEMCHANGING can refuse; single selection. */
+	ncodes = 0;
+	memset(&it, 0, sizeof(it));
+	it.state = LVIS_SELECTED | LVIS_FOCUSED;
+	it.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
+	CHECK(SendMessageW(h, LVM_SETITEMSTATE, 1, (LPARAM)&it));
+	CHECK(seen(LVN_ITEMCHANGING) == 1 && seen(LVN_ITEMCHANGED) == 1);
+	CHECK(last_lv.iItem == 1 && last_lv.uNewState == it.state &&
+	      last_lv.uOldState == 0 && last_lv.uChanged == LVIF_STATE);
+	CHECK_EQ(SendMessageW(h, LVM_GETITEMSTATE, 1, LVIS_SELECTED),
+		 LVIS_SELECTED);
+	it.state = it.stateMask = LVIS_SELECTED;
+	SendMessageW(h, LVM_SETITEMSTATE, 2, (LPARAM)&it);
+	CHECK_EQ(SendMessageW(h, LVM_GETSELECTEDCOUNT, 0, 0), 2);
+	refuse = TRUE;
+	it.state = 0;
+	CHECK(!SendMessageW(h, LVM_SETITEMSTATE, 2, (LPARAM)&it));
+	refuse = FALSE;
+	CHECK_EQ(SendMessageW(h, LVM_GETSELECTEDCOUNT, 0, 0), 2);
+	CHECK_EQ(SendMessageW(h, LVM_GETNEXTITEM, -1, LVNI_SELECTED), 1);
+	CHECK_EQ(SendMessageW(h, LVM_GETNEXTITEM, 1, LVNI_SELECTED), 2);
+	CHECK_EQ(SendMessageW(h, LVM_GETNEXTITEM, 2, LVNI_SELECTED), -1);
+	CHECK_EQ(SendMessageW(h, LVM_GETNEXTITEM, -1, LVNI_FOCUSED), 1);
+	CHECK_EQ(SendMessageW(h, LVM_GETNEXTITEM, 2, LVNI_ABOVE), 1);
+	/* Clearing them all. */
+	it.state = 0;
+	it.stateMask = LVIS_SELECTED;
+	CHECK(SendMessageW(h, LVM_SETITEMSTATE, -1, (LPARAM)&it));
+	CHECK_EQ(SendMessageW(h, LVM_GETSELECTEDCOUNT, 0, 0), 0);
+
+	/* Finding. */
+	LVFINDINFOW f;
+	memset(&f, 0, sizeof(f));
+	f.flags = LVFI_STRING;
+	f.psz = w("ALPHA");
+	CHECK_EQ(SendMessageW(h, LVM_FINDITEMW, -1, (LPARAM)&f), 1);
+	f.flags = LVFI_PARTIAL | LVFI_STRING;
+	f.psz = w("g");
+	CHECK_EQ(SendMessageW(h, LVM_FINDITEMW, -1, (LPARAM)&f), 2);
+	f.flags = LVFI_PARAM;
+	f.lParam = 10;
+	CHECK_EQ(SendMessageW(h, LVM_FINDITEMW, 0, (LPARAM)&f), -1);
+	f.flags = LVFI_PARAM | LVFI_WRAP;
+	CHECK_EQ(SendMessageW(h, LVM_FINDITEMW, 0, (LPARAM)&f), 0);
+
+	/* Sorting by lParam, descending. */
+	CHECK(SendMessageW(h, LVM_SORTITEMS, 0, (LPARAM)by_param_desc));
+	memset(&it, 0, sizeof(it));
+	it.mask = LVIF_PARAM | LVIF_TEXT;
+	it.pszText = buf;
+	it.cchTextMax = 32;
+	SendMessageW(h, LVM_GETITEMW, 0, (LPARAM)&it);
+	CHECK(it.lParam == 12 && !strcmp(a(buf), "gamma"));
+	it.iItem = 2;
+	SendMessageW(h, LVM_GETITEMW, 0, (LPARAM)&it);
+	CHECK_EQ(it.lParam, 10);
+
+	/* A callback item asks the parent. */
+	memset(&it, 0, sizeof(it));
+	it.mask = LVIF_TEXT | LVIF_IMAGE;
+	it.iItem = 3;
+	it.pszText = LPSTR_TEXTCALLBACKW;
+	it.iImage = I_IMAGECALLBACK;
+	CHECK_EQ(SendMessageW(h, LVM_INSERTITEMW, 0, (LPARAM)&it), 3);
+	it.pszText = buf;
+	it.cchTextMax = 32;
+	it.iImage = 0;
+	CHECK(SendMessageW(h, LVM_GETITEMW, 0, (LPARAM)&it));
+	CHECK(!strcmp(a(buf), "c30") && it.iImage == 7);
+	CHECK_EQ(SendMessageA(h, LVM_GETITEMTEXTA, 3, (LPARAM)&ia), 2);
+
+	/* Geometry: report rows under the header. */
+	RECT r0, r1;
+	r0.left = r1.left = LVIR_BOUNDS;
+	CHECK(SendMessageW(h, LVM_GETITEMRECT, 0, (LPARAM)&r0));
+	CHECK(SendMessageW(h, LVM_GETITEMRECT, 1, (LPARAM)&r1));
+	CHECK(r0.top > 0 && r1.top == r0.bottom && r0.right == 160);
+	LVHITTESTINFO ht;
+	memset(&ht, 0, sizeof(ht));
+	ht.pt.x = 120;
+	ht.pt.y = r1.top + 1;
+	CHECK_EQ(SendMessageW(h, LVM_SUBITEMHITTEST, 0, (LPARAM)&ht), 1);
+	CHECK(ht.iSubItem == 1 && (ht.flags & LVHT_ONITEM));
+	ht.pt.y = 190;
+	CHECK_EQ(SendMessageW(h, LVM_HITTEST, 0, (LPARAM)&ht), -1);
+	CHECK_EQ(SendMessageW(h, LVM_GETCOLUMNWIDTH, 1, 0), 60);
+	CHECK(SendMessageW(h, LVM_SETCOLUMNWIDTH, 1, 80));
+	HDITEMW hi;
+	memset(&hi, 0, sizeof(hi));
+	hi.mask = HDI_WIDTH;
+	SendMessageW(hdr, HDM_GETITEMW, 1, (LPARAM)&hi);
+	CHECK_EQ(hi.cxy, 80);
+
+	/* Views and styles. */
+	CHECK_EQ(SendMessageW(h, LVM_GETVIEW, 0, 0), LV_VIEW_DETAILS);
+	CHECK_EQ(SendMessageW(h, LVM_SETVIEW, LV_VIEW_LIST, 0), 1);
+	CHECK_EQ(SendMessageW(h, LVM_GETVIEW, 0, 0), LV_VIEW_LIST);
+	CHECK_EQ(SendMessageW(h, LVM_SETEXTENDEDLISTVIEWSTYLE,
+			      LVS_EX_FULLROWSELECT, LVS_EX_FULLROWSELECT |
+			      LVS_EX_GRIDLINES), 0);
+	CHECK_EQ(SendMessageW(h, LVM_GETEXTENDEDLISTVIEWSTYLE, 0, 0),
+		 LVS_EX_FULLROWSELECT);
+	CHECK_EQ(SendMessageW(h, LVM_SETVIEW, LV_VIEW_ICON, 0), 1);
+	POINT pt = { 33, 44 };
+	CHECK(SendMessageW(h, LVM_SETITEMPOSITION32, 1, (LPARAM)&pt));
+	pt.x = pt.y = 0;
+	CHECK(SendMessageW(h, LVM_GETITEMPOSITION, 1, (LPARAM)&pt));
+	CHECK(pt.x == 33 && pt.y == 44);
+	SendMessageW(h, LVM_SETVIEW, LV_VIEW_DETAILS, 0);
+
+	/* Deleting tells the parent; DELETEALLITEMS can say not to. */
+	ncodes = 0;
+	CHECK(SendMessageW(h, LVM_DELETEITEM, 0, 0));
+	CHECK(seen(LVN_DELETEITEM) == 1 && last_lv.lParam == 12);
+	CHECK(!SendMessageW(h, LVM_DELETEITEM, 9, 0));
+	ncodes = 0;
+	CHECK(SendMessageW(h, LVM_DELETEALLITEMS, 0, 0));
+	CHECK(seen(LVN_DELETEALLITEMS) == 1 && seen(LVN_DELETEITEM) == 3);
+	CHECK_EQ(SendMessageW(h, LVM_GETITEMCOUNT, 0, 0), 0);
+	CHECK(SendMessageW(h, LVM_DELETECOLUMN, 0, 0));
+	CHECK_EQ(SendMessageW(hdr, HDM_GETITEMCOUNT, 0, 0), 1);
+	CHECK(DestroyWindow(h));
+
+	/* An owner-data list view keeps only its count and states. */
+	h = make("SysListView32", LVS_REPORT | LVS_OWNERDATA, 300, 200);
+	CHECK(SendMessageW(h, LVM_SETITEMCOUNT, 1000, 0));
+	CHECK_EQ(SendMessageW(h, LVM_GETITEMCOUNT, 0, 0), 1000);
+	memset(&it, 0, sizeof(it));
+	it.state = it.stateMask = LVIS_SELECTED;
+	CHECK(SendMessageW(h, LVM_SETITEMSTATE, 500, (LPARAM)&it));
+	CHECK_EQ(SendMessageW(h, LVM_GETNEXTITEM, -1, LVNI_SELECTED), 500);
+	memset(&it, 0, sizeof(it));
+	it.mask = LVIF_TEXT;
+	it.iItem = 5;
+	it.iSubItem = 2;
+	it.pszText = buf;
+	it.cchTextMax = 32;
+	CHECK(SendMessageW(h, LVM_GETITEMW, 0, (LPARAM)&it));
+	CHECK(!strcmp(a(buf), "c52"));
+	CHECK(DestroyWindow(h));
+}
+
+static void test_treeview(void)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	USER(LRESULT, SendMessageA, HWND, UINT, WPARAM, LPARAM);
+	USER(BOOL, DestroyWindow, HWND);
+	HWND h = make("SysTreeView32", TVS_HASBUTTONS | TVS_HASLINES, 200,
+		      160);
+	TVINSERTSTRUCTW ins;
+	WCHAR buf[32];
+
+	CHECK(h != NULL);
+	if (!h)
+		return;
+#define ADD(par, after, txt, param) \
+	(memset(&ins, 0, sizeof(ins)), ins.hParent = (par), \
+	 ins.hInsertAfter = (after), \
+	 ins.item.mask = TVIF_TEXT | TVIF_PARAM, ins.item.pszText = w(txt), \
+	 ins.item.lParam = (param), \
+	 (HTREEITEM)SendMessageW(h, TVM_INSERTITEMW, 0, (LPARAM)&ins))
+	HTREEITEM fruit = ADD(TVI_ROOT, TVI_LAST, "fruit", 1);
+	HTREEITEM veg = ADD(TVI_ROOT, TVI_LAST, "veg", 2);
+	HTREEITEM pear = ADD(fruit, TVI_LAST, "pear", 3);
+	HTREEITEM apple = ADD(fruit, TVI_SORT, "apple", 4);
+	HTREEITEM fig = ADD(fruit, TVI_SORT, "fig", 5);
+	HTREEITEM top = ADD(TVI_ROOT, TVI_FIRST, "top", 6);
+	CHECK(fruit && veg && pear && apple && fig && top);
+	CHECK_EQ(SendMessageW(h, TVM_GETCOUNT, 0, 0), 6);
+
+	/* Order and navigation. */
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_ROOT, 0) == top);
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_NEXT,
+				      (LPARAM)top) == fruit);
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_CHILD,
+				      (LPARAM)fruit) == apple);
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_NEXT,
+				      (LPARAM)apple) == fig);
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_NEXT,
+				      (LPARAM)fig) == pear);
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_PARENT,
+				      (LPARAM)fig) == fruit);
+	CHECK(!SendMessageW(h, TVM_GETNEXTITEM, TVGN_PARENT, (LPARAM)fruit));
+	/* Children are hidden until fruit is expanded. */
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_NEXTVISIBLE,
+				      (LPARAM)fruit) == veg);
+
+	TVITEMW it;
+	memset(&it, 0, sizeof(it));
+	it.mask = TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN;
+	it.hItem = fruit;
+	it.pszText = buf;
+	it.cchTextMax = 32;
+	CHECK(SendMessageW(h, TVM_GETITEMW, 0, (LPARAM)&it));
+	CHECK(!strcmp(a(buf), "fruit") && it.lParam == 1 && it.cChildren == 1);
+	TVITEMA ia;
+	char abuf[8];
+	memset(&ia, 0, sizeof(ia));
+	ia.mask = TVIF_TEXT;
+	ia.hItem = apple;
+	ia.pszText = abuf;
+	ia.cchTextMax = 4;
+	CHECK(SendMessageA(h, TVM_GETITEMA, 0, (LPARAM)&ia));
+	CHECK(!strcmp(abuf, "app"));
+	it.hItem = (HTREEITEM)(ULONG_PTR)0x1234;
+	CHECK(!SendMessageW(h, TVM_GETITEMW, 0, (LPARAM)&it));
+
+	/* Expanding: refused, then told once. */
+	ncodes = 0;
+	refuse = TRUE;
+	CHECK(!SendMessageW(h, TVM_EXPAND, TVE_EXPAND, (LPARAM)fruit));
+	refuse = FALSE;
+	CHECK(SendMessageW(h, TVM_EXPAND, TVE_EXPAND, (LPARAM)fruit));
+	CHECK(seen(TVN_ITEMEXPANDINGW) == 2 && seen(TVN_ITEMEXPANDEDW) == 1);
+	CHECK(last_tv.action == TVE_EXPAND && last_tv.itemNew.hItem == fruit &&
+	      last_tv.itemNew.lParam == 1);
+	CHECK_EQ(SendMessageW(h, TVM_GETITEMSTATE, (WPARAM)fruit,
+			      TVIS_EXPANDED | TVIS_EXPANDEDONCE),
+		 TVIS_EXPANDED | TVIS_EXPANDEDONCE);
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_NEXTVISIBLE,
+				      (LPARAM)fruit) == apple);
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_PREVIOUSVISIBLE,
+				      (LPARAM)veg) == pear);
+	CHECK(!SendMessageW(h, TVM_EXPAND, TVE_EXPAND, (LPARAM)veg));
+	ncodes = 0;
+	CHECK(SendMessageW(h, TVM_EXPAND, TVE_COLLAPSE, (LPARAM)fruit));
+	CHECK(SendMessageW(h, TVM_EXPAND, TVE_TOGGLE, (LPARAM)fruit));
+	CHECK_EQ(ncodes, 0);	/* (expanded once) */
+
+	/* The caret: SELCHANGING can refuse. */
+	ncodes = 0;
+	CHECK(SendMessageW(h, TVM_SELECTITEM, TVGN_CARET, (LPARAM)fig));
+	CHECK(seen(TVN_SELCHANGINGW) == 1 && seen(TVN_SELCHANGEDW) == 1);
+	CHECK(last_tv.itemNew.hItem == fig && !last_tv.itemOld.hItem);
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_CARET, 0) == fig);
+	CHECK(SendMessageW(h, TVM_GETITEMSTATE, (WPARAM)fig, TVIS_SELECTED));
+	refuse = TRUE;
+	CHECK(!SendMessageW(h, TVM_SELECTITEM, TVGN_CARET, (LPARAM)veg));
+	refuse = FALSE;
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_CARET, 0) == fig);
+	/* Collapsing fruit moves it there. */
+	CHECK(SendMessageW(h, TVM_EXPAND, TVE_COLLAPSE, (LPARAM)fruit));
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_CARET, 0) ==
+	      fruit);
+
+	/* Rectangles: rows from the top, the text indented. */
+	SendMessageW(h, TVM_EXPAND, TVE_EXPAND, (LPARAM)fruit);
+	RECT rc;
+	memcpy(&rc, &fig, sizeof(fig));
+	CHECK(SendMessageW(h, TVM_GETITEMRECT, TRUE, (LPARAM)&rc));
+	CHECK(rc.top == 3 * 16 && rc.left == 19);
+	memcpy(&rc, &veg, sizeof(veg));
+	CHECK(SendMessageW(h, TVM_GETITEMRECT, FALSE, (LPARAM)&rc));
+	CHECK(rc.top == 5 * 16 && rc.left == 0 && rc.right == 200);
+	TVHITTESTINFO ht;
+	ht.pt.x = 30;
+	ht.pt.y = 3 * 16 + 4;
+	CHECK((HTREEITEM)SendMessageW(h, TVM_HITTEST, 0, (LPARAM)&ht) == fig);
+	CHECK(ht.flags & TVHT_ONITEMLABEL);
+	CHECK_EQ(SendMessageW(h, TVM_GETVISIBLECOUNT, 0, 0), 10);
+	CHECK_EQ(SendMessageW(h, TVM_SETITEMHEIGHT, 21, 0), 16);
+	CHECK_EQ(SendMessageW(h, TVM_GETITEMHEIGHT, 0, 0), 20);
+
+	/* Sorting by lParam, descending. */
+	TVSORTCB sc = { fruit, tv_by_param_desc, 0 };
+	CHECK(SendMessageW(h, TVM_SORTCHILDRENCB, FALSE, (LPARAM)&sc));
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_CHILD,
+				      (LPARAM)fruit) == fig);
+	CHECK(SendMessageW(h, TVM_SORTCHILDREN, FALSE, (LPARAM)fruit));
+	CHECK((HTREEITEM)SendMessageW(h, TVM_GETNEXTITEM, TVGN_CHILD,
+				      (LPARAM)fruit) == apple);
+
+	/* A callback item. */
+	memset(&ins, 0, sizeof(ins));
+	ins.hParent = veg;
+	ins.hInsertAfter = TVI_LAST;
+	ins.item.mask = TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN;
+	ins.item.pszText = LPSTR_TEXTCALLBACKW;
+	ins.item.lParam = 7;
+	ins.item.cChildren = I_CHILDRENCALLBACK;
+	HTREEITEM cb = (HTREEITEM)SendMessageW(h, TVM_INSERTITEMW, 0,
+					       (LPARAM)&ins);
+	memset(&it, 0, sizeof(it));
+	it.mask = TVIF_TEXT | TVIF_CHILDREN;
+	it.hItem = cb;
+	it.pszText = buf;
+	it.cchTextMax = 32;
+	CHECK(SendMessageW(h, TVM_GETITEMW, 0, (LPARAM)&it));
+	CHECK(!strcmp(a(buf), "cb7") && it.cChildren == 1);
+
+	/* Deleting: each item, children too, tells the parent. */
+	deleted_tv = 0;
+	CHECK(SendMessageW(h, TVM_DELETEITEM, 0, (LPARAM)fruit));
+	CHECK_EQ(deleted_tv, 4);
+	CHECK_EQ(SendMessageW(h, TVM_GETCOUNT, 0, 0), 3);
+	CHECK(!SendMessageW(h, TVM_GETNEXTITEM, TVGN_CARET, 0));
+	CHECK(!SendMessageW(h, TVM_DELETEITEM, 0, (LPARAM)fruit));
+	CHECK(SendMessageW(h, TVM_DELETEITEM, 0, (LPARAM)TVI_ROOT));
+	CHECK_EQ(deleted_tv, 7);
+	CHECK_EQ(SendMessageW(h, TVM_GETCOUNT, 0, 0), 0);
+	CHECK(DestroyWindow(h));
+#undef ADD
+}
+
+static void test_list_controls(void)
+{
+	USER_WLP(Set, HWND, int, LONG_PTR);
+	SetWindowLongPtrW(parent, GWLP_WNDPROC, (LONG_PTR)record_proc);
+	test_header();
+	test_listview();
+	test_treeview();
+}
+
 static void test_ordinals(void)
 {
 	static const struct {
@@ -1537,6 +2106,7 @@ int main(void)
 	test_sheets();
 	test_task_dialog();
 	test_misc();
+	test_list_controls();
 	DestroyWindow(parent);
 	test_ordinals();
 	test_fixture();

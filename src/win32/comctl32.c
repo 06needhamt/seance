@@ -178,6 +178,104 @@ static DWORD style_of(HWND h)
 	return (DWORD)api.GetWindowLongW(h, GWL_STYLE);
 }
 
+/* For the controls in the other source files (comctl.h). */
+WCHAR *comctl_a_to_w(const char *s) { return a_to_w(s); }
+char *comctl_w_to_a(const WCHAR *s) { return w_to_a(s); }
+WCHAR *comctl_w_dup(const WCHAR *s) { return w_dup(s); }
+
+int comctl_copy_text_out(const WCHAR *text, void *buf, int size, int wide)
+{
+	return copy_text_out(text, buf, size, wide);
+}
+
+void *comctl_state(HWND h) { API(); return state(h); }
+void comctl_set_state(HWND h, void *s) { API(); set_state(h, s); }
+DWORD comctl_style(HWND h) { API(); return style_of(h); }
+
+LRESULT comctl_def(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+	API();
+	return api.DefWindowProcW(h, msg, wp, lp);
+}
+
+LRESULT comctl_send(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+	API();
+	return api.SendMessageW(h, msg, wp, lp);
+}
+
+HWND comctl_parent(HWND h)
+{
+	API();
+	return api.GetParent(h);
+}
+
+BOOL comctl_client_rect(HWND h, RECT *rc)
+{
+	API();
+	return api.GetClientRect(h, rc);
+}
+
+HWND comctl_create(LPCWSTR cls, DWORD style, int x, int y, int cx, int cy,
+		   HWND parent, UINT id)
+{
+	API();
+	return api.CreateWindowExW(0, cls, NULL, style, x, y, cx, cy, parent,
+				   (HMENU)(UINT_PTR)id, NULL, NULL);
+}
+
+BOOL comctl_move(HWND h, int x, int y, int cx, int cy)
+{
+	API();
+	return api.SetWindowPos(h, NULL, x, y, cx, cy,
+				SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+/* How wide text is in the default font, in pixels. */
+int comctl_text_width(const WCHAR *text)
+{
+	SIZE sz = { 0, 0 };
+
+	API();
+	if (!text || !*text)
+		return 0;
+	HDC dc = api.CreateCompatibleDC(NULL);
+	if (!dc)
+		return 0;
+	api.GetTextExtentPoint32W(dc, text, (int)wstrlen(text), &sz);
+	api.DeleteDC(dc);
+	return sz.cx;
+}
+
+LONG comctl_set_style(HWND h, DWORD style)
+{
+	API();
+	return (LONG)api.SetWindowLongPtrW(h, GWL_STYLE, (LONG_PTR)style);
+}
+
+/* Whether the parent wants Unicode notifications (WM_NOTIFYFORMAT). */
+BOOL comctl_notify_unicode(HWND h)
+{
+	API();
+	HWND parent = api.GetParent(h);
+	if (!parent)
+		return TRUE;
+	LRESULT r = api.SendMessageW(parent, WM_NOTIFYFORMAT, (WPARAM)h,
+				     NF_QUERY);
+	if (r == NFR_ANSI)
+		return FALSE;
+	if (r == NFR_UNICODE)
+		return TRUE;
+	return api.IsWindowUnicode(parent);
+}
+
+static LRESULT notify(HWND to, HWND from, UINT code, NMHDR *hdr);
+
+LRESULT comctl_notify(HWND from, UINT code, NMHDR *hdr)
+{
+	return notify(NULL, from, code, hdr);
+}
+
 /* Trackbars. */
 
 struct trackbar {
@@ -924,9 +1022,9 @@ static const struct control_class {
 	{ "msctls_statusbar32", status_proc },
 	{ "ToolbarWindow32", NULL },
 	{ "tooltips_class32", NULL },
-	{ "SysListView32", NULL },
-	{ "SysHeader32", NULL },
-	{ "SysTreeView32", NULL },
+	{ "SysListView32", comctl_listview_proc },
+	{ "SysHeader32", comctl_header_proc },
+	{ "SysTreeView32", comctl_treeview_proc },
 	{ "SysTabControl32", NULL },
 	{ "msctls_hotkey32", NULL },
 	{ "SysAnimate32", NULL },
