@@ -167,6 +167,9 @@ typedef union _ULARGE_INTEGER {
 #define MAKEWORD(lo, hi)  ((WORD)(((BYTE)(lo)) | ((WORD)((BYTE)(hi))) << 8))
 #define MAKELONG(lo, hi)  ((LONG)(((WORD)(lo)) | ((DWORD)((WORD)(hi))) << 16))
 #define MAKELPARAM(lo, hi) ((LPARAM)(DWORD)MAKELONG(lo, hi))
+#define MAKEWPARAM(lo, hi) ((WPARAM)(DWORD)MAKELONG(lo, hi))
+#define LOBYTE(w)         ((BYTE)((DWORD_PTR)(w) & 0xff))
+#define HIBYTE(w)         ((BYTE)(((DWORD_PTR)(w) >> 8) & 0xff))
 #define LOWORD(l)         ((WORD)((DWORD_PTR)(l) & 0xffff))
 #define HIWORD(l)         ((WORD)((DWORD_PTR)(l) >> 16))
 

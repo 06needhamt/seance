@@ -739,6 +739,73 @@ static LRESULT call_proc(WNDPROC proc, int proc_unicode, HWND hwnd, UINT msg,
 		free(w);
 		return r;
 	}
+	case CB_GETLBTEXT:
+	case CB_GETLBTEXTLEN: {
+		/* A list item's text, in the procedure's charset, then in
+		 * the sender's, with the length in the sender's units. A
+		 * built-in control hands over one snapshot of the text
+		 * (WIN_LBTEXT_SNAPSHOT); for any other procedure the buffer
+		 * is as long as CB_GETLBTEXTLEN said, as for any sender. */
+		struct win_lbtext q = { 0, 0, NULL };
+		void *buf = NULL;
+		WCHAR *f = NULL;
+		const WCHAR *text;
+		proc(hwnd, WIN_LBTEXT_SNAPSHOT, wp, (LPARAM)&q);
+		if (q.done) {
+			if (q.result < 0)
+				return free(q.text), q.result;
+			buf = q.text;	/* always wide */
+			text = buf;
+		} else {
+			LRESULT n = proc(hwnd, CB_GETLBTEXTLEN, wp, 0);
+			if (n < 0)
+				return n;
+			buf = calloc((size_t)n + 1, sizeof(WCHAR));
+			if (!buf)
+				return CB_ERR;
+			r = proc(hwnd, CB_GETLBTEXT, wp, (LPARAM)buf);
+			if (r < 0)
+				return free(buf), r;
+			text = buf;
+			if (!proc_unicode)
+				text = wide_arg((const char *)buf, &f);
+		}
+		if (!text)
+			text = u"";
+		int len;
+		if (unicode) {
+			len = (int)wstrlen(text);
+		} else {
+			int k = cp_from_utf16(CP_ACP, text, -1, NULL, 0, '?',
+					      NULL);
+			len = k > 0 ? k - 1 : 0;
+		}
+		if (msg == CB_GETLBTEXT && lp)
+			len = copy_text(text, (void *)lp, len + 1, unicode);
+		free(f);
+		free(buf);
+		return len;
+	}
+	case CB_FINDSTRING:
+	case CB_FINDSTRINGEXACT: {
+		if (!lp || IS_INTRESOURCE(lp))
+			return proc(hwnd, msg, wp, lp);
+		void *s;
+		if (proc_unicode) {
+			WCHAR *f;
+			const WCHAR *w = wide_arg((const char *)lp, &f);
+			s = f ? (void *)f : (void *)w;
+			r = proc(hwnd, msg, wp, (LPARAM)s);
+			free(f);
+			return r;
+		}
+		char *u = utf16_to_utf8_dup((const WCHAR *)lp);
+		s = u ? utf8_to_acp_dup(u) : NULL;
+		free(u);
+		r = proc(hwnd, msg, wp, (LPARAM)s);
+		free(s);
+		return r;
+	}
 	case WM_NCCREATE:
 	case WM_CREATE: {
 		struct cs_conv c;

@@ -4,8 +4,10 @@
  * helpers, the controls' state, window subclassing, image lists, the
  * headless property sheets and task dialogs, the rest, and its ordinals.
  */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "loader/modules.h"
 #include "runtime/runtime.h"
@@ -1232,6 +1234,17 @@ static BOOL refuse;		/* ITEMCHANGING, SELCHANGING, ITEMEXPANDING */
 static NMLISTVIEW last_lv;
 static NMTREEVIEWW last_tv;
 static int deleted_tv;
+static WPARAM last_command;
+static WORD commands[16];
+static NMSELCHANGE last_sel;
+static COMBOBOXEXITEMW last_cbe;
+static HWND link_window;
+static int last_link = -9;
+static SYSTEMTIME last_daystate_start;
+static int ncommands;
+/* Called first for every WM_NOTIFY the parent gets; a nonzero result is
+ * the answer. For the tests of handlers that change the control. */
+static LRESULT (*notify_hook)(const NMHDR *hdr);
 
 static int seen(UINT code)
 {
@@ -1245,11 +1258,22 @@ static int seen(UINT code)
 static LRESULT WINAPI record_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
 {
 	USER(LRESULT, DefWindowProcW, HWND, UINT, WPARAM, LPARAM);
+	if (m == WM_COMMAND) {
+		last_command = wp;
+		if (ncommands < 16)
+			commands[ncommands++] = HIWORD(wp);
+		return 0;
+	}
 	if (m != WM_NOTIFY)
 		return DefWindowProcW(h, m, wp, lp);
 	NMHDR *hdr = (NMHDR *)lp;
 	if (ncodes < 64)
 		codes[ncodes++] = hdr->code;
+	if (notify_hook) {
+		LRESULT r = notify_hook(hdr);
+		if (r)
+			return r;
+	}
 	switch (hdr->code) {
 	case LVN_ITEMCHANGING:
 		last_lv = *(NMLISTVIEW *)lp;
@@ -1300,7 +1324,62 @@ static LRESULT WINAPI record_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
 		return 0;
 	}
 	case HDN_ITEMCHANGINGW:
+	case TCN_SELCHANGING:
+	case RBN_BEGINDRAG:
 		return refuse;
+	case CBEN_GETDISPINFOW: {
+		NMCOMBOBOXEXW *c = (NMCOMBOBOXEXW *)lp;
+		if (c->ceItem.pszText && c->ceItem.cchTextMax > 3) {
+			c->ceItem.pszText[0] = 'c';
+			c->ceItem.pszText[1] = 'b';
+			c->ceItem.pszText[2] = (WCHAR)('0' + c->ceItem.lParam);
+			c->ceItem.pszText[3] = 0;
+		}
+		return 0;
+	}
+	case CBEN_INSERTITEM:
+	case CBEN_DELETEITEM:
+		last_cbe = ((NMCOMBOBOXEXW *)lp)->ceItem;
+		return 0;
+	case NM_CLICK:
+	case NM_RETURN:
+		if (hdr->hwndFrom && link_window == hdr->hwndFrom)
+			last_link = ((NMLINK *)lp)->item.iLink;
+		return 0;
+	case MCN_SELCHANGE:
+	case MCN_SELECT:
+		last_sel = *(NMSELCHANGE *)lp;
+		return 0;
+	case MCN_GETDAYSTATE: {
+		NMDAYSTATE *d = (NMDAYSTATE *)lp;
+		for (int i = 0; i < d->cDayState; i++)
+			d->prgDayState[i] = 1u << i;	/* bold day i+1 */
+		last_daystate_start = d->stStart;
+		return 0;
+	}
+	case IPN_FIELDCHANGED: {
+		NMIPADDRESS *ip = (NMIPADDRESS *)lp;
+		if (ip->iValue == 13)
+			ip->iValue = 31;	/* the parent can change it */
+		return 0;
+	}
+	case PGN_CALCSIZE: {
+		NMPGCALCSIZE *c = (NMPGCALCSIZE *)lp;
+		if (c->dwFlag == PGF_CALCWIDTH)
+			c->iWidth = 500;
+		else
+			c->iHeight = 400;
+		return 0;
+	}
+	case TTN_GETDISPINFOW: {
+		NMTTDISPINFOW *d = (NMTTDISPINFOW *)lp;
+		d->szText[0] = 't';
+		d->szText[1] = (WCHAR)('0' + d->lParam);
+		d->szText[2] = 0;
+		if (d->lParam == 9)
+			d->uFlags |= TTF_DI_SETITEM;
+		return 0;
+	}
 	}
 	return 0;
 }
@@ -1772,6 +1851,1559 @@ static void test_treeview(void)
 #undef ADD
 }
 
+
+static void test_toolbar(void)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	USER(LRESULT, SendMessageA, HWND, UINT, WPARAM, LPARAM);
+	USER(BOOL, DestroyWindow, HWND);
+	USER(BOOL, GetWindowRect, HWND, LPRECT);
+	USER(BOOL, GetClientRect, HWND, LPRECT);
+	FN(HWND, CreateToolbarEx, HWND, DWORD, UINT, INT, HINSTANCE, UINT_PTR,
+	   LPCTBBUTTON, INT, INT, INT, INT, INT, UINT);
+	HWND h = make("ToolbarWindow32", CCS_NORESIZE, 200, 30);
+	WCHAR buf[32];
+	char abuf[32];
+	RECT rc;
+
+	CHECK(h != NULL);
+	if (!h)
+		return;
+	SendMessageW(h, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
+	CHECK_EQ(SendMessageW(h, TB_GETBUTTONSIZE, 0, 0), MAKELONG(24, 22));
+	CHECK_EQ(SendMessageW(h, TB_GETPADDING, 0, 0), MAKELONG(7, 6));
+
+	/* Strings: a double-NUL run, then the standard bitmap. */
+	CHECK_EQ(SendMessageW(h, TB_ADDSTRINGW, 0,
+			      (LPARAM)u"Open\0Save\0"), 0);
+	CHECK_EQ(SendMessageA(h, TB_ADDSTRINGA, 0, (LPARAM)"Cut\0"), 2);
+	CHECK_EQ(SendMessageW(h, TB_GETSTRINGW, MAKEWPARAM(32, 1),
+			      (LPARAM)buf), 4);
+	CHECK(!strcmp(a(buf), "Save"));
+	CHECK_EQ(SendMessageW(h, TB_GETSTRINGW, MAKEWPARAM(32, 9),
+			      (LPARAM)buf), -1);
+	TBADDBITMAP ab = { HINST_COMMCTRL, IDB_STD_SMALL_COLOR };
+	CHECK_EQ(SendMessageW(h, TB_ADDBITMAP, 0, (LPARAM)&ab), 0);
+	TBADDBITMAP mine = { NULL, 0x1234 };
+	CHECK_EQ(SendMessageW(h, TB_ADDBITMAP, 4, (LPARAM)&mine), 15);
+	CHECK_EQ(SendMessageW(h, TB_ADDBITMAP, 4, (LPARAM)&mine), 15);
+
+	TBBUTTON b[6];
+	memset(b, 0, sizeof(b));
+	for (int i = 0; i < 6; i++) {
+		b[i].iBitmap = i;
+		b[i].idCommand = 100 + i;
+		b[i].fsState = TBSTATE_ENABLED;
+		b[i].iString = -1;
+	}
+	b[0].iString = 0;
+	b[1].iString = 1;
+	b[2].fsStyle = BTNS_SEP;
+	b[2].iBitmap = 0;
+	b[3].fsStyle = BTNS_CHECKGROUP;
+	b[4].fsStyle = BTNS_CHECKGROUP;
+	b[5].fsStyle = BTNS_CHECK | BTNS_DROPDOWN;
+	b[5].iString = (INT_PTR)u"Own";
+	CHECK(SendMessageW(h, TB_ADDBUTTONSW, 6, (LPARAM)b));
+	CHECK_EQ(SendMessageW(h, TB_BUTTONCOUNT, 0, 0), 6);
+	CHECK_EQ(SendMessageW(h, TB_COMMANDTOINDEX, 104, 0), 4);
+	CHECK_EQ(SendMessageW(h, TB_COMMANDTOINDEX, 999, 0), -1);
+
+	/* Geometry: 24-wide buttons, an 8-wide separator. */
+	CHECK(SendMessageW(h, TB_GETITEMRECT, 1, (LPARAM)&rc));
+	CHECK(rc.left == 24 && rc.right == 48 && rc.top == 0 &&
+	      rc.bottom == 22);
+	CHECK(SendMessageW(h, TB_GETRECT, 103, (LPARAM)&rc));
+	CHECK(rc.left == 56 && rc.right == 80);
+	POINT pt = { 50, 5 };
+	CHECK_EQ(SendMessageW(h, TB_HITTEST, 0, (LPARAM)&pt), -2);
+	pt.x = 60;
+	CHECK_EQ(SendMessageW(h, TB_HITTEST, 0, (LPARAM)&pt), 3);
+	pt.x = 190;
+	CHECK_EQ(SendMessageW(h, TB_HITTEST, 0, (LPARAM)&pt), -1);
+	SIZE sz;
+	CHECK(SendMessageW(h, TB_GETMAXSIZE, 0, (LPARAM)&sz));
+	CHECK(sz.cx == 5 * 24 + 8 && sz.cy == 22);
+
+	/* Text: from the pool or the button's own. */
+	CHECK_EQ(SendMessageW(h, TB_GETBUTTONTEXTW, 101, (LPARAM)buf), 4);
+	CHECK(!strcmp(a(buf), "Save"));
+	CHECK_EQ(SendMessageA(h, TB_GETBUTTONTEXTA, 105, 0), 3);
+	CHECK_EQ(SendMessageA(h, TB_GETBUTTONTEXTA, 105, (LPARAM)abuf), 3);
+	CHECK(!strcmp(abuf, "Own"));
+	CHECK_EQ(SendMessageW(h, TB_GETBUTTONTEXTW, 999, (LPARAM)buf), -1);
+
+	/* States. */
+	CHECK(SendMessageW(h, TB_ISBUTTONENABLED, 100, 0));
+	CHECK(SendMessageW(h, TB_ENABLEBUTTON, 100, FALSE));
+	CHECK(!SendMessageW(h, TB_ISBUTTONENABLED, 100, 0));
+	CHECK_EQ(SendMessageW(h, TB_GETSTATE, 100, 0), 0);
+	CHECK_EQ(SendMessageW(h, TB_GETSTATE, 999, 0), -1);
+	CHECK(SendMessageW(h, TB_SETSTATE, 100, TBSTATE_ENABLED |
+						TBSTATE_INDETERMINATE));
+	CHECK(SendMessageW(h, TB_ISBUTTONINDETERMINATE, 100, 0));
+	CHECK(SendMessageW(h, TB_CHECKBUTTON, 103, TRUE));
+	CHECK(SendMessageW(h, TB_CHECKBUTTON, 104, TRUE));
+	CHECK(!SendMessageW(h, TB_ISBUTTONCHECKED, 103, 0));
+	CHECK(SendMessageW(h, TB_ISBUTTONCHECKED, 104, 0));
+	CHECK(SendMessageW(h, TB_MARKBUTTON, 101, TRUE));
+	CHECK(SendMessageW(h, TB_ISBUTTONHIGHLIGHTED, 101, 0));
+
+	/* Hiding moves the later buttons left. */
+	CHECK(SendMessageW(h, TB_HIDEBUTTON, 101, TRUE));
+	CHECK(SendMessageW(h, TB_ISBUTTONHIDDEN, 101, 0));
+	CHECK(!SendMessageW(h, TB_GETITEMRECT, 1, (LPARAM)&rc));
+	CHECK(SendMessageW(h, TB_GETRECT, 103, (LPARAM)&rc) && rc.left == 32);
+	CHECK(SendMessageW(h, TB_HIDEBUTTON, 101, FALSE));
+
+	/* Clicks: a check-group button stays checked, a check button
+	 * toggles, a disabled one does nothing. */
+	ncodes = 0;
+	last_command = 0;
+	SendMessageW(h, WM_LBUTTONDOWN, 0, MAKELPARAM(60, 5));
+	CHECK(SendMessageW(h, TB_ISBUTTONPRESSED, 103, 0));
+	SendMessageW(h, WM_LBUTTONUP, 0, MAKELPARAM(60, 5));
+	CHECK(!SendMessageW(h, TB_ISBUTTONPRESSED, 103, 0));
+	CHECK_EQ(last_command, MAKEWPARAM(103, 0));
+	CHECK(SendMessageW(h, TB_ISBUTTONCHECKED, 103, 0) &&
+	      !SendMessageW(h, TB_ISBUTTONCHECKED, 104, 0));
+	last_command = 0;
+	SendMessageW(h, WM_LBUTTONDOWN, 0, MAKELPARAM(60, 5));
+	SendMessageW(h, WM_LBUTTONUP, 0, MAKELPARAM(150, 5));
+	CHECK_EQ(last_command, 0);	/* released elsewhere */
+	SendMessageW(h, TB_ENABLEBUTTON, 103, FALSE);
+	SendMessageW(h, WM_LBUTTONDOWN, 0, MAKELPARAM(60, 5));
+	SendMessageW(h, WM_LBUTTONUP, 0, MAKELPARAM(60, 5));
+	CHECK_EQ(last_command, 0);
+	SendMessageW(h, TB_ENABLEBUTTON, 103, TRUE);
+	/* The drop-down one notifies instead. */
+	SendMessageW(h, WM_LBUTTONDOWN, 0, MAKELPARAM(110, 5));
+	CHECK_EQ(seen(TBN_DROPDOWN), 1);
+	CHECK_EQ(last_command, 0);
+
+	/* The hot item, with TBN_HOTITEMCHANGE. */
+	CHECK_EQ(SendMessageW(h, TB_GETHOTITEM, 0, 0), -1);
+	CHECK_EQ(SendMessageW(h, TB_SETHOTITEM, 1, 0), -1);
+	CHECK_EQ(SendMessageW(h, TB_GETHOTITEM, 0, 0), 1);
+	CHECK_EQ(seen(TBN_HOTITEMCHANGE), 1);
+
+	/* TBBUTTONINFO by command and by index. */
+	TBBUTTONINFOW bi;
+	memset(&bi, 0, sizeof(bi));
+	bi.cbSize = sizeof(bi);
+	bi.dwMask = TBIF_TEXT | TBIF_COMMAND | TBIF_IMAGE | TBIF_SIZE;
+	bi.pszText = buf;
+	bi.cchText = 32;
+	CHECK_EQ(SendMessageW(h, TB_GETBUTTONINFOW, 100, (LPARAM)&bi), 0);
+	CHECK(!strcmp(a(buf), "Open") && bi.idCommand == 100 &&
+	      bi.iImage == 0 && bi.cx == 24);
+	bi.dwMask = TBIF_TEXT | TBIF_SIZE | TBIF_BYINDEX;
+	bi.pszText = (LPWSTR)u"New";
+	bi.cx = 40;
+	CHECK(SendMessageW(h, TB_SETBUTTONINFOW, 0, (LPARAM)&bi));
+	CHECK(SendMessageW(h, TB_GETITEMRECT, 1, (LPARAM)&rc) &&
+	      rc.left == 40);
+	CHECK_EQ(SendMessageW(h, TB_GETBUTTONTEXTW, 100, (LPARAM)buf), 3);
+	bi.cbSize = 8;
+	CHECK_EQ(SendMessageW(h, TB_GETBUTTONINFOW, 100, (LPARAM)&bi), -1);
+
+	/* Insert, move, delete (with TBN_DELETINGBUTTON). */
+	TBBUTTON nb;
+	memset(&nb, 0, sizeof(nb));
+	nb.idCommand = 200;
+	nb.fsState = TBSTATE_ENABLED;
+	nb.iString = -1;
+	CHECK(SendMessageW(h, TB_INSERTBUTTONW, 1, (LPARAM)&nb));
+	CHECK_EQ(SendMessageW(h, TB_COMMANDTOINDEX, 200, 0), 1);
+	CHECK(SendMessageW(h, TB_MOVEBUTTON, 1, 6));
+	CHECK_EQ(SendMessageW(h, TB_COMMANDTOINDEX, 200, 0), 6);
+	TBBUTTON got;
+	CHECK(SendMessageW(h, TB_GETBUTTON, 6, (LPARAM)&got) &&
+	      got.idCommand == 200 && got.iString == -1);
+	CHECK(SendMessageW(h, TB_SETCMDID, 6, 201));
+	ncodes = 0;
+	CHECK(SendMessageW(h, TB_DELETEBUTTON, 6, 0));
+	CHECK_EQ(seen(TBN_DELETINGBUTTON), 1);
+	CHECK_EQ(SendMessageW(h, TB_BUTTONCOUNT, 0, 0), 6);
+	CHECK(!SendMessageW(h, TB_DELETEBUTTON, 6, 0));
+
+	/* Rows and wrapping. */
+	CHECK_EQ(SendMessageW(h, TB_GETROWS, 0, 0), 1);
+	SendMessageW(h, TB_SETROWS, MAKEWPARAM(2, TRUE), (LPARAM)&rc);
+	CHECK_EQ(SendMessageW(h, TB_GETROWS, 0, 0), 2);
+	CHECK_EQ(rc.bottom, 44);
+	SendMessageW(h, TB_SETROWS, MAKEWPARAM(1, TRUE), 0);
+	CHECK_EQ(SendMessageW(h, TB_GETROWS, 0, 0), 1);
+	SendMessageW(h, TB_SETSTYLE, 0, WS_CHILD | CCS_NORESIZE |
+					TBSTYLE_WRAPABLE);
+	CHECK(SendMessageW(h, TB_GETSTYLE, 0, 0) & TBSTYLE_WRAPABLE);
+	SendMessageW(h, TB_SETBUTTONSIZE, 0, MAKELPARAM(60, 30));
+	/* 40 + 60 + 8 + 60 fit in 200; the fifth button starts row 2. */
+	CHECK_EQ(SendMessageW(h, TB_GETROWS, 0, 0), 2);
+	CHECK(SendMessageW(h, TB_GETITEMRECT, 4, (LPARAM)&rc) &&
+	      rc.left == 0 && rc.top == 30);
+
+	/* Sizes, styles, the insert mark, image lists. */
+	CHECK(SendMessageW(h, TB_SETBITMAPSIZE, 0, MAKELPARAM(32, 32)));
+	CHECK_EQ(SendMessageW(h, TB_GETBUTTONSIZE, 0, 0), MAKELONG(60, 39));
+	CHECK_EQ(SendMessageW(h, TB_SETEXTENDEDSTYLE, 0,
+			      TBSTYLE_EX_DRAWDDARROWS), 0);
+	CHECK_EQ(SendMessageW(h, TB_GETEXTENDEDSTYLE, 0, 0),
+		 TBSTYLE_EX_DRAWDDARROWS);
+	TBINSERTMARK mk = { 2, TBIMHT_AFTER }, mk2;
+	SendMessageW(h, TB_SETINSERTMARK, 0, (LPARAM)&mk);
+	SendMessageW(h, TB_GETINSERTMARK, 0, (LPARAM)&mk2);
+	CHECK(mk2.iButton == 2 && mk2.dwFlags == TBIMHT_AFTER);
+	pt.x = 30;
+	pt.y = 5;
+	CHECK(SendMessageW(h, TB_INSERTMARKHITTEST, (WPARAM)&pt,
+			   (LPARAM)&mk2));
+	CHECK(mk2.iButton == 0 && mk2.dwFlags == TBIMHT_AFTER);
+	CHECK_EQ(SendMessageW(h, TB_SETIMAGELIST, 0, (LPARAM)0x1234), 0);
+	CHECK_EQ(SendMessageW(h, TB_GETIMAGELIST, 0, 0), 0x1234);
+	CHECK_EQ(SendMessageW(h, TB_SETPARENT, (WPARAM)h, 0), (LRESULT)parent);
+	CHECK(DestroyWindow(h));
+
+	/* CreateToolbarEx: the buttons and bitmaps, across the parent. */
+	ncodes = 0;
+	HWND tb = CreateToolbarEx(parent, WS_CHILD, 52, 15, HINST_COMMCTRL,
+				  IDB_STD_SMALL_COLOR, b, 3, 0, 0, 16, 15,
+				  sizeof(TBBUTTON));
+	CHECK(tb != NULL);
+	CHECK_EQ(SendMessageW(tb, TB_BUTTONCOUNT, 0, 0), 3);
+	RECT pc;
+	GetClientRect(parent, &pc);
+	GetWindowRect(tb, &rc);
+	CHECK(rc.right - rc.left == pc.right && rc.bottom - rc.top == 22);
+	CHECK(DestroyWindow(tb));
+}
+
+
+static HWND CreateWindowExW_(HWND owner)
+{
+	USER(HWND, CreateWindowExW, DWORD, LPCWSTR, LPCWSTR, DWORD, int, int,
+	     int, int, HWND, HMENU, HINSTANCE, LPVOID);
+	return CreateWindowExW(0, w("STATIC"), NULL, WS_CHILD, 0, 0, 10, 10,
+			       owner, NULL, NULL, NULL);
+}
+
+static void set_rect(RECT *r, int l, int t, int rt, int b)
+{
+	r->left = l;
+	r->top = t;
+	r->right = rt;
+	r->bottom = b;
+}
+
+static void test_tooltip(void)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	USER(LRESULT, SendMessageA, HWND, UINT, WPARAM, LPARAM);
+	USER(BOOL, DestroyWindow, HWND);
+	HWND h = make("tooltips_class32", 0, 10, 10);
+	WCHAR buf[96];
+	char abuf[96];
+
+	CHECK(h != NULL);
+	if (!h)
+		return;
+	TTTOOLINFOW ti;
+	memset(&ti, 0, sizeof(ti));
+	ti.cbSize = sizeof(ti);
+	ti.hwnd = parent;
+	ti.uId = 1;
+	set_rect(&ti.rect, 0, 0, 50, 20);
+	ti.lpszText = (LPWSTR)u"First tip";
+	CHECK(SendMessageW(h, TTM_ADDTOOLW, 0, (LPARAM)&ti));
+	TTTOOLINFOA ta;
+	memset(&ta, 0, sizeof(ta));
+	ta.cbSize = offsetof(TTTOOLINFOA, lParam);	/* the oldest size */
+	ta.hwnd = parent;
+	ta.uId = 2;
+	set_rect(&ta.rect, 50, 0, 100, 20);
+	ta.lpszText = (LPSTR)"Second";
+	CHECK(SendMessageA(h, TTM_ADDTOOLA, 0, (LPARAM)&ta));
+	ti.uId = 3;
+	set_rect(&ti.rect, 100, 0, 150, 20);
+	ti.lpszText = LPSTR_TEXTCALLBACKW;
+	ti.lParam = 4;
+	CHECK(SendMessageW(h, TTM_ADDTOOLW, 0, (LPARAM)&ti));
+	ti.uId = 4;
+	set_rect(&ti.rect, 150, 0, 200, 20);
+	ti.lParam = 9;
+	CHECK(SendMessageW(h, TTM_ADDTOOLW, 0, (LPARAM)&ti));
+	ti.cbSize = 8;
+	CHECK(!SendMessageW(h, TTM_ADDTOOLW, 0, (LPARAM)&ti));
+	ti.cbSize = sizeof(ti);
+	CHECK_EQ(SendMessageW(h, TTM_GETTOOLCOUNT, 0, 0), 4);
+
+	/* Text: a string, A from W, a callback, one the owner keeps. */
+	ti.uId = 1;
+	ti.lpszText = buf;
+	SendMessageW(h, TTM_GETTEXTW, 96, (LPARAM)&ti);
+	CHECK(!strcmp(a(buf), "First tip"));
+	ta.uId = 1;
+	ta.lpszText = abuf;
+	SendMessageA(h, TTM_GETTEXTA, 96, (LPARAM)&ta);
+	CHECK(!strcmp(abuf, "First tip"));
+	ti.uId = 3;
+	ti.lpszText = buf;
+	ncodes = 0;
+	SendMessageW(h, TTM_GETTEXTW, 96, (LPARAM)&ti);
+	CHECK(!strcmp(a(buf), "t4") && seen(TTN_GETDISPINFOW) == 1);
+	ti.uId = 4;
+	SendMessageW(h, TTM_GETTEXTW, 96, (LPARAM)&ti);
+	SendMessageW(h, TTM_GETTEXTW, 96, (LPARAM)&ti);
+	CHECK(!strcmp(a(buf), "t9") && seen(TTN_GETDISPINFOW) == 2);
+
+	/* Tool info round trip, and enumeration. */
+	memset(&ti, 0, sizeof(ti));
+	ti.cbSize = sizeof(ti);
+	ti.hwnd = parent;
+	ti.uId = 2;
+	ti.lpszText = buf;
+	CHECK(SendMessageW(h, TTM_GETTOOLINFOW, 0, (LPARAM)&ti));
+	CHECK(!strcmp(a(buf), "Second") && ti.rect.left == 50);
+	ti.uId = 3;
+	CHECK(SendMessageW(h, TTM_GETTOOLINFOW, 0, (LPARAM)&ti));
+	CHECK(ti.lpszText == LPSTR_TEXTCALLBACKW && ti.lParam == 4);
+	ti.uId = 77;
+	CHECK(!SendMessageW(h, TTM_GETTOOLINFOW, 0, (LPARAM)&ti));
+	ti.lpszText = buf;
+	CHECK(SendMessageW(h, TTM_ENUMTOOLSW, 1, (LPARAM)&ti));
+	CHECK(ti.uId == 2 && !strcmp(a(buf), "Second"));
+	CHECK(!SendMessageW(h, TTM_ENUMTOOLSW, 4, (LPARAM)&ti));
+	ti.uId = 1;
+	ti.lpszText = (LPWSTR)u"Changed";
+	SendMessageW(h, TTM_UPDATETIPTEXTW, 0, (LPARAM)&ti);
+	set_rect(&ti.rect, 0, 20, 50, 40);
+	SendMessageW(h, TTM_NEWTOOLRECTW, 0, (LPARAM)&ti);
+	ti.lpszText = buf;
+	CHECK(SendMessageW(h, TTM_GETTOOLINFOW, 0, (LPARAM)&ti));
+	CHECK(!strcmp(a(buf), "Changed") && ti.rect.top == 20);
+
+	/* Hit test. */
+	TTHITTESTINFOW hi;
+	memset(&hi, 0, sizeof(hi));
+	hi.hwnd = parent;
+	hi.pt.x = 60;
+	hi.pt.y = 5;
+	hi.ti.cbSize = sizeof(hi.ti);
+	hi.ti.lpszText = buf;
+	CHECK(SendMessageW(h, TTM_HITTESTW, 0, (LPARAM)&hi));
+	CHECK(hi.ti.uId == 2);
+	hi.pt.x = 10;
+	CHECK(!SendMessageW(h, TTM_HITTESTW, 0, (LPARAM)&hi));
+
+	/* Relayed mouse moves show and hide the tip. */
+	MSG m;
+	memset(&m, 0, sizeof(m));
+	m.hwnd = parent;
+	m.message = WM_MOUSEMOVE;
+	m.lParam = MAKELPARAM(60, 5);
+	ncodes = 0;
+	SendMessageW(h, TTM_RELAYEVENT, 0, (LPARAM)&m);
+	CHECK_EQ(seen(TTN_SHOW), 1);
+	memset(&ti, 0, sizeof(ti));
+	ti.cbSize = sizeof(ti);
+	CHECK(SendMessageW(h, TTM_GETCURRENTTOOLW, 0, (LPARAM)&ti) &&
+	      ti.uId == 2);
+	m.lParam = MAKELPARAM(300, 5);
+	SendMessageW(h, TTM_RELAYEVENT, 0, (LPARAM)&m);
+	CHECK_EQ(seen(TTN_POP), 1);
+	CHECK(!SendMessageW(h, TTM_GETCURRENTTOOLW, 0, 0));
+	SendMessageW(h, TTM_ACTIVATE, FALSE, 0);
+	m.lParam = MAKELPARAM(60, 5);
+	SendMessageW(h, TTM_RELAYEVENT, 0, (LPARAM)&m);
+	CHECK_EQ(seen(TTN_SHOW), 1);
+	SendMessageW(h, TTM_ACTIVATE, TRUE, 0);
+
+	/* Settings. */
+	CHECK_EQ(SendMessageW(h, TTM_GETDELAYTIME, TTDT_INITIAL, 0), 500);
+	CHECK_EQ(SendMessageW(h, TTM_GETDELAYTIME, TTDT_AUTOPOP, 0), 5000);
+	SendMessageW(h, TTM_SETDELAYTIME, TTDT_INITIAL, 200);
+	CHECK_EQ(SendMessageW(h, TTM_GETDELAYTIME, TTDT_RESHOW, 0), 40);
+	SendMessageW(h, TTM_SETDELAYTIME, TTDT_AUTOMATIC, 1000);
+	CHECK_EQ(SendMessageW(h, TTM_GETDELAYTIME, TTDT_AUTOPOP, 0), 10000);
+	SendMessageW(h, TTM_SETDELAYTIME, TTDT_AUTOMATIC, -1);
+	CHECK_EQ(SendMessageW(h, TTM_GETDELAYTIME, TTDT_INITIAL, 0), 500);
+	CHECK_EQ(SendMessageW(h, TTM_SETMAXTIPWIDTH, 0, 120), -1);
+	CHECK_EQ(SendMessageW(h, TTM_GETMAXTIPWIDTH, 0, 0), 120);
+	SendMessageW(h, TTM_SETTIPBKCOLOR, RGB(1, 2, 3), 0);
+	CHECK_EQ(SendMessageW(h, TTM_GETTIPBKCOLOR, 0, 0), RGB(1, 2, 3));
+	RECT mg = { 1, 2, 3, 4 }, mg2;
+	SendMessageW(h, TTM_SETMARGIN, 0, (LPARAM)&mg);
+	SendMessageW(h, TTM_GETMARGIN, 0, (LPARAM)&mg2);
+	CHECK(!memcmp(&mg, &mg2, sizeof(mg)));
+	RECT r = { 10, 10, 20, 20 };
+	CHECK(SendMessageW(h, TTM_ADJUSTRECT, TRUE, (LPARAM)&r));
+	CHECK(SendMessageW(h, TTM_ADJUSTRECT, FALSE, (LPARAM)&r));
+	CHECK(r.left == 10 && r.top == 10 && r.right == 20 && r.bottom == 20);
+	CHECK(SendMessageA(h, TTM_SETTITLEA, TTI_INFO, (LPARAM)"Title"));
+	TTGETTITLE gt = { sizeof(gt), 0, 32, buf };
+	SendMessageW(h, TTM_GETTITLE, 0, (LPARAM)&gt);
+	CHECK(!strcmp(a(buf), "Title") && gt.uTitleBitmap == TTI_INFO);
+	memset(&ti, 0, sizeof(ti));
+	ti.cbSize = sizeof(ti);
+	ti.hwnd = parent;
+	ti.uId = 2;
+	LRESULT bs = SendMessageW(h, TTM_GETBUBBLESIZE, 0, (LPARAM)&ti);
+	CHECK(LOWORD(bs) > 0 && HIWORD(bs) > 16);
+
+	/* Tracking needs TTF_TRACK. */
+	ncodes = 0;
+	SendMessageW(h, TTM_TRACKACTIVATE, TRUE, (LPARAM)&ti);
+	CHECK_EQ(seen(TTN_SHOW), 0);
+	ti.uId = 5;
+	ti.uFlags = TTF_TRACK | TTF_ABSOLUTE;
+	ti.lpszText = (LPWSTR)u"Tracked";
+	CHECK(SendMessageW(h, TTM_ADDTOOLW, 0, (LPARAM)&ti));
+	SendMessageW(h, TTM_TRACKACTIVATE, TRUE, (LPARAM)&ti);
+	CHECK_EQ(seen(TTN_SHOW), 1);
+	SendMessageW(h, TTM_TRACKPOSITION, 0, MAKELPARAM(30, 40));
+	SendMessageW(h, TTM_TRACKACTIVATE, FALSE, 0);
+	CHECK_EQ(seen(TTN_POP), 1);
+
+	/* TTF_SUBCLASS: the tool window's own mouse moves are relayed. */
+	HWND child = make("STATIC", 0, 40, 40);
+	memset(&ti, 0, sizeof(ti));
+	ti.cbSize = sizeof(ti);
+	ti.hwnd = parent;
+	ti.uId = (UINT_PTR)child;
+	ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+	ti.lpszText = (LPWSTR)u"Child";
+	CHECK(SendMessageW(h, TTM_ADDTOOLW, 0, (LPARAM)&ti));
+	ncodes = 0;
+	SendMessageW(child, WM_MOUSEMOVE, 0, MAKELPARAM(5, 5));
+	CHECK_EQ(seen(TTN_SHOW), 1);
+	SendMessageW(child, WM_LBUTTONDOWN, 0, MAKELPARAM(5, 5));
+	CHECK_EQ(seen(TTN_POP), 1);
+	SendMessageW(h, TTM_DELTOOLW, 0, (LPARAM)&ti);
+	ncodes = 0;
+	SendMessageW(child, WM_MOUSEMOVE, 0, MAKELPARAM(5, 5));
+	CHECK_EQ(seen(TTN_SHOW), 0);
+	CHECK(DestroyWindow(child));
+
+	/* Deleting. */
+	ti.uId = 2;
+	ti.uFlags = 0;
+	SendMessageW(h, TTM_DELTOOLW, 0, (LPARAM)&ti);
+	CHECK_EQ(SendMessageW(h, TTM_GETTOOLCOUNT, 0, 0), 4);
+	CHECK(!SendMessageW(h, TTM_GETTOOLINFOW, 0, (LPARAM)&ti));
+	CHECK(DestroyWindow(h));
+}
+
+
+static void test_tab(void)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	USER(LRESULT, SendMessageA, HWND, UINT, WPARAM, LPARAM);
+	USER(BOOL, DestroyWindow, HWND);
+	HWND h = make("SysTabControl32", TCS_FIXEDWIDTH, 200, 100);
+	WCHAR buf[32];
+	RECT rc;
+
+	CHECK(h != NULL);
+	if (!h)
+		return;
+	CHECK_EQ(SendMessageW(h, TCM_GETCURSEL, 0, 0), -1);
+	TCITEMW it;
+	memset(&it, 0, sizeof(it));
+	it.mask = TCIF_TEXT | TCIF_PARAM;
+	static const char *const names[3] = { "One", "Two", "Three" };
+	for (int i = 0; i < 3; i++) {
+		it.pszText = w(names[i]);
+		it.lParam = 10 + i;
+		CHECK_EQ(SendMessageW(h, TCM_INSERTITEMW, 99, (LPARAM)&it), i);
+	}
+	TCITEMA ia;
+	memset(&ia, 0, sizeof(ia));
+	ia.mask = TCIF_TEXT | TCIF_IMAGE;
+	ia.pszText = (LPSTR)"Zero";
+	ia.iImage = 2;
+	CHECK_EQ(SendMessageA(h, TCM_INSERTITEMA, 0, (LPARAM)&ia), 0);
+	CHECK_EQ(SendMessageW(h, TCM_GETITEMCOUNT, 0, 0), 4);
+	/* The first insert selected item 0, which is now item 1. */
+	CHECK_EQ(SendMessageW(h, TCM_GETCURSEL, 0, 0), 1);
+	CHECK(!SendMessageW(h, TCM_SETITEMEXTRA, 8, 0));
+
+	memset(&it, 0, sizeof(it));
+	it.mask = TCIF_TEXT | TCIF_PARAM | TCIF_IMAGE;
+	it.pszText = buf;
+	it.cchTextMax = 32;
+	CHECK(SendMessageW(h, TCM_GETITEMW, 2, (LPARAM)&it));
+	CHECK(!strcmp(a(buf), "Two") && it.lParam == 11 && it.iImage == -1);
+	CHECK(SendMessageW(h, TCM_GETITEMW, 0, (LPARAM)&it));
+	CHECK(!strcmp(a(buf), "Zero") && it.iImage == 2);
+	CHECK(!SendMessageW(h, TCM_GETITEMW, 4, (LPARAM)&it));
+
+	/* Fixed width tabs, side by side. */
+	CHECK(SendMessageW(h, TCM_GETITEMRECT, 1, (LPARAM)&rc));
+	CHECK(rc.left == 96 && rc.right == 192 && rc.bottom == 20);
+	CHECK_EQ(SendMessageW(h, TCM_GETROWCOUNT, 0, 0), 1);
+	CHECK_EQ(SendMessageW(h, TCM_SETITEMSIZE, 0, MAKELPARAM(40, 24)),
+		 MAKELONG(96, 20));
+	CHECK(SendMessageW(h, TCM_GETITEMRECT, 3, (LPARAM)&rc));
+	CHECK(rc.left == 120 && rc.right == 160 && rc.bottom == 24);
+	TCHITTESTINFO hi = { { 50, 5 }, 0 };
+	CHECK_EQ(SendMessageW(h, TCM_HITTEST, 0, (LPARAM)&hi), 1);
+	CHECK_EQ(hi.flags, TCHT_ONITEMLABEL);
+	hi.pt.y = 50;
+	CHECK_EQ(SendMessageW(h, TCM_HITTEST, 0, (LPARAM)&hi), -1);
+	CHECK_EQ(hi.flags, TCHT_NOWHERE);
+	RECT disp = { 0, 0, 200, 100 };
+	SendMessageW(h, TCM_ADJUSTRECT, FALSE, (LPARAM)&disp);
+	CHECK(disp.left == 2 && disp.top == 26 && disp.right == 198 &&
+	      disp.bottom == 98);
+	SendMessageW(h, TCM_ADJUSTRECT, TRUE, (LPARAM)&disp);
+	CHECK(disp.left == 0 && disp.top == 0 && disp.bottom == 100);
+
+	/* SETCURSEL doesn't notify; a click does, and can be refused. */
+	ncodes = 0;
+	CHECK_EQ(SendMessageW(h, TCM_SETCURSEL, 2, 0), 1);
+	CHECK_EQ(SendMessageW(h, TCM_SETCURSEL, 9, 0), -1);
+	CHECK_EQ(SendMessageW(h, TCM_GETCURSEL, 0, 0), 2);
+	CHECK_EQ(ncodes, 0);
+	SendMessageW(h, WM_LBUTTONDOWN, 0, MAKELPARAM(130, 5));
+	CHECK_EQ(SendMessageW(h, TCM_GETCURSEL, 0, 0), 3);
+	CHECK(seen(TCN_SELCHANGING) == 1 && seen(TCN_SELCHANGE) == 1);
+	refuse = TRUE;
+	SendMessageW(h, WM_LBUTTONDOWN, 0, MAKELPARAM(10, 5));
+	refuse = FALSE;
+	CHECK_EQ(SendMessageW(h, TCM_GETCURSEL, 0, 0), 3);
+	CHECK_EQ(seen(TCN_SELCHANGE), 1);
+	SendMessageW(h, TCM_SETCURFOCUS, 0, 0);
+	CHECK(SendMessageW(h, TCM_GETCURSEL, 0, 0) == 0 &&
+	      SendMessageW(h, TCM_GETCURFOCUS, 0, 0) == 0);
+
+	/* States, images, deleting. */
+	CHECK(SendMessageW(h, TCM_HIGHLIGHTITEM, 2, TRUE));
+	memset(&it, 0, sizeof(it));
+	it.mask = TCIF_STATE;
+	it.dwStateMask = TCIS_HIGHLIGHTED | TCIS_BUTTONPRESSED;
+	CHECK(SendMessageW(h, TCM_GETITEMW, 2, (LPARAM)&it));
+	CHECK_EQ(it.dwState, TCIS_HIGHLIGHTED);
+	/* Without an image list there is nothing to remove. */
+	SendMessageW(h, TCM_REMOVEIMAGE, 1, 0);
+	it.mask = TCIF_IMAGE;
+	CHECK(SendMessageW(h, TCM_GETITEMW, 0, (LPARAM)&it) && it.iImage == 2);
+	{
+		FN(HIMAGELIST, ImageList_Create, INT, INT, UINT, INT, INT);
+		FN(BOOL, ImageList_Destroy, HIMAGELIST);
+		FN(INT, ImageList_GetImageCount, HIMAGELIST);
+		FN(BOOL, ImageList_SetImageCount, HIMAGELIST, UINT);
+		HIMAGELIST il = ImageList_Create(16, 16, ILC_COLOR32, 3, 1);
+		CHECK(il && ImageList_SetImageCount(il, 3));
+		SendMessageW(h, TCM_SETIMAGELIST, 0, (LPARAM)il);
+		SendMessageW(h, TCM_REMOVEIMAGE, 1, 0);
+		CHECK_EQ(ImageList_GetImageCount(il), 2);
+		CHECK(SendMessageW(h, TCM_GETITEMW, 0, (LPARAM)&it) &&
+		      it.iImage == 1);
+		SendMessageW(h, TCM_SETIMAGELIST, 0, 0);
+		ImageList_Destroy(il);
+	}
+	SendMessageW(h, TCM_SETCURSEL, 2, 0);
+	CHECK(SendMessageW(h, TCM_DELETEITEM, 1, 0));
+	CHECK_EQ(SendMessageW(h, TCM_GETCURSEL, 0, 0), 1);
+	CHECK(SendMessageW(h, TCM_DELETEITEM, 1, 0));
+	CHECK_EQ(SendMessageW(h, TCM_GETCURSEL, 0, 0), -1);
+	CHECK(!SendMessageW(h, TCM_DELETEITEM, 5, 0));
+	CHECK(SendMessageW(h, TCM_DELETEALLITEMS, 0, 0));
+	CHECK_EQ(SendMessageW(h, TCM_GETITEMCOUNT, 0, 0), 0);
+
+	/* Extra bytes, once empty; multiline wrapping. */
+	CHECK(SendMessageW(h, TCM_SETITEMEXTRA, 2 * sizeof(LPARAM), 0));
+	struct {
+		TCITEMHEADERW hdr;
+		LPARAM data[2];
+	} big;
+	memset(&big, 0, sizeof(big));
+	big.hdr.mask = TCIF_PARAM;
+	big.data[0] = 5;
+	big.data[1] = 6;
+	CHECK_EQ(SendMessageW(h, TCM_INSERTITEMW, 0, (LPARAM)&big), 0);
+	memset(&big, 0, sizeof(big));
+	big.hdr.mask = TCIF_PARAM;
+	CHECK(SendMessageW(h, TCM_GETITEMW, 0, (LPARAM)&big));
+	CHECK(big.data[0] == 5 && big.data[1] == 6);
+	CHECK(DestroyWindow(h));
+
+	h = make("SysTabControl32", TCS_FIXEDWIDTH | TCS_MULTILINE, 200, 100);
+	SendMessageW(h, TCM_SETITEMSIZE, 0, MAKELPARAM(80, 20));
+	memset(&it, 0, sizeof(it));
+	for (int i = 0; i < 5; i++)
+		SendMessageW(h, TCM_INSERTITEMW, i, (LPARAM)&it);
+	CHECK_EQ(SendMessageW(h, TCM_GETROWCOUNT, 0, 0), 3);
+	CHECK(SendMessageW(h, TCM_GETITEMRECT, 2, (LPARAM)&rc));
+	CHECK(rc.left == 0 && rc.top == 20);
+	CHECK(DestroyWindow(h));
+}
+
+
+static void test_rebar(void)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	USER(LRESULT, SendMessageA, HWND, UINT, WPARAM, LPARAM);
+	USER(BOOL, DestroyWindow, HWND);
+	USER(BOOL, GetWindowRect, HWND, LPRECT);
+	USER(BOOL, GetClientRect, HWND, LPRECT);
+	HWND h = make("ReBarWindow32", 0, 50, 10);
+	WCHAR buf[32];
+	RECT rc, pc;
+
+	CHECK(h != NULL);
+	if (!h)
+		return;
+	HWND child = make("STATIC", 0, 10, 10);
+	REBARBANDINFOW bi;
+	memset(&bi, 0, sizeof(bi));
+	bi.cbSize = sizeof(bi);
+	bi.fMask = RBBIM_STYLE | RBBIM_CHILD | RBBIM_CHILDSIZE | RBBIM_SIZE |
+		   RBBIM_ID | RBBIM_LPARAM;
+	bi.fStyle = RBBS_NOGRIPPER;
+	bi.hwndChild = child;
+	bi.cxMinChild = 50;
+	bi.cyMinChild = 24;
+	bi.cx = 120;
+	bi.wID = 7;
+	bi.lParam = 70;
+	ncodes = 0;
+	CHECK(SendMessageW(h, RB_INSERTBANDW, -1, (LPARAM)&bi));
+	CHECK_EQ(seen(RBN_HEIGHTCHANGE), 1);
+	REBARBANDINFOA ba;
+	memset(&ba, 0, sizeof(ba));
+	ba.cbSize = offsetof(REBARBANDINFOA, cyChild);	/* the oldest size */
+	ba.fMask = RBBIM_TEXT | RBBIM_SIZE | RBBIM_ID;
+	ba.lpText = (LPSTR)"Links";
+	ba.cx = 80;
+	ba.wID = 8;
+	CHECK(SendMessageA(h, RB_INSERTBANDA, -1, (LPARAM)&ba));
+	ba.cbSize = 8;
+	CHECK(!SendMessageA(h, RB_INSERTBANDA, -1, (LPARAM)&ba));
+	CHECK_EQ(SendMessageW(h, RB_GETBANDCOUNT, 0, 0), 2);
+	CHECK_EQ(SendMessageW(h, RB_IDTOINDEX, 8, 0), 1);
+	CHECK_EQ(SendMessageW(h, RB_IDTOINDEX, 9, 0), -1);
+
+	/* One row, across the parent; the child after its band's header. */
+	CHECK_EQ(SendMessageW(h, RB_GETROWCOUNT, 0, 0), 1);
+	CHECK_EQ(SendMessageW(h, RB_GETBARHEIGHT, 0, 0), 28);
+	CHECK_EQ(SendMessageW(h, RB_GETROWHEIGHT, 1, 0), 28);
+	GetClientRect(parent, &pc);
+	GetWindowRect(h, &rc);
+	CHECK(rc.right - rc.left == pc.right && rc.bottom - rc.top == 28);
+	CHECK(SendMessageW(h, RB_GETRECT, 0, (LPARAM)&rc));
+	CHECK(rc.left == 0 && rc.right == 120);
+	CHECK(SendMessageW(h, RB_GETRECT, 1, (LPARAM)&rc));
+	CHECK(rc.left == 120 && rc.right == pc.right);
+	GetWindowRect(child, &rc);
+	CHECK(rc.right - rc.left == 120 && rc.bottom - rc.top == 24);
+
+	/* Band info back. */
+	memset(&bi, 0, sizeof(bi));
+	bi.cbSize = sizeof(bi);
+	bi.fMask = RBBIM_TEXT | RBBIM_ID | RBBIM_SIZE | RBBIM_HEADERSIZE;
+	bi.lpText = buf;
+	bi.cch = 32;
+	CHECK(SendMessageW(h, RB_GETBANDINFOW, 1, (LPARAM)&bi));
+	CHECK(!strcmp(a(buf), "Links") && bi.wID == 8 && bi.cx == 80);
+	CHECK(bi.cxHeader > 10);
+	bi.fMask = RBBIM_LPARAM | RBBIM_CHILD;
+	CHECK(SendMessageW(h, RB_GETBANDINFOW, 0, (LPARAM)&bi));
+	CHECK(bi.lParam == 70 && bi.hwndChild == child);
+	CHECK(!SendMessageW(h, RB_GETBANDINFOW, 2, (LPARAM)&bi));
+
+	/* Hit test. */
+	RBHITTESTINFO hi;
+	memset(&hi, 0, sizeof(hi));
+	hi.pt.x = 125;
+	hi.pt.y = 5;
+	CHECK_EQ(SendMessageW(h, RB_HITTEST, 0, (LPARAM)&hi), 1);
+	CHECK(hi.iBand == 1 && hi.flags == RBHT_GRABBER);
+	hi.pt.x = 5;
+	CHECK_EQ(SendMessageW(h, RB_HITTEST, 0, (LPARAM)&hi), 0);
+	CHECK_EQ(hi.flags, RBHT_CLIENT);
+	hi.pt.y = 50;
+	CHECK_EQ(SendMessageW(h, RB_HITTEST, 0, (LPARAM)&hi), -1);
+	CHECK_EQ(hi.flags, RBHT_NOWHERE);
+
+	/* A break starts a second row. */
+	memset(&bi, 0, sizeof(bi));
+	bi.cbSize = sizeof(bi);
+	bi.fMask = RBBIM_STYLE | RBBIM_ID;
+	bi.fStyle = RBBS_BREAK;
+	bi.wID = 9;
+	CHECK(SendMessageW(h, RB_INSERTBANDW, -1, (LPARAM)&bi));
+	CHECK_EQ(SendMessageW(h, RB_GETROWCOUNT, 0, 0), 2);
+	CHECK(SendMessageW(h, RB_GETRECT, 2, (LPARAM)&rc) && rc.top == 28);
+	CHECK(SendMessageW(h, RB_SHOWBAND, 2, FALSE));
+	CHECK_EQ(SendMessageW(h, RB_GETROWCOUNT, 0, 0), 1);
+	CHECK(SendMessageW(h, RB_SHOWBAND, 2, TRUE));
+
+	/* Dragging, which the parent can refuse. */
+	SendMessageW(h, RB_BEGINDRAG, 1, MAKELPARAM(120, 5));
+	SendMessageW(h, RB_DRAGMOVE, 0, MAKELPARAM(150, 5));
+	SendMessageW(h, RB_ENDDRAG, 0, 0);
+	CHECK(SendMessageW(h, RB_GETRECT, 0, (LPARAM)&rc) && rc.right == 150);
+	CHECK_EQ(seen(RBN_ENDDRAG), 1);
+	refuse = TRUE;
+	SendMessageW(h, RB_BEGINDRAG, 1, MAKELPARAM(150, 5));
+	refuse = FALSE;
+	SendMessageW(h, RB_DRAGMOVE, 0, MAKELPARAM(200, 5));
+	CHECK(SendMessageW(h, RB_GETRECT, 0, (LPARAM)&rc) && rc.right == 150);
+	SendMessageW(h, RB_MINIMIZEBAND, 0, 0);
+	CHECK(SendMessageW(h, RB_GETRECT, 0, (LPARAM)&rc) && rc.right == 50);
+	SendMessageW(h, RB_MAXIMIZEBAND, 0, FALSE);
+	CHECK(SendMessageW(h, RB_GETRECT, 1, (LPARAM)&rc));
+	int links_min = rc.right - rc.left;
+	CHECK(SendMessageW(h, RB_GETRECT, 0, (LPARAM)&rc) &&
+	      rc.right == pc.right - links_min);
+
+	/* Moving, colours, bar info, deleting. */
+	CHECK(SendMessageW(h, RB_MOVEBAND, 0, 1));
+	CHECK_EQ(SendMessageW(h, RB_IDTOINDEX, 7, 0), 1);
+	CHECK_EQ((COLORREF)SendMessageW(h, RB_SETBKCOLOR, 0, RGB(1, 2, 3)),
+		 CLR_NONE);
+	CHECK_EQ(SendMessageW(h, RB_GETBKCOLOR, 0, 0), RGB(1, 2, 3));
+	REBARINFO ri = { sizeof(ri), RBIM_IMAGELIST, (HIMAGELIST)0x55 };
+	CHECK(SendMessageW(h, RB_SETBARINFO, 0, (LPARAM)&ri));
+	ri.himl = NULL;
+	CHECK(SendMessageW(h, RB_GETBARINFO, 0, (LPARAM)&ri) &&
+	      ri.himl == (HIMAGELIST)0x55);
+	ri.himl = NULL;
+	SendMessageW(h, RB_SETBARINFO, 0, (LPARAM)&ri);
+	ncodes = 0;
+	CHECK(SendMessageW(h, RB_DELETEBAND, 2, 0));
+	CHECK(seen(RBN_DELETINGBAND) == 1 && seen(RBN_DELETEDBAND) == 1);
+	CHECK_EQ(SendMessageW(h, RB_GETBANDCOUNT, 0, 0), 2);
+	CHECK(!SendMessageW(h, RB_DELETEBAND, 2, 0));
+	CHECK(DestroyWindow(h));
+	CHECK(DestroyWindow(child));
+}
+
+
+static int seen_command(WORD code)
+{
+	int n = 0;
+	for (int i = 0; i < ncommands; i++)
+		n += commands[i] == code;
+	return n;
+}
+
+static void test_small_controls(void)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	USER(LRESULT, SendMessageA, HWND, UINT, WPARAM, LPARAM);
+	USER(BOOL, DestroyWindow, HWND);
+	USER(BOOL, GetWindowRect, HWND, LPRECT);
+	USER(int, GetWindowTextA, HWND, LPSTR, int);
+	USER(BOOL, SetWindowTextA, HWND, LPCSTR);
+	WCHAR buf[64];
+
+	/* Hot keys: the rules replace a forbidden combination. */
+	HWND h = make("msctls_hotkey32", 0, 100, 20);
+	CHECK(h != NULL);
+	SendMessageW(h, HKM_SETHOTKEY, MAKEWORD('A', HOTKEYF_CONTROL), 0);
+	CHECK_EQ(SendMessageW(h, HKM_GETHOTKEY, 0, 0),
+		 MAKEWORD('A', HOTKEYF_CONTROL));
+	SendMessageW(h, HKM_SETRULES, HKCOMB_NONE | HKCOMB_S,
+		     MAKELPARAM(HOTKEYF_CONTROL | HOTKEYF_ALT, 0));
+	ncommands = 0;
+	SendMessageW(h, WM_KEYDOWN, 'B', 0);
+	CHECK_EQ(SendMessageW(h, HKM_GETHOTKEY, 0, 0),
+		 MAKEWORD('B', HOTKEYF_CONTROL | HOTKEYF_ALT));
+	CHECK_EQ(seen_command(EN_CHANGE), 1);
+	SendMessageW(h, WM_KEYDOWN, VK_CONTROL, 0);
+	SendMessageW(h, WM_KEYDOWN, VK_SHIFT, 0);
+	SendMessageW(h, WM_KEYDOWN, 'C', 0);
+	CHECK_EQ(SendMessageW(h, HKM_GETHOTKEY, 0, 0),
+		 MAKEWORD('C', HOTKEYF_CONTROL | HOTKEYF_SHIFT));
+	SendMessageW(h, WM_KEYUP, VK_CONTROL, 0);
+	SendMessageW(h, WM_KEYUP, VK_SHIFT, 0);
+	SendMessageW(h, WM_KEYDOWN, VK_BACK, 0);
+	CHECK_EQ(SendMessageW(h, HKM_GETHOTKEY, 0, 0), 0);
+	CHECK(DestroyWindow(h));
+
+	/* Animation: an AVI file opens and plays; anything else doesn't. */
+	char path[] = "/tmp/seance-aviXXXXXX";
+	int fd = mkstemp(path);
+	CHECK(fd >= 0);
+	static const unsigned char avi[] = {
+		'R', 'I', 'F', 'F', 100, 0, 0, 0, 'A', 'V', 'I', ' ',
+		'L', 'I', 'S', 'T', 64, 0, 0, 0, 'h', 'd', 'r', 'l',
+		'a', 'v', 'i', 'h', 56, 0, 0, 0,
+		0x40, 0x9c, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		12, 0, 0, 0,	/* dwTotalFrames */
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	};
+	CHECK(fd >= 0 && write(fd, avi, sizeof(avi)) == (ssize_t)sizeof(avi));
+	if (fd >= 0)
+		close(fd);
+	char winpath[64];
+	snprintf(winpath, sizeof(winpath), "Z:%s", path);
+	h = make("SysAnimate32", 0, 50, 50);
+	CHECK(!SendMessageW(h, ACM_PLAY, 1, MAKELONG(0, -1)));
+	CHECK(SendMessageA(h, ACM_OPENA, 0, (LPARAM)winpath));
+	ncommands = 0;
+	CHECK(SendMessageW(h, ACM_PLAY, 1, MAKELONG(0, -1)));
+	CHECK(seen_command(ACN_START) == 1 && seen_command(ACN_STOP) == 1);
+	CHECK(!SendMessageW(h, ACM_ISPLAYING, 0, 0));
+	CHECK(SendMessageW(h, ACM_PLAY, -1, MAKELONG(0, -1)));
+	CHECK(SendMessageW(h, ACM_ISPLAYING, 0, 0));
+	CHECK(SendMessageW(h, ACM_STOP, 0, 0));
+	CHECK(!SendMessageW(h, ACM_ISPLAYING, 0, 0));
+	CHECK_EQ(seen_command(ACN_STOP), 2);
+	CHECK(SendMessageW(h, ACM_OPENW, 0, 0));	/* closes */
+	CHECK(!SendMessageW(h, ACM_PLAY, 1, 0));
+	CHECK(!SendMessageA(h, ACM_OPENA, 0, (LPARAM)"Z:/nonexistent.avi"));
+	CHECK(DestroyWindow(h));
+	unlink(path);
+
+	/* IP addresses. */
+	h = make("SysIPAddress32", 0, 120, 20);
+	CHECK(SendMessageW(h, IPM_ISBLANK, 0, 0));
+	DWORD ip = 1;
+	CHECK_EQ(SendMessageW(h, IPM_GETADDRESS, 0, (LPARAM)&ip), 0);
+	CHECK_EQ(ip, 0);
+	SendMessageW(h, IPM_SETADDRESS, 0, MAKEIPADDRESS(192, 168, 1, 20));
+	CHECK_EQ(SendMessageW(h, IPM_GETADDRESS, 0, (LPARAM)&ip), 4);
+	CHECK_EQ(ip, (DWORD)MAKEIPADDRESS(192, 168, 1, 20));
+	char text[32];
+	GetWindowTextA(h, text, 32);
+	CHECK(!strcmp(text, "192.168.1.20"));
+	CHECK(SendMessageW(h, IPM_SETRANGE, 3, MAKEIPRANGE(1, 10)));
+	CHECK(!SendMessageW(h, IPM_SETRANGE, 4, MAKEIPRANGE(1, 10)));
+	CHECK(!SendMessageW(h, IPM_SETRANGE, 0, MAKEIPRANGE(9, 1)));
+	SendMessageW(h, IPM_GETADDRESS, 0, (LPARAM)&ip);
+	CHECK_EQ(FOURTH_IPADDRESS(ip), 10);
+	SendMessageW(h, IPM_CLEARADDRESS, 0, 0);
+	/* Typing: digits, a dot to move on, a full field moving on. */
+	ncodes = 0;
+	SendMessageW(h, IPM_SETFOCUS, 0, 0);
+	SendMessageW(h, WM_CHAR, '1', 0);
+	SendMessageW(h, WM_CHAR, '3', 0);
+	SendMessageW(h, WM_CHAR, '.', 0);
+	SendMessageW(h, WM_CHAR, '2', 0);
+	SendMessageW(h, WM_CHAR, '5', 0);
+	SendMessageW(h, WM_CHAR, '5', 0);
+	SendMessageW(h, WM_CHAR, '7', 0);
+	CHECK_EQ(seen(IPN_FIELDCHANGED), 2);
+	CHECK_EQ(SendMessageW(h, IPM_GETADDRESS, 0, (LPARAM)&ip), 3);
+	CHECK_EQ(ip, (DWORD)MAKEIPADDRESS(31, 255, 7, 0));
+	SetWindowTextA(h, "10.0..4");
+	CHECK_EQ(SendMessageW(h, IPM_GETADDRESS, 0, (LPARAM)&ip), 3);
+	CHECK_EQ(ip, (DWORD)MAKEIPADDRESS(10, 0, 0, 4));
+	GetWindowTextA(h, text, 32);
+	CHECK(!strcmp(text, "10.0..4"));
+	CHECK(DestroyWindow(h));
+
+	/* Pagers: the parent sizes the child, the position is clamped. */
+	h = make("SysPager", PGS_HORZ, 100, 30);
+	HWND child = CreateWindowExW_(h);
+	CHECK(child != NULL);
+	SendMessageW(h, PGM_SETCHILD, 0, (LPARAM)child);
+	RECT rc;
+	GetWindowRect(child, &rc);
+	CHECK(rc.right - rc.left == 500 && rc.bottom - rc.top == 30);
+	CHECK_EQ(SendMessageW(h, PGM_GETBUTTONSTATE, 0, PGB_TOPORLEFT),
+		 PGF_INVISIBLE);
+	CHECK_EQ(SendMessageW(h, PGM_GETBUTTONSTATE, 0, PGB_BOTTOMORRIGHT),
+		 PGF_NORMAL);
+	SendMessageW(h, PGM_SETPOS, 0, 1000);
+	CHECK_EQ(SendMessageW(h, PGM_GETPOS, 0, 0), 400);
+	CHECK_EQ(SendMessageW(h, PGM_GETBUTTONSTATE, 0, PGB_BOTTOMORRIGHT),
+		 PGF_INVISIBLE);
+	CHECK_EQ(SendMessageW(h, PGM_SETBORDER, 0, 5), 0);
+	CHECK_EQ(SendMessageW(h, PGM_GETBORDER, 0, 0), 5);
+	CHECK_EQ(SendMessageW(h, PGM_GETPOS, 0, 0), 400);	/* max is 410 */
+	SendMessageW(h, PGM_SETPOS, 0, 1000);
+	CHECK_EQ(SendMessageW(h, PGM_GETPOS, 0, 0), 410);
+	CHECK_EQ(SendMessageW(h, PGM_SETBUTTONSIZE, 0, 20), 12);
+	CHECK_EQ(SendMessageW(h, PGM_GETBUTTONSIZE, 0, 0), 20);
+	CHECK_EQ((COLORREF)SendMessageW(h, PGM_SETBKCOLOR, 0, RGB(1, 2, 3)) !=
+		 RGB(1, 2, 3), 1);
+	CHECK_EQ(SendMessageW(h, PGM_GETBKCOLOR, 0, 0), RGB(1, 2, 3));
+	CHECK(DestroyWindow(h));
+
+	/* The native font control keeps its font. */
+	h = make("NativeFontCtl", NFS_ALL, 10, 10);
+	SendMessageW(h, WM_SETFONT, (WPARAM)0x1234, 0);
+	CHECK_EQ(SendMessageW(h, WM_GETFONT, 0, 0), 0x1234);
+	CHECK(DestroyWindow(h));
+	(void)buf;
+}
+
+
+static SYSTEMTIME day(int y, int m, int d)
+{
+	SYSTEMTIME st;
+	memset(&st, 0, sizeof(st));
+	st.wYear = (WORD)y;
+	st.wMonth = (WORD)m;
+	st.wDay = (WORD)d;
+	return st;
+}
+
+static void test_date_controls(void)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	USER(LRESULT, SendMessageA, HWND, UINT, WPARAM, LPARAM);
+	USER(BOOL, DestroyWindow, HWND);
+	USER(int, GetWindowTextA, HWND, LPSTR, int);
+	SYSTEMTIME st, r[2];
+	char text[64];
+
+	/* The month calendar, one day selected. */
+	HWND h = make("SysMonthCal32", MCS_DAYSTATE, 200, 200);
+	CHECK(h != NULL);
+	CHECK(SendMessageW(h, MCM_GETCURSEL, 0, (LPARAM)&st));
+	CHECK(st.wYear >= 2000);
+	st = day(2024, 2, 29);
+	ncodes = 0;
+	CHECK(SendMessageW(h, MCM_SETCURSEL, 0, (LPARAM)&st));
+	CHECK_EQ(seen(MCN_GETDAYSTATE), 1);	/* a new month */
+	CHECK(last_daystate_start.wMonth == 1 && last_daystate_start.wDay == 28);
+	memset(&st, 0, sizeof(st));
+	CHECK(SendMessageW(h, MCM_GETCURSEL, 0, (LPARAM)&st));
+	CHECK(st.wYear == 2024 && st.wMonth == 2 && st.wDay == 29 &&
+	      st.wDayOfWeek == 4);
+	st = day(2023, 2, 29);
+	CHECK(!SendMessageW(h, MCM_SETCURSEL, 0, (LPARAM)&st));
+	CHECK(!SendMessageW(h, MCM_SETSELRANGE, 0, (LPARAM)r));
+
+	/* Ranges keep the selection inside. */
+	r[0] = day(2024, 3, 5);
+	r[1] = day(2024, 6, 1);
+	CHECK(SendMessageW(h, MCM_SETRANGE, GDTR_MIN | GDTR_MAX, (LPARAM)r));
+	CHECK(SendMessageW(h, MCM_GETCURSEL, 0, (LPARAM)&st) && st.wMonth == 3 &&
+	      st.wDay == 5);
+	memset(r, 0, sizeof(r));
+	CHECK_EQ(SendMessageW(h, MCM_GETRANGE, 0, (LPARAM)r), GDTR_MIN | GDTR_MAX);
+	CHECK(r[1].wMonth == 6);
+	st = day(2024, 7, 1);
+	CHECK(!SendMessageW(h, MCM_SETCURSEL, 0, (LPARAM)&st));
+	SendMessageW(h, MCM_SETRANGE, 0, 0);
+
+	/* The grid: March 2024 starts on a Friday; Sunday first. */
+	st = day(2024, 3, 15);
+	SendMessageW(h, MCM_SETCURSEL, 0, (LPARAM)&st);
+	CHECK_EQ(SendMessageW(h, MCM_GETMONTHRANGE, GMR_VISIBLE, (LPARAM)r), 1);
+	CHECK(r[0].wDay == 1 && r[1].wDay == 31);
+	CHECK_EQ(SendMessageW(h, MCM_GETMONTHRANGE, GMR_DAYSTATE, (LPARAM)r), 3);
+	CHECK(r[0].wMonth == 2 && r[0].wDay == 25 && r[1].wMonth == 4 &&
+	      r[1].wDay == 6);
+	MCHITTESTINFO hi;
+	memset(&hi, 0, sizeof(hi));
+	hi.cbSize = MCHITTESTINFO_V1_SIZE;
+	hi.pt.x = 5 * 23 + 3;	/* Friday */
+	hi.pt.y = 20 + 16 + 3;	/* the first week */
+	CHECK_EQ(SendMessageW(h, MCM_HITTEST, 0, (LPARAM)&hi), MCHT_CALENDARDATE);
+	CHECK(hi.st.wMonth == 3 && hi.st.wDay == 1);
+	hi.pt.x = 3;
+	CHECK_EQ(SendMessageW(h, MCM_HITTEST, 0, (LPARAM)&hi),
+		 MCHT_CALENDARDATEPREV);
+	hi.pt.y = 5;
+	hi.pt.x = 80;
+	CHECK_EQ(SendMessageW(h, MCM_HITTEST, 0, (LPARAM)&hi), MCHT_TITLEBK);
+	hi.pt.x = 500;
+	CHECK_EQ(SendMessageW(h, MCM_HITTEST, 0, (LPARAM)&hi), MCHT_NOWHERE);
+	/* Clicking a day selects it. */
+	ncodes = 0;
+	SendMessageW(h, WM_LBUTTONDOWN, 0, MAKELPARAM(2 * 23 + 3, 20 + 16 + 16 + 3));
+	CHECK(seen(MCN_SELCHANGE) == 1 && seen(MCN_SELECT) == 1);
+	CHECK(last_sel.stSelStart.wDay == 5 && last_sel.stSelEnd.wDay == 5);
+	/* First day of the week. */
+	CHECK_EQ(SendMessageW(h, MCM_GETFIRSTDAYOFWEEK, 0, 0), MAKELONG(6, 0));
+	CHECK_EQ(SendMessageW(h, MCM_SETFIRSTDAYOFWEEK, 0, 0), MAKELONG(6, 0));
+	CHECK_EQ(SendMessageW(h, MCM_GETFIRSTDAYOFWEEK, 0, 0), MAKELONG(0, 1));
+	SendMessageW(h, MCM_GETMONTHRANGE, GMR_DAYSTATE, (LPARAM)r);
+	CHECK(r[0].wMonth == 2 && r[0].wDay == 26);	/* a Monday */
+	/* Today, colours, sizes. */
+	st = day(2020, 1, 2);
+	SendMessageW(h, MCM_SETTODAY, 0, (LPARAM)&st);
+	memset(&st, 0, sizeof(st));
+	CHECK(SendMessageW(h, MCM_GETTODAY, 0, (LPARAM)&st) &&
+	      st.wYear == 2020 && st.wDay == 2);
+	CHECK(SendMessageW(h, MCM_SETCOLOR, MCSC_TEXT, RGB(1, 2, 3)) != -1);
+	CHECK_EQ(SendMessageW(h, MCM_GETCOLOR, MCSC_TEXT, 0), RGB(1, 2, 3));
+	CHECK_EQ(SendMessageW(h, MCM_GETCOLOR, 9, 0), -1);
+	RECT rc;
+	CHECK(SendMessageW(h, MCM_GETMINREQRECT, 0, (LPARAM)&rc) &&
+	      rc.right > 0 && rc.bottom > 0);
+	MONTHDAYSTATE ds[3] = { 1, 2, 4 };
+	CHECK(SendMessageW(h, MCM_SETDAYSTATE, 3, (LPARAM)ds));
+	CHECK(DestroyWindow(h));
+
+	/* A multiple selection. */
+	h = make("SysMonthCal32", MCS_MULTISELECT, 200, 200);
+	CHECK(!SendMessageW(h, MCM_GETCURSEL, 0, (LPARAM)&st));
+	CHECK_EQ(SendMessageW(h, MCM_GETMAXSELCOUNT, 0, 0), 7);
+	r[0] = day(2024, 5, 10);
+	r[1] = day(2024, 5, 14);
+	CHECK(SendMessageW(h, MCM_SETSELRANGE, 0, (LPARAM)r));
+	memset(r, 0, sizeof(r));
+	CHECK(SendMessageW(h, MCM_GETSELRANGE, 0, (LPARAM)r));
+	CHECK(r[0].wDay == 10 && r[1].wDay == 14);
+	CHECK(SendMessageW(h, MCM_SETMAXSELCOUNT, 3, 0));
+	r[0] = day(2024, 5, 10);
+	r[1] = day(2024, 5, 14);
+	CHECK(!SendMessageW(h, MCM_SETSELRANGE, 0, (LPARAM)r));
+	CHECK(DestroyWindow(h));
+
+	/* The date and time picker. */
+	h = make("SysDateTimePick32", DTS_SHOWNONE, 150, 20);
+	CHECK(h != NULL);
+	CHECK_EQ(SendMessageW(h, DTM_GETSYSTEMTIME, 0, (LPARAM)&st), GDT_VALID);
+	st = day(2024, 7, 4);
+	st.wHour = 15;
+	st.wMinute = 5;
+	st.wSecond = 9;
+	CHECK(SendMessageW(h, DTM_SETSYSTEMTIME, GDT_VALID, (LPARAM)&st));
+	GetWindowTextA(h, text, 64);
+	CHECK(!strcmp(text, "7/4/2024"));
+	CHECK(SendMessageA(h, DTM_SETFORMATA, 0,
+			   (LPARAM)"dddd, MMM dd yy 'at' hh:mm:ss tt"));
+	GetWindowTextA(h, text, 64);
+	CHECK(!strcmp(text, "Thursday, Jul 04 24 at 03:05:09 PM"));
+	SendMessageW(h, DTM_SETFORMATW, 0, (LPARAM)u"HH'h'mm");
+	GetWindowTextA(h, text, 64);
+	CHECK(!strcmp(text, "15h05"));
+	CHECK(SendMessageW(h, DTM_SETSYSTEMTIME, GDT_NONE, 0));
+	CHECK_EQ(SendMessageW(h, DTM_GETSYSTEMTIME, 0, (LPARAM)&st), GDT_NONE);
+	CHECK_EQ(SendMessageW(h, DTM_GETSYSTEMTIME, 0, 0), GDT_ERROR);
+	st = day(2024, 13, 1);
+	CHECK(!SendMessageW(h, DTM_SETSYSTEMTIME, GDT_VALID, (LPARAM)&st));
+	r[0] = day(2024, 1, 1);
+	r[1] = day(2024, 12, 31);
+	CHECK(SendMessageW(h, DTM_SETRANGE, GDTR_MIN | GDTR_MAX, (LPARAM)r));
+	st = day(2025, 1, 1);
+	CHECK(!SendMessageW(h, DTM_SETSYSTEMTIME, GDT_VALID, (LPARAM)&st));
+	CHECK_EQ(SendMessageW(h, DTM_GETRANGE, 0, (LPARAM)r), GDTR_MIN | GDTR_MAX);
+	CHECK(!SendMessageW(h, DTM_GETMONTHCAL, 0, 0));
+	CHECK(DestroyWindow(h));
+	h = make("SysDateTimePick32", 0, 150, 20);
+	CHECK(!SendMessageW(h, DTM_SETSYSTEMTIME, GDT_NONE, 0));
+	h = (DestroyWindow(h), make("SysDateTimePick32", DTS_TIMEFORMAT, 150, 20));
+	st = day(2024, 7, 4);
+	st.wHour = 0;
+	st.wMinute = 30;
+	SendMessageW(h, DTM_SETSYSTEMTIME, GDT_VALID, (LPARAM)&st);
+	GetWindowTextA(h, text, 64);
+	CHECK(!strcmp(text, "12:30:00 AM"));
+	CHECK(DestroyWindow(h));
+}
+
+
+/* How wide text is in the default font, as the controls measure it. */
+static int comctl_width(const WCHAR *t)
+{
+	GDI(HDC, CreateCompatibleDC, HDC);
+	GDI(BOOL, GetTextExtentPoint32W, HDC, LPCWSTR, int, SIZE *);
+	GDI(BOOL, DeleteDC, HDC);
+	SIZE sz = { 0, 0 };
+	int n = 0;
+	while (t[n])
+		n++;
+	HDC dc = CreateCompatibleDC(NULL);
+	GetTextExtentPoint32W(dc, t, n, &sz);
+	DeleteDC(dc);
+	return sz.cx;
+}
+
+/* Handlers that change or destroy a control while it notifies. */
+
+static HWND hook_target;
+static int hook_count;
+
+static LRESULT pop_again(const NMHDR *hdr)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	if (hdr->code == TTN_POP) {
+		hook_count++;
+		SendMessageW(hook_target, TTM_POP, 0, 0);	/* no second one */
+	}
+	return 0;
+}
+
+static LRESULT destroy_on(const NMHDR *hdr)
+{
+	USER(BOOL, DestroyWindow, HWND);
+	if (hook_target && hdr->hwndFrom == hook_target &&
+	    hdr->code == (UINT)hook_count) {
+		HWND h = hook_target;
+		hook_target = NULL;
+		DestroyWindow(h);
+	}
+	return 0;
+}
+
+static LRESULT delete_tab(const NMHDR *hdr)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	if (hdr->code == TCN_SELCHANGING)
+		SendMessageW(hook_target, TCM_DELETEITEM, 0, 0);
+	return 0;
+}
+
+/* An IPN_FIELDCHANGED handler that moves the focus itself. */
+static LRESULT refocus_ip(const NMHDR *hdr)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	if (hdr->code == IPN_FIELDCHANGED) {
+		if (hook_count++ == 0)
+			SendMessageW(hook_target, IPM_SETFOCUS, 3, 0);
+	}
+	return 0;
+}
+
+/* A band child that grows its band on each of its first nine WM_SIZEs,
+ * one more than the rebar lays out in a row. */
+static int kid_sizes;
+
+static LRESULT WINAPI growing_kid(HWND h, UINT m, WPARAM wp, LPARAM lp)
+{
+	USER(LRESULT, DefWindowProcW, HWND, UINT, WPARAM, LPARAM);
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	if (m == WM_SIZE && kid_sizes < 9) {
+		kid_sizes++;
+		REBARBANDINFOW bi;
+		memset(&bi, 0, sizeof(bi));
+		bi.cbSize = sizeof(bi);
+		bi.fMask = RBBIM_CHILDSIZE;
+		bi.cyMinChild = 10 + kid_sizes;
+		SendMessageW(hook_target, RB_SETBANDINFOW, 0, (LPARAM)&bi);
+	}
+	return DefWindowProcW(h, m, wp, lp);
+}
+
+static LRESULT STUB_WINAPI nested_sub(HWND h, UINT m, WPARAM wp, LPARAM lp,
+				      UINT_PTR id, DWORD_PTR ref)
+{
+	FN(LRESULT, DefSubclassProc, HWND, UINT, WPARAM, LPARAM);
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	if (m == WM_USER + 1)
+		SendMessageW(h, WM_USER + 2, 0, 0);
+	return DefSubclassProc(h, m, wp, lp);
+}
+
+static LRESULT STUB_WINAPI removing_sub(HWND h, UINT m, WPARAM wp, LPARAM lp,
+					UINT_PTR id, DWORD_PTR ref)
+{
+	FN(LRESULT, DefSubclassProc, HWND, UINT, WPARAM, LPARAM);
+	FN(BOOL, RemoveWindowSubclass, HWND, SUBCLASSPROC, UINT_PTR);
+	if (m == WM_USER + 2)
+		RemoveWindowSubclass(h, removing_sub, id);
+	if (m == WM_USER + 1)
+		hook_count += 100;	/* must not run: removed by then */
+	return DefSubclassProc(h, m, wp, lp);
+}
+
+static void test_reentrancy(void)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	USER(LRESULT, SendMessageA, HWND, UINT, WPARAM, LPARAM);
+	USER(BOOL, DestroyWindow, HWND);
+	USER(BOOL, IsWindow, HWND);
+	FN(BOOL, SetWindowSubclass, HWND, SUBCLASSPROC, UINT_PTR, DWORD_PTR);
+	FN(BOOL, GetWindowSubclass, HWND, SUBCLASSPROC, UINT_PTR, DWORD_PTR *);
+
+	/* A subclass removed inside a nested message is skipped, and
+	 * freed only once the outer dispatch is done. */
+	HWND h = make("tooltips_class32", 0, 10, 10);
+	CHECK(SetWindowSubclass(h, removing_sub, 1, 0));
+	CHECK(SetWindowSubclass(h, nested_sub, 2, 0));
+	hook_count = 0;
+	SendMessageW(h, WM_USER + 1, 0, 0);
+	CHECK_EQ(hook_count, 0);
+	CHECK(!GetWindowSubclass(h, removing_sub, 1, NULL));
+	CHECK(GetWindowSubclass(h, nested_sub, 2, NULL));
+	SendMessageW(h, WM_USER + 1, 0, 0);
+	CHECK(DestroyWindow(h));
+
+	/* A TTN_POP handler that pops again gets one TTN_POP. */
+	h = make("tooltips_class32", 0, 10, 10);
+	TTTOOLINFOW ti;
+	memset(&ti, 0, sizeof(ti));
+	ti.cbSize = sizeof(ti);
+	ti.hwnd = parent;
+	ti.uId = 1;
+	set_rect(&ti.rect, 0, 0, 50, 20);
+	ti.lpszText = (LPWSTR)u"Tip";
+	CHECK(SendMessageW(h, TTM_ADDTOOLW, 0, (LPARAM)&ti));
+	MSG m;
+	memset(&m, 0, sizeof(m));
+	m.hwnd = parent;
+	m.message = WM_MOUSEMOVE;
+	m.lParam = MAKELPARAM(5, 5);
+	SendMessageW(h, TTM_RELAYEVENT, 0, (LPARAM)&m);
+	hook_target = h;
+	hook_count = 0;
+	notify_hook = pop_again;
+	SendMessageW(h, TTM_POP, 0, 0);
+	notify_hook = NULL;
+	CHECK_EQ(hook_count, 1);
+	/* A TTN_SHOW handler that destroys the tooltip. */
+	hook_count = (int)TTN_SHOW;
+	notify_hook = destroy_on;
+	SendMessageW(h, TTM_RELAYEVENT, 0, (LPARAM)&m);
+	notify_hook = NULL;
+	CHECK(!IsWindow(h));
+
+	/* A tab control whose TCN_SELCHANGING handler deletes a tab: the
+	 * click no longer means that tab, so nothing is selected. */
+	h = make("SysTabControl32", TCS_FIXEDWIDTH, 200, 100);
+	TCITEMW it;
+	memset(&it, 0, sizeof(it));
+	it.mask = TCIF_TEXT;
+	it.pszText = (LPWSTR)u"one";
+	for (int i = 0; i < 3; i++)
+		SendMessageW(h, TCM_INSERTITEMW, i, (LPARAM)&it);
+	RECT rc;
+	CHECK(SendMessageW(h, TCM_GETITEMRECT, 2, (LPARAM)&rc));
+	hook_target = h;
+	notify_hook = delete_tab;
+	SendMessageW(h, WM_LBUTTONDOWN, 0, MAKELPARAM(rc.left + 2, 5));
+	notify_hook = NULL;
+	CHECK_EQ(SendMessageW(h, TCM_GETITEMCOUNT, 0, 0), 2);
+	/* The handler deleted the selected tab; the click selected none. */
+	CHECK_EQ(SendMessageW(h, TCM_GETCURSEL, 0, 0), -1);
+	/* With TCM_SETCURSEL the button state follows the selection. */
+	CHECK(DestroyWindow(h));
+	h = make("SysTabControl32", TCS_BUTTONS, 200, 100);
+	for (int i = 0; i < 2; i++)
+		SendMessageW(h, TCM_INSERTITEMW, i, (LPARAM)&it);
+	SendMessageW(h, TCM_SETCURSEL, 1, 0);
+	it.mask = TCIF_STATE;
+	it.dwStateMask = TCIS_BUTTONPRESSED;
+	CHECK(SendMessageW(h, TCM_GETITEMW, 1, (LPARAM)&it) &&
+	      it.dwState == TCIS_BUTTONPRESSED);
+	CHECK(SendMessageW(h, TCM_GETITEMW, 0, (LPARAM)&it) && !it.dwState);
+	/* TCM_SETCURSEL(-1) clears the focus with the selection. */
+	SendMessageW(h, TCM_SETCURSEL, (WPARAM)-1, 0);
+	CHECK_EQ(SendMessageW(h, TCM_GETCURSEL, 0, 0), -1);
+	CHECK_EQ(SendMessageW(h, TCM_GETCURFOCUS, 0, 0), -1);
+	CHECK(DestroyWindow(h));
+
+	/* A TTN_POP handler that destroys a tracking tooltip as
+	 * TTM_TRACKACTIVATE(FALSE) hides it. */
+	h = make("tooltips_class32", 0, 10, 10);
+	memset(&ti, 0, sizeof(ti));
+	ti.cbSize = sizeof(ti);
+	ti.uFlags = TTF_TRACK;
+	ti.hwnd = parent;
+	ti.uId = 2;
+	ti.lpszText = (LPWSTR)u"Tracked";
+	CHECK(SendMessageW(h, TTM_ADDTOOLW, 0, (LPARAM)&ti));
+	SendMessageW(h, TTM_TRACKACTIVATE, TRUE, (LPARAM)&ti);
+	hook_target = h;
+	hook_count = (int)TTN_POP;
+	notify_hook = destroy_on;
+	SendMessageW(h, TTM_TRACKACTIVATE, FALSE, (LPARAM)&ti);
+	notify_hook = NULL;
+	CHECK(!IsWindow(h));
+
+	/* A toolbar destroyed by its TBN_HOTITEMCHANGE handler. */
+	h = make("ToolbarWindow32", CCS_NORESIZE, 200, 30);
+	SendMessageW(h, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
+	TBBUTTON tb;
+	memset(&tb, 0, sizeof(tb));
+	tb.idCommand = 7;
+	tb.fsState = TBSTATE_ENABLED;
+	tb.iString = -1;
+	CHECK(SendMessageW(h, TB_ADDBUTTONSW, 1, (LPARAM)&tb));
+	hook_target = h;
+	hook_count = (int)TBN_HOTITEMCHANGE;
+	notify_hook = destroy_on;
+	SendMessageW(h, TB_SETHOTITEM, 0, 0);
+	notify_hook = NULL;
+	CHECK(!IsWindow(h));
+
+	/* An IPN_FIELDCHANGED handler that moves the focus elsewhere: one
+	 * notification, and the focus goes where the handler put it. */
+	h = make("SysIPAddress32", 0, 120, 20);
+	hook_target = h;
+	hook_count = 0;
+	notify_hook = refocus_ip;
+	SendMessageW(h, IPM_SETFOCUS, 1, 0);
+	notify_hook = NULL;
+	CHECK_EQ(hook_count, 1);
+	SendMessageW(h, WM_CHAR, '7', 0);
+	DWORD addr = 0;
+	CHECK_EQ(SendMessageW(h, IPM_GETADDRESS, 0, (LPARAM)&addr), 1);
+	CHECK_EQ(addr, 7);
+	CHECK(DestroyWindow(h));
+
+	/* A rebar destroyed by its RBN_DELETINGBAND handler. */
+	h = make("ReBarWindow32", CCS_NORESIZE, 200, 30);
+	REBARBANDINFOW bi;
+	memset(&bi, 0, sizeof(bi));
+	bi.cbSize = sizeof(bi);
+	bi.fMask = RBBIM_ID | RBBIM_SIZE;
+	bi.cx = 50;
+	CHECK(SendMessageW(h, RB_INSERTBANDW, -1, (LPARAM)&bi));
+	CHECK(SendMessageW(h, RB_INSERTBANDW, -1, (LPARAM)&bi));
+	/* RB_SIZETORECT lays the bands out in the rectangle's width. */
+	RECT want;
+	set_rect(&want, 0, 0, 300, 30);
+	SendMessageW(h, RB_SIZETORECT, 0, (LPARAM)&want);
+	CHECK(SendMessageW(h, RB_GETRECT, 1, (LPARAM)&rc) && rc.right == 300);
+	hook_target = h;
+	hook_count = (int)RBN_DELETINGBAND;
+	notify_hook = destroy_on;
+	CHECK(!SendMessageW(h, RB_DELETEBAND, 0, 0));
+	notify_hook = NULL;
+	CHECK(!IsWindow(h));
+
+	/* A child that keeps changing its band outlasts the rebar's layout
+	 * passes: every child is still placed, and the rest of the layout
+	 * is posted, so pumping messages brings it up to date. */
+	{
+		USER(ATOM, RegisterClassW, const WNDCLASSW *);
+		USER(HWND, CreateWindowExW, DWORD, LPCWSTR, LPCWSTR, DWORD, int,
+		     int, int, int, HWND, HMENU, HINSTANCE, LPVOID);
+		USER(BOOL, PeekMessageW, MSG *, HWND, UINT, UINT, UINT);
+		USER(LRESULT, DispatchMessageW, const MSG *);
+		USER(BOOL, GetClientRect, HWND, RECT *);
+		WNDCLASSW wc;
+		memset(&wc, 0, sizeof(wc));
+		wc.lpfnWndProc = growing_kid;
+		wc.lpszClassName = w("GrowingKid");
+		CHECK(RegisterClassW(&wc));
+		h = make("ReBarWindow32", CCS_NORESIZE, 200, 60);
+		hook_target = h;
+		kid_sizes = 0;
+		HWND kid = CreateWindowExW(0, w("GrowingKid"), NULL, WS_CHILD,
+					   0, 0, 10, 10, h, NULL, NULL, NULL);
+		CHECK(kid != NULL);
+		memset(&bi, 0, sizeof(bi));
+		bi.cbSize = sizeof(bi);
+		bi.fMask = RBBIM_CHILD | RBBIM_CHILDSIZE | RBBIM_SIZE;
+		bi.hwndChild = kid;
+		bi.cyMinChild = 10;
+		bi.cx = 100;
+		CHECK(SendMessageW(h, RB_INSERTBANDW, -1, (LPARAM)&bi));
+		MSG pm;
+		for (int i = 0; i < 16 && PeekMessageW(&pm, NULL, 0, 0, PM_REMOVE);
+		     i++)
+			DispatchMessageW(&pm);
+		CHECK_EQ(kid_sizes, 9);
+		CHECK(GetClientRect(kid, &rc));
+		CHECK_EQ(rc.bottom - rc.top, 19);
+		CHECK(DestroyWindow(h));
+		hook_target = NULL;
+	}
+
+	/* ComboBoxEx: an ANSI caller gets ANSI text, and a CBEN_DELETEITEM
+	 * handler that destroys the control. */
+	h = make("ComboBoxEx32", 0, 200, 100);
+	COMBOBOXEXITEMW ci;
+	memset(&ci, 0, sizeof(ci));
+	ci.mask = CBEIF_TEXT;
+	ci.iItem = -1;
+	ci.pszText = (LPWSTR)u"alpha";
+	CHECK_EQ(SendMessageW(h, CBEM_INSERTITEMW, 0, (LPARAM)&ci), 0);
+	CHECK_EQ(SendMessageA(h, CB_GETLBTEXTLEN, 0, 0), 5);
+	char text[16];
+	memset(text, 'x', sizeof(text));
+	CHECK_EQ(SendMessageA(h, CB_GETLBTEXT, 0, (LPARAM)text), 5);
+	CHECK(!strcmp(text, "alpha"));
+	CHECK_EQ(SendMessageA(h, CB_FINDSTRINGEXACT, (WPARAM)-1,
+			      (LPARAM)"ALPHA"), 0);
+	hook_target = h;
+	hook_count = (int)CBEN_DELETEITEM;
+	notify_hook = destroy_on;
+	SendMessageW(h, CB_RESETCONTENT, 0, 0);
+	notify_hook = NULL;
+	CHECK(!IsWindow(h));
+
+	/* SysLink: an unterminated tag is plain text. */
+	{
+		USER(HWND, CreateWindowExW, DWORD, LPCWSTR, LPCWSTR, DWORD, int,
+		     int, int, int, HWND, HMENU, HINSTANCE, LPVOID);
+		h = CreateWindowExW(0, w("SysLink"), w("go <a href=\"x\""),
+				    WS_CHILD, 0, 0, 300, 20, parent, NULL,
+				    NULL, NULL);
+	}
+	CHECK(h != NULL);
+	LITEM li;
+	memset(&li, 0, sizeof(li));
+	li.mask = LIF_ITEMINDEX;
+	CHECK(!SendMessageW(h, LM_GETITEM, 0, (LPARAM)&li));
+	CHECK(DestroyWindow(h));
+}
+
+static void test_comboex_link(void)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	USER(LRESULT, SendMessageA, HWND, UINT, WPARAM, LPARAM);
+	USER(BOOL, DestroyWindow, HWND);
+	USER(HWND, CreateWindowExW, DWORD, LPCWSTR, LPCWSTR, DWORD, int, int,
+	     int, int, HWND, HMENU, HINSTANCE, LPVOID);
+	USER(BOOL, SetWindowTextW, HWND, LPCWSTR);
+	USER(int, GetWindowTextA, HWND, LPSTR, int);
+	WCHAR buf[64];
+
+	/* ComboBoxEx. */
+	HWND h = make("ComboBoxEx32", 0, 150, 100);
+	CHECK(h != NULL);
+	COMBOBOXEXITEMW it;
+	memset(&it, 0, sizeof(it));
+	it.mask = CBEIF_TEXT | CBEIF_IMAGE | CBEIF_LPARAM | CBEIF_INDENT;
+	static const char *const names[3] = { "Red", "Green", "blue" };
+	ncodes = 0;
+	for (int i = 0; i < 3; i++) {
+		it.iItem = -1;
+		it.pszText = w(names[i]);
+		it.iImage = i;
+		it.lParam = 10 + i;
+		it.iIndent = i;
+		CHECK_EQ(SendMessageW(h, CBEM_INSERTITEMW, 0, (LPARAM)&it), i);
+	}
+	CHECK(seen(CBEN_INSERTITEM) == 3 && last_cbe.lParam == 12);
+	COMBOBOXEXITEMA ia;
+	memset(&ia, 0, sizeof(ia));
+	ia.mask = CBEIF_TEXT;
+	ia.iItem = 0;
+	ia.pszText = (LPSTR)"Black";
+	CHECK_EQ(SendMessageA(h, CBEM_INSERTITEMA, 0, (LPARAM)&ia), 0);
+	it.mask = CBEIF_TEXT | CBEIF_LPARAM;
+	it.iItem = 4;
+	it.pszText = LPSTR_TEXTCALLBACKW;
+	it.lParam = 7;
+	CHECK_EQ(SendMessageW(h, CBEM_INSERTITEMW, 0, (LPARAM)&it), 4);
+	CHECK_EQ(SendMessageW(h, CB_GETCOUNT, 0, 0), 5);
+
+	memset(&it, 0, sizeof(it));
+	it.mask = CBEIF_TEXT | CBEIF_IMAGE | CBEIF_LPARAM | CBEIF_INDENT;
+	it.iItem = 2;
+	it.pszText = buf;
+	it.cchTextMax = 64;
+	CHECK(SendMessageW(h, CBEM_GETITEMW, 0, (LPARAM)&it));
+	CHECK(!strcmp(a(buf), "Green") && it.iImage == 1 && it.lParam == 11 &&
+	      it.iIndent == 1);
+	it.iItem = 4;
+	CHECK(SendMessageW(h, CBEM_GETITEMW, 0, (LPARAM)&it));
+	CHECK(!strcmp(a(buf), "cb7"));
+	CHECK_EQ(SendMessageW(h, CB_GETLBTEXT, 4, (LPARAM)buf), 3);
+	CHECK_EQ(SendMessageW(h, CB_GETLBTEXTLEN, 1, 0), 3);
+	CHECK_EQ(SendMessageW(h, CB_GETITEMDATA, 3, 0), 12);
+	CHECK(SendMessageW(h, CB_SETITEMDATA, 3, 99));
+	CHECK_EQ(SendMessageW(h, CB_GETITEMDATA, 3, 0), 99);
+	CHECK_EQ(SendMessageW(h, CB_GETITEMDATA, 9, 0), CB_ERR);
+
+	/* Selection and finding. */
+	CHECK_EQ(SendMessageW(h, CB_GETCURSEL, 0, 0), -1);
+	CHECK_EQ(SendMessageW(h, CB_SETCURSEL, 2, 0), 2);
+	it.iItem = -1;	/* the selection */
+	it.mask = CBEIF_TEXT;
+	CHECK(SendMessageW(h, CBEM_GETITEMW, 0, (LPARAM)&it));
+	CHECK(!strcmp(a(buf), "Green"));
+	ncommands = 0;
+	SendMessageW(h, WM_KEYDOWN, 0x28, 0);	/* down */
+	CHECK(SendMessageW(h, CB_GETCURSEL, 0, 0) == 3 &&
+	      seen_command(CBN_SELCHANGE) == 1);
+	CHECK_EQ(SendMessageW(h, CB_FINDSTRINGEXACT, -1, (LPARAM)u"BLUE"), 3);
+	CHECK_EQ(SendMessageW(h, CB_FINDSTRINGEXACT, -1, (LPARAM)u"Gre"), CB_ERR);
+	CHECK_EQ(SendMessageW(h, CB_FINDSTRING, -1, (LPARAM)u"Gre"), 2);
+	CHECK_EQ(SendMessageW(h, CB_FINDSTRING, 2, (LPARAM)u"b"), 3);
+	CHECK_EQ(SendMessageW(h, CBEM_SETEXTENDEDSTYLE, 0,
+			      CBES_EX_CASESENSITIVE), 0);
+	CHECK_EQ(SendMessageW(h, CB_FINDSTRINGEXACT, -1, (LPARAM)u"BLUE"),
+		 CB_ERR);
+	CHECK_EQ(SendMessageW(h, CB_ADDSTRING, 0, (LPARAM)u"x"), CB_ERR);
+	CHECK(SendMessageW(h, CB_SHOWDROPDOWN, TRUE, 0));
+	CHECK(SendMessageW(h, CB_GETDROPPEDSTATE, 0, 0));
+	CHECK_EQ(seen_command(CBN_DROPDOWN), 1);
+	CHECK(SendMessageW(h, CBEM_GETCOMBOCONTROL, 0, 0) == (LRESULT)h);
+
+	/* Deleting (CBEN_DELETEITEM), set item. */
+	ncodes = 0;
+	CHECK_EQ(SendMessageW(h, CBEM_DELETEITEM, 0, 0), 4);
+	CHECK(seen(CBEN_DELETEITEM) == 1);
+	CHECK_EQ(SendMessageW(h, CB_GETCURSEL, 0, 0), 2);
+	it.mask = CBEIF_TEXT;
+	it.iItem = 0;
+	it.pszText = (LPWSTR)u"Crimson";
+	CHECK(SendMessageW(h, CBEM_SETITEMW, 0, (LPARAM)&it));
+	CHECK_EQ(SendMessageW(h, CB_GETLBTEXT, 0, (LPARAM)buf), 7);
+	SendMessageW(h, CB_RESETCONTENT, 0, 0);
+	CHECK_EQ(seen(CBEN_DELETEITEM), 5);
+	CHECK_EQ(SendMessageW(h, CB_GETCOUNT, 0, 0), 0);
+	CHECK(DestroyWindow(h));
+
+	/* SysLink: markup, items, hit test, clicks. */
+	h = CreateWindowExW(0, w("SysLink"),
+			    w("See <a href=\"http://a.example/\" id=\"one\">"
+			      "this</a> or <A id='two'>that</A>."),
+			    WS_CHILD, 0, 0, 300, 20, parent, NULL, NULL, NULL);
+	CHECK(h != NULL);
+	link_window = h;
+	LITEM li;
+	memset(&li, 0, sizeof(li));
+	li.mask = LIF_ITEMINDEX | LIF_STATE | LIF_ITEMID | LIF_URL;
+	li.iLink = 0;
+	li.stateMask = LIS_ENABLED | LIS_FOCUSED;
+	CHECK(SendMessageW(h, LM_GETITEM, 0, (LPARAM)&li));
+	CHECK(!strcmp(a(li.szUrl), "http://a.example/") &&
+	      !strcmp(a(li.szID), "one") &&
+	      li.state == (LIS_ENABLED | LIS_FOCUSED));
+	memset(&li, 0, sizeof(li));
+	li.mask = LIF_ITEMID | LIF_STATE;
+	memcpy(li.szID, u"two", 8);
+	li.stateMask = ~0u;
+	CHECK(SendMessageW(h, LM_GETITEM, 0, (LPARAM)&li));
+	CHECK(li.iLink == 1 && li.szUrl[0] == 0 && li.state == LIS_ENABLED);
+	li.mask = LIF_ITEMINDEX;
+	li.iLink = 2;
+	CHECK(!SendMessageW(h, LM_GETITEM, 0, (LPARAM)&li));
+	/* Set a URL and the visited state. */
+	memset(&li, 0, sizeof(li));
+	li.mask = LIF_ITEMINDEX | LIF_URL | LIF_STATE;
+	li.iLink = 1;
+	memcpy(li.szUrl, u"x:y", 8);
+	li.state = LIS_VISITED;
+	li.stateMask = LIS_VISITED;
+	CHECK(SendMessageW(h, LM_SETITEM, 0, (LPARAM)&li));
+	memset(&li, 0, sizeof(li));
+	li.mask = LIF_ITEMINDEX | LIF_URL | LIF_STATE;
+	li.iLink = 1;
+	li.stateMask = LIS_VISITED;
+	CHECK(SendMessageW(h, LM_GETITEM, 0, (LPARAM)&li));
+	CHECK(!strcmp(a(li.szUrl), "x:y") && li.state == LIS_VISITED);
+	/* Hit test: the second link lies after "See this or ". */
+	CHECK_EQ(SendMessageW(h, LM_GETIDEALHEIGHT, 0, 0), 16);
+	int x0 = comctl_width(u"See this or "), x1 = comctl_width(u"See this or that");
+	LHITTESTINFO hi;
+	memset(&hi, 0, sizeof(hi));
+	hi.pt.x = (x0 + x1) / 2;
+	hi.pt.y = 5;
+	CHECK(SendMessageW(h, LM_HITTEST, 0, (LPARAM)&hi));
+	CHECK(hi.item.iLink == 1 && !strcmp(a(hi.item.szID), "two"));
+	hi.pt.x = 1;
+	CHECK(!SendMessageW(h, LM_HITTEST, 0, (LPARAM)&hi));
+	last_link = -9;
+	SendMessageW(h, WM_LBUTTONDOWN, 0, MAKELPARAM((x0 + x1) / 2, 5));
+	CHECK_EQ(last_link, 1);
+	last_link = -9;
+	SendMessageW(h, WM_KEYDOWN, VK_RETURN, 0);
+	CHECK_EQ(last_link, 1);
+	SendMessageW(h, WM_KEYDOWN, VK_TAB, 0);
+	last_link = -9;
+	SendMessageW(h, WM_KEYDOWN, VK_RETURN, 0);
+	CHECK_EQ(last_link, 0);
+	/* New markup replaces the links; the window keeps the markup. */
+	SetWindowTextW(h, w("<a>only</a>"));
+	char text[64];
+	GetWindowTextA(h, text, 64);
+	CHECK(!strcmp(text, "<a>only</a>"));
+	li.mask = LIF_ITEMINDEX;
+	li.iLink = 1;
+	CHECK(!SendMessageW(h, LM_GETITEM, 0, (LPARAM)&li));
+	li.iLink = 0;
+	CHECK(SendMessageW(h, LM_GETITEM, 0, (LPARAM)&li));
+	link_window = NULL;
+	CHECK(DestroyWindow(h));
+}
+
 static void test_list_controls(void)
 {
 	USER_WLP(Set, HWND, int, LONG_PTR);
@@ -1779,6 +3411,14 @@ static void test_list_controls(void)
 	test_header();
 	test_listview();
 	test_treeview();
+	test_toolbar();
+	test_tooltip();
+	test_tab();
+	test_rebar();
+	test_small_controls();
+	test_date_controls();
+	test_comboex_link();
+	test_reentrancy();
 }
 
 static void test_ordinals(void)

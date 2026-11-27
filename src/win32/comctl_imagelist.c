@@ -487,6 +487,12 @@ WINFN(BOOL) il_ImageList_Remove(HIMAGELIST h, INT i)
 	return TRUE;
 }
 
+/* For the controls that keep an image list (comctl.h). */
+BOOL comctl_imagelist_remove(HIMAGELIST h, int i)
+{
+	return il_ImageList_Remove(h, i);
+}
+
 WINFN(BOOL) il_ImageList_SetOverlayImage(HIMAGELIST h, INT image, INT overlay)
 {
 	if (!valid(h) || overlay < 1 || overlay > 15 || image < -1 ||

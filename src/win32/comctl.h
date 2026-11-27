@@ -27,6 +27,8 @@ WCHAR *comctl_w_dup(const WCHAR *s);
 int comctl_copy_text_out(const WCHAR *text, void *buf, int size, int wide);
 void *comctl_state(HWND h);
 void comctl_set_state(HWND h, void *s);
+BOOL comctl_alive(HWND h, const void *s);
+BOOL comctl_imagelist_remove(HIMAGELIST h, int i);
 DWORD comctl_style(HWND h);
 LRESULT comctl_def(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 LRESULT comctl_send(HWND h, UINT msg, WPARAM wp, LPARAM lp);
@@ -35,16 +37,40 @@ BOOL comctl_client_rect(HWND h, RECT *rc);
 HWND comctl_create(LPCWSTR cls, DWORD style, int x, int y, int cx, int cy,
 		   HWND parent, UINT id);
 BOOL comctl_move(HWND h, int x, int y, int cx, int cy);
+BOOL comctl_show(HWND h, int cmd);
+/* PostMessageW. */
+BOOL comctl_post(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+HINSTANCE comctl_instance(HWND h);
 BOOL comctl_notify_unicode(HWND h);
 int comctl_text_width(const WCHAR *text);
 LONG comctl_set_style(HWND h, DWORD style);
 /* WM_NOTIFY to h's parent, with hdr's header filled in. */
 LRESULT comctl_notify(HWND from, UINT code, NMHDR *hdr);
+/* The same, to a given window (NULL: the parent). */
+LRESULT comctl_notify_to(HWND to, HWND from, UINT code, NMHDR *hdr);
+
+/* SetWindowSubclass, RemoveWindowSubclass and DefSubclassProc. */
+BOOL comctl_set_subclass(HWND h, SUBCLASSPROC proc, UINT_PTR id, DWORD_PTR ref);
+BOOL comctl_remove_subclass(HWND h, SUBCLASSPROC proc, UINT_PTR id);
+LRESULT comctl_def_subclass(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 
 /* The control procedures in the other source files. */
 LRESULT STUB_WINAPI comctl_header_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 LRESULT STUB_WINAPI comctl_listview_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 LRESULT STUB_WINAPI comctl_treeview_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_toolbar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_tooltip_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_tab_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_rebar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_hotkey_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_animate_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_ipaddr_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_pager_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_nativefont_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_monthcal_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_datetime_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_comboex_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT STUB_WINAPI comctl_link_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 
 /* The export tables of the other source files. */
 extern const struct builtin_export comctl_dpa_exports[];

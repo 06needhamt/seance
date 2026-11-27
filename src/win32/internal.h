@@ -42,4 +42,26 @@ void *win_realloc(void *p, size_t n);
 void win_free(void *p);
 size_t win_usable(void *p);
 
+/*
+ * Between user32 and the built-in controls: a list item's text as one
+ * snapshot. user32 converts CB_GETLBTEXT and CB_GETLBTEXTLEN between
+ * charsets with it, so the length and the copy come from the same text
+ * (a callback item's text could change between a CB_GETLBTEXTLEN and a
+ * CB_GETLBTEXT, and the copy would overrun a buffer sized by the first).
+ * wParam: the item; lParam: a struct win_lbtext. A control that knows the
+ * message sets done, result (the length, or CB_ERR) and text (a malloc'd
+ * copy, or NULL); any other procedure leaves done at 0 and user32 falls
+ * back to the two messages. The value is in the system range, which
+ * Windows leaves unused here.
+ */
+#define WIN_LBTEXT_SNAPSHOT 0x03F7
+/* Posted by a built-in control to itself for work it deferred (the rebar's
+ * layout after its pass budget ran out). Same range, also unused. */
+#define WIN_DEFERRED_LAYOUT 0x03F8
+struct win_lbtext {
+	int done;
+	LRESULT result;
+	WCHAR *text;
+};
+
 #endif /* VFW_WIN32_INTERNAL_H */

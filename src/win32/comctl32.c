@@ -17,6 +17,7 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stddef.h>
 #include <string.h>
 #include <strings.h>
 
@@ -39,7 +40,9 @@ static struct {
 	LONG_PTR (WINAPI *SetWindowLongPtrA)(HWND, int, LONG_PTR);
 	LONG_PTR (WINAPI *SetWindowLongPtrW)(HWND, int, LONG_PTR);
 	BOOL (WINAPI *IsWindowUnicode)(HWND);
+	BOOL (WINAPI *IsWindow)(HWND);
 	BOOL (WINAPI *ShowWindow)(HWND, int);
+	BOOL (WINAPI *PostMessageW)(HWND, UINT, WPARAM, LPARAM);
 	HANDLE (WINAPI *GetPropW)(HWND, LPCWSTR);
 	BOOL (WINAPI *SetPropW)(HWND, LPCWSTR, HANDLE);
 	HANDLE (WINAPI *RemovePropW)(HWND, LPCWSTR);
@@ -81,7 +84,7 @@ static void api_init(void)
 	api.SetWindowLongPtrA = USER32(SetWindowLongA);
 	api.SetWindowLongPtrW = USER32(SetWindowLongW);
 #endif
-	U(IsWindowUnicode); U(ShowWindow);
+	U(IsWindowUnicode); U(IsWindow); U(ShowWindow); U(PostMessageW);
 	U(GetPropW); U(SetPropW); U(RemovePropW);
 	U(SetWindowTextW); U(GetWindowTextW); U(GetParent); U(GetDlgItem);
 	U(GetClientRect); U(GetWindowRect); U(ScreenToClient);
@@ -189,6 +192,15 @@ int comctl_copy_text_out(const WCHAR *text, void *buf, int size, int wide)
 }
 
 void *comctl_state(HWND h) { API(); return state(h); }
+
+/* Whether h is still the live control that owns s: a notification handler
+ * may have destroyed it (its state goes back to NULL at WM_NCDESTROY, and
+ * window handles are never reused). */
+BOOL comctl_alive(HWND h, const void *s)
+{
+	API();
+	return s && api.IsWindow(h) && state(h) == s;
+}
 void comctl_set_state(HWND h, void *s) { API(); set_state(h, s); }
 DWORD comctl_style(HWND h) { API(); return style_of(h); }
 
@@ -222,6 +234,24 @@ HWND comctl_create(LPCWSTR cls, DWORD style, int x, int y, int cx, int cy,
 	API();
 	return api.CreateWindowExW(0, cls, NULL, style, x, y, cx, cy, parent,
 				   (HMENU)(UINT_PTR)id, NULL, NULL);
+}
+
+HINSTANCE comctl_instance(HWND h)
+{
+	API();
+	return (HINSTANCE)api.GetWindowLongPtrW(h, GWLP_HINSTANCE);
+}
+
+BOOL comctl_post(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+	API();
+	return api.PostMessageW(h, msg, wp, lp);
+}
+
+BOOL comctl_show(HWND h, int cmd)
+{
+	API();
+	return api.ShowWindow(h, cmd);
 }
 
 BOOL comctl_move(HWND h, int x, int y, int cx, int cy)
@@ -274,6 +304,11 @@ static LRESULT notify(HWND to, HWND from, UINT code, NMHDR *hdr);
 LRESULT comctl_notify(HWND from, UINT code, NMHDR *hdr)
 {
 	return notify(NULL, from, code, hdr);
+}
+
+LRESULT comctl_notify_to(HWND to, HWND from, UINT code, NMHDR *hdr)
+{
+	return notify(to, from, code, hdr);
 }
 
 /* Trackbars. */
@@ -1020,22 +1055,22 @@ static const struct control_class {
 	{ "msctls_progress32", progress_proc },
 	{ "msctls_updown32", updown_proc },
 	{ "msctls_statusbar32", status_proc },
-	{ "ToolbarWindow32", NULL },
-	{ "tooltips_class32", NULL },
+	{ "ToolbarWindow32", comctl_toolbar_proc },
+	{ "tooltips_class32", comctl_tooltip_proc },
 	{ "SysListView32", comctl_listview_proc },
 	{ "SysHeader32", comctl_header_proc },
 	{ "SysTreeView32", comctl_treeview_proc },
-	{ "SysTabControl32", NULL },
-	{ "msctls_hotkey32", NULL },
-	{ "SysAnimate32", NULL },
-	{ "SysDateTimePick32", NULL },
-	{ "SysMonthCal32", NULL },
-	{ "ComboBoxEx32", NULL },
-	{ "ReBarWindow32", NULL },
-	{ "SysIPAddress32", NULL },
-	{ "SysPager", NULL },
-	{ "NativeFontCtl", NULL },
-	{ "SysLink", NULL },
+	{ "SysTabControl32", comctl_tab_proc },
+	{ "msctls_hotkey32", comctl_hotkey_proc },
+	{ "SysAnimate32", comctl_animate_proc },
+	{ "SysDateTimePick32", comctl_datetime_proc },
+	{ "SysMonthCal32", comctl_monthcal_proc },
+	{ "ComboBoxEx32", comctl_comboex_proc },
+	{ "ReBarWindow32", comctl_rebar_proc },
+	{ "SysIPAddress32", comctl_ipaddr_proc },
+	{ "SysPager", comctl_pager_proc },
+	{ "NativeFontCtl", comctl_nativefont_proc },
+	{ "SysLink", comctl_link_proc },
 };
 
 static pthread_once_t classes_once = PTHREAD_ONCE_INIT;
@@ -1102,6 +1137,7 @@ struct subclass {
 	SUBCLASSPROC proc;
 	UINT_PTR id;
 	DWORD_PTR ref;
+	int removed;	/* taken out while a dispatch could still reach it */
 };
 
 struct subclass_info {
@@ -1142,8 +1178,30 @@ WINFN(LRESULT) cc_DefSubclassProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 		       api.CallWindowProcW(s->orig, h, msg, wp, lp) :
 		       api.CallWindowProcA(s->orig, h, msg, wp, lp);
 	struct subclass *p = s->stackpos;
+	while (p && p->removed)
+		p = p->next;
+	if (!p) {
+		s->stackpos = NULL;
+		return s->unicode ?
+		       api.CallWindowProcW(s->orig, h, msg, wp, lp) :
+		       api.CallWindowProcA(s->orig, h, msg, wp, lp);
+	}
 	s->stackpos = p->next;
 	return p->proc(h, msg, wp, lp, p->id, p->ref);
+}
+
+/* Free the records removed during a dispatch, once none is running. */
+static void subclass_sweep(struct subclass_info *s)
+{
+	for (struct subclass **pp = &s->procs; *pp;) {
+		struct subclass *p = *pp;
+		if (p->removed) {
+			*pp = p->next;
+			free(p);
+		} else {
+			pp = &p->next;
+		}
+	}
 }
 
 WINFN(LRESULT) subclass_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
@@ -1159,6 +1217,8 @@ WINFN(LRESULT) subclass_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 	LRESULT r = cc_DefSubclassProc(h, msg, wp, lp);
 	s->running--;
 	s->stackpos = saved;
+	if (!s->running)
+		subclass_sweep(s);
 	if (msg == WM_NCDESTROY && !s->running) {
 		/* The window is gone: nothing is left to call them. */
 		while (s->procs) {
@@ -1193,7 +1253,7 @@ WINFN(BOOL) cc_SetWindowSubclass(HWND h, SUBCLASSPROC proc, UINT_PTR id,
 		s->orig = (WNDPROC)old;
 	}
 	for (struct subclass *p = s->procs; p; p = p->next)
-		if (p->proc == proc && p->id == id) {
+		if (!p->removed && p->proc == proc && p->id == id) {
 			p->ref = ref;
 			return TRUE;
 		}
@@ -1216,7 +1276,7 @@ WINFN(BOOL) cc_GetWindowSubclass(HWND h, SUBCLASSPROC proc, UINT_PTR id,
 	struct subclass_info *s = h ? subclass_info(h) : NULL;
 
 	for (struct subclass *p = s ? s->procs : NULL; p; p = p->next)
-		if (p->proc == proc && p->id == id) {
+		if (!p->removed && p->proc == proc && p->id == id) {
 			if (ref)
 				*ref = p->ref;
 			return TRUE;
@@ -1234,8 +1294,14 @@ WINFN(BOOL) cc_RemoveWindowSubclass(HWND h, SUBCLASSPROC proc, UINT_PTR id)
 		return FALSE;
 	for (struct subclass **pp = &s->procs; *pp; pp = &(*pp)->next) {
 		struct subclass *p = *pp;
-		if (p->proc != proc || p->id != id)
+		if (p->removed || p->proc != proc || p->id != id)
 			continue;
+		if (s->running) {
+			/* A saved dispatch position may point at it: free it
+			 * once the outermost dispatch returns. */
+			p->removed = 1;
+			return TRUE;
+		}
 		*pp = p->next;
 		if (s->stackpos == p)
 			s->stackpos = p->next;
@@ -1244,6 +1310,21 @@ WINFN(BOOL) cc_RemoveWindowSubclass(HWND h, SUBCLASSPROC proc, UINT_PTR id)
 		return TRUE;
 	}
 	return FALSE;
+}
+
+BOOL comctl_set_subclass(HWND h, SUBCLASSPROC proc, UINT_PTR id, DWORD_PTR ref)
+{
+	return cc_SetWindowSubclass(h, proc, id, ref);
+}
+
+BOOL comctl_remove_subclass(HWND h, SUBCLASSPROC proc, UINT_PTR id)
+{
+	return cc_RemoveWindowSubclass(h, proc, id);
+}
+
+LRESULT comctl_def_subclass(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+	return cc_DefSubclassProc(h, msg, wp, lp);
 }
 
 /* The Create* helpers. */
@@ -1286,15 +1367,36 @@ WINFN(HWND) cc_CreateUpDownControl(DWORD style, INT x, INT y, INT cx, INT cy,
 	return h;
 }
 
-/* A toolbar is a plain window here: its buttons are not kept. */
+/* A toolbar with its bitmap, sizes and buttons, sized to its parent. */
 WINFN(HWND) cc_CreateToolbarEx(HWND parent, DWORD style, UINT id, INT nbitmaps,
 			       HINSTANCE bm_inst, UINT_PTR bm_id,
 			       LPCTBBUTTON buttons, INT nbuttons, INT dx_button,
 			       INT dy_button, INT dx_bitmap, INT dy_bitmap,
 			       UINT struct_size)
 {
-	return create(u"ToolbarWindow32", NULL, WS_CHILD | style, 0, 0, 100,
-		      30, parent, id);
+	HWND h = create(u"ToolbarWindow32", NULL, WS_CHILD | style, 0, 0, 100,
+			30, parent, id);
+	if (!h)
+		return NULL;
+	API();
+	api.SendMessageW(h, TB_BUTTONSTRUCTSIZE, struct_size, 0);
+	if (dx_bitmap > 0 || dy_bitmap > 0)
+		api.SendMessageW(h, TB_SETBITMAPSIZE, 0,
+				 MAKELPARAM(dx_bitmap, dy_bitmap));
+	if (dx_button > 0 || dy_button > 0)
+		api.SendMessageW(h, TB_SETBUTTONSIZE, 0,
+				 MAKELPARAM(dx_button, dy_button));
+	/* The standard bitmaps (HINST_COMMCTRL) are added whatever the
+	 * count says. */
+	if (nbitmaps > 0 || bm_inst == HINST_COMMCTRL) {
+		TBADDBITMAP a = { bm_inst, bm_id };
+		api.SendMessageW(h, TB_ADDBITMAP, (WPARAM)nbitmaps, (LPARAM)&a);
+	}
+	if (buttons && nbuttons > 0)
+		api.SendMessageW(h, TB_ADDBUTTONSW, (WPARAM)nbuttons,
+				 (LPARAM)buttons);
+	api.SendMessageW(h, TB_AUTOSIZE, 0, 0);
+	return h;
 }
 
 WINFN(HWND) cc_CreateToolbar(HWND parent, DWORD style, UINT id, INT nbitmaps,
@@ -1303,7 +1405,7 @@ WINFN(HWND) cc_CreateToolbar(HWND parent, DWORD style, UINT id, INT nbitmaps,
 {
 	return cc_CreateToolbarEx(parent, style | CCS_TOP, id, nbitmaps,
 				  bm_inst, bm_id, buttons, nbuttons, 0, 0, 0, 0,
-				  12);
+				  offsetof(TBBUTTON, iString));
 }
 
 /* A bitmap resource with its colours mapped (by default to the 3-D ones). */
