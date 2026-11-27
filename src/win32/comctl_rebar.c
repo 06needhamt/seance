@@ -207,10 +207,10 @@ static void layout(HWND h, struct rebar *s)
 			break;
 	}
 	s->busy = FALSE;
-	if (s->again && !s->deferred) {
-		s->deferred = TRUE;
-		comctl_post(h, WIN_DEFERRED_LAYOUT, 0, 0);
-	}
+	/* Marked only once it is queued, so a failed post leaves the next
+	 * layout to try again. */
+	if (s->again && !s->deferred)
+		s->deferred = comctl_post(h, WIN_DEFERRED_LAYOUT, 0, 0);
 	s->again = FALSE;
 	if (old != s->height)
 		comctl_notify_to(target(h, s), h, RBN_HEIGHTCHANGE, NULL);
