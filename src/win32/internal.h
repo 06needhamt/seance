@@ -55,6 +55,9 @@ size_t win_usable(void *p);
  * Windows leaves unused here.
  */
 #define WIN_LBTEXT_SNAPSHOT 0x03F7
+/* Posted by a built-in control to itself for work it deferred (the rebar's
+ * layout after its pass budget ran out). Same range, also unused. */
+#define WIN_DEFERRED_LAYOUT 0x03F8
 struct win_lbtext {
 	int done;
 	LRESULT result;

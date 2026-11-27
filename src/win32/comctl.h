@@ -38,6 +38,8 @@ HWND comctl_create(LPCWSTR cls, DWORD style, int x, int y, int cx, int cy,
 		   HWND parent, UINT id);
 BOOL comctl_move(HWND h, int x, int y, int cx, int cy);
 BOOL comctl_show(HWND h, int cmd);
+/* PostMessageW. */
+BOOL comctl_post(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 HINSTANCE comctl_instance(HWND h);
 BOOL comctl_notify_unicode(HWND h);
 int comctl_text_width(const WCHAR *text);

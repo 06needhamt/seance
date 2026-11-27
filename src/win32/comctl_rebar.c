@@ -53,6 +53,7 @@ struct rebar {
 	HWND notify, tooltips;
 	int height;
 	BOOL busy, again, moving, unicode;	/* moving: the bar itself */
+	BOOL deferred;		/* a WIN_DEFERRED_LAYOUT is posted */
 	int width;		/* RB_SIZETORECT's width while it lays out, or 0 */
 	unsigned drag;		/* the uid of the band being dragged, or 0 */
 	int drag_x;
@@ -136,9 +137,11 @@ static int bar_width(HWND h, const struct rebar *s)
 
 /* Moving a child sends it messages whose handlers may change the bands
  * (then the layout runs again, s->again) or destroy the rebar (FALSE). */
-static BOOL place_children(HWND h, struct rebar *s)
+static BOOL place_children(HWND h, struct rebar *s, BOOL all)
 {
-	for (int i = 0; i < s->n && !s->again; i++) {
+	/* A layout asked for from a child's handler stops the round early,
+	 * unless this is the last pass (all), which places every child. */
+	for (int i = 0; i < s->n && (all || !s->again); i++) {
 		const struct rb_band *b = &s->b[i];
 		if (!b->child || (b->style & RBBS_HIDDEN))
 			continue;
@@ -178,11 +181,11 @@ static void layout(HWND h, struct rebar *s)
 	for (int pass = 0; pass < PASSES; pass++) {
 		s->again = FALSE;
 		compute(h, s, &y);
-		if (!place_children(h, s))
+		if (!place_children(h, s, pass == PASSES - 1))
 			return;
 		/* Handlers that keep asking for layouts get PASSES of them;
-		 * the last one finishes regardless, so the height and the
-		 * bar's own position always follow the bands. */
+		 * the last one places every child, the height and the bar,
+		 * and what they asked for after that is posted for later. */
 		if (s->again && pass < PASSES - 1)
 			continue;
 		s->height = y;
@@ -204,6 +207,11 @@ static void layout(HWND h, struct rebar *s)
 			break;
 	}
 	s->busy = FALSE;
+	if (s->again && !s->deferred) {
+		s->deferred = TRUE;
+		comctl_post(h, WIN_DEFERRED_LAYOUT, 0, 0);
+	}
+	s->again = FALSE;
 	if (old != s->height)
 		comctl_notify_to(target(h, s), h, RBN_HEIGHTCHANGE, NULL);
 }
@@ -753,6 +761,10 @@ LRESULT STUB_WINAPI comctl_rebar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 	}
 	case RB_GETUNICODEFORMAT:
 		return s->unicode;
+	case WIN_DEFERRED_LAYOUT:
+		s->deferred = FALSE;
+		layout(h, s);
+		return 0;
 	case WM_SIZE:
 		if (s->moving)
 			break;

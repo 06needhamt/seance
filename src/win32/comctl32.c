@@ -42,6 +42,7 @@ static struct {
 	BOOL (WINAPI *IsWindowUnicode)(HWND);
 	BOOL (WINAPI *IsWindow)(HWND);
 	BOOL (WINAPI *ShowWindow)(HWND, int);
+	BOOL (WINAPI *PostMessageW)(HWND, UINT, WPARAM, LPARAM);
 	HANDLE (WINAPI *GetPropW)(HWND, LPCWSTR);
 	BOOL (WINAPI *SetPropW)(HWND, LPCWSTR, HANDLE);
 	HANDLE (WINAPI *RemovePropW)(HWND, LPCWSTR);
@@ -83,7 +84,7 @@ static void api_init(void)
 	api.SetWindowLongPtrA = USER32(SetWindowLongA);
 	api.SetWindowLongPtrW = USER32(SetWindowLongW);
 #endif
-	U(IsWindowUnicode); U(IsWindow); U(ShowWindow);
+	U(IsWindowUnicode); U(IsWindow); U(ShowWindow); U(PostMessageW);
 	U(GetPropW); U(SetPropW); U(RemovePropW);
 	U(SetWindowTextW); U(GetWindowTextW); U(GetParent); U(GetDlgItem);
 	U(GetClientRect); U(GetWindowRect); U(ScreenToClient);
@@ -239,6 +240,12 @@ HINSTANCE comctl_instance(HWND h)
 {
 	API();
 	return (HINSTANCE)api.GetWindowLongPtrW(h, GWLP_HINSTANCE);
+}
+
+BOOL comctl_post(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+	API();
+	return api.PostMessageW(h, msg, wp, lp);
 }
 
 BOOL comctl_show(HWND h, int cmd)

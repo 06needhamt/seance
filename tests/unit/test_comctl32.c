@@ -2955,6 +2955,26 @@ static LRESULT refocus_ip(const NMHDR *hdr)
 	return 0;
 }
 
+/* A band child that grows its band on each of its first nine WM_SIZEs,
+ * one more than the rebar lays out in a row. */
+static int kid_sizes;
+
+static LRESULT WINAPI growing_kid(HWND h, UINT m, WPARAM wp, LPARAM lp)
+{
+	USER(LRESULT, DefWindowProcW, HWND, UINT, WPARAM, LPARAM);
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	if (m == WM_SIZE && kid_sizes < 9) {
+		kid_sizes++;
+		REBARBANDINFOW bi;
+		memset(&bi, 0, sizeof(bi));
+		bi.cbSize = sizeof(bi);
+		bi.fMask = RBBIM_CHILDSIZE;
+		bi.cyMinChild = 10 + kid_sizes;
+		SendMessageW(hook_target, RB_SETBANDINFOW, 0, (LPARAM)&bi);
+	}
+	return DefWindowProcW(h, m, wp, lp);
+}
+
 static LRESULT STUB_WINAPI nested_sub(HWND h, UINT m, WPARAM wp, LPARAM lp,
 				      UINT_PTR id, DWORD_PTR ref)
 {
@@ -3132,6 +3152,45 @@ static void test_reentrancy(void)
 	CHECK(!SendMessageW(h, RB_DELETEBAND, 0, 0));
 	notify_hook = NULL;
 	CHECK(!IsWindow(h));
+
+	/* A child that keeps changing its band outlasts the rebar's layout
+	 * passes: every child is still placed, and the rest of the layout
+	 * is posted, so pumping messages brings it up to date. */
+	{
+		USER(ATOM, RegisterClassW, const WNDCLASSW *);
+		USER(HWND, CreateWindowExW, DWORD, LPCWSTR, LPCWSTR, DWORD, int,
+		     int, int, int, HWND, HMENU, HINSTANCE, LPVOID);
+		USER(BOOL, PeekMessageW, MSG *, HWND, UINT, UINT, UINT);
+		USER(LRESULT, DispatchMessageW, const MSG *);
+		USER(BOOL, GetClientRect, HWND, RECT *);
+		WNDCLASSW wc;
+		memset(&wc, 0, sizeof(wc));
+		wc.lpfnWndProc = growing_kid;
+		wc.lpszClassName = w("GrowingKid");
+		CHECK(RegisterClassW(&wc));
+		h = make("ReBarWindow32", CCS_NORESIZE, 200, 60);
+		hook_target = h;
+		kid_sizes = 0;
+		HWND kid = CreateWindowExW(0, w("GrowingKid"), NULL, WS_CHILD,
+					   0, 0, 10, 10, h, NULL, NULL, NULL);
+		CHECK(kid != NULL);
+		memset(&bi, 0, sizeof(bi));
+		bi.cbSize = sizeof(bi);
+		bi.fMask = RBBIM_CHILD | RBBIM_CHILDSIZE | RBBIM_SIZE;
+		bi.hwndChild = kid;
+		bi.cyMinChild = 10;
+		bi.cx = 100;
+		CHECK(SendMessageW(h, RB_INSERTBANDW, -1, (LPARAM)&bi));
+		MSG pm;
+		for (int i = 0; i < 16 && PeekMessageW(&pm, NULL, 0, 0, PM_REMOVE);
+		     i++)
+			DispatchMessageW(&pm);
+		CHECK_EQ(kid_sizes, 9);
+		CHECK(GetClientRect(kid, &rc));
+		CHECK_EQ(rc.bottom - rc.top, 19);
+		CHECK(DestroyWindow(h));
+		hook_target = NULL;
+	}
 
 	/* ComboBoxEx: an ANSI caller gets ANSI text, and a CBEN_DELETEITEM
 	 * handler that destroys the control. */
