@@ -27,6 +27,8 @@ WCHAR *comctl_w_dup(const WCHAR *s);
 int comctl_copy_text_out(const WCHAR *text, void *buf, int size, int wide);
 void *comctl_state(HWND h);
 void comctl_set_state(HWND h, void *s);
+BOOL comctl_alive(HWND h, const void *s);
+BOOL comctl_imagelist_remove(HIMAGELIST h, int i);
 DWORD comctl_style(HWND h);
 LRESULT comctl_def(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 LRESULT comctl_send(HWND h, UINT msg, WPARAM wp, LPARAM lp);
@@ -35,6 +37,8 @@ BOOL comctl_client_rect(HWND h, RECT *rc);
 HWND comctl_create(LPCWSTR cls, DWORD style, int x, int y, int cx, int cy,
 		   HWND parent, UINT id);
 BOOL comctl_move(HWND h, int x, int y, int cx, int cy);
+BOOL comctl_show(HWND h, int cmd);
+HINSTANCE comctl_instance(HWND h);
 BOOL comctl_notify_unicode(HWND h);
 int comctl_text_width(const WCHAR *text);
 LONG comctl_set_style(HWND h, DWORD style);

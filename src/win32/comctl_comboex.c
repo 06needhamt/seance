@@ -21,6 +21,7 @@ struct cbe_item {
 	BOOL callback;
 	int image, selimage, overlay, indent;
 	LPARAM lParam;
+	unsigned uid;		/* the item's identity while indexes move */
 };
 
 struct comboex {
@@ -28,9 +29,18 @@ struct comboex {
 	int n, cap, sel;
 	HIMAGELIST himl;
 	DWORD ex_style;
-	BOOL dropped, unicode;
+	BOOL dropped, unicode;	/* unicode: the parent takes CBEN_*W */
+	unsigned next_uid;
 	HFONT font;
 };
+
+static int find_uid(const struct comboex *s, unsigned uid)
+{
+	for (int i = 0; i < s->n; i++)
+		if (s->it[i].uid == uid)
+			return i;
+	return -1;
+}
 
 static UINT control_id(HWND h)
 {
@@ -68,29 +78,55 @@ static void notify_item(HWND h, UINT code, const struct cbe_item *t, int i)
 	comctl_notify(h, code, &nm.hdr);
 }
 
-/* The item's text, asking the parent when it is a callback (the result
- * is the caller's to free). */
-static WCHAR *text_of(HWND h, struct cbe_item *t, int i)
+/* Item i's text, asking the parent when it is a callback, with
+ * CBEN_GETDISPINFOA or W as the parent's notification format is (the
+ * result is the caller's to free). The handler runs synchronously and may
+ * change the items or destroy the control: callers check comctl_alive and
+ * find their item again afterwards. */
+static WCHAR *text_of(HWND h, struct comboex *s, int i)
 {
+	const struct cbe_item *t = &s->it[i];
 	if (!t->callback)
 		return comctl_w_dup(t->text ? t->text : u"");
-	WCHAR buf[260];
-	NMCOMBOBOXEXW nm;
-	memset(&nm, 0, sizeof(nm));
-	buf[0] = 0;
-	nm.ceItem.mask = CBEIF_TEXT;
-	nm.ceItem.iItem = i;
-	nm.ceItem.pszText = buf;
-	nm.ceItem.cchTextMax = 260;
-	nm.ceItem.lParam = t->lParam;
-	comctl_notify(h, CBEN_GETDISPINFOW, &nm.hdr);
-	const WCHAR *got = nm.ceItem.pszText ? nm.ceItem.pszText : u"";
-	if (nm.ceItem.mask & CBEIF_DI_SETITEM) {
-		free(t->text);
-		t->text = comctl_w_dup(got);
-		t->callback = FALSE;
+	unsigned uid = t->uid;
+	WCHAR *got;
+	UINT mask;
+	if (s->unicode) {
+		WCHAR buf[260];
+		NMCOMBOBOXEXW nm;
+		memset(&nm, 0, sizeof(nm));
+		buf[0] = 0;
+		nm.ceItem.mask = CBEIF_TEXT;
+		nm.ceItem.iItem = i;
+		nm.ceItem.pszText = buf;
+		nm.ceItem.cchTextMax = 260;
+		nm.ceItem.lParam = t->lParam;
+		comctl_notify(h, CBEN_GETDISPINFOW, &nm.hdr);
+		buf[259] = 0;
+		got = comctl_w_dup(nm.ceItem.pszText ? nm.ceItem.pszText : u"");
+		mask = nm.ceItem.mask;
+	} else {
+		char buf[260];
+		NMCOMBOBOXEXA nm;
+		memset(&nm, 0, sizeof(nm));
+		buf[0] = 0;
+		nm.ceItem.mask = CBEIF_TEXT;
+		nm.ceItem.iItem = i;
+		nm.ceItem.pszText = buf;
+		nm.ceItem.cchTextMax = 260;
+		nm.ceItem.lParam = t->lParam;
+		comctl_notify(h, CBEN_GETDISPINFOA, &nm.hdr);
+		buf[259] = 0;
+		got = comctl_a_to_w(nm.ceItem.pszText ? nm.ceItem.pszText : "");
+		mask = nm.ceItem.mask;
 	}
-	return comctl_w_dup(got);
+	if ((mask & CBEIF_DI_SETITEM) && comctl_alive(h, s) &&
+	    (i = find_uid(s, uid)) >= 0) {
+		free(s->it[i].text);
+		s->it[i].text = comctl_w_dup(got ? got : u"");
+		s->it[i].callback = FALSE;
+	}
+	return got;
 }
 
 static void set_fields(struct cbe_item *t, const COMBOBOXEXITEMW *in,
@@ -138,6 +174,7 @@ static LRESULT insert(HWND h, struct comboex *s, const COMBOBOXEXITEMW *in,
 	struct cbe_item *t = &s->it[at];
 	memset(t, 0, sizeof(*t));
 	set_fields(t, in, wide);
+	t->uid = ++s->next_uid;
 	s->n++;
 	if (s->sel >= at)
 		s->sel++;
@@ -149,15 +186,20 @@ static LRESULT delete(HWND h, struct comboex *s, int i)
 {
 	if (i < 0 || i >= s->n)
 		return CB_ERR;
-	notify_item(h, CBEN_DELETEITEM, &s->it[i], i);
-	free(s->it[i].text);
+	/* The item leaves the list before CBEN_DELETEITEM, so a handler
+	 * that edits the list (even CB_RESETCONTENT) cannot free it twice;
+	 * the notification describes the copy, freed afterwards. */
+	struct cbe_item gone = s->it[i];
 	memmove(&s->it[i], &s->it[i + 1], (size_t)(s->n - i - 1) * sizeof(*s->it));
 	s->n--;
 	if (s->sel == i)
 		s->sel = -1;
 	else if (s->sel > i)
 		s->sel--;
-	return s->n;
+	LRESULT left = s->n;
+	notify_item(h, CBEN_DELETEITEM, &gone, i);
+	free(gone.text);
+	return comctl_alive(h, s) ? s->n : left;
 }
 
 static BOOL get_fields(HWND h, struct comboex *s, COMBOBOXEXITEMW *out,
@@ -170,14 +212,17 @@ static BOOL get_fields(HWND h, struct comboex *s, COMBOBOXEXITEMW *out,
 		i = s->sel;	/* the edit box: what is selected */
 	if (i < 0 || i >= s->n)
 		return FALSE;
-	struct cbe_item *t = &s->it[i];
 	UINT m = out->mask;
 	if ((m & CBEIF_TEXT) && out->pszText) {
-		WCHAR *text = text_of(h, t, i);
+		unsigned uid = s->it[i].uid;
+		WCHAR *text = text_of(h, s, i);
 		comctl_copy_text_out(text ? text : u"", out->pszText,
 				     out->cchTextMax, wide);
 		free(text);
+		if (!comctl_alive(h, s) || (i = find_uid(s, uid)) < 0)
+			return FALSE;
 	}
+	const struct cbe_item *t = &s->it[i];
 	if (m & CBEIF_IMAGE)
 		out->iImage = t->image;
 	if (m & CBEIF_SELECTEDIMAGE)
@@ -213,11 +258,16 @@ static LRESULT find(HWND h, struct comboex *s, int start, const WCHAR *what,
 	int begin = start < 0 || start >= s->n ? 0 : start + 1;
 	for (int k = 0; k < s->n; k++) {
 		int i = (begin + k) % s->n;
-		WCHAR *t = text_of(h, &s->it[i], i);
+		unsigned uid = s->it[i].uid;
+		WCHAR *t = text_of(h, s, i);
 		BOOL hit = t && same(t, what, prefix, cs);
 		free(t);
+		if (!comctl_alive(h, s))
+			return CB_ERR;
 		if (hit)
-			return i;
+			return find_uid(s, uid) >= 0 ? find_uid(s, uid) : CB_ERR;
+		if (!s->n)
+			return CB_ERR;
 	}
 	return CB_ERR;
 }
@@ -237,6 +287,15 @@ LRESULT STUB_WINAPI comctl_comboex_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 	if (!s)
 		return comctl_def(h, msg, wp, lp);
 	switch (msg) {
+	case WM_CREATE:
+		s->unicode = comctl_notify_unicode(h);
+		break;
+	case WM_NOTIFYFORMAT:
+		if (lp == NF_REQUERY) {
+			s->unicode = comctl_notify_unicode(h);
+			return s->unicode ? NFR_UNICODE : NFR_ANSI;
+		}
+		break;
 	case CBEM_INSERTITEMA:
 		wide = 0;
 		/* fall through */
@@ -307,7 +366,7 @@ LRESULT STUB_WINAPI comctl_comboex_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 		int i = (int)wp;
 		if (i < 0 || i >= s->n)
 			return CB_ERR;
-		WCHAR *t = text_of(h, &s->it[i], i);
+		WCHAR *t = text_of(h, s, i);
 		int len = t ? (int)wstrlen(t) : 0;
 		if (msg == CB_GETLBTEXT && lp)
 			memcpy((void *)lp, t ? t : u"",
@@ -325,7 +384,8 @@ LRESULT STUB_WINAPI comctl_comboex_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 		s->it[wp].lParam = lp;
 		return TRUE;
 	case CB_RESETCONTENT:
-		while (s->n)
+		/* A CBEN_DELETEITEM handler may destroy the control. */
+		while (comctl_alive(h, s) && s->n)
 			delete(h, s, s->n - 1);
 		return 0;
 	case CB_FINDSTRING:

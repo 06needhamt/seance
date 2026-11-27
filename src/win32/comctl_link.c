@@ -93,11 +93,14 @@ static void parse(struct syslink *s, const WCHAR *m)
 	for (const WCHAR *p = m; p && *p;) {
 		if (!open && p[0] == '<' && fold(p[1]) == 'a' &&
 		    (p[2] == '>' || p[2] == ' ' || p[2] == '\t')) {
-			void *q = realloc(s->l, (size_t)(s->n + 1) * sizeof(*s->l));
+			/* An unterminated tag is plain text; s->l only
+			 * changes once its new entry is there. */
 			const WCHAR *e = p + 2;
 			while (*e && *e != '>')
 				e++;
-			if (!q || !*e) {
+			void *q = *e ? realloc(s->l, (size_t)(s->n + 1) *
+						   sizeof(*s->l)) : NULL;
+			if (!q) {
 				s->plain[out++] = *p++;
 				continue;
 			}
@@ -130,16 +133,19 @@ static void parse(struct syslink *s, const WCHAR *m)
 		s->l[0].state |= LIS_FOCUSED;
 }
 
+/* How wide the first n characters are, however many there are. */
 static int text_cx(const WCHAR *t, int n)
 {
-	WCHAR buf[512];
 	if (n <= 0)
 		return 0;
-	if (n > 511)
-		n = 511;
+	WCHAR *buf = malloc(((size_t)n + 1) * sizeof(WCHAR));
+	if (!buf)
+		return 0;
 	memcpy(buf, t, (size_t)n * sizeof(WCHAR));
 	buf[n] = 0;
-	return comctl_text_width(buf);
+	int cx = comctl_text_width(buf);
+	free(buf);
+	return cx;
 }
 
 static int hit(const struct syslink *s, POINT pt)
@@ -267,7 +273,7 @@ LRESULT STUB_WINAPI comctl_link_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 		int i = hit(s, pt);
 		if (i >= 0 && (s->l[i].state & LIS_ENABLED)) {
 			focus(s, i);
-			notify_link(h, s, i, NM_CLICK);
+			notify_link(h, s, i, NM_CLICK);	/* s unused after */
 		}
 		return 0;
 	}

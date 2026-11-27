@@ -33,6 +33,7 @@ struct tab {
 	struct tc_item *it;
 	int n, cap;
 	int sel, focus;
+	unsigned gen;		/* counts item insertions and deletions */
 	int extra;		/* bytes of caller data per item */
 	int cx, cy, pad_x, pad_y, min_width;
 	HIMAGELIST himl;
@@ -101,16 +102,38 @@ static int rows(const struct tab *s)
 	return r;
 }
 
-/* SELCHANGING (which can refuse), the change, SELCHANGE. */
+/* Select item i (or none, -1); with TCS_BUTTONS the selected button is
+ * the pressed one (without TCS_MULTISELECT, the only one). */
+static void set_sel(HWND h, struct tab *s, int i)
+{
+	DWORD st = comctl_style(h);
+	if ((st & TCS_BUTTONS) && !(st & TCS_MULTISELECT))
+		for (int j = 0; j < s->n; j++)
+			s->it[j].state &= ~(DWORD)TCIS_BUTTONPRESSED;
+	s->sel = i;
+	if (i >= 0) {
+		s->focus = i;
+		if (st & TCS_BUTTONS)
+			s->it[i].state |= TCIS_BUTTONPRESSED;
+	}
+}
+
+/* SELCHANGING (which can refuse), the change, SELCHANGE. The handler runs
+ * synchronously: if it destroyed the control, or added or removed items
+ * so that index i may no longer be the item clicked, the change is
+ * dropped. */
 static BOOL select_by_user(HWND h, struct tab *s, int i)
 {
 	NMHDR hdr;
 
 	if (i == s->sel)
 		return TRUE;
+	unsigned gen = s->gen;
 	if (comctl_notify(h, TCN_SELCHANGING, &hdr))
 		return FALSE;
-	s->sel = s->focus = i;
+	if (!comctl_alive(h, s) || s->gen != gen || i >= s->n)
+		return FALSE;
+	set_sel(h, s, i);
 	comctl_notify(h, TCN_SELCHANGE, &hdr);
 	return TRUE;
 }
@@ -196,6 +219,7 @@ static int insert(HWND h, struct tab *s, int at, const TCITEMW *in, int wide)
 	t->extra = extra;
 	set_fields(s, t, in, wide);
 	s->n++;
+	s->gen++;
 	if (s->n == 1)
 		s->sel = s->focus = 0;
 	else {
@@ -221,6 +245,7 @@ static BOOL delete(HWND h, struct tab *s, int i)
 	clear(&s->it[i]);
 	memmove(&s->it[i], &s->it[i + 1], (size_t)(s->n - i - 1) * sizeof(*s->it));
 	s->n--;
+	s->gen++;
 	if (s->sel == i)
 		s->sel = -1;
 	else if (s->sel > i)
@@ -315,9 +340,7 @@ LRESULT STUB_WINAPI comctl_tab_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 		int old = s->sel;
 		if ((int)wp < -1 || (int)wp >= s->n)
 			return -1;
-		s->sel = (int)wp;
-		if (wp != (WPARAM)-1)
-			s->focus = (int)wp;
+		set_sel(h, s, (int)wp);
 		return old;
 	}
 	case TCM_GETCURFOCUS:
@@ -371,6 +394,9 @@ LRESULT STUB_WINAPI comctl_tab_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 		return (LRESULT)old;
 	}
 	case TCM_REMOVEIMAGE:
+		if ((int)wp < 0 || !s->himl ||
+		    !comctl_imagelist_remove(s->himl, (int)wp))
+			return 0;
 		for (int i = 0; i < s->n; i++) {
 			if (s->it[i].image == (int)wp)
 				s->it[i].image = -1;

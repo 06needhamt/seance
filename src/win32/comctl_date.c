@@ -110,8 +110,13 @@ static void now(SYSTEMTIME *st)
 {
 	time_t t = time(NULL);
 	struct tm tm;
-	localtime_r(&t, &tm);
 	memset(st, 0, sizeof(*st));
+	if (!localtime_r(&t, &tm)) {	/* no clock: 1 January 2000 */
+		st->wYear = 2000;
+		st->wMonth = st->wDay = 1;
+		st->wDayOfWeek = 6;
+		return;
+	}
 	st->wYear = (WORD)(tm.tm_year + 1900);
 	st->wMonth = (WORD)(tm.tm_mon + 1);
 	st->wDay = (WORD)tm.tm_mday;
@@ -137,13 +142,17 @@ static BOOL in_range(const struct range *r, const SYSTEMTIME *st,
 }
 
 static BOOL set_range(struct range *r, DWORD flags, const SYSTEMTIME *lim,
-		      BOOL (*valid)(const SYSTEMTIME *))
+		      BOOL (*valid)(const SYSTEMTIME *),
+		      int (*cmp)(const SYSTEMTIME *, const SYSTEMTIME *))
 {
 	if (!lim && flags)
 		return FALSE;
 	if (((flags & GDTR_MIN) && !valid(&lim[0])) ||
 	    ((flags & GDTR_MAX) && !valid(&lim[1])))
 		return FALSE;
+	if ((flags & GDTR_MIN) && (flags & GDTR_MAX) && cmp &&
+	    cmp(&lim[0], &lim[1]) > 0)
+		return FALSE;	/* a minimum after the maximum */
 	r->flags = flags & (GDTR_MIN | GDTR_MAX);
 	if (flags & GDTR_MIN)
 		r->lim[0] = lim[0];
@@ -200,20 +209,28 @@ static long grid_start(const struct monthcal *s)
 	return first - (col ? col : 7);
 }
 
-static void ask_day_states(HWND h, struct monthcal *s)
+/* MCN_GETDAYSTATE: the parent fills the buffer it is given or points
+ * prgDayState at its own. FALSE when its handler destroyed the control. */
+static BOOL ask_day_states(HWND h, struct monthcal *s)
 {
 	if (!(comctl_style(h) & MCS_DAYSTATE))
-		return;
+		return TRUE;
 	NMDAYSTATE nm;
+	MONTHDAYSTATE buf[3];
 	memset(&nm, 0, sizeof(nm));
+	memset(buf, 0, sizeof(buf));
 	from_day_number(grid_start(s), &nm.stStart);
 	nm.cDayState = 3;
-	memset(s->state, 0, sizeof(s->state));
-	nm.prgDayState = s->state;
+	nm.prgDayState = buf;
 	comctl_notify(h, MCN_GETDAYSTATE, &nm.nmhdr);
+	if (!comctl_alive(h, s))
+		return FALSE;
+	memcpy(s->state, nm.prgDayState ? nm.prgDayState : buf,
+	       sizeof(s->state));
+	return TRUE;
 }
 
-static void set_selection(HWND h, struct monthcal *s, const SYSTEMTIME *a,
+static BOOL set_selection(HWND h, struct monthcal *s, const SYSTEMTIME *a,
 			  const SYSTEMTIME *b)
 {
 	BOOL month = a->wYear != s->sel[0].wYear ||
@@ -222,17 +239,18 @@ static void set_selection(HWND h, struct monthcal *s, const SYSTEMTIME *a,
 	s->sel[1] = *b;
 	date_only(&s->sel[0]);
 	date_only(&s->sel[1]);
-	if (month)
-		ask_day_states(h, s);
+	return month ? ask_day_states(h, s) : TRUE;
 }
 
-static void notify_selection(HWND h, struct monthcal *s, UINT code)
+/* FALSE when the handler destroyed the control. */
+static BOOL notify_selection(HWND h, struct monthcal *s, UINT code)
 {
 	NMSELCHANGE nm;
 	memset(&nm, 0, sizeof(nm));
 	nm.stSelStart = s->sel[0];
 	nm.stSelEnd = s->sel[1];
 	comctl_notify(h, code, &nm.nmhdr);
+	return comctl_alive(h, s);
 }
 
 static LRESULT month_range(const struct monthcal *s, DWORD which,
@@ -298,9 +316,9 @@ static void click(HWND h, struct monthcal *s, POINT pt)
 	if ((what & ~(DWORD)(MCHT_NEXT | MCHT_PREV)) != MCHT_CALENDARDATE ||
 	    !in_range(&s->range, &d, cmp_date))
 		return;
-	set_selection(h, s, &d, &d);
-	notify_selection(h, s, MCN_SELCHANGE);
-	notify_selection(h, s, MCN_SELECT);
+	if (set_selection(h, s, &d, &d) &&
+	    notify_selection(h, s, MCN_SELCHANGE))
+		notify_selection(h, s, MCN_SELECT);
 }
 
 LRESULT STUB_WINAPI comctl_monthcal_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
@@ -378,9 +396,12 @@ LRESULT STUB_WINAPI comctl_monthcal_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 	case MCM_SETDAYSTATE: {
 		if (!(comctl_style(h) & MCS_DAYSTATE) || !lp)
 			return FALSE;
-		int n = (int)wp < 3 ? (int)wp : 3;
+		/* One per month MCM_GETMONTHRANGE(GMR_DAYSTATE) counts. */
+		LRESULT months = month_range(s, GMR_DAYSTATE, NULL);
+		if (wp != (WPARAM)months || months > 3)
+			return FALSE;
 		memcpy(s->state, (const void *)lp,
-		       (size_t)n * sizeof(MONTHDAYSTATE));
+		       (size_t)months * sizeof(MONTHDAYSTATE));
 		return TRUE;
 	}
 	case MCM_GETMINREQRECT: {
@@ -393,14 +414,14 @@ LRESULT STUB_WINAPI comctl_monthcal_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 		return TRUE;
 	}
 	case MCM_SETCOLOR: {
-		if ((int)wp < 0 || (int)wp > MCSC_TRAILINGTEXT)
+		if (wp > MCSC_TRAILINGTEXT)
 			return -1;
 		COLORREF old = s->colour[wp];
 		s->colour[wp] = (COLORREF)lp;
 		return old;
 	}
 	case MCM_GETCOLOR:
-		if ((int)wp < 0 || (int)wp > MCSC_TRAILINGTEXT)
+		if (wp > MCSC_TRAILINGTEXT)
 			return -1;
 		return s->colour[wp];
 	case MCM_SETTODAY:
@@ -441,7 +462,7 @@ LRESULT STUB_WINAPI comctl_monthcal_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 	case MCM_GETRANGE:
 		return get_range(&s->range, st);
 	case MCM_SETRANGE:
-		if (!set_range(&s->range, (DWORD)wp, st, valid_date))
+		if (!set_range(&s->range, (DWORD)wp, st, valid_date, cmp_date))
 			return FALSE;
 		/* The selection moves inside. */
 		if ((s->range.flags & GDTR_MIN) &&
@@ -686,7 +707,7 @@ LRESULT STUB_WINAPI comctl_datetime_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 	case DTM_GETRANGE:
 		return get_range(&s->range, st);
 	case DTM_SETRANGE:
-		if (!set_range(&s->range, (DWORD)wp, st, valid_time))
+		if (!set_range(&s->range, (DWORD)wp, st, valid_time, cmp_time))
 			return FALSE;
 		if ((s->range.flags & GDTR_MIN) &&
 		    cmp_time(&s->t, &s->range.lim[0]) < 0)
@@ -694,23 +715,29 @@ LRESULT STUB_WINAPI comctl_datetime_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 		if ((s->range.flags & GDTR_MAX) &&
 		    cmp_time(&s->t, &s->range.lim[1]) > 0)
 			s->t = s->range.lim[1];
+		s->t.wDayOfWeek = (WORD)weekday(s->t.wYear, s->t.wMonth,
+						s->t.wDay);
 		return TRUE;
 	case DTM_SETFORMATA:
-	case DTM_SETFORMATW:
+	case DTM_SETFORMATW: {
+		WCHAR *f = !lp ? NULL : msg == DTM_SETFORMATW ?
+			   comctl_w_dup((const WCHAR *)lp) :
+			   comctl_a_to_w((const char *)lp);
+		if (lp && !f)
+			return FALSE;	/* the old format stays */
 		free(s->format);
-		s->format = !lp ? NULL : msg == DTM_SETFORMATW ?
-			    comctl_w_dup((const WCHAR *)lp) :
-			    comctl_a_to_w((const char *)lp);
+		s->format = f;
 		return TRUE;
+	}
 	case DTM_SETMCCOLOR: {
-		if ((int)wp < 0 || (int)wp > MCSC_TRAILINGTEXT)
+		if (wp > MCSC_TRAILINGTEXT)
 			return -1;
 		COLORREF old = s->mc_colour[wp];
 		s->mc_colour[wp] = (COLORREF)lp;
 		return old;
 	}
 	case DTM_GETMCCOLOR:
-		if ((int)wp < 0 || (int)wp > MCSC_TRAILINGTEXT)
+		if (wp > MCSC_TRAILINGTEXT)
 			return -1;
 		return s->mc_colour[wp];
 	case DTM_GETMONTHCAL:

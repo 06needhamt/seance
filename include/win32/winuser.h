@@ -282,6 +282,10 @@ typedef struct tagMONITORINFO {
 #define WM_MOUSEMOVE         0x0200
 #define WM_LBUTTONDOWN       0x0201
 #define WM_LBUTTONUP         0x0202
+#define WM_RBUTTONDOWN       0x0204
+#define WM_RBUTTONUP         0x0205
+#define WM_MBUTTONDOWN       0x0207
+#define WM_MBUTTONUP         0x0208
 #define MK_LBUTTON           0x0001
 #define MK_RBUTTON           0x0002
 #define MK_SHIFT             0x0004
@@ -425,6 +429,9 @@ typedef const SCROLLINFO *LPCSCROLLINFO;
 #define SW_SHOWMINIMIZED  2
 #define SW_SHOWMAXIMIZED  3
 #define SW_SHOWNOACTIVATE 4
+#define SW_MINIMIZE       6
+#define SW_SHOWMINNOACTIVE 7
+#define SW_SHOWNA         8
 #define SW_SHOW           5
 
 /* SetWindowPos. */

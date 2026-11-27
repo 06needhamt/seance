@@ -7,6 +7,7 @@
 #define VFW_WIN32_COMMCTRL_H
 
 #include "types.h"
+#include "winbase.h"
 #include "wingdi.h"
 #include "winuser.h"
 

@@ -131,10 +131,28 @@ static WCHAR *load_res(HINSTANCE inst, UINT_PTR id)
 	return n > 0 ? comctl_w_dup(buf) : NULL;
 }
 
-/* The tool's text, asking its owner when it is a callback. The result
- * is the caller's to free. */
-static WCHAR *text_of(HWND h, struct tool *t)
+/* After the owner answers TTN_GETDISPINFO with TTF_DI_SETITEM, the tool
+ * keeps the text, if the tooltip and the tool both survived the call. */
+static void cache_text(HWND h, struct tooltip *s, HWND hwnd, UINT_PTR id,
+		       const WCHAR *out)
 {
+	if (!comctl_alive(h, s))
+		return;
+	int i = find(s, hwnd, id);
+	if (i < 0)
+		return;
+	free(s->t[i].text);
+	s->t[i].text = out ? comctl_w_dup(out) : NULL;
+	s->t[i].callback = FALSE;
+}
+
+/* Tool i's text, asking its owner when it is a callback. The result is
+ * the caller's to free. The owner's handler runs synchronously and may
+ * change the tools or destroy the tooltip: callers check comctl_alive and
+ * find the tool again before using s afterwards. */
+static WCHAR *text_of(HWND h, struct tooltip *s, int i)
+{
+	const struct tool *t = &s->t[i];
 	if (t->text)
 		return comctl_w_dup(t->text);
 	if (t->res)
@@ -142,17 +160,19 @@ static WCHAR *text_of(HWND h, struct tool *t)
 	if (!t->callback)
 		return NULL;
 
+	HWND owner = t->hwnd;
+	UINT_PTR id = t->id;
 	WCHAR *out = NULL;
 	if (t->ansi_owner) {
 		NMTTDISPINFOA d;
 		memset(&d, 0, sizeof(d));
 		d.hdr.hwndFrom = h;
-		d.hdr.idFrom = t->id;
+		d.hdr.idFrom = id;
 		d.hdr.code = TTN_GETDISPINFOA;
 		d.hinst = t->hinst;
 		d.uFlags = t->flags;
 		d.lParam = t->lParam;
-		comctl_send(t->hwnd, WM_NOTIFY, t->id, (LPARAM)&d);
+		comctl_send(owner, WM_NOTIFY, id, (LPARAM)&d);
 		if (d.lpszText && IS_INTRES(d.lpszText) && d.hinst)
 			out = load_res(d.hinst, (UINT_PTR)d.lpszText);
 		else if (d.lpszText && !IS_INTRES(d.lpszText))
@@ -160,33 +180,27 @@ static WCHAR *text_of(HWND h, struct tool *t)
 		else
 			out = (d.szText[sizeof(d.szText) - 1] = 0,
 			       comctl_a_to_w(d.szText));
-		if (d.uFlags & TTF_DI_SETITEM) {
-			free(t->text);
-			t->text = out ? comctl_w_dup(out) : NULL;
-			t->callback = FALSE;
-		}
+		if (d.uFlags & TTF_DI_SETITEM)
+			cache_text(h, s, owner, id, out);
 		return out;
 	}
 	NMTTDISPINFOW d;
 	memset(&d, 0, sizeof(d));
 	d.hdr.hwndFrom = h;
-	d.hdr.idFrom = t->id;
+	d.hdr.idFrom = id;
 	d.hdr.code = TTN_GETDISPINFOW;
 	d.hinst = t->hinst;
 	d.uFlags = t->flags;
 	d.lParam = t->lParam;
-	comctl_send(t->hwnd, WM_NOTIFY, t->id, (LPARAM)&d);
+	comctl_send(owner, WM_NOTIFY, id, (LPARAM)&d);
 	if (d.lpszText && IS_INTRES(d.lpszText) && d.hinst)
 		out = load_res(d.hinst, (UINT_PTR)d.lpszText);
 	else if (d.lpszText && !IS_INTRES(d.lpszText))
 		out = comctl_w_dup(d.lpszText);
 	else
 		out = (d.szText[TEXT_MAX - 1] = 0, comctl_w_dup(d.szText));
-	if (d.uFlags & TTF_DI_SETITEM) {
-		free(t->text);
-		t->text = out ? comctl_w_dup(out) : NULL;
-		t->callback = FALSE;
-	}
+	if (d.uFlags & TTF_DI_SETITEM)
+		cache_text(h, s, owner, id, out);
 	return out;
 }
 
@@ -210,11 +224,14 @@ static void get_fields(const struct tool *t, TTTOOLINFOW *ti, int wide)
 				     TEXT_MAX, wide);
 }
 
-/* The point, in hwnd's client coordinates, is over which tool? */
-static int hit(const struct tooltip *s, HWND hwnd, POINT pt)
+/* The point, in hwnd's client coordinates, is over which tool? A mouse
+ * move never activates a TTF_TRACK tool (mouse is FALSE for TTM_HITTEST). */
+static int hit(const struct tooltip *s, HWND hwnd, POINT pt, BOOL mouse)
 {
 	for (int i = 0; i < s->n; i++) {
 		const struct tool *t = &s->t[i];
+		if (mouse && (t->flags & TTF_TRACK))
+			continue;
 		if (t->flags & TTF_IDISHWND) {
 			if ((HWND)t->id != hwnd)
 				continue;
@@ -233,63 +250,92 @@ static int hit(const struct tooltip *s, HWND hwnd, POINT pt)
 	return -1;
 }
 
-static void notify_owner(HWND h, const struct tool *t, UINT code)
+static void notify_owner(HWND h, HWND owner, UINT_PTR id, UINT code)
 {
 	NMHDR hdr;
 	hdr.hwndFrom = h;
-	hdr.idFrom = t->id;
+	hdr.idFrom = id;
 	hdr.code = code;
-	comctl_send(t->hwnd, WM_NOTIFY, t->id, (LPARAM)&hdr);
+	comctl_send(owner, WM_NOTIFY, id, (LPARAM)&hdr);
 }
 
+/* Hide the tip. It is marked hidden before TTN_POP goes out, so a
+ * TTM_POP from the handler sends no second one. Afterwards s may be gone
+ * (check comctl_alive). */
 static void pop(HWND h, struct tooltip *s)
 {
-	if (s->visible && s->current >= 0 && s->current < s->n)
-		notify_owner(h, &s->t[s->current], TTN_POP);
+	BOOL was = s->visible;
 	s->visible = FALSE;
+	if (was && s->current >= 0 && s->current < s->n)
+		notify_owner(h, s->t[s->current].hwnd, s->t[s->current].id,
+			     TTN_POP);
 }
 
+/* Show tool i's tip: the old one goes (TTN_POP), the owner is asked for
+ * a callback text (TTN_GETDISPINFO) and told (TTN_SHOW). Each handler may
+ * change the tools or destroy the tooltip, so the tool is found again by
+ * its window and id after each; if it went, nothing is shown. */
 static void show(HWND h, struct tooltip *s, int i)
 {
 	if (i == s->current && s->visible)
 		return;
+	HWND owner = i >= 0 ? s->t[i].hwnd : NULL;
+	UINT_PTR id = i >= 0 ? s->t[i].id : 0;
 	pop(h, s);
+	if (!comctl_alive(h, s))
+		return;
+	i = i >= 0 ? find(s, owner, id) : -1;
 	s->current = i;
 	if (i < 0)
 		return;
-	notify_owner(h, &s->t[i], TTN_SHOW);
+	free(text_of(h, s, i));
+	if (!comctl_alive(h, s))
+		return;
+	if ((i = find(s, owner, id)) < 0) {
+		s->current = -1;
+		return;
+	}
+	s->current = i;
 	s->visible = TRUE;
+	notify_owner(h, owner, id, TTN_SHOW);
 }
 
 static LRESULT STUB_WINAPI relay_subclass(HWND hwnd, UINT msg, WPARAM wp,
 					  LPARAM lp, UINT_PTR id,
 					  DWORD_PTR ref);
 
-static void delete_at(HWND h, struct tooltip *s, int i)
+/* Returns FALSE when the TTN_POP handler destroyed the tooltip. */
+static BOOL delete_at(HWND h, struct tooltip *s, int i)
 {
-	struct tool *t = &s->t[i];
-	HWND win = (t->flags & TTF_IDISHWND) ? (HWND)t->id : t->hwnd;
-	BOOL sub = (t->flags & TTF_SUBCLASS) != 0;
-
 	if (s->current == i) {
+		HWND owner = s->t[i].hwnd;
+		UINT_PTR id = s->t[i].id;
 		pop(h, s);
+		if (!comctl_alive(h, s))
+			return FALSE;
 		s->current = -1;
 		s->tracking = FALSE;
+		if ((i = find(s, owner, id)) < 0)
+			return TRUE;	/* the handler deleted it */
 	} else if (s->current > i) {
 		s->current--;
 	}
+	struct tool *t = &s->t[i];
+	HWND win = (t->flags & TTF_IDISHWND) ? (HWND)t->id : t->hwnd;
+	BOOL sub = (t->flags & TTF_SUBCLASS) != 0;
 	free(t->text);
 	memmove(t, t + 1, (size_t)(s->n - i - 1) * sizeof(*t));
 	s->n--;
 	if (!sub)
-		return;
+		return TRUE;
 	for (int j = 0; j < s->n; j++) {
 		const struct tool *o = &s->t[j];
 		HWND ow = (o->flags & TTF_IDISHWND) ? (HWND)o->id : o->hwnd;
 		if ((o->flags & TTF_SUBCLASS) && ow == win)
-			return;
+			return TRUE;
 	}
 	comctl_remove_subclass(win, (SUBCLASSPROC)relay_subclass, (UINT_PTR)h);
+	return TRUE;
 }
 
 static BOOL add(HWND h, struct tooltip *s, const TTTOOLINFOW *ti, int wide)
@@ -304,15 +350,26 @@ static BOOL add(HWND h, struct tooltip *s, const TTTOOLINFOW *ti, int wide)
 		s->t = p;
 		s->cap = cap;
 	}
-	struct tool *t = &s->t[s->n];
+	/* The tool is in the list before its owner is asked for its
+	 * notification format, so a tool added from that handler goes
+	 * after it; afterwards the tool is found again by its index. */
+	int i = s->n++;
+	struct tool *t = &s->t[i];
 	memset(t, 0, sizeof(*t));
 	set_fields(t, ti, wide);
-	LRESULT f = t->hwnd ? comctl_send(t->hwnd, WM_NOTIFYFORMAT, (WPARAM)h,
-					  NF_QUERY) : NFR_UNICODE;
-	t->ansi_owner = f == NFR_ANSI;
-	s->n++;
-	if (t->flags & TTF_SUBCLASS) {
-		HWND win = (t->flags & TTF_IDISHWND) ? (HWND)t->id : t->hwnd;
+	HWND owner = t->hwnd;
+	UINT_PTR id = t->id;
+	UINT flags = t->flags;
+	LRESULT f = owner ? comctl_send(owner, WM_NOTIFYFORMAT, (WPARAM)h,
+					NF_QUERY) : NFR_UNICODE;
+	if (!comctl_alive(h, s))
+		return FALSE;
+	if (i < s->n && s->t[i].hwnd == owner && s->t[i].id == id)
+		s->t[i].ansi_owner = f == NFR_ANSI;
+	else if ((i = find(s, owner, id)) >= 0)
+		s->t[i].ansi_owner = f == NFR_ANSI;
+	if (flags & TTF_SUBCLASS) {
+		HWND win = (flags & TTF_IDISHWND) ? (HWND)id : owner;
 		comctl_set_subclass(win, (SUBCLASSPROC)relay_subclass,
 				    (UINT_PTR)h, 0);
 	}
@@ -329,11 +386,15 @@ static void relay(HWND h, struct tooltip *s, const MSG *m)
 			return;
 		POINT pt = { (short)LOWORD(m->lParam),
 			     (short)HIWORD(m->lParam) };
-		show(h, s, hit(s, m->hwnd, pt));
+		show(h, s, hit(s, m->hwnd, pt, TRUE));
 		break;
 	}
 	case WM_LBUTTONDOWN:
 	case WM_LBUTTONUP:
+	case WM_RBUTTONDOWN:
+	case WM_RBUTTONUP:
+	case WM_MBUTTONDOWN:
+	case WM_MBUTTONUP:
 		if (!s->tracking)
 			pop(h, s);
 		break;
@@ -345,7 +406,9 @@ static LRESULT STUB_WINAPI relay_subclass(HWND hwnd, UINT msg, WPARAM wp,
 					  DWORD_PTR ref)
 {
 	if (msg == WM_MOUSEMOVE || msg == WM_LBUTTONDOWN ||
-	    msg == WM_LBUTTONUP) {
+	    msg == WM_LBUTTONUP || msg == WM_RBUTTONDOWN ||
+	    msg == WM_RBUTTONUP || msg == WM_MBUTTONDOWN ||
+	    msg == WM_MBUTTONUP) {
 		MSG m;
 		memset(&m, 0, sizeof(m));
 		m.hwnd = hwnd;
@@ -379,6 +442,8 @@ static LRESULT bubble(const struct tooltip *s, const WCHAR *text)
 
 static void destroy(HWND h, struct tooltip *s)
 {
+	/* The window is going: no TTN_POP for a tip nobody sees. */
+	s->visible = FALSE;
 	while (s->n)
 		delete_at(h, s, s->n - 1);
 	free(s->t);
@@ -401,7 +466,7 @@ static LRESULT get_text(HWND h, struct tooltip *s, WPARAM wp,
 			((char *)ti->lpszText)[0] = 0;
 		return 0;
 	}
-	WCHAR *t = text_of(h, &s->t[i]);
+	WCHAR *t = text_of(h, s, i);
 	comctl_copy_text_out(t ? t : u"", ti->lpszText, size, wide);
 	free(t);
 	return 0;
@@ -518,7 +583,7 @@ LRESULT STUB_WINAPI comctl_tooltip_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 		TTHITTESTINFOW *hi = (TTHITTESTINFOW *)lp;
 		if (!hi)
 			return FALSE;
-		int i = hit(s, hi->hwnd, hi->pt);
+		int i = hit(s, hi->hwnd, hi->pt, FALSE);
 		if (i < 0)
 			return FALSE;
 		if (hi->ti.cbSize < offsetof(TTTOOLINFOW, lParam))
@@ -608,7 +673,11 @@ LRESULT STUB_WINAPI comctl_tooltip_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 		s->track.x = (short)LOWORD(lp);
 		s->track.y = (short)HIWORD(lp);
 		if (s->tracking && s->current >= 0) {
-			WCHAR *t = text_of(h, &s->t[s->current]);
+			WCHAR *t = text_of(h, s, s->current);
+			if (!comctl_alive(h, s)) {
+				free(t);
+				return 0;
+			}
 			LRESULT sz = bubble(s, t);
 			free(t);
 			comctl_move(h, s->track.x, s->track.y, LOWORD(sz),
@@ -621,8 +690,8 @@ LRESULT STUB_WINAPI comctl_tooltip_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 		int i = find(s, ti->hwnd, ti->uId);
 		if (i < 0)
 			return 0;
-		WCHAR *t = text_of(h, &s->t[i]);
-		LRESULT sz = bubble(s, t);
+		WCHAR *t = text_of(h, s, i);
+		LRESULT sz = comctl_alive(h, s) ? bubble(s, t) : 0;
 		free(t);
 		return sz;
 	}

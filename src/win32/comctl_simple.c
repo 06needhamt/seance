@@ -69,8 +69,6 @@ static WORD combination(BYTE mods)
 
 static void hotkey_set(HWND h, struct hotkey *s, BYTE vk, BYTE mods)
 {
-	if (vk && (combination(mods) & s->invalid))
-		mods = (BYTE)s->fallback;
 	if (vk == s->vk && mods == s->mods)
 		return;
 	s->vk = vk;
@@ -78,7 +76,8 @@ static void hotkey_set(HWND h, struct hotkey *s, BYTE vk, BYTE mods)
 	command(h, EN_CHANGE);
 }
 
-static void hotkey_key(HWND h, struct hotkey *s, WPARAM vk, BOOL down)
+static void hotkey_key(HWND h, struct hotkey *s, WPARAM vk, LPARAM lp,
+		       BOOL down)
 {
 	switch (vk) {
 	case VK_SHIFT:
@@ -101,6 +100,13 @@ static void hotkey_key(HWND h, struct hotkey *s, WPARAM vk, BOOL down)
 	BYTE mods = (BYTE)((s->shift ? HOTKEYF_SHIFT : 0) |
 			   (s->ctrl ? HOTKEYF_CONTROL : 0) |
 			   (s->alt ? HOTKEYF_ALT : 0));
+	if (vk && (combination(mods) & s->invalid))
+		mods = (BYTE)s->fallback;
+	/* An extended key (bit 24 of the key message) keeps HOTKEYF_EXT. */
+	if (lp & (1 << 24))
+		mods |= HOTKEYF_EXT;
+	else
+		mods &= (BYTE)~HOTKEYF_EXT;
 	hotkey_set(h, s, (BYTE)vk, mods);
 }
 
@@ -128,12 +134,17 @@ LRESULT STUB_WINAPI comctl_hotkey_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 		return 0;
 	case WM_KEYDOWN:
 	case WM_SYSKEYDOWN:
-		hotkey_key(h, s, wp, TRUE);
+		hotkey_key(h, s, wp, lp, TRUE);
 		return 0;
 	case WM_KEYUP:
 	case WM_SYSKEYUP:
-		hotkey_key(h, s, wp, FALSE);
+		hotkey_key(h, s, wp, lp, FALSE);
 		return 0;
+	case WM_SETFOCUS:
+	case WM_KILLFOCUS:
+		/* Key-ups that went to another window are lost: start over. */
+		s->shift = s->ctrl = s->alt = FALSE;
+		break;
 	case WM_SETFONT:
 		s->font = (HFONT)wp;
 		return 0;
@@ -201,6 +212,8 @@ static DWORD open_resource(HINSTANCE inst, const WCHAR *name)
 	return p ? avi_frames(p, size) : 0;
 }
 
+/* The parent's ACN_ handlers run synchronously and may destroy the
+ * control: s is not used after one unless comctl_alive says so. */
 static void animate_stop(HWND h, struct animate *s)
 {
 	if (!s->playing)
@@ -214,9 +227,11 @@ static BOOL animate_play(HWND h, struct animate *s, int repeat)
 	if (!s->open)
 		return FALSE;
 	animate_stop(h, s);
+	if (!comctl_alive(h, s))
+		return FALSE;
 	s->playing = TRUE;
 	command(h, ACN_START);
-	if (repeat != -1)
+	if (repeat != -1 && comctl_alive(h, s))
 		animate_stop(h, s);
 	return TRUE;
 }
@@ -236,6 +251,8 @@ LRESULT STUB_WINAPI comctl_animate_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 	case ACM_OPENA:
 	case ACM_OPENW: {
 		animate_stop(h, s);
+		if (!comctl_alive(h, s))
+			return FALSE;
 		s->open = FALSE;
 		s->frames = 0;
 		if (!lp)
@@ -248,9 +265,13 @@ LRESULT STUB_WINAPI comctl_animate_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 			       comctl_a_to_w((const char *)lp);
 			res = name;
 		}
+		/* A NULL module is the one that created the control. */
+		HINSTANCE inst = (HINSTANCE)wp;
+		if (!inst)
+			inst = comctl_instance(h);
 		DWORD frames = 0;
-		if (wp || IS_INTRES(lp))
-			frames = open_resource((HINSTANCE)wp, res);
+		if (inst || IS_INTRES(lp))
+			frames = open_resource(inst, res);
 		if (!frames && name)
 			frames = open_file(name);
 		free(name);
@@ -282,27 +303,39 @@ LRESULT STUB_WINAPI comctl_animate_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 struct ipaddr {
 	int field[4];		/* -1: blank */
 	int digits[4];		/* typed into each field */
+	BOOL selected[4];	/* the field's text is selected: a digit
+				 * replaces it */
 	BYTE lo[4], hi[4];
 	int focus;
 	HFONT font;
 };
 
-static int field_changed(HWND h, struct ipaddr *s, int i)
+/* The field is left: IPN_FIELDCHANGED, whose handler may change the value
+ * (which is then kept to the field's range, blank staying blank) or
+ * destroy the control (FALSE). */
+static BOOL field_changed(HWND h, struct ipaddr *s, int i)
 {
 	NMIPADDRESS nm;
 	memset(&nm, 0, sizeof(nm));
 	nm.iField = i;
 	nm.iValue = s->field[i];
 	comctl_notify(h, IPN_FIELDCHANGED, &nm.hdr);
-	if (nm.iValue != s->field[i]) {
-		if (nm.iValue < 0)
-			s->field[i] = -1;
-		else
-			s->field[i] = nm.iValue < s->lo[i] ? s->lo[i] :
-				      nm.iValue > s->hi[i] ? s->hi[i] :
-							     nm.iValue;
-	}
-	return s->field[i];
+	if (!comctl_alive(h, s))
+		return FALSE;
+	if (nm.iValue < 0)
+		s->field[i] = -1;
+	else
+		s->field[i] = nm.iValue < s->lo[i] ? s->lo[i] :
+			      nm.iValue > s->hi[i] ? s->hi[i] : nm.iValue;
+	return TRUE;
+}
+
+/* Focus field i with its text selected, as Windows does. */
+static void ip_focus(struct ipaddr *s, int i)
+{
+	s->focus = i;
+	s->digits[i] = 0;
+	s->selected[i] = TRUE;
 }
 
 static void ip_char(HWND h, struct ipaddr *s, WCHAR c)
@@ -310,25 +343,32 @@ static void ip_char(HWND h, struct ipaddr *s, WCHAR c)
 	int i = s->focus;
 
 	if (c >= '0' && c <= '9') {
+		if (s->selected[i]) {	/* the first digit replaces it */
+			s->field[i] = -1;
+			s->digits[i] = 0;
+			s->selected[i] = FALSE;
+		}
 		int v = (s->field[i] < 0 ? 0 : s->field[i]) * 10 + (c - '0');
 		if (v > s->hi[i])
 			v = s->hi[i];
 		s->field[i] = v;
 		s->digits[i]++;
 		command(h, EN_CHANGE);
+		if (!comctl_alive(h, s))
+			return;
 		/* A full field moves on to the next. */
-		if (s->digits[i] >= 3 && i < 3) {
-			field_changed(h, s, i);
-			s->focus = i + 1;
-			s->digits[i + 1] = 0;
-		}
+		if (s->digits[i] >= 3 && i < 3 && field_changed(h, s, i))
+			ip_focus(s, i + 1);
 		return;
 	}
-	if (c == '.' && i < 3 && s->digits[i]) {
-		field_changed(h, s, i);
-		s->focus = i + 1;
-		s->digits[i + 1] = 0;
-	}
+	if (c == '.' && i < 3 && s->digits[i] && field_changed(h, s, i))
+		ip_focus(s, i + 1);
+}
+
+static void ip_reset_typing(struct ipaddr *s)
+{
+	for (int i = 0; i < 4; i++)
+		s->digits[i] = 0, s->selected[i] = FALSE;
 }
 
 static int ip_text(const struct ipaddr *s, WCHAR *out, int size)
@@ -396,6 +436,7 @@ LRESULT STUB_WINAPI comctl_ipaddr_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 			s->field[i] = -1, s->digits[i] = 0;
 		return 0;
 	case IPM_SETADDRESS:
+		ip_reset_typing(s);
 		for (int i = 0; i < 4; i++)
 			s->field[i] = (int)(((DWORD)lp >> (24 - 8 * i)) & 0xff);
 		return TRUE;
@@ -425,14 +466,19 @@ LRESULT STUB_WINAPI comctl_ipaddr_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 			s->field[i] = hi;
 		return TRUE;
 	}
-	case IPM_SETFOCUS:
-		if ((int)wp < 0 || (int)wp > 3)
-			wp = 0;
-		if ((int)wp != s->focus)
-			field_changed(h, s, s->focus);
-		s->focus = (int)wp;
-		s->digits[wp] = 0;
+	case IPM_SETFOCUS: {
+		int i = (int)wp;
+		if (i < 0 || i > 3) {	/* the first blank field, else 0 */
+			for (i = 0; i < 4 && s->field[i] >= 0; i++)
+				;
+			if (i == 4)
+				i = 0;
+		}
+		if (i != s->focus && !field_changed(h, s, s->focus))
+			return 0;
+		ip_focus(s, i);
 		return 0;
+	}
 	case IPM_ISBLANK:
 		for (int i = 0; i < 4; i++)
 			if (s->field[i] >= 0)
@@ -442,6 +488,7 @@ LRESULT STUB_WINAPI comctl_ipaddr_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 		ip_char(h, s, (WCHAR)wp);
 		return 0;
 	case WM_SETTEXT:
+		ip_reset_typing(s);
 		ip_parse(s, (const WCHAR *)lp);
 		return TRUE;
 	case WM_GETTEXT:
@@ -521,6 +568,8 @@ static void pager_recalc(HWND h, struct pager *s)
 		nm.iHeight = cr.bottom - cr.top;
 	}
 	comctl_notify(h, PGN_CALCSIZE, &nm.hdr);
+	if (!comctl_alive(h, s))
+		return;
 	s->extent = horz ? nm.iWidth : nm.iHeight;
 	pager_place(h, s);
 }
@@ -588,6 +637,21 @@ LRESULT STUB_WINAPI comctl_pager_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 		return PGF_INVISIBLE;
 	case WM_SIZE:
 		pager_place(h, s);
+		break;
+	case WM_MOUSEMOVE:
+		/* PGM_FORWARDMOUSE: to the child, in its coordinates. */
+		if (s->forward && s->child) {
+			BOOL horz = (comctl_style(h) & PGS_HORZ) != 0;
+			int x = (short)LOWORD(lp), y = (short)HIWORD(lp);
+			int off = s->border - s->pos;
+			if (horz)
+				x -= off;
+			else
+				y -= off;
+			comctl_send(s->child, WM_MOUSEMOVE, wp,
+				    MAKELPARAM(x, y));
+			return 0;
+		}
 		break;
 	case WM_NCDESTROY:
 		free(s);

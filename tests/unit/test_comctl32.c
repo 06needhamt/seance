@@ -1242,6 +1242,9 @@ static HWND link_window;
 static int last_link = -9;
 static SYSTEMTIME last_daystate_start;
 static int ncommands;
+/* Called first for every WM_NOTIFY the parent gets; a nonzero result is
+ * the answer. For the tests of handlers that change the control. */
+static LRESULT (*notify_hook)(const NMHDR *hdr);
 
 static int seen(UINT code)
 {
@@ -1266,6 +1269,11 @@ static LRESULT WINAPI record_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
 	NMHDR *hdr = (NMHDR *)lp;
 	if (ncodes < 64)
 		codes[ncodes++] = hdr->code;
+	if (notify_hook) {
+		LRESULT r = notify_hook(hdr);
+		if (r)
+			return r;
+	}
 	switch (hdr->code) {
 	case LVN_ITEMCHANGING:
 		last_lv = *(NMLISTVIEW *)lp;
@@ -2375,9 +2383,25 @@ static void test_tab(void)
 	it.dwStateMask = TCIS_HIGHLIGHTED | TCIS_BUTTONPRESSED;
 	CHECK(SendMessageW(h, TCM_GETITEMW, 2, (LPARAM)&it));
 	CHECK_EQ(it.dwState, TCIS_HIGHLIGHTED);
+	/* Without an image list there is nothing to remove. */
 	SendMessageW(h, TCM_REMOVEIMAGE, 1, 0);
 	it.mask = TCIF_IMAGE;
-	CHECK(SendMessageW(h, TCM_GETITEMW, 0, (LPARAM)&it) && it.iImage == 1);
+	CHECK(SendMessageW(h, TCM_GETITEMW, 0, (LPARAM)&it) && it.iImage == 2);
+	{
+		FN(HIMAGELIST, ImageList_Create, INT, INT, UINT, INT, INT);
+		FN(BOOL, ImageList_Destroy, HIMAGELIST);
+		FN(INT, ImageList_GetImageCount, HIMAGELIST);
+		FN(BOOL, ImageList_SetImageCount, HIMAGELIST, UINT);
+		HIMAGELIST il = ImageList_Create(16, 16, ILC_COLOR32, 3, 1);
+		CHECK(il && ImageList_SetImageCount(il, 3));
+		SendMessageW(h, TCM_SETIMAGELIST, 0, (LPARAM)il);
+		SendMessageW(h, TCM_REMOVEIMAGE, 1, 0);
+		CHECK_EQ(ImageList_GetImageCount(il), 2);
+		CHECK(SendMessageW(h, TCM_GETITEMW, 0, (LPARAM)&it) &&
+		      it.iImage == 1);
+		SendMessageW(h, TCM_SETIMAGELIST, 0, 0);
+		ImageList_Destroy(il);
+	}
 	SendMessageW(h, TCM_SETCURSEL, 2, 0);
 	CHECK(SendMessageW(h, TCM_DELETEITEM, 1, 0));
 	CHECK_EQ(SendMessageW(h, TCM_GETCURSEL, 0, 0), 1);
@@ -2885,6 +2909,205 @@ static int comctl_width(const WCHAR *t)
 	return sz.cx;
 }
 
+/* Handlers that change or destroy a control while it notifies. */
+
+static HWND hook_target;
+static int hook_count;
+
+static LRESULT pop_again(const NMHDR *hdr)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	if (hdr->code == TTN_POP) {
+		hook_count++;
+		SendMessageW(hook_target, TTM_POP, 0, 0);	/* no second one */
+	}
+	return 0;
+}
+
+static LRESULT destroy_on(const NMHDR *hdr)
+{
+	USER(BOOL, DestroyWindow, HWND);
+	if (hook_target && hdr->hwndFrom == hook_target &&
+	    hdr->code == (UINT)hook_count) {
+		HWND h = hook_target;
+		hook_target = NULL;
+		DestroyWindow(h);
+	}
+	return 0;
+}
+
+static LRESULT delete_tab(const NMHDR *hdr)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	if (hdr->code == TCN_SELCHANGING)
+		SendMessageW(hook_target, TCM_DELETEITEM, 0, 0);
+	return 0;
+}
+
+static LRESULT STUB_WINAPI nested_sub(HWND h, UINT m, WPARAM wp, LPARAM lp,
+				      UINT_PTR id, DWORD_PTR ref)
+{
+	FN(LRESULT, DefSubclassProc, HWND, UINT, WPARAM, LPARAM);
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	if (m == WM_USER + 1)
+		SendMessageW(h, WM_USER + 2, 0, 0);
+	return DefSubclassProc(h, m, wp, lp);
+}
+
+static LRESULT STUB_WINAPI removing_sub(HWND h, UINT m, WPARAM wp, LPARAM lp,
+					UINT_PTR id, DWORD_PTR ref)
+{
+	FN(LRESULT, DefSubclassProc, HWND, UINT, WPARAM, LPARAM);
+	FN(BOOL, RemoveWindowSubclass, HWND, SUBCLASSPROC, UINT_PTR);
+	if (m == WM_USER + 2)
+		RemoveWindowSubclass(h, removing_sub, id);
+	if (m == WM_USER + 1)
+		hook_count += 100;	/* must not run: removed by then */
+	return DefSubclassProc(h, m, wp, lp);
+}
+
+static void test_reentrancy(void)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	USER(LRESULT, SendMessageA, HWND, UINT, WPARAM, LPARAM);
+	USER(BOOL, DestroyWindow, HWND);
+	USER(BOOL, IsWindow, HWND);
+	FN(BOOL, SetWindowSubclass, HWND, SUBCLASSPROC, UINT_PTR, DWORD_PTR);
+	FN(BOOL, GetWindowSubclass, HWND, SUBCLASSPROC, UINT_PTR, DWORD_PTR *);
+
+	/* A subclass removed inside a nested message is skipped, and
+	 * freed only once the outer dispatch is done. */
+	HWND h = make("tooltips_class32", 0, 10, 10);
+	CHECK(SetWindowSubclass(h, removing_sub, 1, 0));
+	CHECK(SetWindowSubclass(h, nested_sub, 2, 0));
+	hook_count = 0;
+	SendMessageW(h, WM_USER + 1, 0, 0);
+	CHECK_EQ(hook_count, 0);
+	CHECK(!GetWindowSubclass(h, removing_sub, 1, NULL));
+	CHECK(GetWindowSubclass(h, nested_sub, 2, NULL));
+	SendMessageW(h, WM_USER + 1, 0, 0);
+	CHECK(DestroyWindow(h));
+
+	/* A TTN_POP handler that pops again gets one TTN_POP. */
+	h = make("tooltips_class32", 0, 10, 10);
+	TTTOOLINFOW ti;
+	memset(&ti, 0, sizeof(ti));
+	ti.cbSize = sizeof(ti);
+	ti.hwnd = parent;
+	ti.uId = 1;
+	set_rect(&ti.rect, 0, 0, 50, 20);
+	ti.lpszText = (LPWSTR)u"Tip";
+	CHECK(SendMessageW(h, TTM_ADDTOOLW, 0, (LPARAM)&ti));
+	MSG m;
+	memset(&m, 0, sizeof(m));
+	m.hwnd = parent;
+	m.message = WM_MOUSEMOVE;
+	m.lParam = MAKELPARAM(5, 5);
+	SendMessageW(h, TTM_RELAYEVENT, 0, (LPARAM)&m);
+	hook_target = h;
+	hook_count = 0;
+	notify_hook = pop_again;
+	SendMessageW(h, TTM_POP, 0, 0);
+	notify_hook = NULL;
+	CHECK_EQ(hook_count, 1);
+	/* A TTN_SHOW handler that destroys the tooltip. */
+	hook_count = (int)TTN_SHOW;
+	notify_hook = destroy_on;
+	SendMessageW(h, TTM_RELAYEVENT, 0, (LPARAM)&m);
+	notify_hook = NULL;
+	CHECK(!IsWindow(h));
+
+	/* A tab control whose TCN_SELCHANGING handler deletes a tab: the
+	 * click no longer means that tab, so nothing is selected. */
+	h = make("SysTabControl32", TCS_FIXEDWIDTH, 200, 100);
+	TCITEMW it;
+	memset(&it, 0, sizeof(it));
+	it.mask = TCIF_TEXT;
+	it.pszText = (LPWSTR)u"one";
+	for (int i = 0; i < 3; i++)
+		SendMessageW(h, TCM_INSERTITEMW, i, (LPARAM)&it);
+	RECT rc;
+	CHECK(SendMessageW(h, TCM_GETITEMRECT, 2, (LPARAM)&rc));
+	hook_target = h;
+	notify_hook = delete_tab;
+	SendMessageW(h, WM_LBUTTONDOWN, 0, MAKELPARAM(rc.left + 2, 5));
+	notify_hook = NULL;
+	CHECK_EQ(SendMessageW(h, TCM_GETITEMCOUNT, 0, 0), 2);
+	/* The handler deleted the selected tab; the click selected none. */
+	CHECK_EQ(SendMessageW(h, TCM_GETCURSEL, 0, 0), -1);
+	/* With TCM_SETCURSEL the button state follows the selection. */
+	CHECK(DestroyWindow(h));
+	h = make("SysTabControl32", TCS_BUTTONS, 200, 100);
+	for (int i = 0; i < 2; i++)
+		SendMessageW(h, TCM_INSERTITEMW, i, (LPARAM)&it);
+	SendMessageW(h, TCM_SETCURSEL, 1, 0);
+	it.mask = TCIF_STATE;
+	it.dwStateMask = TCIS_BUTTONPRESSED;
+	CHECK(SendMessageW(h, TCM_GETITEMW, 1, (LPARAM)&it) &&
+	      it.dwState == TCIS_BUTTONPRESSED);
+	CHECK(SendMessageW(h, TCM_GETITEMW, 0, (LPARAM)&it) && !it.dwState);
+	CHECK(DestroyWindow(h));
+
+	/* A rebar destroyed by its RBN_DELETINGBAND handler. */
+	h = make("ReBarWindow32", CCS_NORESIZE, 200, 30);
+	REBARBANDINFOW bi;
+	memset(&bi, 0, sizeof(bi));
+	bi.cbSize = sizeof(bi);
+	bi.fMask = RBBIM_ID | RBBIM_SIZE;
+	bi.cx = 50;
+	CHECK(SendMessageW(h, RB_INSERTBANDW, -1, (LPARAM)&bi));
+	CHECK(SendMessageW(h, RB_INSERTBANDW, -1, (LPARAM)&bi));
+	/* RB_SIZETORECT lays the bands out in the rectangle's width. */
+	RECT want;
+	set_rect(&want, 0, 0, 300, 30);
+	SendMessageW(h, RB_SIZETORECT, 0, (LPARAM)&want);
+	CHECK(SendMessageW(h, RB_GETRECT, 1, (LPARAM)&rc) && rc.right == 300);
+	hook_target = h;
+	hook_count = (int)RBN_DELETINGBAND;
+	notify_hook = destroy_on;
+	CHECK(!SendMessageW(h, RB_DELETEBAND, 0, 0));
+	notify_hook = NULL;
+	CHECK(!IsWindow(h));
+
+	/* ComboBoxEx: an ANSI caller gets ANSI text, and a CBEN_DELETEITEM
+	 * handler that destroys the control. */
+	h = make("ComboBoxEx32", 0, 200, 100);
+	COMBOBOXEXITEMW ci;
+	memset(&ci, 0, sizeof(ci));
+	ci.mask = CBEIF_TEXT;
+	ci.iItem = -1;
+	ci.pszText = (LPWSTR)u"alpha";
+	CHECK_EQ(SendMessageW(h, CBEM_INSERTITEMW, 0, (LPARAM)&ci), 0);
+	CHECK_EQ(SendMessageA(h, CB_GETLBTEXTLEN, 0, 0), 5);
+	char text[16];
+	memset(text, 'x', sizeof(text));
+	CHECK_EQ(SendMessageA(h, CB_GETLBTEXT, 0, (LPARAM)text), 5);
+	CHECK(!strcmp(text, "alpha"));
+	CHECK_EQ(SendMessageA(h, CB_FINDSTRINGEXACT, (WPARAM)-1,
+			      (LPARAM)"ALPHA"), 0);
+	hook_target = h;
+	hook_count = (int)CBEN_DELETEITEM;
+	notify_hook = destroy_on;
+	SendMessageW(h, CB_RESETCONTENT, 0, 0);
+	notify_hook = NULL;
+	CHECK(!IsWindow(h));
+
+	/* SysLink: an unterminated tag is plain text. */
+	{
+		USER(HWND, CreateWindowExW, DWORD, LPCWSTR, LPCWSTR, DWORD, int,
+		     int, int, int, HWND, HMENU, HINSTANCE, LPVOID);
+		h = CreateWindowExW(0, w("SysLink"), w("go <a href=\"x\""),
+				    WS_CHILD, 0, 0, 300, 20, parent, NULL,
+				    NULL, NULL);
+	}
+	CHECK(h != NULL);
+	LITEM li;
+	memset(&li, 0, sizeof(li));
+	li.mask = LIF_ITEMINDEX;
+	CHECK(!SendMessageW(h, LM_GETITEM, 0, (LPARAM)&li));
+	CHECK(DestroyWindow(h));
+}
+
 static void test_comboex_link(void)
 {
 	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
@@ -3072,6 +3295,7 @@ static void test_list_controls(void)
 	test_small_controls();
 	test_date_controls();
 	test_comboex_link();
+	test_reentrancy();
 }
 
 static void test_ordinals(void)

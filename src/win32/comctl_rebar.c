@@ -41,6 +41,7 @@ struct rb_band {
 	UINT cx_header;
 	BOOL header_set;
 	RECT rc;
+	unsigned uid;		/* the band's identity while indexes move */
 };
 
 struct rebar {
@@ -51,11 +52,22 @@ struct rebar {
 	HPALETTE palette;
 	HWND notify, tooltips;
 	int height;
-	BOOL busy, unicode;
-	int drag;		/* the band being dragged, or -1 */
+	BOOL busy, again, moving, unicode;	/* moving: the bar itself */
+	int width;		/* RB_SIZETORECT's width while it lays out, or 0 */
+	unsigned drag;		/* the uid of the band being dragged, or 0 */
 	int drag_x;
+	int mouse_x;		/* the last mouse position seen, for (DWORD)-1 */
+	unsigned next_uid;
 	HFONT font;
 };
+
+static int find_uid(const struct rebar *s, unsigned uid)
+{
+	for (int i = 0; uid && i < s->n; i++)
+		if (s->b[i].uid == uid)
+			return i;
+	return -1;
+}
 
 static HWND target(HWND h, const struct rebar *s)
 {
@@ -109,9 +121,11 @@ static int min_cx(const struct rebar *s, const struct rb_band *b)
 	return header_cx(s, b) + (int)b->cx_min;
 }
 
-static int bar_width(HWND h)
+static int bar_width(HWND h, const struct rebar *s)
 {
 	RECT rc;
+	if (s->width > 0)
+		return s->width;
 	HWND parent = comctl_parent(h);
 	if (!(comctl_style(h) & CCS_NORESIZE) && parent)
 		comctl_client_rect(parent, &rc);
@@ -120,25 +134,79 @@ static int bar_width(HWND h)
 	return rc.right - rc.left;
 }
 
-static void place_children(const struct rebar *s)
+/* Moving a child sends it messages whose handlers may change the bands
+ * (then the layout runs again, s->again) or destroy the rebar (FALSE). */
+static BOOL place_children(HWND h, struct rebar *s)
 {
-	for (int i = 0; i < s->n; i++) {
+	for (int i = 0; i < s->n && !s->again; i++) {
 		const struct rb_band *b = &s->b[i];
 		if (!b->child || (b->style & RBBS_HIDDEN))
 			continue;
+		HWND child = b->child;
 		int x = b->rc.left + header_cx(s, b);
+		int y = b->rc.top + MARGIN_CY, cx = b->rc.right - x;
 		int cy = content_cy(s, b);
-		comctl_move(b->child, x, b->rc.top + MARGIN_CY,
-			    b->rc.right - x, cy);
+		comctl_move(child, x, y, cx, cy);
+		if (!comctl_alive(h, s))
+			return FALSE;
 	}
+	return TRUE;
 }
 
+/* Show or hide a band's child with the band (RBBS_HIDDEN). */
+static void show_child(const struct rb_band *b, UINT old_style)
+{
+	if (b->child && ((old_style ^ b->style) & RBBS_HIDDEN))
+		comctl_show(b->child, (b->style & RBBS_HIDDEN) ? SW_HIDE :
+							       SW_SHOWNA);
+}
+
+static void compute(HWND h, struct rebar *s, int *height);
+
+/* Lay the bands out and move the children and the bar. A layout asked
+ * for from inside (a child's or the parent's handler) makes this one run
+ * again with the new bands; afterwards s may be gone (comctl_alive). */
 static void layout(HWND h, struct rebar *s)
 {
-	if (s->busy)
+	if (s->busy) {
+		s->again = TRUE;
 		return;
+	}
 	s->busy = TRUE;
-	int width = bar_width(h), y = 0, first = 0;
+	int old = s->height, y = 0;
+	for (int pass = 0; pass < 8; pass++) {
+		s->again = FALSE;
+		compute(h, s, &y);
+		if (!place_children(h, s))
+			return;
+		if (s->again)
+			continue;
+		s->height = y;
+		DWORD st = comctl_style(h);
+		HWND parent = comctl_parent(h);
+		if (!(st & CCS_NORESIZE) && parent && !s->width) {
+			RECT pc;
+			comctl_client_rect(parent, &pc);
+			int top = (st & CCS_BOTTOM) == CCS_BOTTOM ?
+				  pc.bottom - y : 0;
+			/* Its own WM_SIZE needs no second pass. */
+			s->moving = TRUE;
+			comctl_move(h, 0, top, pc.right - pc.left, y);
+			if (!comctl_alive(h, s))
+				return;
+			s->moving = FALSE;
+		}
+		if (!s->again)
+			break;
+	}
+	s->busy = FALSE;
+	if (old != s->height)
+		comctl_notify_to(target(h, s), h, RBN_HEIGHTCHANGE, NULL);
+}
+
+static void compute(HWND h, struct rebar *s, int *height)
+{
+	int width = bar_width(h, s), y = 0, first = 0;
 
 	while (first < s->n) {
 		/* The row: up to the next RBBS_BREAK. */
@@ -178,21 +246,7 @@ static void layout(HWND h, struct rebar *s)
 		y += row_cy;
 		first = end;
 	}
-	place_children(s);
-
-	int old = s->height;
-	s->height = y;
-	DWORD st = comctl_style(h);
-	HWND parent = comctl_parent(h);
-	if (!(st & CCS_NORESIZE) && parent) {
-		RECT pc;
-		comctl_client_rect(parent, &pc);
-		int top = (st & CCS_BOTTOM) == CCS_BOTTOM ? pc.bottom - y : 0;
-		comctl_move(h, 0, top, pc.right - pc.left, y);
-	}
-	s->busy = FALSE;
-	if (old != s->height)
-		comctl_notify_to(target(h, s), h, RBN_HEIGHTCHANGE, NULL);
+	*height = y;
 }
 
 static int rows(const struct rebar *s)
@@ -224,10 +278,18 @@ static BOOL covers(const REBARBANDINFOW *bi, size_t end)
 #define HAS(field) covers(bi, offsetof(REBARBANDINFOW, field) + \
 			      sizeof(bi->field))
 
-static void set_fields(struct rb_band *b, const REBARBANDINFOW *bi, int wide)
+/* FALSE, changing nothing, when the new title cannot be copied. */
+static BOOL set_fields(struct rb_band *b, const REBARBANDINFOW *bi, int wide)
 {
 	UINT m = bi->fMask;
+	WCHAR *text = NULL;
 
+	if ((m & RBBIM_TEXT) && bi->lpText) {
+		text = wide ? comctl_w_dup(bi->lpText) :
+			      comctl_a_to_w((const char *)bi->lpText);
+		if (!text)
+			return FALSE;
+	}
 	if (m & RBBIM_STYLE)
 		b->style = bi->fStyle;
 	if (m & RBBIM_COLORS) {
@@ -236,9 +298,7 @@ static void set_fields(struct rb_band *b, const REBARBANDINFOW *bi, int wide)
 	}
 	if (m & RBBIM_TEXT) {
 		free(b->text);
-		b->text = !bi->lpText ? NULL :
-			  wide ? comctl_w_dup(bi->lpText) :
-				 comctl_a_to_w((const char *)bi->lpText);
+		b->text = text;
 	}
 	if (m & RBBIM_IMAGE)
 		b->image = bi->iImage;
@@ -267,6 +327,7 @@ static void set_fields(struct rb_band *b, const REBARBANDINFOW *bi, int wide)
 		b->cx_header = bi->cxHeader;
 		b->header_set = TRUE;
 	}
+	return TRUE;
 }
 
 static void get_fields(const struct rebar *s, const struct rb_band *b,
@@ -325,13 +386,18 @@ static BOOL insert(HWND h, struct rebar *s, int at,
 	}
 	if (at < 0 || at > s->n)
 		at = s->n;
+	struct rb_band nb;
+	memset(&nb, 0, sizeof(nb));
+	nb.image = -1;
+	nb.fore = nb.back = CLR_NONE;
+	if (!set_fields(&nb, bi, wide))
+		return FALSE;
+	nb.uid = ++s->next_uid ? s->next_uid : ++s->next_uid;
 	memmove(&s->b[at + 1], &s->b[at], (size_t)(s->n - at) * sizeof(*s->b));
-	struct rb_band *b = &s->b[at];
-	memset(b, 0, sizeof(*b));
-	b->image = -1;
-	b->fore = b->back = CLR_NONE;
-	set_fields(b, bi, wide);
+	s->b[at] = nb;
 	s->n++;
+	if (nb.child && (nb.style & RBBS_HIDDEN))
+		comctl_show(nb.child, SW_HIDE);
 	layout(h, s);
 	return TRUE;
 }
@@ -340,20 +406,31 @@ static BOOL delete(HWND h, struct rebar *s, int i)
 {
 	if (i < 0 || i >= s->n)
 		return FALSE;
+	/* The handlers run synchronously: the band is found again by its
+	 * identity after RBN_DELETINGBAND, and nothing more is done if the
+	 * rebar went. */
+	unsigned uid = s->b[i].uid;
 	notify_band(h, s, RBN_DELETINGBAND, i);
+	if (!comctl_alive(h, s))
+		return FALSE;
+	if ((i = find_uid(s, uid)) < 0)
+		return TRUE;	/* the handler deleted it */
 	UINT id = s->b[i].id;
 	free(s->b[i].text);
 	memmove(&s->b[i], &s->b[i + 1], (size_t)(s->n - i - 1) * sizeof(*s->b));
 	s->n--;
+	if (s->drag == uid)
+		s->drag = 0;
+	/* The new layout is in place before RBN_DELETEDBAND. */
+	layout(h, s);
+	if (!comctl_alive(h, s))
+		return TRUE;
 	NMREBAR nm;
 	memset(&nm, 0, sizeof(nm));
 	nm.dwMask = RBNM_ID;
 	nm.uBand = (UINT)i;
 	nm.wID = id;
 	comctl_notify_to(target(h, s), h, RBN_DELETEDBAND, &nm.hdr);
-	if (s->drag == i)
-		s->drag = -1;
-	layout(h, s);
 	return TRUE;
 }
 
@@ -398,7 +475,7 @@ static void maximize(HWND h, struct rebar *s, int i, BOOL ideal)
 		b->cx = (UINT)header_cx(s, b) + b->cx_ideal;
 	} else {
 		/* The others in its row shrink to their minimum. */
-		int width = bar_width(h), used = 0;
+		int width = bar_width(h, s), used = 0;
 		for (int j = 0; j < s->n; j++) {
 			if (j == i || (s->b[j].style & RBBS_HIDDEN) ||
 			    s->b[j].rc.top != b->rc.top)
@@ -421,8 +498,8 @@ LRESULT STUB_WINAPI comctl_rebar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 		if (!(s = calloc(1, sizeof(*s))))
 			return FALSE;
 		s->bk = s->fg = CLR_NONE;
-		s->drag = -1;
 		s->unicode = TRUE;
+		s->mouse_x = -1;
 		comctl_set_state(h, s);
 	}
 	if (!s)
@@ -450,8 +527,14 @@ LRESULT STUB_WINAPI comctl_rebar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 	case RB_SETBANDINFOW:
 		if ((int)wp < 0 || (int)wp >= s->n || !valid(bi))
 			return FALSE;
-		set_fields(&s->b[wp], bi, wide);
-		layout(h, s);
+		{
+			UINT old_style = s->b[wp].style;
+			if (!set_fields(&s->b[wp], bi, wide))
+				return FALSE;
+			show_child(&s->b[wp], old_style);
+		}
+		if (comctl_alive(h, s))
+			layout(h, s);
 		return TRUE;
 	case RB_GETBARINFO: {
 		REBARINFO *ri = (REBARINFO *)lp;
@@ -522,28 +605,61 @@ LRESULT STUB_WINAPI comctl_rebar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 	case RB_GETTEXTCOLOR:
 		return s->fg;
 	case RB_SIZETORECT: {
+		/* The bands are laid out in the rectangle's width (not the
+		 * parent's), and the bar takes the rectangle. The result:
+		 * whether any band moved or changed size. */
 		const RECT *rc = (const RECT *)lp;
 		if (!rc)
 			return FALSE;
-		int old = s->height;
-		comctl_move(h, rc->left, rc->top, rc->right - rc->left,
-			    rc->bottom - rc->top);
-		layout(h, s);
-		return old != s->height;
+		RECT want = *rc;
+		RECT *before = s->n ? malloc((size_t)s->n * sizeof(RECT)) : NULL;
+		int n = s->n, old = s->height;
+		for (int i = 0; before && i < n; i++)
+			before[i] = s->b[i].rc;
+		s->width = want.right - want.left > 0 ?
+			   want.right - want.left : 1;
+		comctl_move(h, want.left, want.top, want.right - want.left,
+			    want.bottom - want.top);
+		if (comctl_alive(h, s))
+			layout(h, s);
+		if (!comctl_alive(h, s)) {
+			free(before);
+			return FALSE;
+		}
+		s->width = 0;
+		BOOL changed = old != s->height || n != s->n || (n && !before);
+		for (int i = 0; before && !changed && i < n; i++)
+			changed = memcmp(&before[i], &s->b[i].rc,
+					 sizeof(RECT)) != 0;
+		free(before);
+		return changed;
 	}
-	case RB_BEGINDRAG:
-		if ((int)wp < 0 || (int)wp >= s->n ||
-		    notify_band(h, s, RBN_BEGINDRAG, (int)wp))
+	case RB_BEGINDRAG: {
+		if ((int)wp < 0 || (int)wp >= s->n)
 			return 0;
-		s->drag = (int)wp;
-		s->drag_x = lp == (LPARAM)-1 ? s->b[wp].rc.left :
-					      (short)LOWORD(lp);
+		unsigned uid = s->b[wp].uid;
+		if (notify_band(h, s, RBN_BEGINDRAG, (int)wp) ||
+		    !comctl_alive(h, s))
+			return 0;
+		int i = find_uid(s, uid);
+		if (i < 0)
+			return 0;
+		s->drag = uid;
+		/* (DWORD)-1: where the mouse last was, else the band's left */
+		s->drag_x = (DWORD)lp == (DWORD)-1 ?
+			    (s->mouse_x >= 0 ? s->mouse_x : s->b[i].rc.left) :
+			    (short)LOWORD(lp);
 		return 0;
+	}
 	case RB_DRAGMOVE: {
-		if (s->drag < 0)
+		int d = find_uid(s, s->drag);
+		if (d < 0)
 			return 0;
-		int x = (short)LOWORD(lp), dx = x - s->drag_x;
-		int p = previous_in_row(s, s->drag);
+		if ((DWORD)lp == (DWORD)-1 && s->mouse_x < 0)
+			return 0;
+		int x = (DWORD)lp == (DWORD)-1 ? s->mouse_x : (short)LOWORD(lp);
+		int dx = x - s->drag_x;
+		int p = previous_in_row(s, d);
 		if (p < 0 || !dx)
 			return 0;
 		int w = s->b[p].rc.right - s->b[p].rc.left + dx;
@@ -554,11 +670,13 @@ LRESULT STUB_WINAPI comctl_rebar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 		layout(h, s);
 		return 0;
 	}
-	case RB_ENDDRAG:
-		if (s->drag >= 0)
-			notify_band(h, s, RBN_ENDDRAG, s->drag);
-		s->drag = -1;
+	case RB_ENDDRAG: {
+		int d = find_uid(s, s->drag);
+		s->drag = 0;
+		if (d >= 0)
+			notify_band(h, s, RBN_ENDDRAG, d);
 		return 0;
+	}
 	case RB_MINIMIZEBAND:
 		if ((int)wp < 0 || (int)wp >= s->n)
 			return 0;
@@ -578,15 +696,19 @@ LRESULT STUB_WINAPI comctl_rebar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 		rc->right = 0;
 		return 0;
 	}
-	case RB_SHOWBAND:
+	case RB_SHOWBAND: {
 		if ((int)wp < 0 || (int)wp >= s->n)
 			return FALSE;
+		UINT old_style = s->b[wp].style;
 		if (lp)
 			s->b[wp].style &= ~(UINT)RBBS_HIDDEN;
 		else
 			s->b[wp].style |= RBBS_HIDDEN;
-		layout(h, s);
+		show_child(&s->b[wp], old_style);
+		if (comctl_alive(h, s))
+			layout(h, s);
 		return TRUE;
+	}
 	case RB_MOVEBAND: {
 		int from = (int)wp, to = (int)lp;
 		if (from < 0 || from >= s->n || to < 0 || to >= s->n)
@@ -620,8 +742,23 @@ LRESULT STUB_WINAPI comctl_rebar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 	case RB_GETUNICODEFORMAT:
 		return s->unicode;
 	case WM_SIZE:
+		if (s->moving)
+			break;
+		/* fall through */
 	case WM_STYLECHANGED:
 		layout(h, s);
+		if (!comctl_alive(h, s))
+			return 0;
+		break;
+	case WM_COMMAND:
+	case WM_NOTIFY: {
+		/* The bands' children talk to the rebar's notify window. */
+		HWND to = target(h, s);
+		return to ? comctl_send(to, msg, wp, lp) : 0;
+	}
+	case WM_MOUSEMOVE:
+	case WM_LBUTTONDOWN:
+		s->mouse_x = (short)LOWORD(lp);
 		break;
 	case WM_SETFONT:
 		s->font = (HFONT)wp;

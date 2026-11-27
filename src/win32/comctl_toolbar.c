@@ -217,6 +217,8 @@ static BOOL insert(HWND h, struct toolbar *s, int at, const TBBUTTON *in,
 	s->n++;
 	if (s->hot >= at && s->hot >= 0)
 		s->hot++;
+	if (s->pressed >= at && s->pressed >= 0)
+		s->pressed++;
 	layout(h, s);
 	return TRUE;
 }
@@ -234,7 +236,12 @@ static BOOL delete(HWND h, struct toolbar *s, int i)
 	nm.tbButton.fsStyle = s->b[i].fsStyle;
 	nm.tbButton.dwData = s->b[i].dwData;
 	nm.tbButton.iString = s->b[i].iString;
+	int n = s->n;
 	comctl_notify_to(target(h, s), h, TBN_DELETINGBUTTON, &nm.hdr);
+	/* The handler may have destroyed the toolbar or changed its
+	 * buttons; then this deletion is dropped. */
+	if (!comctl_alive(h, s) || s->n != n)
+		return FALSE;
 	clear(&s->b[i]);
 	memmove(&s->b[i], &s->b[i + 1], (size_t)(s->n - i - 1) * sizeof(*s->b));
 	s->n--;
@@ -242,6 +249,10 @@ static BOOL delete(HWND h, struct toolbar *s, int i)
 		s->hot = -1;
 	else if (s->hot > i)
 		s->hot--;
+	if (s->pressed == i)
+		s->pressed = -1;
+	else if (s->pressed > i)
+		s->pressed--;
 	layout(h, s);
 	return TRUE;
 }
@@ -280,8 +291,10 @@ static LRESULT set_flag(HWND h, struct toolbar *s, int id, BYTE flag, BOOL on)
 		s->b[i].fsState |= flag;
 	else
 		s->b[i].fsState &= (BYTE)~flag;
-	if (flag == TBSTATE_ENABLED && !on && s->pressed == i)
+	if (flag == TBSTATE_ENABLED && !on && s->pressed == i) {
 		s->pressed = -1;
+		s->b[i].fsState &= (BYTE)~TBSTATE_PRESSED;
+	}
 	if ((old ^ s->b[i].fsState) & (TBSTATE_HIDDEN | TBSTATE_WRAP))
 		layout(h, s);
 	return TRUE;
@@ -705,6 +718,17 @@ LRESULT STUB_WINAPI comctl_toolbar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 			memmove(&s->b[to + 1], &s->b[to],
 				(size_t)(from - to) * sizeof(*s->b));
 		s->b[to] = t;
+		/* The hot and pressed buttons stay the same buttons. */
+		int *track[2] = { &s->hot, &s->pressed };
+		for (int k = 0; k < 2; k++) {
+			int v = *track[k];
+			if (v == from)
+				*track[k] = to;
+			else if (from < to && v > from && v <= to)
+				(*track[k])--;
+			else if (from > to && v >= to && v < from)
+				(*track[k])++;
+		}
 		layout(h, s);
 		return TRUE;
 	}
