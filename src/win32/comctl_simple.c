@@ -227,7 +227,8 @@ static BOOL animate_play(HWND h, struct animate *s, int repeat)
 	if (!s->open)
 		return FALSE;
 	animate_stop(h, s);
-	if (!comctl_alive(h, s))
+	/* The ACN_STOP handler may have destroyed or closed the clip. */
+	if (!comctl_alive(h, s) || !s->open)
 		return FALSE;
 	s->playing = TRUE;
 	command(h, ACN_START);
@@ -307,6 +308,8 @@ struct ipaddr {
 				 * replaces it */
 	BYTE lo[4], hi[4];
 	int focus;
+	BOOL leaving;		/* IPN_FIELDCHANGED for the focus is out */
+	int want;		/* the field to focus once it returns */
 	HFONT font;
 };
 
@@ -338,6 +341,29 @@ static void ip_focus(struct ipaddr *s, int i)
 	s->selected[i] = TRUE;
 }
 
+/* Move the focus to field i, telling the parent the old field was left.
+ * A focus change asked for from that IPN_FIELDCHANGED handler (an
+ * IPM_SETFOCUS, or typing) is recorded instead of leaving the field
+ * again, and the newest such request is where the focus goes. FALSE:
+ * the handler destroyed the control. */
+static BOOL ip_move(HWND h, struct ipaddr *s, int i)
+{
+	if (s->leaving) {
+		s->want = i;
+		return TRUE;
+	}
+	if (i != s->focus) {
+		s->leaving = TRUE;
+		s->want = i;
+		if (!field_changed(h, s, s->focus))
+			return FALSE;
+		s->leaving = FALSE;
+		i = s->want;
+	}
+	ip_focus(s, i);
+	return TRUE;
+}
+
 static void ip_char(HWND h, struct ipaddr *s, WCHAR c)
 {
 	int i = s->focus;
@@ -357,12 +383,12 @@ static void ip_char(HWND h, struct ipaddr *s, WCHAR c)
 		if (!comctl_alive(h, s))
 			return;
 		/* A full field moves on to the next. */
-		if (s->digits[i] >= 3 && i < 3 && field_changed(h, s, i))
-			ip_focus(s, i + 1);
+		if (s->digits[i] >= 3 && i < 3)
+			ip_move(h, s, i + 1);
 		return;
 	}
-	if (c == '.' && i < 3 && s->digits[i] && field_changed(h, s, i))
-		ip_focus(s, i + 1);
+	if (c == '.' && i < 3 && s->digits[i])
+		ip_move(h, s, i + 1);
 }
 
 static void ip_reset_typing(struct ipaddr *s)
@@ -474,9 +500,7 @@ LRESULT STUB_WINAPI comctl_ipaddr_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 			if (i == 4)
 				i = 0;
 		}
-		if (i != s->focus && !field_changed(h, s, s->focus))
-			return 0;
-		ip_focus(s, i);
+		ip_move(h, s, i);
 		return 0;
 	}
 	case IPM_ISBLANK:
@@ -515,6 +539,7 @@ struct pager {
 	int pos, extent, border, button;
 	COLORREF bk;
 	BOOL forward;
+	unsigned calc_gen;	/* bumped by each PGN_CALCSIZE round */
 };
 
 static int pager_room(HWND h, const struct pager *s)
@@ -567,8 +592,11 @@ static void pager_recalc(HWND h, struct pager *s)
 		nm.iWidth = cr.right - cr.left;
 		nm.iHeight = cr.bottom - cr.top;
 	}
+	/* A PGM_SETCHILD or PGM_RECALCSIZE from the handler starts a newer
+	 * round, whose result stands; this one's is then stale. */
+	unsigned gen = ++s->calc_gen;
 	comctl_notify(h, PGN_CALCSIZE, &nm.hdr);
-	if (!comctl_alive(h, s))
+	if (!comctl_alive(h, s) || gen != s->calc_gen)
 		return;
 	s->extent = horz ? nm.iWidth : nm.iHeight;
 	pager_place(h, s);

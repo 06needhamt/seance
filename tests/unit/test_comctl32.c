@@ -2944,6 +2944,17 @@ static LRESULT delete_tab(const NMHDR *hdr)
 	return 0;
 }
 
+/* An IPN_FIELDCHANGED handler that moves the focus itself. */
+static LRESULT refocus_ip(const NMHDR *hdr)
+{
+	USER(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	if (hdr->code == IPN_FIELDCHANGED) {
+		if (hook_count++ == 0)
+			SendMessageW(hook_target, IPM_SETFOCUS, 3, 0);
+	}
+	return 0;
+}
+
 static LRESULT STUB_WINAPI nested_sub(HWND h, UINT m, WPARAM wp, LPARAM lp,
 				      UINT_PTR id, DWORD_PTR ref)
 {
@@ -3046,6 +3057,59 @@ static void test_reentrancy(void)
 	CHECK(SendMessageW(h, TCM_GETITEMW, 1, (LPARAM)&it) &&
 	      it.dwState == TCIS_BUTTONPRESSED);
 	CHECK(SendMessageW(h, TCM_GETITEMW, 0, (LPARAM)&it) && !it.dwState);
+	/* TCM_SETCURSEL(-1) clears the focus with the selection. */
+	SendMessageW(h, TCM_SETCURSEL, (WPARAM)-1, 0);
+	CHECK_EQ(SendMessageW(h, TCM_GETCURSEL, 0, 0), -1);
+	CHECK_EQ(SendMessageW(h, TCM_GETCURFOCUS, 0, 0), -1);
+	CHECK(DestroyWindow(h));
+
+	/* A TTN_POP handler that destroys a tracking tooltip as
+	 * TTM_TRACKACTIVATE(FALSE) hides it. */
+	h = make("tooltips_class32", 0, 10, 10);
+	memset(&ti, 0, sizeof(ti));
+	ti.cbSize = sizeof(ti);
+	ti.uFlags = TTF_TRACK;
+	ti.hwnd = parent;
+	ti.uId = 2;
+	ti.lpszText = (LPWSTR)u"Tracked";
+	CHECK(SendMessageW(h, TTM_ADDTOOLW, 0, (LPARAM)&ti));
+	SendMessageW(h, TTM_TRACKACTIVATE, TRUE, (LPARAM)&ti);
+	hook_target = h;
+	hook_count = (int)TTN_POP;
+	notify_hook = destroy_on;
+	SendMessageW(h, TTM_TRACKACTIVATE, FALSE, (LPARAM)&ti);
+	notify_hook = NULL;
+	CHECK(!IsWindow(h));
+
+	/* A toolbar destroyed by its TBN_HOTITEMCHANGE handler. */
+	h = make("ToolbarWindow32", CCS_NORESIZE, 200, 30);
+	SendMessageW(h, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
+	TBBUTTON tb;
+	memset(&tb, 0, sizeof(tb));
+	tb.idCommand = 7;
+	tb.fsState = TBSTATE_ENABLED;
+	tb.iString = -1;
+	CHECK(SendMessageW(h, TB_ADDBUTTONSW, 1, (LPARAM)&tb));
+	hook_target = h;
+	hook_count = (int)TBN_HOTITEMCHANGE;
+	notify_hook = destroy_on;
+	SendMessageW(h, TB_SETHOTITEM, 0, 0);
+	notify_hook = NULL;
+	CHECK(!IsWindow(h));
+
+	/* An IPN_FIELDCHANGED handler that moves the focus elsewhere: one
+	 * notification, and the focus goes where the handler put it. */
+	h = make("SysIPAddress32", 0, 120, 20);
+	hook_target = h;
+	hook_count = 0;
+	notify_hook = refocus_ip;
+	SendMessageW(h, IPM_SETFOCUS, 1, 0);
+	notify_hook = NULL;
+	CHECK_EQ(hook_count, 1);
+	SendMessageW(h, WM_CHAR, '7', 0);
+	DWORD addr = 0;
+	CHECK_EQ(SendMessageW(h, IPM_GETADDRESS, 0, (LPARAM)&addr), 1);
+	CHECK_EQ(addr, 7);
 	CHECK(DestroyWindow(h));
 
 	/* A rebar destroyed by its RBN_DELETINGBAND handler. */

@@ -464,10 +464,13 @@ LRESULT STUB_WINAPI comctl_monthcal_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 	case MCM_SETRANGE:
 		if (!set_range(&s->range, (DWORD)wp, st, valid_date, cmp_date))
 			return FALSE;
-		/* The selection moves inside. */
+		/* The selection moves inside. The range is set by then, so a
+		 * handler that destroys the calendar still leaves this a
+		 * success; s is gone and nothing more is done. */
 		if ((s->range.flags & GDTR_MIN) &&
-		    cmp_date(&s->sel[0], &s->range.lim[0]) < 0)
-			set_selection(h, s, &s->range.lim[0], &s->range.lim[0]);
+		    cmp_date(&s->sel[0], &s->range.lim[0]) < 0 &&
+		    !set_selection(h, s, &s->range.lim[0], &s->range.lim[0]))
+			return TRUE;
 		if ((s->range.flags & GDTR_MAX) &&
 		    cmp_date(&s->sel[1], &s->range.lim[1]) > 0)
 			set_selection(h, s, &s->range.lim[1], &s->range.lim[1]);

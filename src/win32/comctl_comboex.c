@@ -287,13 +287,21 @@ LRESULT STUB_WINAPI comctl_comboex_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 	if (!s)
 		return comctl_def(h, msg, wp, lp);
 	switch (msg) {
-	case WM_CREATE:
-		s->unicode = comctl_notify_unicode(h);
+	case WM_CREATE: {
+		/* The parent's WM_NOTIFYFORMAT handler may destroy the
+		 * control: then the creation fails. */
+		BOOL unicode = comctl_notify_unicode(h);
+		if (!comctl_alive(h, s))
+			return -1;
+		s->unicode = unicode;
 		break;
+	}
 	case WM_NOTIFYFORMAT:
 		if (lp == NF_REQUERY) {
-			s->unicode = comctl_notify_unicode(h);
-			return s->unicode ? NFR_UNICODE : NFR_ANSI;
+			BOOL unicode = comctl_notify_unicode(h);
+			if (comctl_alive(h, s))
+				s->unicode = unicode;
+			return unicode ? NFR_UNICODE : NFR_ANSI;
 		}
 		break;
 	case CBEM_INSERTITEMA:
@@ -373,6 +381,21 @@ LRESULT STUB_WINAPI comctl_comboex_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 			       (size_t)(len + 1) * sizeof(WCHAR));
 		free(t);
 		return len;
+	}
+	case WIN_LBTEXT_SNAPSHOT: {
+		struct win_lbtext *q = (struct win_lbtext *)lp;
+		int i = (int)wp;
+		if (!q)
+			return 0;
+		q->done = 1;
+		q->text = NULL;
+		if (i < 0 || i >= s->n) {
+			q->result = CB_ERR;
+			return 0;
+		}
+		q->text = text_of(h, s, i);
+		q->result = q->text ? (LRESULT)wstrlen(q->text) : 0;
+		return 0;
 	}
 	case CB_GETITEMDATA:
 		if ((int)wp < 0 || (int)wp >= s->n)

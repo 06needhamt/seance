@@ -34,12 +34,14 @@ struct tool {
 	BOOL callback;
 	BOOL ansi_owner;	/* the owner answers WM_NOTIFYFORMAT with ANSI */
 	LPARAM lParam;
+	unsigned uid;		/* stable identity across notifications */
 };
 
 struct tooltip {
 	struct tool *t;
 	int n, cap;
 	int current;		/* -1: none */
+	unsigned next_uid;
 	BOOL active, visible, tracking, unicode;
 	int delay[4];		/* by TTDT_* */
 	BOOL delay_set[4];
@@ -96,6 +98,14 @@ static int find(const struct tooltip *s, HWND hwnd, UINT_PTR id)
 	return -1;
 }
 
+static int find_uid(const struct tooltip *s, unsigned uid)
+{
+	for (int i = 0; i < s->n; i++)
+		if (s->t[i].uid == uid)
+			return i;
+	return -1;
+}
+
 static void set_text(struct tool *t, const TTTOOLINFOW *ti, int wide)
 {
 	free(t->text);
@@ -133,12 +143,12 @@ static WCHAR *load_res(HINSTANCE inst, UINT_PTR id)
 
 /* After the owner answers TTN_GETDISPINFO with TTF_DI_SETITEM, the tool
  * keeps the text, if the tooltip and the tool both survived the call. */
-static void cache_text(HWND h, struct tooltip *s, HWND hwnd, UINT_PTR id,
+static void cache_text(HWND h, struct tooltip *s, unsigned uid,
 		       const WCHAR *out)
 {
 	if (!comctl_alive(h, s))
 		return;
-	int i = find(s, hwnd, id);
+	int i = find_uid(s, uid);
 	if (i < 0)
 		return;
 	free(s->t[i].text);
@@ -162,6 +172,7 @@ static WCHAR *text_of(HWND h, struct tooltip *s, int i)
 
 	HWND owner = t->hwnd;
 	UINT_PTR id = t->id;
+	unsigned uid = t->uid;
 	WCHAR *out = NULL;
 	if (t->ansi_owner) {
 		NMTTDISPINFOA d;
@@ -181,7 +192,7 @@ static WCHAR *text_of(HWND h, struct tooltip *s, int i)
 			out = (d.szText[sizeof(d.szText) - 1] = 0,
 			       comctl_a_to_w(d.szText));
 		if (d.uFlags & TTF_DI_SETITEM)
-			cache_text(h, s, owner, id, out);
+			cache_text(h, s, uid, out);
 		return out;
 	}
 	NMTTDISPINFOW d;
@@ -200,7 +211,7 @@ static WCHAR *text_of(HWND h, struct tooltip *s, int i)
 	else
 		out = (d.szText[TEXT_MAX - 1] = 0, comctl_w_dup(d.szText));
 	if (d.uFlags & TTF_DI_SETITEM)
-		cache_text(h, s, owner, id, out);
+		cache_text(h, s, uid, out);
 	return out;
 }
 
@@ -274,30 +285,29 @@ static void pop(HWND h, struct tooltip *s)
 /* Show tool i's tip: the old one goes (TTN_POP), the owner is asked for
  * a callback text (TTN_GETDISPINFO) and told (TTN_SHOW). Each handler may
  * change the tools or destroy the tooltip, so the tool is found again by
- * its window and id after each; if it went, nothing is shown. */
+ * its uid after each; if it went, nothing is shown. */
 static void show(HWND h, struct tooltip *s, int i)
 {
 	if (i == s->current && s->visible)
 		return;
-	HWND owner = i >= 0 ? s->t[i].hwnd : NULL;
-	UINT_PTR id = i >= 0 ? s->t[i].id : 0;
+	unsigned uid = i >= 0 ? s->t[i].uid : 0;
 	pop(h, s);
 	if (!comctl_alive(h, s))
 		return;
-	i = i >= 0 ? find(s, owner, id) : -1;
+	i = i >= 0 ? find_uid(s, uid) : -1;
 	s->current = i;
 	if (i < 0)
 		return;
 	free(text_of(h, s, i));
 	if (!comctl_alive(h, s))
 		return;
-	if ((i = find(s, owner, id)) < 0) {
+	if ((i = find_uid(s, uid)) < 0) {
 		s->current = -1;
 		return;
 	}
 	s->current = i;
 	s->visible = TRUE;
-	notify_owner(h, owner, id, TTN_SHOW);
+	notify_owner(h, s->t[i].hwnd, s->t[i].id, TTN_SHOW);
 }
 
 static LRESULT STUB_WINAPI relay_subclass(HWND hwnd, UINT msg, WPARAM wp,
@@ -308,15 +318,18 @@ static LRESULT STUB_WINAPI relay_subclass(HWND hwnd, UINT msg, WPARAM wp,
 static BOOL delete_at(HWND h, struct tooltip *s, int i)
 {
 	if (s->current == i) {
-		HWND owner = s->t[i].hwnd;
-		UINT_PTR id = s->t[i].id;
+		unsigned uid = s->t[i].uid;
 		pop(h, s);
 		if (!comctl_alive(h, s))
 			return FALSE;
+		if ((i = find_uid(s, uid)) < 0)
+			return TRUE;	/* the handler deleted it */
+	}
+	/* The TTN_POP handler may have shown another tool: the tip state
+	 * is cleared only when it is still this one's. */
+	if (s->current == i) {
 		s->current = -1;
 		s->tracking = FALSE;
-		if ((i = find(s, owner, id)) < 0)
-			return TRUE;	/* the handler deleted it */
 	} else if (s->current > i) {
 		s->current--;
 	}
@@ -352,24 +365,28 @@ static BOOL add(HWND h, struct tooltip *s, const TTTOOLINFOW *ti, int wide)
 	}
 	/* The tool is in the list before its owner is asked for its
 	 * notification format, so a tool added from that handler goes
-	 * after it; afterwards the tool is found again by its index. */
+	 * after it; afterwards the tool is found again by its uid. */
 	int i = s->n++;
 	struct tool *t = &s->t[i];
 	memset(t, 0, sizeof(*t));
 	set_fields(t, ti, wide);
+	t->uid = ++s->next_uid;
+	unsigned uid = t->uid;
 	HWND owner = t->hwnd;
-	UINT_PTR id = t->id;
-	UINT flags = t->flags;
 	LRESULT f = owner ? comctl_send(owner, WM_NOTIFYFORMAT, (WPARAM)h,
 					NF_QUERY) : NFR_UNICODE;
 	if (!comctl_alive(h, s))
 		return FALSE;
-	if (i < s->n && s->t[i].hwnd == owner && s->t[i].id == id)
-		s->t[i].ansi_owner = f == NFR_ANSI;
-	else if ((i = find(s, owner, id)) >= 0)
-		s->t[i].ansi_owner = f == NFR_ANSI;
-	if (flags & TTF_SUBCLASS) {
-		HWND win = (flags & TTF_IDISHWND) ? (HWND)id : owner;
+	/* A handler that deleted the tool again leaves nothing to relay
+	 * for; the add itself succeeded. */
+	if ((i = find_uid(s, uid)) < 0)
+		return TRUE;
+	t = &s->t[i];
+	t->ansi_owner = f == NFR_ANSI;
+	if (t->flags & TTF_SUBCLASS) {
+		UINT_PTR id = t->id;
+		owner = t->hwnd;
+		HWND win = (t->flags & TTF_IDISHWND) ? (HWND)id : owner;
 		comctl_set_subclass(win, (SUBCLASSPROC)relay_subclass,
 				    (UINT_PTR)h, 0);
 	}
@@ -657,6 +674,8 @@ LRESULT STUB_WINAPI comctl_tooltip_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 	case TTM_TRACKACTIVATE: {
 		if (!wp) {
 			pop(h, s);
+			if (!comctl_alive(h, s))
+				return 0;
 			s->tracking = FALSE;
 			return 0;
 		}

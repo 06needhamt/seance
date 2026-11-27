@@ -742,21 +742,34 @@ static LRESULT call_proc(WNDPROC proc, int proc_unicode, HWND hwnd, UINT msg,
 	case CB_GETLBTEXT:
 	case CB_GETLBTEXTLEN: {
 		/* A list item's text, in the procedure's charset, then in
-		 * the sender's: the buffer is as long as CB_GETLBTEXTLEN
-		 * said, so the length comes back in the sender's units. */
-		LRESULT n = proc(hwnd, CB_GETLBTEXTLEN, wp, 0);
-		if (n < 0)
-			return n;
-		void *buf = calloc((size_t)n + 1, sizeof(WCHAR));
-		if (!buf)
-			return CB_ERR;
-		r = proc(hwnd, CB_GETLBTEXT, wp, (LPARAM)buf);
-		if (r < 0)
-			return free(buf), r;
+		 * the sender's, with the length in the sender's units. A
+		 * built-in control hands over one snapshot of the text
+		 * (WIN_LBTEXT_SNAPSHOT); for any other procedure the buffer
+		 * is as long as CB_GETLBTEXTLEN said, as for any sender. */
+		struct win_lbtext q = { 0, 0, NULL };
+		void *buf = NULL;
 		WCHAR *f = NULL;
-		const WCHAR *text = buf;
-		if (!proc_unicode)
-			text = wide_arg((const char *)buf, &f);
+		const WCHAR *text;
+		proc(hwnd, WIN_LBTEXT_SNAPSHOT, wp, (LPARAM)&q);
+		if (q.done) {
+			if (q.result < 0)
+				return free(q.text), q.result;
+			buf = q.text;	/* always wide */
+			text = buf;
+		} else {
+			LRESULT n = proc(hwnd, CB_GETLBTEXTLEN, wp, 0);
+			if (n < 0)
+				return n;
+			buf = calloc((size_t)n + 1, sizeof(WCHAR));
+			if (!buf)
+				return CB_ERR;
+			r = proc(hwnd, CB_GETLBTEXT, wp, (LPARAM)buf);
+			if (r < 0)
+				return free(buf), r;
+			text = buf;
+			if (!proc_unicode)
+				text = wide_arg((const char *)buf, &f);
+		}
 		if (!text)
 			text = u"";
 		int len;

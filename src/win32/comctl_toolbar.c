@@ -30,6 +30,7 @@ struct tb_button {
 	WCHAR *text;		/* when iString pointed at a string */
 	WORD cx;		/* TBBUTTONINFO's, 0 for the default */
 	RECT rc;
+	unsigned uid;		/* stable identity across notifications */
 };
 
 struct tb_bitmap {
@@ -51,6 +52,7 @@ struct toolbar {
 	HIMAGELIST himl[3];	/* normal, hot, disabled */
 	DWORD ex_style, dt_mask, dt_flags;
 	int hot, pressed;
+	unsigned next_uid;
 	BOOL anchor, unicode, list;
 	TBINSERTMARK mark;
 	COLORREF mark_colour;
@@ -204,6 +206,7 @@ static BOOL insert(HWND h, struct toolbar *s, int at, const TBBUTTON *in,
 	memmove(&s->b[at + 1], &s->b[at], (size_t)(s->n - at) * sizeof(*s->b));
 	struct tb_button *b = &s->b[at];
 	memset(b, 0, sizeof(*b));
+	b->uid = ++s->next_uid;
 	b->iBitmap = in->iBitmap;
 	b->idCommand = in->idCommand;
 	b->fsState = in->fsState;
@@ -223,6 +226,14 @@ static BOOL insert(HWND h, struct toolbar *s, int at, const TBBUTTON *in,
 	return TRUE;
 }
 
+static int find_uid(const struct toolbar *s, unsigned uid)
+{
+	for (int i = 0; i < s->n; i++)
+		if (s->b[i].uid == uid)
+			return i;
+	return -1;
+}
+
 static BOOL delete(HWND h, struct toolbar *s, int i)
 {
 	if (i < 0 || i >= s->n)
@@ -236,11 +247,15 @@ static BOOL delete(HWND h, struct toolbar *s, int i)
 	nm.tbButton.fsStyle = s->b[i].fsStyle;
 	nm.tbButton.dwData = s->b[i].dwData;
 	nm.tbButton.iString = s->b[i].iString;
-	int n = s->n;
+	unsigned uid = s->b[i].uid;
 	comctl_notify_to(target(h, s), h, TBN_DELETINGBUTTON, &nm.hdr);
-	/* The handler may have destroyed the toolbar or changed its
-	 * buttons; then this deletion is dropped. */
-	if (!comctl_alive(h, s) || s->n != n)
+	/* The handler may have destroyed the toolbar or moved, inserted or
+	 * removed buttons: find this one again, and drop the deletion if
+	 * it has gone. */
+	if (!comctl_alive(h, s))
+		return FALSE;
+	i = find_uid(s, uid);
+	if (i < 0)
 		return FALSE;
 	clear(&s->b[i]);
 	memmove(&s->b[i], &s->b[i + 1], (size_t)(s->n - i - 1) * sizeof(*s->b));
@@ -493,7 +508,14 @@ static void set_hot(HWND h, struct toolbar *s, int i, DWORD why)
 	nm.idNew = i >= 0 ? s->b[i].idCommand : 0;
 	nm.dwFlags = why | (s->hot < 0 ? HICF_ENTERING : 0) |
 		     (i < 0 ? HICF_LEAVING : 0);
-	if (comctl_notify_to(target(h, s), h, TBN_HOTITEMCHANGE, &nm.hdr))
+	unsigned uid = i >= 0 ? s->b[i].uid : 0;
+	LRESULT refused = comctl_notify_to(target(h, s), h, TBN_HOTITEMCHANGE,
+					   &nm.hdr);
+	/* The handler may have destroyed the toolbar or changed its
+	 * buttons. */
+	if (!comctl_alive(h, s) || refused)
+		return;
+	if (i >= 0 && (i = find_uid(s, uid)) < 0)
 		return;
 	s->hot = i;
 }

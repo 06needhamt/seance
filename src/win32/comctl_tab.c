@@ -111,8 +111,8 @@ static void set_sel(HWND h, struct tab *s, int i)
 		for (int j = 0; j < s->n; j++)
 			s->it[j].state &= ~(DWORD)TCIS_BUTTONPRESSED;
 	s->sel = i;
+	s->focus = i;	/* TCM_SETCURSEL(-1) clears the focus too */
 	if (i >= 0) {
-		s->focus = i;
 		if (st & TCS_BUTTONS)
 			s->it[i].state |= TCIS_BUTTONPRESSED;
 	}

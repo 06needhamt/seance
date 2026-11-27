@@ -174,12 +174,16 @@ static void layout(HWND h, struct rebar *s)
 	}
 	s->busy = TRUE;
 	int old = s->height, y = 0;
-	for (int pass = 0; pass < 8; pass++) {
+	enum { PASSES = 8 };
+	for (int pass = 0; pass < PASSES; pass++) {
 		s->again = FALSE;
 		compute(h, s, &y);
 		if (!place_children(h, s))
 			return;
-		if (s->again)
+		/* Handlers that keep asking for layouts get PASSES of them;
+		 * the last one finishes regardless, so the height and the
+		 * bar's own position always follow the bands. */
+		if (s->again && pass < PASSES - 1)
 			continue;
 		s->height = y;
 		DWORD st = comctl_style(h);
@@ -396,8 +400,13 @@ static BOOL insert(HWND h, struct rebar *s, int at,
 	memmove(&s->b[at + 1], &s->b[at], (size_t)(s->n - at) * sizeof(*s->b));
 	s->b[at] = nb;
 	s->n++;
-	if (nb.child && (nb.style & RBBS_HIDDEN))
+	if (nb.child && (nb.style & RBBS_HIDDEN)) {
 		comctl_show(nb.child, SW_HIDE);
+		/* The child's handlers may have destroyed the rebar; the
+		 * band was inserted all the same. */
+		if (!comctl_alive(h, s))
+			return TRUE;
+	}
 	layout(h, s);
 	return TRUE;
 }
@@ -613,7 +622,7 @@ LRESULT STUB_WINAPI comctl_rebar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 			return FALSE;
 		RECT want = *rc;
 		RECT *before = s->n ? malloc((size_t)s->n * sizeof(RECT)) : NULL;
-		int n = s->n, old = s->height;
+		int n = s->n, old = s->height, old_width = s->width;
 		for (int i = 0; before && i < n; i++)
 			before[i] = s->b[i].rc;
 		s->width = want.right - want.left > 0 ?
@@ -626,7 +635,10 @@ LRESULT STUB_WINAPI comctl_rebar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 			free(before);
 			return FALSE;
 		}
-		s->width = 0;
+		/* An RB_SIZETORECT nested in this one's handlers restores
+		 * the width it found, so the outer one's stands until it
+		 * returns. */
+		s->width = old_width;
 		BOOL changed = old != s->height || n != s->n || (n && !before);
 		for (int i = 0; before && !changed && i < n; i++)
 			changed = memcmp(&before[i], &s->b[i].rc,
