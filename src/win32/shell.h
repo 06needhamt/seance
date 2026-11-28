@@ -61,6 +61,10 @@ char *shell_icon_csidl(int csidl, int *index);
  */
 HRESULT shell_ui_object(LPCITEMIDLIST parent, const char *dir, UINT n,
 			LPCITEMIDLIST *children, REFIID riid, void **ppv);
+/* A modeless "Properties" sheet for files or folders (Windows paths),
+ * with a General page (shell_props.c). */
+HRESULT shell_properties(HWND owner, UINT n, char *const *paths);
+
 HRESULT shell_view_object(IShellFolder *sf, LPCITEMIDLIST parent,
 			  const char *dir, HWND owner, REFIID riid, void **ppv);
 

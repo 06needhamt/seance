@@ -403,8 +403,16 @@ comdlg32 are built in too, headless:
   Windows would send them, each thread has a message queue with timers,
   and LoadString, wsprintf and the `Char*` functions work; nothing is drawn
   and no input arrives. A message box prints to stderr and answers with
-  its default button, as if someone pressed Enter. Dialog boxes can't be
-  shown: `DialogBox*` and `CreateDialog*` fail and say so. msvfw32's
+  its default button, as if someone pressed Enter. Dialogs are real
+  windows built from their templates (`DLGTEMPLATE` or `DLGTEMPLATEEX`,
+  from resources or memory), with the standard controls (static, button,
+  edit, list box, combo box) keeping their state and sending the
+  notifications Windows sends, keyboard navigation through
+  `IsDialogMessage`, and `DefDlgProc`. A modeless dialog stays until the
+  codec destroys it, so it can be driven by messages; a modal one
+  (`DialogBox*`) has no one to answer it, so once its queue is empty
+  Cancel is pressed (or the default button, with `VFW_DIALOG=ok`) and it
+  says so on stderr. msvfw32's
   compressor dialog, `ICCompressorChoose`, answers as if OK were pressed
   on its initial selection (the compressor chosen last time, else Full
   Frames), or as `$VFW_COMPRESSOR` says: a FOURCC, `uncompressed` or
@@ -462,8 +470,11 @@ comdlg32 are built in too, headless:
   system image lists; folder items' data objects, context menus, drop
   targets and a list-view shell view; and dropped files (`HDROP`). With
   no desktop, `ShellExecute` has nothing to open anything with,
-  `SHBrowseForFolder` is cancelled, and rename and properties from a
-  context menu show nothing; each says so on stderr.
+  and `SHBrowseForFolder` is cancelled; each says so on stderr. Rename
+  from a view's context menu edits the item's label in the view's list
+  (the new name renames the file), and properties opens a modeless
+  property sheet with a General page (name, type, location, size, times,
+  read-only) whose OK and Apply rename and set the attribute.
 
 - **comctl32:** `InitCommonControls(Ex)` registers the control classes.
   Nothing is drawn, so a control is its state: every class (trackbars,
@@ -476,9 +487,14 @@ comdlg32 are built in too, headless:
   subclassing (`SetWindowSubclass`), the DPA and DSA arrays, `Alloc` and
   `Str_SetPtr`, and image lists (kept at 32 bits, drawn through gdi32
   with their masks) work, with Windows' ordinals, since much of comctl32
-  is imported by ordinal. `PropertySheet` destroys its pages (their
-  `PSPCB_RELEASE` callbacks run) and answers as if Cancel were pressed;
-  `TaskDialog` answers with its default button, as `MessageBox` does.
+  is imported by ordinal. List views edit labels in an edit control
+  (`LVM_EDITLABEL`, `LVN_BEGINLABELEDIT`/`ENDLABELEDIT`). `PropertySheet`
+  builds a real sheet: a dialog with a tab control, OK, Cancel, Apply and
+  Help (or a wizard's Back, Next and Finish), whose pages are child
+  dialogs told `PSN_SETACTIVE`, `KILLACTIVE`, `APPLY`, `RESET` and the
+  rest, driven through the `PSM_*` messages; a modal sheet ends as a
+  modal dialog does, with Cancel unless `VFW_DIALOG=ok`. `TaskDialog`
+  answers with its default button, as `MessageBox` does.
 - **comdlg32:** `GetOpenFileName` and `GetSaveFileName` answer with the
   file `$VFW_OPEN_FILE` or `$VFW_SAVE_FILE` names (a Windows path, or an
   absolute Unix one; relative ones are in the dialog's initial folder),
@@ -486,7 +502,7 @@ comdlg32 are built in too, headless:
   unset or `cancel`, they are cancelled. `ChooseColor` and `ChooseFont`
   answer OK with what they start with, there are no printers
   (`PrintDlg` fails with `PDERR_NODEFAULTPRN`), and the find and replace
-  dialogs fail, as `CreateDialog` does. Each says so on stderr.
+  dialogs fail. Each says so on stderr.
 - **winspool.drv:** there are no printers. `OpenPrinter` fails with
   `ERROR_INVALID_PRINTER_NAME`; `DocumentProperties` and `ClosePrinter` fail
   with `ERROR_INVALID_HANDLE`. This lets codecs that import the spooler for a
@@ -1033,6 +1049,7 @@ decodes below 40 dB.
 | `VFW_CWD` | The current directory DLLs start in, a Windows (`C:\work`) or Unix directory (default `C:\`) |
 | `VFW_DATE` | The date and time (UTC) DLLs see at startup, `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM[:SS]`; the clock runs on from there (default: the host's) |
 | `VFW_COMPRESSOR` | What `ICCompressorChoose` answers: a FOURCC (`TST0`), `uncompressed` or `cancel` |
+| `VFW_DIALOG` | `ok` makes modal dialogs and property sheets end with their default button (OK) instead of Cancel |
 | `VFW_ACM_FORMAT` | What `acmFormatChoose` answers: a format tag and, optionally, rate, channels and bits (`1,22050,1,8`), or `cancel` |
 | `VFW_OPEN_FILE`, `VFW_SAVE_FILE` | What `GetOpenFileName` and `GetSaveFileName` answer: a file, or `cancel` (the default) |
 | `VFW_ZERO_MEMORY=0` | Don't zero memory from `malloc`, `operator new` and `HeapAlloc` (zeroed by default) |

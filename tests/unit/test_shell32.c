@@ -1545,6 +1545,164 @@ static const IDropSourceVtbl src_vtbl = {
 	src_qi, src_ref, src_ref, src_query, src_feedback,
 };
 
+/* Messages queued for this thread (edits and sheets finish later). */
+static void pump_all(struct module *u32)
+{
+	BOOL (WINAPI *peek)(MSG *, HWND, UINT, UINT, UINT) =
+		mod_get_proc(u32, "PeekMessageW");
+	LRESULT (WINAPI *dispatch)(const MSG *) =
+		mod_get_proc(u32, "DispatchMessageW");
+	MSG m;
+	for (int i = 0; i < 100 && peek(&m, NULL, 0, 0, 1); i++)
+		dispatch(&m);
+}
+
+/* Rename through the view's list, then a Properties sheet that renames
+ * again and makes the file read-only. */
+static void view_rename_and_properties(IShellView *sv, HWND list)
+{
+	FN(LPITEMIDLIST, ILCreateFromPathA, LPCSTR);
+	FN(void, ILFree, LPITEMIDLIST);
+	struct module *u32 = mod_load("user32.dll", NULL);
+	LRESULT (WINAPI *send)(HWND, UINT, WPARAM, LPARAM) =
+		mod_get_proc(u32, "SendMessageW");
+	HWND (WINAPI *find)(LPCWSTR, LPCWSTR) = mod_get_proc(u32, "FindWindowW");
+	BOOL (WINAPI *is_window)(HWND) = mod_get_proc(u32, "IsWindow");
+	UINT (WINAPI *get_item_text)(HWND, int, LPSTR, int) =
+		mod_get_proc(u32, "GetDlgItemTextA");
+	BOOL (WINAPI *set_item_text)(HWND, int, LPCSTR) =
+		mod_get_proc(u32, "SetDlgItemTextA");
+	HWND (WINAPI *item)(HWND, int) = mod_get_proc(u32, "GetDlgItem");
+	DWORD (WINAPI *attrs)(LPCSTR) = get_from(k32, "GetFileAttributesA");
+	BOOL (WINAPI *set_attrs)(LPCSTR, DWORD) =
+		get_from(k32, "SetFileAttributesA");
+	LPITEMIDLIST c = ILCreateFromPathA("C:\\ui\\c.txt");
+	IContextMenu *cm = NULL;
+	char text[256];
+
+	CHECK(c && list);
+	if (!c || !list)
+		return;
+	CHECK(sv->lpVtbl->SelectItem(sv, c, SVSI_SELECT | SVSI_DESELECTOTHERS)
+	      == S_OK);
+	ILFree(c);
+	CHECK(sv->lpVtbl->GetItemObject(sv, SVGIO_SELECTION, &IID_IContextMenu,
+					(void **)&cm) == S_OK && cm);
+	if (!cm)
+		return;
+	CMINVOKECOMMANDINFO ci;
+	memset(&ci, 0, sizeof(ci));
+	ci.cbSize = sizeof(ci);
+	ci.lpVerb = "rename";
+	CHECK(cm->lpVtbl->InvokeCommand(cm, &ci) == S_OK);
+	HWND edit = (HWND)send(list, LVM_GETEDITCONTROL, 0, 0);
+	CHECK(edit != NULL);
+	if (edit) {
+		send(edit, WM_SETTEXT, 0, (LPARAM)u"d.txt");
+		send(edit, WM_KEYDOWN, VK_RETURN, 0);
+		pump_all(u32);
+		CHECK(!send(list, LVM_GETEDITCONTROL, 0, 0));
+		CHECK(!is_window(edit));
+	}
+	CHECK(exists("ui/d.txt") && !exists("ui/c.txt"));
+	/* The row shows the new name. */
+	int row = -1;
+	for (int i = 0; i < 4 && row < 0; i++) {
+		WCHAR w[64] = { 0 };
+		LVITEMW li;
+		memset(&li, 0, sizeof(li));
+		li.pszText = w;
+		li.cchTextMax = 64;
+		send(list, LVM_GETITEMTEXTW, i, (LPARAM)&li);
+		if (!memcmp(w, u"d.txt", 12))
+			row = i;
+	}
+	CHECK(row >= 0);
+	/* The menu names c.txt, which is gone: one for d.txt. */
+	cm->lpVtbl->Release(cm);
+	cm = NULL;
+	CHECK(sv->lpVtbl->GetItemObject(sv, SVGIO_SELECTION, &IID_IContextMenu,
+					(void **)&cm) == S_OK && cm);
+	if (!cm)
+		return;
+	/* Escape leaves the name alone. */
+	CHECK(cm->lpVtbl->InvokeCommand(cm, &ci) == S_OK);
+	edit = (HWND)send(list, LVM_GETEDITCONTROL, 0, 0);
+	if (edit) {
+		send(edit, WM_SETTEXT, 0, (LPARAM)u"x.txt");
+		send(edit, WM_KEYDOWN, VK_ESCAPE, 0);
+		pump_all(u32);
+	}
+	CHECK(exists("ui/d.txt") && !exists("ui/x.txt"));
+	/* A bad name is refused and the label stays. */
+	CHECK(cm->lpVtbl->InvokeCommand(cm, &ci) == S_OK);
+	edit = (HWND)send(list, LVM_GETEDITCONTROL, 0, 0);
+	if (edit) {
+		send(edit, WM_SETTEXT, 0, (LPARAM)u"a?b");
+		send(edit, WM_KEYDOWN, VK_RETURN, 0);
+		pump_all(u32);
+	}
+	CHECK(exists("ui/d.txt"));
+
+	/* Properties: a modeless sheet with a General page. */
+	ci.lpVerb = "properties";
+	CHECK(cm->lpVtbl->InvokeCommand(cm, &ci) == S_OK);
+	cm->lpVtbl->Release(cm);
+	HWND sheet = find(NULL, u"d.txt Properties");
+	CHECK(sheet != NULL);
+	if (!sheet)
+		return;
+	HWND page = (HWND)send(sheet, PSM_GETCURRENTPAGEHWND, 0, 0);
+	CHECK(page != NULL);
+	if (page) {
+		get_item_text(page, 101, text, sizeof(text));
+		CHECK_STR(text, "d.txt");
+		get_item_text(page, 103, text, sizeof(text));
+		CHECK_STR(text, "C:\\ui");
+		get_item_text(page, 104, text, sizeof(text));
+		CHECK_STR(text, "1 bytes");
+		get_item_text(page, 107, text, sizeof(text));
+		CHECK(strlen(text) == 19 && text[4] == '-');
+		CHECK_EQ(send(item(page, 110), BM_GETCHECK, 0, 0), BST_UNCHECKED);
+		set_item_text(page, 101, "e.txt");
+		send(item(page, 110), BM_CLICK, 0, 0);
+		CHECK_EQ(send(item(page, 110), BM_GETCHECK, 0, 0), BST_CHECKED);
+		send(sheet, PSM_PRESSBUTTON, PSBTN_OK, 0);
+		pump_all(u32);
+	}
+	CHECK(!is_window(sheet));
+	CHECK(exists("ui/e.txt") && !exists("ui/d.txt"));
+	DWORD a = attrs("C:\\ui\\e.txt");
+	CHECK(a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_READONLY));
+	CHECK(set_attrs("C:\\ui\\e.txt", FILE_ATTRIBUTE_NORMAL));
+	a = attrs("C:\\ui\\e.txt");
+	CHECK(a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_READONLY));
+
+	/* The folder's own properties, from the background; Cancel. */
+	CHECK(sv->lpVtbl->GetItemObject(sv, SVGIO_BACKGROUND, &IID_IContextMenu,
+					(void **)&cm) == S_OK && cm);
+	if (!cm)
+		return;
+	CHECK(cm->lpVtbl->InvokeCommand(cm, &ci) == S_OK);
+	cm->lpVtbl->Release(cm);
+	sheet = find(NULL, u"ui Properties");
+	CHECK(sheet != NULL);
+	if (!sheet)
+		return;
+	page = (HWND)send(sheet, PSM_GETCURRENTPAGEHWND, 0, 0);
+	if (page) {
+		get_item_text(page, 102, text, sizeof(text));
+		CHECK_STR(text, "File Folder");
+		get_item_text(page, 105, text, sizeof(text));
+		CHECK(strstr(text, " Files, ") && strstr(text, " Folder"));
+		set_item_text(page, 101, "renamed");
+	}
+	send(sheet, PSM_PRESSBUTTON, PSBTN_CANCEL, 0);
+	pump_all(u32);
+	CHECK(!is_window(sheet));
+	CHECK(exists("ui/e.txt"));
+}
+
 static void test_shell_ui(void)
 {
 	FN(HRESULT, SHGetDesktopFolder, IShellFolder **);
@@ -1915,6 +2073,7 @@ static void test_shell_ui(void)
 			      strstr(text, "C:\\ui\\sub"));
 			d->lpVtbl->Release(d);
 		}
+		view_rename_and_properties(sv, list);
 		IContextMenu *vm = NULL;
 		CHECK(sv->lpVtbl->GetItemObject(sv, SVGIO_BACKGROUND,
 						&IID_IContextMenu,

@@ -12,7 +12,8 @@
  *   properties for items, and paste and properties for a folder's
  *   background. Cut and copy put a data object on the OLE clipboard and
  *   paste takes files from it; delete goes to the Recycle Bin unless Shift
- *   is down. With no GUI, rename and properties show nothing.
+ *   is down. Rename, on a view's menu, edits the label in the view's
+ *   list; properties opens shell_props.c's sheet.
  * - IExtractIconA/W: shell_icon.c's icon locations.
  * - IShellView: a "SHELLDLL_DefView" window with a list view of the
  *   folder's items, a selection, and the objects of the selection.
@@ -33,6 +34,7 @@
 #include "win32/k32.h"
 #include "win32/path.h"
 #include "win32/shell.h"
+#include "win32/user.h"
 
 extern const struct builtin_dll builtin_user32, builtin_ole32,
 	builtin_comctl32, builtin_shell32, builtin_kernel32;
@@ -48,7 +50,6 @@ extern const struct builtin_dll builtin_user32, builtin_ole32,
 #define GMEM_ZEROINIT 0x0040
 #define DATADIR_GET 1
 #define DATA_S_SAMEFORMATETC ((HRESULT)0x00040130)
-#define GW_CHILD 5
 #ifndef E_ABORT
 #define E_ABORT ((HRESULT)0x80004004)
 #endif
@@ -924,7 +925,10 @@ struct cmenu {
 	LONG ref;
 	struct items it;
 	int background;		/* the folder's own menu */
+	IShellView *view;	/* the view it came from, which can rename */
 };
+
+static HRESULT view_edit(IShellView *view, LPCITEMIDLIST child);
 
 #define CM(This) ((struct cmenu *)(This))
 
@@ -983,6 +987,8 @@ static ULONG WINAPI cm_Release(IContextMenu *This)
 	struct cmenu *m = CM(This);
 	LONG r = InterlockedDecrement(&m->ref);
 	if (!r) {
+		if (m->view)
+			m->view->lpVtbl->Release(m->view);
 		items_free(&m->it);
 		free(m);
 	}
@@ -1185,11 +1191,18 @@ static HRESULT WINAPI cm_InvokeCommand(IContextMenu *This,
 	case V_DELETE:
 		return delete_items(m, !(info->fMask & CMIC_MASK_SHIFT_DOWN));
 	case V_RENAME:
+		/* The view's list edits the name in place; without one
+		 * there is nothing to type it into. */
+		if (m->view && view_edit(m->view, m->it.child[0]) == S_OK)
+			return S_OK;
 		no_gui("Rename", name, "cancelled");
 		return HRESULT_FROM_WIN32(ERROR_CANCELLED);
 	default:
-		no_gui("Properties", name, "nothing shown");
-		return S_OK;
+		if (m->background) {
+			char *d = m->it.dir;
+			return shell_properties(info->hwnd, 1, &d);
+		}
+		return shell_properties(info->hwnd, m->it.n, m->it.path);
 	}
 }
 
@@ -1621,9 +1634,12 @@ static HRESULT WINAPI v_DestroyViewWindow(IShellView *This)
 	struct view *v = VIEW(This);
 	BOOL (WINAPI *destroy)(HWND) = U32("DestroyWindow");
 
-	if (v->hwnd)
-		destroy(v->hwnd);
+	HWND h = v->hwnd;
 	v->hwnd = v->list = NULL;
+	if (h) {
+		((LONG_PTR (WINAPI *)(HWND, int, LONG_PTR))U32(USER_SETLONGPTR_W))(h, GWLP_USERDATA, 0);
+		destroy(h);
+	}
 	return S_OK;
 }
 
@@ -1671,6 +1687,63 @@ static HRESULT WINAPI v_UIActivate(IShellView *This, UINT state)
 	return S_OK;
 }
 
+/* The list asks whether an item's label may be edited, and then gives
+ * the new name, which renames the item. */
+static LRESULT view_notify(struct view *v, const NMHDR *nm)
+{
+	const NMLVDISPINFOW *d = (const NMLVDISPINFOW *)nm;
+	int wide = nm->code == LVN_BEGINLABELEDITW ||
+		   nm->code == LVN_ENDLABELEDITW;
+	int i = d->item.iItem;
+
+	if (nm->code != LVN_BEGINLABELEDITW && nm->code != LVN_BEGINLABELEDITA &&
+	    nm->code != LVN_ENDLABELEDITW && nm->code != LVN_ENDLABELEDITA)
+		return 0;
+	if (i < 0 || (UINT)i >= v->n)
+		return nm->code == LVN_BEGINLABELEDITW ||
+		       nm->code == LVN_BEGINLABELEDITA;
+	LPCITEMIDLIST one = v->item[i];
+	if (nm->code == LVN_BEGINLABELEDITW || nm->code == LVN_BEGINLABELEDITA) {
+		ULONG a = SFGAO_CANRENAME;
+		return v->sf->lpVtbl->GetAttributesOf(v->sf, 1, &one, &a) != S_OK ||
+		       !(a & SFGAO_CANRENAME);
+	}
+	if (!d->item.pszText)
+		return FALSE;		/* cancelled */
+	char *u8 = wide ? NULL : acp_to_utf8((const char *)d->item.pszText);
+	WCHAR *name = u8 ? utf8_to_utf16_dup(u8) : NULL;
+	free(u8);
+	if (!wide && !name)
+		return FALSE;
+	LPITEMIDLIST np = NULL;
+	HRESULT hr = v->sf->lpVtbl->SetNameOf(v->sf, v->hwnd, one,
+			wide ? d->item.pszText : name, SHGDN_INFOLDER, &np);
+	free(name);
+	if (hr != S_OK) {
+		char *was = display_name(v, one);
+		fprintf(stderr, "Rename [%s]\n  (failed: 0x%08lx)\n", was,
+			(unsigned long)hr);
+		free(was);
+		return FALSE;
+	}
+	if (np) {
+		il_free(v->item[i]);
+		v->item[i] = np;
+	}
+	return TRUE;
+}
+
+/* Starts editing a child's label, for the rename verb. */
+static HRESULT view_edit(IShellView *view, LPCITEMIDLIST child)
+{
+	struct view *v = VIEW(view);
+
+	if (!v->list || !child)
+		return E_FAIL;
+	return view->lpVtbl->SelectItem(view, child, SVSI_EDIT | SVSI_SELECT |
+					SVSI_DESELECTOTHERS | SVSI_FOCUSED);
+}
+
 /* The view window keeps its list view filling it. */
 WINFN(LRESULT) defview_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -1684,6 +1757,14 @@ WINFN(LRESULT) defview_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		if (list)
 			move(list, 0, 0, LOWORD(lp), HIWORD(lp), TRUE);
 		return 0;
+	}
+	if (msg == WM_NOTIFY && lp) {
+		LONG_PTR (WINAPI *get_long)(HWND, int) =
+			U32(USER_GETLONGPTR_W);
+		struct view *v = (struct view *)get_long(hwnd, GWLP_USERDATA);
+		const NMHDR *nm = (const NMHDR *)lp;
+		if (v && nm->hwndFrom == v->list)
+			return view_notify(v, nm);
 	}
 	return def(hwnd, msg, wp, lp);
 }
@@ -1753,10 +1834,12 @@ static HRESULT WINAPI v_CreateViewWindow(IShellView *This, IShellView *prev,
 			 WS_VISIBLE, x, y, w, h, parent, NULL, NULL, NULL);
 	if (!v->hwnd)
 		return E_FAIL;
+	((LONG_PTR (WINAPI *)(HWND, int, LONG_PTR))U32(USER_SETLONGPTR_W))(
+		v->hwnd, GWLP_USERDATA, (LONG_PTR)v);
 	DWORD mode = fs->ViewMode < 5 ? modes[fs->ViewMode] : LVS_ICON;
 	v->list = create(0, listview, NULL, WS_CHILD | WS_VISIBLE |
-			 LVS_SHOWSELALWAYS | mode, 0, 0, w, h, v->hwnd, NULL,
-			 NULL, NULL);
+			 LVS_SHOWSELALWAYS | LVS_EDITLABELS | mode, 0, 0, w, h,
+			 v->hwnd, NULL, NULL, NULL);
 	if (!v->list) {
 		v_DestroyViewWindow(This);
 		return E_FAIL;
@@ -1822,9 +1905,15 @@ static HRESULT WINAPI v_SelectItem(IShellView *This, LPCITEMIDLIST pidl,
 		v->focus = at;
 	view_mark(v, (UINT)at);
 	if ((flags & SVSI_EDIT) == SVSI_EDIT) {
-		char *name = display_name(v, v->item[at]);
-		no_gui("Rename", name, "cancelled");
-		free(name);
+		LRESULT (WINAPI *send)(HWND, UINT, WPARAM, LPARAM) =
+			U32("SendMessageW");
+		if (!v->list || !send(v->list, LVM_EDITLABELW, (WPARAM)at, 0)) {
+			char *name = display_name(v, v->item[at]);
+			no_gui("Rename", name, "cancelled");
+			free(name);
+			return v->list ? HRESULT_FROM_WIN32(ERROR_CANCELLED) :
+			       S_OK;
+		}
 	}
 	return S_OK;
 }
@@ -1862,6 +1951,13 @@ static HRESULT WINAPI v_GetItemObject(IShellView *This, UINT what, REFIID riid,
 		HRESULT hr = k ? v->sf->lpVtbl->GetUIObjectOf(v->sf, v->owner,
 				 k, list, riid, NULL, ppv) : E_FAIL;
 		free(list);
+		/* The view's own menu renames through the view. */
+		if (hr == S_OK && same_guid(riid, &IID_IContextMenu) &&
+		    ((IContextMenu *)*ppv)->lpVtbl == &cmenu_vtbl &&
+		    !CM(*ppv)->view) {
+			CM(*ppv)->view = This;
+			This->lpVtbl->AddRef(This);
+		}
 		return hr;
 	}
 	default:

@@ -646,14 +646,39 @@ static DWORD file_attributes(const void *name, int wide)
 WINFN(DWORD) k32_GetFileAttributesA(LPCSTR name) { return file_attributes(name, 0); }
 WINFN(DWORD) k32_GetFileAttributesW(LPCWSTR name) { return file_attributes(name, 1); }
 
+/* Only read-only has a host meaning: a file without write permission.
+ * The other attributes are accepted and not kept. */
+static BOOL set_file_attributes(const void *name, int wide, DWORD attrs)
+{
+	char *p = unix_path(name, wide);
+	struct stat st;
+	BOOL ok = TRUE;
+
+	if (!p)
+		return FALSE;
+	if (stat(p, &st)) {
+		set_path_error(p);
+		ok = FALSE;
+	} else if (!S_ISDIR(st.st_mode)) {
+		mode_t m = attrs & FILE_ATTRIBUTE_READONLY ? st.st_mode & ~0222 :
+			   st.st_mode | 0200;
+		if ((m & 07777) != (st.st_mode & 07777) && chmod(p, m & 07777)) {
+			set_path_error(p);
+			ok = FALSE;
+		}
+	}
+	free(p);
+	return ok;
+}
+
 WINFN(BOOL) k32_SetFileAttributesA(LPCSTR name, DWORD attrs)
 {
-	return file_attributes(name, 0) != INVALID_FILE_ATTRIBUTES;
+	return set_file_attributes(name, 0, attrs);
 }
 
 WINFN(BOOL) k32_SetFileAttributesW(LPCWSTR name, DWORD attrs)
 {
-	return file_attributes(name, 1) != INVALID_FILE_ATTRIBUTES;
+	return set_file_attributes(name, 1, attrs);
 }
 
 static BOOL create_directory(const void *name, int wide)
