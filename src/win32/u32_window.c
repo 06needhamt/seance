@@ -14,8 +14,9 @@
  * switch threads). Messages carrying text are converted between ANSI and
  * UTF-16 when the sender and the procedure disagree, as on Windows.
  *
- * Dialog boxes can't be shown: DialogBox* and CreateDialog* fail, saying
- * so on stderr.
+ * Each thread has a focus window: SetFocus sends WM_KILLFOCUS and
+ * WM_SETFOCUS as on Windows. Dialogs and the standard controls are in
+ * u32_dialog.c.
  *
  * One lock guards everything here; it is never held while a window, timer
  * or enumeration procedure runs, so those may call back in freely.
@@ -148,6 +149,7 @@ static UINT_PTR next_timer_id = 1;
 static pthread_key_t queue_key;
 static __thread struct sent *in_send;	/* being handled on this thread */
 static __thread struct sent *waiting;	/* sent by this thread, awaited */
+static __thread HWND focus;		/* this thread's focus window */
 
 static void queue_thread_end(void *arg);
 static struct queue *queue_self(void);
@@ -348,28 +350,42 @@ out:
 	return atom;
 }
 
-/* The system classes a codec might create a hidden window of. */
+/* The system classes: the dialog class and the standard controls. */
 static void register_system_classes(void)
 {
-	static const char *const names[] = {
-		"STATIC", "BUTTON", "EDIT", "#32770", "#32769", "Message",
+	static const struct {
+		const char *name;
+		WNDPROC proc;
+		int extra;
+	} classes_[] = {
+		{ "STATIC", user_static_proc, USER_CONTROL_EXTRA },
+		{ "BUTTON", user_button_proc, USER_CONTROL_EXTRA },
+		{ "EDIT", user_edit_proc, USER_CONTROL_EXTRA },
+		{ "LISTBOX", user_listbox_proc, USER_CONTROL_EXTRA },
+		{ "COMBOBOX", user_combobox_proc, USER_CONTROL_EXTRA },
+		{ "COMBOLBOX", user_listbox_proc, USER_CONTROL_EXTRA },
+		{ "SCROLLBAR", user_DefWindowProcW, 0 },
+		{ "#32770", user_DefDlgProcW, DLGWINDOWEXTRA },
+		{ "#32769", user_DefWindowProcW, 0 },
+		{ "Message", user_DefWindowProcW, 0 },
 	};
 	static int done;
 
 	if (__atomic_exchange_n(&done, 1, __ATOMIC_SEQ_CST))
 		return;
-	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+	for (size_t i = 0; i < sizeof(classes_) / sizeof(classes_[0]); i++) {
 		WCHAR w[16];
 		WNDCLASSEXW wc;
 		size_t j = 0;
-		for (; names[i][j]; j++)
-			w[j] = names[i][j];
+		for (; classes_[i].name[j]; j++)
+			w[j] = classes_[i].name[j];
 		w[j] = 0;
 		memset(&wc, 0, sizeof(wc));
 		wc.cbSize = sizeof(wc);
-		wc.lpfnWndProc = user_DefWindowProcW;
+		wc.style = CS_GLOBALCLASS;
+		wc.lpfnWndProc = classes_[i].proc;
 		wc.lpszClassName = w;
-		wc.cbWndExtra = !strcmp(names[i], "#32770") ? 30 : 0;
+		wc.cbWndExtra = classes_[i].extra;
 		register_class(&wc, 1);
 	}
 }
@@ -688,6 +704,25 @@ static void convert_cs(const void *in, int to_unicode, struct cs_conv *out)
 }
 
 /*
+ * Whether a list or combo box message's lParam is an owner-drawn item's
+ * data, not a string: an owner-drawn box without LBS_/CBS_HASSTRINGS.
+ */
+static int item_data(HWND hwnd, UINT msg)
+{
+	enter();
+	struct window *w = get(hwnd);
+	DWORD style = w ? w->style : 0;
+	leave();
+	if (msg >= LB_ADDSTRING && msg <= LB_FINDSTRINGEXACT)
+		return (style & (LBS_OWNERDRAWFIXED | LBS_OWNERDRAWVARIABLE)) &&
+		       !(style & LBS_HASSTRINGS);
+	if (msg >= CB_GETEDITSEL && msg <= CB_FINDSTRINGEXACT)
+		return (style & (CBS_OWNERDRAWFIXED | CBS_OWNERDRAWVARIABLE)) &&
+		       !(style & CBS_HASSTRINGS);
+	return 0;
+}
+
+/*
  * Calls a window procedure expecting proc_unicode messages with a message
  * from a unicode (or ANSI) sender, converting text where they differ.
  */
@@ -739,6 +774,11 @@ static LRESULT call_proc(WNDPROC proc, int proc_unicode, HWND hwnd, UINT msg,
 		free(w);
 		return r;
 	}
+	case LB_GETTEXT:
+	case LB_GETTEXTLEN:
+		if (item_data(hwnd, msg))
+			return proc(hwnd, msg, wp, lp);
+		/* fall through */
 	case CB_GETLBTEXT:
 	case CB_GETLBTEXTLEN: {
 		/* A list item's text, in the procedure's charset, then in
@@ -757,13 +797,16 @@ static LRESULT call_proc(WNDPROC proc, int proc_unicode, HWND hwnd, UINT msg,
 			buf = q.text;	/* always wide */
 			text = buf;
 		} else {
-			LRESULT n = proc(hwnd, CB_GETLBTEXTLEN, wp, 0);
+			int lb = msg == LB_GETTEXT || msg == LB_GETTEXTLEN;
+			LRESULT n = proc(hwnd, lb ? LB_GETTEXTLEN : CB_GETLBTEXTLEN,
+					 wp, 0);
 			if (n < 0)
 				return n;
 			buf = calloc((size_t)n + 1, sizeof(WCHAR));
 			if (!buf)
 				return CB_ERR;
-			r = proc(hwnd, CB_GETLBTEXT, wp, (LPARAM)buf);
+			r = proc(hwnd, lb ? LB_GETTEXT : CB_GETLBTEXT, wp,
+				 (LPARAM)buf);
 			if (r < 0)
 				return free(buf), r;
 			text = buf;
@@ -780,15 +823,24 @@ static LRESULT call_proc(WNDPROC proc, int proc_unicode, HWND hwnd, UINT msg,
 					      NULL);
 			len = k > 0 ? k - 1 : 0;
 		}
-		if (msg == CB_GETLBTEXT && lp)
+		if ((msg == CB_GETLBTEXT || msg == LB_GETTEXT) && lp)
 			len = copy_text(text, (void *)lp, len + 1, unicode);
 		free(f);
 		free(buf);
 		return len;
 	}
 	case CB_FINDSTRING:
-	case CB_FINDSTRINGEXACT: {
-		if (!lp || IS_INTRESOURCE(lp))
+	case CB_FINDSTRINGEXACT:
+	case CB_ADDSTRING:
+	case CB_INSERTSTRING:
+	case CB_SELECTSTRING:
+	case LB_ADDSTRING:
+	case LB_INSERTSTRING:
+	case LB_FINDSTRING:
+	case LB_FINDSTRINGEXACT:
+	case LB_SELECTSTRING:
+	case EM_REPLACESEL: {
+		if (!lp || IS_INTRESOURCE(lp) || item_data(hwnd, msg))
 			return proc(hwnd, msg, wp, lp);
 		void *s;
 		if (proc_unicode) {
@@ -1019,6 +1071,8 @@ BOOL WINAPI user_DestroyWindow(HWND hwnd)
 		return ok;
 
 	user_clipboard_owner_destroyed(hwnd);
+	if (focus == hwnd)
+		focus = NULL;
 	send(hwnd, WM_DESTROY, 0, 0, 1);
 	for (size_t i = 0; i < n; i++)
 		user_DestroyWindow(kids[i]);
@@ -1996,9 +2050,30 @@ WINFN(HWND) user_FindWindowA(LPCSTR cls, LPCSTR title)
 WINFN(HWND) user_GetDesktopWindow(void) { return user_desktop(); }
 WINFN(HWND) user_GetActiveWindow(void) { return NULL; }
 WINFN(HWND) user_GetForegroundWindow(void) { return NULL; }
-WINFN(HWND) user_GetFocus(void) { return NULL; }
+WINFN(HWND) user_GetFocus(void)
+{
+	if (focus && !user_is_window(focus))
+		focus = NULL;
+	return focus;
+}
 WINFN(HWND) user_GetCapture(void) { return NULL; }
-WINFN(HWND) user_SetFocus(HWND hwnd) { return NULL; }
+WINFN(HWND) user_SetFocus(HWND hwnd)
+{
+	HWND old = user_GetFocus();
+
+	if (hwnd && !user_is_window(hwnd)) {
+		win_set_error(ERROR_INVALID_WINDOW_HANDLE);
+		return NULL;
+	}
+	if (hwnd == old)
+		return old;
+	focus = hwnd;
+	if (old)
+		send(old, WM_KILLFOCUS, (WPARAM)hwnd, 0, 1);
+	if (hwnd && focus == hwnd)
+		send(hwnd, WM_SETFOCUS, (WPARAM)old, 0, 1);
+	return old;
+}
 WINFN(HWND) user_SetActiveWindow(HWND hwnd) { return NULL; }
 WINFN(HWND) user_SetCapture(HWND hwnd) { return NULL; }
 WINFN(BOOL) user_ReleaseCapture(void) { return TRUE; }
@@ -3057,81 +3132,6 @@ WINFN(BOOL) user_KillTimer(HWND hwnd, UINT_PTR id)
 	return ok;
 }
 
-/* Dialogs: there is no GUI to show them on. */
-
-static void no_dialog(const char *fn)
-{
-	vfw_warn("%s: a DLL tried to open a dialog box, but there is no GUI; "
-		 "it fails", fn);
-	win_set_error(ERROR_CALL_NOT_IMPLEMENTED);
-}
-
-WINFN(INT_PTR) user_DialogBoxParamA(HINSTANCE inst, LPCSTR tmpl, HWND parent,
-				    DLGPROC proc, LPARAM param)
-{
-	no_dialog("DialogBoxParamA");
-	return -1;
-}
-
-WINFN(INT_PTR) user_DialogBoxParamW(HINSTANCE inst, LPCWSTR tmpl, HWND parent,
-				    DLGPROC proc, LPARAM param)
-{
-	no_dialog("DialogBoxParamW");
-	return -1;
-}
-
-WINFN(INT_PTR) user_DialogBoxIndirectParamA(HINSTANCE inst, const void *tmpl,
-					    HWND parent, DLGPROC proc,
-					    LPARAM param)
-{
-	no_dialog("DialogBoxIndirectParamA");
-	return -1;
-}
-
-WINFN(INT_PTR) user_DialogBoxIndirectParamW(HINSTANCE inst, const void *tmpl,
-					    HWND parent, DLGPROC proc,
-					    LPARAM param)
-{
-	no_dialog("DialogBoxIndirectParamW");
-	return -1;
-}
-
-WINFN(HWND) user_CreateDialogParamA(HINSTANCE inst, LPCSTR tmpl, HWND parent,
-				    DLGPROC proc, LPARAM param)
-{
-	no_dialog("CreateDialogParamA");
-	return NULL;
-}
-
-WINFN(HWND) user_CreateDialogParamW(HINSTANCE inst, LPCWSTR tmpl, HWND parent,
-				    DLGPROC proc, LPARAM param)
-{
-	no_dialog("CreateDialogParamW");
-	return NULL;
-}
-
-WINFN(HWND) user_CreateDialogIndirectParamA(HINSTANCE inst, const void *tmpl,
-					    HWND parent, DLGPROC proc,
-					    LPARAM param)
-{
-	no_dialog("CreateDialogIndirectParamA");
-	return NULL;
-}
-
-WINFN(HWND) user_CreateDialogIndirectParamW(HINSTANCE inst, const void *tmpl,
-					    HWND parent, DLGPROC proc,
-					    LPARAM param)
-{
-	no_dialog("CreateDialogIndirectParamW");
-	return NULL;
-}
-
-WINFN(BOOL) user_EndDialog(HWND hwnd, INT_PTR result)
-{
-	win_set_error(ERROR_INVALID_WINDOW_HANDLE);
-	return FALSE;
-}
-
 /* Dialog items: the child windows with a given id. */
 
 WINFN(HWND) user_GetDlgItem(HWND hwnd, int id)
@@ -3244,24 +3244,15 @@ const struct builtin_export u32_window_exports[] = {
 	E(CallWindowProcW),
 	E(CheckDlgButton),
 	E(ClientToScreen),
-	E(CreateDialogIndirectParamA),
-	E(CreateDialogIndirectParamW),
-	E(CreateDialogParamA),
-	E(CreateDialogParamW),
 	E(CreateWindowExA),
 	E(CreateWindowExW),
 	E(DefWindowProcA),
 	E(DefWindowProcW),
 	E(DestroyWindow),
-	E(DialogBoxIndirectParamA),
-	E(DialogBoxIndirectParamW),
-	E(DialogBoxParamA),
-	E(DialogBoxParamW),
 	E(DispatchMessageA),
 	E(DispatchMessageW),
 	E(EnableScrollBar),
 	E(EnableWindow),
-	E(EndDialog),
 	E(EnumChildWindows),
 	E(EnumThreadWindows),
 	E(EnumWindows),

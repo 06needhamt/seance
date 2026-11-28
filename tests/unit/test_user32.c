@@ -1255,6 +1255,379 @@ static void test_send_endings(void)
 	CloseHandle(owned_go);
 }
 
+/* Dialogs: a template built in memory, and what its procedure saw. */
+struct tbuf {
+	BYTE b[2048];
+	size_t n;
+};
+
+static void t_put(struct tbuf *t, const void *p, size_t n)
+{
+	memcpy(t->b + t->n, p, n);
+	t->n += n;
+}
+
+static void t_word(struct tbuf *t, WORD v)
+{
+	t_put(t, &v, 2);
+}
+
+static void t_dword(struct tbuf *t, DWORD v)
+{
+	t_put(t, &v, 4);
+}
+
+static void t_str(struct tbuf *t, const char *s)
+{
+	do
+		t_word(t, (BYTE)*s);
+	while (*s++);
+}
+
+static void t_align(struct tbuf *t)
+{
+	while (t->n & 3)
+		t->b[t->n++] = 0;
+}
+
+static void t_item(struct tbuf *t, int ex, DWORD style, short x, short y,
+		   short cx, short cy, WORD id, WORD cls, const char *title)
+{
+	t_align(t);
+	if (ex) {
+		t_dword(t, 0);		/* help id */
+		t_dword(t, 0);		/* exstyle */
+		t_dword(t, style);
+	} else {
+		t_dword(t, style);
+		t_dword(t, 0);
+	}
+	t_word(t, (WORD)x);
+	t_word(t, (WORD)y);
+	t_word(t, (WORD)cx);
+	t_word(t, (WORD)cy);
+	if (ex)
+		t_dword(t, id);
+	else
+		t_word(t, id);
+	t_word(t, 0xffff);
+	t_word(t, cls);
+	t_str(t, title);
+	t_word(t, 0);			/* no creation data */
+}
+
+/* The test dialog: an edit, a check box, two radios, a list, a combo, OK
+ * and Cancel. */
+static void t_dialog(struct tbuf *t, int ex, DWORD style)
+{
+	t->n = 0;
+	style |= DS_SETFONT;
+	if (ex) {
+		t_word(t, 1);
+		t_word(t, 0xffff);
+		t_dword(t, 0);
+		t_dword(t, 0);
+		t_dword(t, style);
+	} else {
+		t_dword(t, style);
+		t_dword(t, 0);
+	}
+	t_word(t, 8);
+	t_word(t, 10);
+	t_word(t, 20);
+	t_word(t, 200);
+	t_word(t, 100);
+	t_word(t, 0);			/* no menu */
+	t_word(t, 0);			/* the dialog class */
+	t_str(t, "Settings");
+	t_word(t, 8);
+	if (ex) {
+		t_word(t, 400);
+		t_word(t, 0);		/* italic, charset */
+	}
+	t_str(t, "MS Shell Dlg");
+	const DWORD vis = WS_CHILD | WS_VISIBLE;
+	t_item(t, ex, vis | WS_TABSTOP | ES_AUTOHSCROLL, 5, 5, 100, 12, 100,
+	       0x81, "abc");
+	t_item(t, ex, vis | WS_TABSTOP | BS_AUTOCHECKBOX, 5, 20, 100, 10, 101,
+	       0x80, "Check");
+	t_item(t, ex, vis | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON, 5, 32,
+	       50, 10, 102, 0x80, "One");
+	t_item(t, ex, vis | BS_AUTORADIOBUTTON, 60, 32, 50, 10, 103, 0x80,
+	       "Two");
+	t_item(t, ex, vis | WS_TABSTOP | WS_GROUP | LBS_SORT | LBS_NOTIFY, 5,
+	       45, 60, 40, 104, 0x83, "");
+	t_item(t, ex, vis | WS_TABSTOP | CBS_DROPDOWNLIST, 70, 45, 60, 40, 105,
+	       0x85, "");
+	t_item(t, ex, vis | WS_TABSTOP | BS_DEFPUSHBUTTON, 90, 80, 50, 14, IDOK,
+	       0x80, "OK");
+	t_item(t, ex, vis | WS_TABSTOP, 145, 80, 50, 14, IDCANCEL, 0x80,
+	       "Cancel");
+	/* The item count. */
+	WORD n = 8;
+	memcpy(t->b + (ex ? 16 : 8), &n, 2);
+}
+
+static char dlog[512];
+static LPARAM dlg_param;
+static int dlg_end_in_init, dlg_ignore_cancel;
+static HWND dlg_owner;
+static BOOL owner_enabled_in_init;
+static BOOL (WINAPI *p_EndDialog)(HWND, INT_PTR);
+static BOOL (WINAPI *p_IsWindowEnabled)(HWND);
+
+static void dnote(const char *fmt, int a, int b)
+{
+	size_t n = strlen(dlog);
+	snprintf(dlog + n, sizeof(dlog) - n, n ? ",%s" : "%s", fmt);
+	n = strlen(dlog);
+	char tmp[64];
+	snprintf(tmp, sizeof(tmp), dlog + n - strlen(fmt), a, b);
+	dlog[n - strlen(fmt)] = 0;
+	n = strlen(dlog);
+	snprintf(dlog + n, sizeof(dlog) - n, "%s", tmp);
+}
+
+static INT_PTR WINAPI dlg_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+	switch (msg) {
+	case WM_INITDIALOG:
+		dlg_param = lp;
+		dnote("init", 0, 0);
+		if (dlg_owner)
+			owner_enabled_in_init = p_IsWindowEnabled(dlg_owner);
+		if (dlg_end_in_init)
+			p_EndDialog(h, 5);
+		return TRUE;
+	case WM_COMMAND:
+		dnote("cmd%d/%d", LOWORD(wp), HIWORD(wp));
+		if (LOWORD(wp) == IDOK)
+			p_EndDialog(h, 42);
+		else if (LOWORD(wp) == IDCANCEL && !dlg_ignore_cancel)
+			p_EndDialog(h, 7);
+		return TRUE;
+	}
+	return FALSE;
+}
+
+static void test_dialogs(void)
+{
+	FN(HWND, CreateDialogIndirectParamW, HINSTANCE, const void *, HWND,
+	   DLGPROC, LPARAM);
+	FN(HWND, CreateDialogIndirectParamA, HINSTANCE, const void *, HWND,
+	   DLGPROC, LPARAM);
+	FN(INT_PTR, DialogBoxIndirectParamW, HINSTANCE, const void *, HWND,
+	   DLGPROC, LPARAM);
+	FN(BOOL, EndDialog, HWND, INT_PTR);
+	FN(HWND, GetDlgItem, HWND, int);
+	FN(BOOL, IsWindowVisible, HWND);
+	FN(BOOL, IsWindowEnabled, HWND);
+	FN(BOOL, IsWindowUnicode, HWND);
+	FN(BOOL, DestroyWindow, HWND);
+	FN(HWND, GetFocus, void);
+	FN(HWND, SetFocus, HWND);
+	FN(LRESULT, SendMessageW, HWND, UINT, WPARAM, LPARAM);
+	FN(LRESULT, SendMessageA, HWND, UINT, WPARAM, LPARAM);
+	FN(BOOL, SetDlgItemTextA, HWND, int, LPCSTR);
+	FN(UINT, GetDlgItemTextA, HWND, int, LPSTR, int);
+	FN(int, GetClassNameA, HWND, LPSTR, int);
+	FN(int, GetWindowTextA, HWND, LPSTR, int);
+	FN(UINT, IsDlgButtonChecked, HWND, int);
+	FN(BOOL, CheckRadioButton, HWND, int, int, int);
+	FN(BOOL, IsDialogMessageW, HWND, LPMSG);
+	FN(HWND, GetNextDlgTabItem, HWND, HWND, BOOL);
+	FN(HWND, GetNextDlgGroupItem, HWND, HWND, BOOL);
+	FN(BOOL, PeekMessageW, LPMSG, HWND, UINT, UINT, UINT);
+	FN(LRESULT, DispatchMessageW, const MSG *);
+	FN(LONG, GetDialogBaseUnits, void);
+	FN(BOOL, GetClientRect, HWND, LPRECT);
+	FN(HWND, CreateWindowExA, DWORD, LPCSTR, LPCSTR, DWORD, int, int, int,
+	   int, HWND, HMENU, HINSTANCE, LPVOID);
+	p_EndDialog = EndDialog;
+	p_IsWindowEnabled = IsWindowEnabled;
+	struct tbuf t;
+	char buf[64];
+
+	CHECK_EQ(GetDialogBaseUnits(), MAKELONG(8, 16));
+	for (int ex = 0; ex < 2; ex++) {
+		t_dialog(&t, ex, WS_POPUP | WS_CAPTION | WS_VISIBLE);
+		dlog[0] = 0;
+		HWND h = CreateDialogIndirectParamW(NULL, t.b, NULL, dlg_proc,
+						    1234);
+		CHECK(h != NULL);
+		if (!h)
+			continue;
+		/* The edit gets the focus: EN_SETFOCUS. */
+		CHECK(!strcmp(dlog, "init,cmd100/256") && dlg_param == 1234);
+		CHECK(IsWindowVisible(h) && IsWindowUnicode(h));
+		CHECK(GetClassNameA(h, buf, sizeof(buf)) &&
+		      !strcmp(buf, "#32770"));
+		CHECK(GetWindowTextA(h, buf, sizeof(buf)) &&
+		      !strcmp(buf, "Settings"));
+		RECT rc;
+		CHECK(GetClientRect(h, &rc) && rc.right == 400 &&
+		      rc.bottom == 200);
+		HWND edit = GetDlgItem(h, 100), check = GetDlgItem(h, 101);
+		HWND list = GetDlgItem(h, 104), combo = GetDlgItem(h, 105);
+		CHECK(edit && check && list && combo && GetDlgItem(h, IDOK));
+		CHECK(GetClassNameA(edit, buf, sizeof(buf)) &&
+		      !strcmp(buf, "EDIT"));
+		CHECK(GetDlgItemTextA(h, 100, buf, sizeof(buf)) &&
+		      !strcmp(buf, "abc"));
+		/* The first tab stop has the focus, its text selected. */
+		CHECK(GetFocus() == edit);
+		DWORD a = 9, b = 9;
+		SendMessageW(edit, EM_GETSEL, (WPARAM)&a, (LPARAM)&b);
+		CHECK(a == 0 && b == 3);
+		CHECK_EQ(SendMessageW(h, DM_GETDEFID, 0, 0),
+			 MAKELONG(IDOK, DC_HASDEFID));
+
+		/* The edit: typed over its selection, with EN_CHANGE. */
+		dlog[0] = 0;
+		SendMessageW(edit, WM_CHAR, 'x', 0);
+		SendMessageW(edit, WM_CHAR, 'y', 0);
+		SendMessageW(edit, WM_CHAR, 8, 0);
+		CHECK(GetDlgItemTextA(h, 100, buf, sizeof(buf)) &&
+		      !strcmp(buf, "x"));
+		CHECK(strstr(dlog, "cmd100/768") != NULL);	/* EN_CHANGE */
+		CHECK_EQ(SendMessageW(edit, EM_GETMODIFY, 0, 0), TRUE);
+		SendMessageW(edit, EM_LIMITTEXT, 3, 0);
+		SendMessageA(edit, EM_REPLACESEL, 0, (LPARAM)"12345");
+		CHECK(GetDlgItemTextA(h, 100, buf, sizeof(buf)) &&
+		      !strcmp(buf, "x12"));
+		CHECK(SetDlgItemTextA(h, 100, "hello"));
+		CHECK_EQ(SendMessageW(edit, EM_GETMODIFY, 0, 0), FALSE);
+
+		/* Buttons: clicks toggle and notify; radio groups. */
+		dlog[0] = 0;
+		CHECK_EQ(IsDlgButtonChecked(h, 101), BST_UNCHECKED);
+		SendMessageW(check, BM_CLICK, 0, 0);
+		CHECK_EQ(IsDlgButtonChecked(h, 101), BST_CHECKED);
+		CHECK(!strcmp(dlog, "cmd101/0"));
+		CHECK(CheckRadioButton(h, 102, 103, 102));
+		SendMessageW(GetDlgItem(h, 103), BM_CLICK, 0, 0);
+		CHECK(IsDlgButtonChecked(h, 103) == BST_CHECKED &&
+		      IsDlgButtonChecked(h, 102) == BST_UNCHECKED);
+		CHECK(GetNextDlgGroupItem(h, GetDlgItem(h, 102), FALSE) ==
+		      GetDlgItem(h, 103));
+		CHECK(GetNextDlgGroupItem(h, GetDlgItem(h, 103), FALSE) ==
+		      GetDlgItem(h, 102));
+
+		/* A sorted list box, from ANSI and Unicode senders. */
+		SendMessageA(list, LB_ADDSTRING, 0, (LPARAM)"pear");
+		SendMessageA(list, LB_ADDSTRING, 0, (LPARAM)"apple");
+		SendMessageW(list, LB_ADDSTRING, 0, (LPARAM)w("fig"));
+		CHECK_EQ(SendMessageW(list, LB_GETCOUNT, 0, 0), 3);
+		CHECK_EQ(SendMessageA(list, LB_GETTEXTLEN, 1, 0), 3);
+		CHECK(SendMessageA(list, LB_GETTEXT, 2, (LPARAM)buf) == 4 &&
+		      !strcmp(buf, "pear"));
+		CHECK_EQ(SendMessageA(list, LB_FINDSTRING, (WPARAM)-1,
+				      (LPARAM)"F"), 1);
+		CHECK_EQ(SendMessageA(list, LB_FINDSTRINGEXACT, (WPARAM)-1,
+				      (LPARAM)"pea"), LB_ERR);
+		CHECK_EQ(SendMessageW(list, LB_SETCURSEL, 0, 0), 0);
+		SendMessageW(list, LB_SETITEMDATA, 0, 77);
+		CHECK_EQ(SendMessageW(list, LB_GETITEMDATA, 0, 0), 77);
+		dlog[0] = 0;
+		SendMessageW(list, WM_KEYDOWN, VK_DOWN, 0);
+		CHECK_EQ(SendMessageW(list, LB_GETCURSEL, 0, 0), 1);
+		CHECK(!strcmp(dlog, "cmd104/1"));	/* LBN_SELCHANGE */
+		CHECK_EQ(SendMessageW(list, LB_DELETESTRING, 0, 0), 2);
+		CHECK_EQ(SendMessageW(list, LB_GETCURSEL, 0, 0), 0);
+
+		/* A drop-down list: its text is the selection's. */
+		SendMessageA(combo, CB_ADDSTRING, 0, (LPARAM)"low");
+		SendMessageA(combo, CB_ADDSTRING, 0, (LPARAM)"high");
+		CHECK_EQ(SendMessageW(combo, CB_SETCURSEL, 1, 0), 1);
+		CHECK(GetWindowTextA(combo, buf, sizeof(buf)) &&
+		      !strcmp(buf, "high"));
+		CHECK(SendMessageA(combo, CB_GETLBTEXT, 0, (LPARAM)buf) == 3 &&
+		      !strcmp(buf, "low"));
+		CHECK_EQ(SendMessageA(combo, WM_SETTEXT, 0, (LPARAM)"none"),
+			 CB_ERR);
+		CHECK_EQ(SendMessageA(combo, WM_SETTEXT, 0, (LPARAM)"LOW"), TRUE);
+		CHECK_EQ(SendMessageW(combo, CB_GETCURSEL, 0, 0), 0);
+		dlog[0] = 0;
+		SendMessageW(combo, CB_SHOWDROPDOWN, TRUE, 0);
+		CHECK(SendMessageW(combo, CB_GETDROPPEDSTATE, 0, 0) &&
+		      !strcmp(dlog, "cmd105/7"));
+
+		/* The keyboard: Tab moves on, Escape and Enter press Cancel
+		 * and the default button. */
+		SetFocus(edit);
+		MSG m = { edit, WM_KEYDOWN, VK_TAB, 0, 0, { 0, 0 } };
+		CHECK(IsDialogMessageW(h, &m));
+		CHECK(GetFocus() == check);
+		CHECK(GetNextDlgTabItem(h, check, TRUE) == edit);
+		CHECK(GetNextDlgTabItem(h, GetDlgItem(h, IDCANCEL), FALSE) ==
+		      edit);
+		MSG out = { h, WM_KEYDOWN, VK_TAB, 0, 0, { 0, 0 } };
+		CHECK(!IsDialogMessageW(NULL, &out));
+		dlog[0] = 0;
+		dlg_ignore_cancel = 1;
+		m.message = WM_KEYDOWN;
+		m.wParam = VK_ESCAPE;
+		CHECK(IsDialogMessageW(h, &m));
+		CHECK(!strcmp(dlog, "cmd2/0"));
+		/* WM_CLOSE posts IDCANCEL. */
+		dlog[0] = 0;
+		SendMessageW(h, WM_CLOSE, 0, 0);
+		CHECK(IsWindowVisible(h) && !dlog[0]);
+		while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE))
+			DispatchMessageW(&m);
+		CHECK(!strcmp(dlog, "cmd2/0"));
+		dlg_ignore_cancel = 0;
+		dlog[0] = 0;
+		m.hwnd = edit;
+		m.message = WM_KEYDOWN;
+		m.wParam = VK_RETURN;
+		CHECK(IsDialogMessageW(h, &m));
+		CHECK(!strcmp(dlog, "cmd1/0"));
+		/* EndDialog only hides a modeless one. */
+		CHECK(!IsWindowVisible(h));
+		CHECK(DestroyWindow(h));
+		CHECK(!EndDialog(h, 0));
+	}
+
+	/* An ANSI dialog gets ANSI messages. */
+	t_dialog(&t, 0, WS_POPUP);
+	HWND ha = CreateDialogIndirectParamA(NULL, t.b, NULL, dlg_proc, 0);
+	CHECK(ha && !IsWindowUnicode(ha) && !IsWindowVisible(ha));
+	DestroyWindow(ha);
+
+	/* Modal: the owner is disabled while it runs, and nobody presses a
+	 * button, so Cancel is. */
+	dlg_owner = CreateWindowExA(0, "STATIC", "owner", 0, 0, 0, 10, 10,
+				    NULL, NULL, NULL, NULL);
+	dlog[0] = 0;
+	t_dialog(&t, 1, WS_POPUP | WS_VISIBLE);
+	CHECK_EQ(DialogBoxIndirectParamW(NULL, t.b, dlg_owner, dlg_proc, 9),
+		 7);
+	CHECK(!strcmp(dlog, "init,cmd100/256,cmd2/0"));
+	CHECK(!owner_enabled_in_init && IsWindowEnabled(dlg_owner));
+	/* One that ends itself as it starts. */
+	dlg_end_in_init = 1;
+	dlog[0] = 0;
+	CHECK_EQ(DialogBoxIndirectParamW(NULL, t.b, dlg_owner, dlg_proc, 9),
+		 5);
+	CHECK(!strcmp(dlog, "init,cmd100/256"));
+	dlg_end_in_init = 0;
+	/* $VFW_DIALOG=ok presses the default button. */
+	setenv("VFW_DIALOG", "ok", 1);
+	dlog[0] = 0;
+	CHECK_EQ(DialogBoxIndirectParamW(NULL, t.b, dlg_owner, dlg_proc, 9),
+		 42);
+	CHECK(!strcmp(dlog, "init,cmd100/256,cmd1/0"));
+	unsetenv("VFW_DIALOG");
+	/* One that won't end is ended with the button pressed. */
+	dlg_ignore_cancel = 1;
+	CHECK_EQ(DialogBoxIndirectParamW(NULL, t.b, dlg_owner, dlg_proc, 9),
+		 IDCANCEL);
+	dlg_ignore_cancel = 0;
+	DestroyWindow(dlg_owner);
+	dlg_owner = NULL;
+}
+
 int main(void)
 {
 	CHECK_EQ(lowmem_reserve(), 0);
@@ -1275,6 +1648,7 @@ int main(void)
 	test_misc();
 	test_clipboard();
 	test_fixture();
+	test_dialogs();
 
 	mod_free(u32);
 	mod_free(gdi);

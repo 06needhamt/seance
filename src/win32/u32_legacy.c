@@ -44,11 +44,6 @@ WINFN(DWORD) user_CheckMenuItem(HMENU menu, UINT id, UINT flags)
 	return (DWORD)-1;
 }
 
-WINFN(BOOL) user_CheckRadioButton(HWND hwnd, int first, int last, int check)
-{
-	return TRUE;
-}
-
 WINFN(HWND) user_ChildWindowFromPoint(HWND parent, POINT point)
 {
 	return user_is_window(parent) ? parent : NULL;
@@ -259,11 +254,6 @@ WINFN(UINT) user_GetMenuState(HMENU menu, UINT id, UINT flags)
 	return (UINT)-1;
 }
 
-WINFN(HWND) user_GetNextDlgTabItem(HWND dialog, HWND control, BOOL previous)
-{
-	return NULL;
-}
-
 WINFN(WORD) user_GetWindowWord(HWND hwnd, int index)
 {
 	if (!user_is_window(hwnd)) return 0;
@@ -300,22 +290,6 @@ WINFN(BOOL) user_GetWindowPlacement(HWND hwnd, WINDOWPLACEMENT *placement)
 WINFN(BOOL) user_GrayStringA(HDC hdc, HBRUSH brush, void *callback,
 			      LPARAM data, int count, int x, int y, int cx, int cy)
 {
-	return TRUE;
-}
-
-WINFN(BOOL) user_IsDialogMessageA(HWND dialog, LPMSG message)
-{
-	return FALSE;
-}
-
-WINFN(BOOL) user_MapDialogRect(HWND dialog, LPRECT rc)
-{
-	if (!rc)
-		return FALSE;
-	rc->left = rc->left * 8 / 4;
-	rc->right = rc->right * 8 / 4;
-	rc->top = rc->top * 16 / 8;
-	rc->bottom = rc->bottom * 16 / 8;
 	return TRUE;
 }
 
@@ -387,7 +361,6 @@ const struct builtin_export u32_legacy_exports[] = {
 	E(AdjustWindowRectEx),
 	E(CallNextHookEx),
 	E(CheckMenuItem),
-	E(CheckRadioButton),
 	E(ChildWindowFromPoint),
 	E(CreateMenu),
 	E(CreatePopupMenu),
@@ -403,7 +376,6 @@ const struct builtin_export u32_legacy_exports[] = {
 	E(GetMenuItemCount),
 	E(GetMenuItemID),
 	E(GetMenuState),
-	E(GetNextDlgTabItem),
 	E(GetShellWindow),
 	E(GetSubMenu),
 	E(GetUpdateRect),
@@ -411,8 +383,6 @@ const struct builtin_export u32_legacy_exports[] = {
 	E(GetWindowWord),
 	E(GrayStringA),
 	E(InsertMenuItemW),
-	E(IsDialogMessageA),
-	E(MapDialogRect),
 	E(MapWindowPoints),
 	E(ModifyMenuA),
 	E(RedrawWindow),
