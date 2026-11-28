@@ -290,6 +290,7 @@ typedef struct tagMONITORINFO {
 #define MK_RBUTTON           0x0002
 #define MK_SHIFT             0x0004
 #define MK_CONTROL           0x0008
+#define MK_MBUTTON           0x0010
 
 /* Combo box messages (which ComboBoxEx answers). */
 #define CB_ERR               (-1)

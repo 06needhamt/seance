@@ -737,6 +737,7 @@ static void test_misc(void)
 	FN(BOOL, EnumDisplaySettingsExA, LPCSTR, DWORD, DEVMODEA *, DWORD);
 	FN(int, GetKeyboardLayoutList, int, HANDLE *);
 	FN(BOOL, GetCursorPos, LPPOINT);
+	FN(BOOL, SetCursorPos, int, int);
 	FN(HWINSTA, GetProcessWindowStation, void);
 	FN(BOOL, GetUserObjectInformationA, HANDLE, int, PVOID, DWORD, LPDWORD);
 	FN(HMONITOR, MonitorFromWindow, HWND, DWORD);
@@ -826,6 +827,12 @@ static void test_misc(void)
 	CHECK(layouts[0] == (HANDLE)0x04090409 && !layouts[1]);
 	POINT pt;
 	CHECK(GetCursorPos(&pt) && pt.x == 512);
+	/* The cursor stays where it is put, inside the screen. */
+	CHECK(SetCursorPos(10, 20) && GetCursorPos(&pt));
+	CHECK(pt.x == 10 && pt.y == 20);
+	CHECK(SetCursorPos(-5, 100000) && GetCursorPos(&pt));
+	CHECK(pt.x == 0 && pt.y == 767);
+	SetCursorPos(512, 384);
 
 	/* One display mode, the screen's (frapsvid.dll asks). */
 	DEVMODEA dm;

@@ -1583,20 +1583,95 @@ WINFN(HRESULT) ole_RevokeDragDrop(HWND hwnd)
 	return S_OK;
 }
 
+/* The drop target registered for hwnd or the nearest parent, AddRef'd. */
+static IDropTarget *target_at(HWND hwnd)
+{
+	HWND (WINAPI *parent)(HWND) = u32("GetParent");
+	IDropTarget *t = NULL;
+
+	for (int depth = 0; hwnd && !t && depth < 64; depth++) {
+		pthread_mutex_lock(&drop_lock);
+		for (size_t i = 0; i < ndrops && !t; i++)
+			if (drops[i].hwnd == hwnd) {
+				t = drops[i].target;
+				t->lpVtbl->AddRef(t);
+			}
+		pthread_mutex_unlock(&drop_lock);
+		if (!t)
+			hwnd = parent(hwnd);
+	}
+	return t;
+}
+
+/* The mouse buttons and modifier keys down, as MK_ flags. */
+static DWORD key_state(void)
+{
+	SHORT (WINAPI *key)(int) = u32("GetAsyncKeyState");
+	static const struct { int vk; DWORD mk; } map[] = {
+		{ 0x01, MK_LBUTTON }, { 0x02, MK_RBUTTON }, { 0x04, MK_MBUTTON },
+		{ 0x10, MK_SHIFT }, { 0x11, MK_CONTROL }, { 0x12, MK_ALT },
+	};
+	DWORD k = 0;
+
+	for (size_t i = 0; key && i < sizeof(map) / sizeof(map[0]); i++)
+		if (key(map[i].vk) & 0x8000)
+			k |= map[i].mk;
+	return k;
+}
+
 /*
- * No mouse button is ever down, so the source is told so at once; it
- * normally answers with a drop, but with no target under the cursor
- * nothing receives it, which Windows reports as cancelled.
+ * The drag starts over the window under the cursor, whose registered
+ * drop target (or a parent's) is entered. No mouse button is held, so
+ * the source is asked once whether to go on; when it answers with a
+ * drop, the target gets it (an effect it would take, out of those the
+ * source allows), and otherwise it is left. A source that keeps saying
+ * go on is asked again a bounded number of times, as nothing changes.
  */
 WINFN(HRESULT) ole_DoDragDrop(IDataObject *data, IDropSource *source,
 			      DWORD ok_effects, DWORD *effect)
 {
+	BOOL (WINAPI *cursor)(POINT *) = u32("GetCursorPos");
+	HWND (WINAPI *from_point)(POINT) = u32("WindowFromPoint");
+	POINT pt = { 0, 0 };
+
 	if (!data || !source || !effect)
 		return E_INVALIDARG;
 	*effect = DROPEFFECT_NONE;
-	source->lpVtbl->GiveFeedback(source, DROPEFFECT_NONE);
-	source->lpVtbl->QueryContinueDrag(source, FALSE, 0);
-	return DRAGDROP_S_CANCEL;
+	if (cursor)
+		cursor(&pt);
+	POINTL at = { pt.x, pt.y };
+	IDropTarget *t = from_point ? target_at(from_point(pt)) : NULL;
+	DWORD keys = key_state(), eff = DROPEFFECT_NONE;
+	if (t) {
+		eff = ok_effects;
+		if (FAILED(t->lpVtbl->DragEnter(t, data, keys, at, &eff)))
+			eff = DROPEFFECT_NONE;
+		eff &= ok_effects;
+	}
+	source->lpVtbl->GiveFeedback(source, eff);
+	HRESULT hr = S_OK;
+	for (int i = 0; i < 16 && hr == S_OK; i++) {
+		hr = source->lpVtbl->QueryContinueDrag(source, FALSE, keys);
+		if (hr == S_OK && t) {
+			eff = ok_effects;
+			if (FAILED(t->lpVtbl->DragOver(t, keys, at, &eff)))
+				eff = DROPEFFECT_NONE;
+			eff &= ok_effects;
+			source->lpVtbl->GiveFeedback(source, eff);
+		}
+	}
+	HRESULT r = DRAGDROP_S_CANCEL;
+	if (t && hr == DRAGDROP_S_DROP && eff != DROPEFFECT_NONE) {
+		eff = ok_effects;
+		if (SUCCEEDED(t->lpVtbl->Drop(t, data, keys, at, &eff)))
+			*effect = eff & ok_effects;
+		r = DRAGDROP_S_DROP;
+	} else if (t) {
+		t->lpVtbl->DragLeave(t);
+	}
+	if (t)
+		t->lpVtbl->Release(t);
+	return r;
 }
 
 /* ---- the registry's OLE keys ---- */

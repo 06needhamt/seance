@@ -1911,6 +1911,35 @@ WINFN(HWND) user_GetWindow(HWND hwnd, UINT command)
 	return r;
 }
 
+/* The visible window at a screen point: the topmost of parent's
+ * children holding it, then the deepest of its own. */
+static struct window *hit(HWND parent, POINT pt)
+{
+	for (size_t i = 0; i < nwins; i++) {
+		struct window *w = wins[i];
+		if (w->parent != parent || w->handle == DESKTOP_HANDLE ||
+		    (w->flags & MESSAGE_ONLY) || !(w->style & WS_VISIBLE))
+			continue;
+		POINT o = origin(w);
+		if (pt.x < o.x || pt.y < o.y ||
+		    pt.x >= o.x + w->rect.right - w->rect.left ||
+		    pt.y >= o.y + w->rect.bottom - w->rect.top)
+			continue;
+		struct window *in = hit(w->handle, pt);
+		return in ? in : w;
+	}
+	return NULL;
+}
+
+WINFN(HWND) user_WindowFromPoint(POINT pt)
+{
+	enter();
+	struct window *w = hit(NULL, pt);
+	HWND r = w ? w->handle : NULL;
+	leave();
+	return r;
+}
+
 /* The child on top, of hwnd or (NULL) of the desktop. */
 WINFN(HWND) user_GetTopWindow(HWND hwnd)
 {
@@ -3317,6 +3346,7 @@ const struct builtin_export u32_window_exports[] = {
 	E(RemovePropW),
 	E(ReplyMessage),
 	E(ScreenToClient),
+	E(WindowFromPoint),
 	E(SendDlgItemMessageA),
 	E(SendDlgItemMessageW),
 	E(SendMessageA),

@@ -1523,6 +1523,28 @@ static void hdrop_text(IDataObject *d, char *out, size_t n)
 
 /* The objects of a folder's items and of the folder: data objects,
  * context menus, drop targets, icons, a view, and dropped files. */
+/* A drop source that lets go at once. */
+static WINAPI HRESULT src_qi(IDropSource *self, REFIID riid, void **ppv)
+{
+	*ppv = self;
+	return S_OK;
+}
+static WINAPI ULONG src_ref(IDropSource *self)
+{
+	return 1;
+}
+static WINAPI HRESULT src_query(IDropSource *self, BOOL esc, DWORD keys)
+{
+	return esc ? DRAGDROP_S_CANCEL : DRAGDROP_S_DROP;
+}
+static WINAPI HRESULT src_feedback(IDropSource *self, DWORD effect)
+{
+	return DRAGDROP_S_USEDEFAULTCURSORS;
+}
+static const IDropSourceVtbl src_vtbl = {
+	src_qi, src_ref, src_ref, src_query, src_feedback,
+};
+
 static void test_shell_ui(void)
 {
 	FN(HRESULT, SHGetDesktopFolder, IShellFolder **);
@@ -1784,6 +1806,41 @@ static void test_shell_ui(void)
 		CHECK(dt->lpVtbl->Drop(dt, d, 0, at, &eff) == S_OK &&
 		      eff == DROPEFFECT_MOVE);
 		CHECK(exists("ui/sub/b.txt") && !exists("ui/b.txt"));
+
+		/* Dragged with DoDragDrop onto a window registering sub's
+		 * target, under the cursor: no keys, so a move. */
+		HRESULT (WINAPI *reg)(HWND, IDropTarget *) =
+			get_from(ole, "RegisterDragDrop");
+		HRESULT (WINAPI *revoke)(HWND) =
+			get_from(ole, "RevokeDragDrop");
+		HRESULT (WINAPI *drag)(IDataObject *, IDropSource *, DWORD,
+				       DWORD *) = get_from(ole, "DoDragDrop");
+		HWND (WINAPI *mkwin)(DWORD, LPCSTR, LPCSTR, DWORD, int, int,
+				     int, int, HWND, HMENU, HINSTANCE, void *) =
+			u32 ? mod_get_proc(u32, "CreateWindowExA") : NULL;
+		BOOL (WINAPI *setcur)(int, int) =
+			u32 ? mod_get_proc(u32, "SetCursorPos") : NULL;
+		BOOL (WINAPI *destroy)(HWND) =
+			u32 ? mod_get_proc(u32, "DestroyWindow") : NULL;
+		CHECK(mkwin && setcur && destroy);
+		CHECK(!remove(on_disk("ui/sub/b.txt")));
+		write_file("ui/b.txt", "b");
+		HWND w = mkwin ? mkwin(0, "STATIC", "sub", WS_VISIBLE, 300, 300,
+				       40, 40, NULL, NULL, NULL, NULL) : NULL;
+		CHECK(w);
+		if (w && setcur && destroy) {
+			IDropSource ds = { &src_vtbl };
+			CHECK(setcur(310, 310));
+			CHECK_EQ(reg(w, dt), S_OK);
+			eff = 0;
+			CHECK_EQ(drag(d, &ds, DROPEFFECT_COPY | DROPEFFECT_MOVE,
+				      &eff), DRAGDROP_S_DROP);
+			CHECK_EQ(eff, DROPEFFECT_MOVE);
+			CHECK(exists("ui/sub/b.txt") && !exists("ui/b.txt"));
+			CHECK_EQ(revoke(w), S_OK);
+			destroy(w);
+			setcur(512, 384);
+		}
 	}
 	if (dt)
 		dt->lpVtbl->Release(dt);

@@ -904,6 +904,65 @@ static const IDropSourceVtbl ds_vtbl = {
 	ds_qi, ds_addref, ds_release, ds_query, ds_feedback,
 };
 
+/* A drop target that counts, taking accept as the effect. */
+struct dtarget {
+	IDropTarget iface;
+	LONG refs;
+	int enters, overs, leaves, drops;
+	DWORD accept, last_keys;
+	POINTL last_pt;
+};
+
+WINAPI static HRESULT dt_qi(IDropTarget *self, REFIID riid, void **ppv)
+{
+	*ppv = self;
+	((struct dtarget *)self)->refs++;
+	return S_OK;
+}
+WINAPI static ULONG dt_addref(IDropTarget *self)
+{
+	return ++((struct dtarget *)self)->refs;
+}
+WINAPI static ULONG dt_release(IDropTarget *self)
+{
+	return --((struct dtarget *)self)->refs;
+}
+WINAPI static HRESULT dt_enter(IDropTarget *self, IDataObject *d, DWORD keys,
+			       POINTL pt, DWORD *eff)
+{
+	struct dtarget *t = (struct dtarget *)self;
+	t->enters++;
+	t->last_pt = pt;
+	t->last_keys = keys;
+	*eff &= t->accept;
+	return S_OK;
+}
+WINAPI static HRESULT dt_over(IDropTarget *self, DWORD keys, POINTL pt,
+			      DWORD *eff)
+{
+	struct dtarget *t = (struct dtarget *)self;
+	t->overs++;
+	*eff &= t->accept;
+	return S_OK;
+}
+WINAPI static HRESULT dt_leave(IDropTarget *self)
+{
+	((struct dtarget *)self)->leaves++;
+	return S_OK;
+}
+WINAPI static HRESULT dt_drop(IDropTarget *self, IDataObject *d, DWORD keys,
+			      POINTL pt, DWORD *eff)
+{
+	struct dtarget *t = (struct dtarget *)self;
+	t->drops++;
+	*eff &= t->accept;
+	return S_OK;
+}
+
+static const IDropTargetVtbl dt_vtbl = {
+	dt_qi, dt_addref, dt_release, dt_enter, dt_over, dt_leave, dt_drop,
+};
+
 static void test_drag_drop(void)
 {
 	FN(HRESULT, RegisterDragDrop, HWND, IDropTarget *);
@@ -940,6 +999,54 @@ static void test_drag_drop(void)
 		 DRAGDROP_S_CANCEL);
 	CHECK_EQ(src.refs, 1);
 	DestroyWindow(w);
+
+	/* Over a registered window: the drop is the target's. The cursor
+	 * is over a child, whose parent took the registration. */
+	U32(BOOL, SetCursorPos, int, int);
+	U32(HWND, WindowFromPoint, POINT);
+	struct dtarget dt = { { &dt_vtbl }, 1, 0, 0, 0, 0, DROPEFFECT_COPY,
+			      0, { 0, 0 } };
+	HWND top = CreateWindowExA(0, "STATIC", "top", WS_VISIBLE, 100, 100,
+				   50, 50, NULL, NULL, NULL, NULL);
+	HWND kid = CreateWindowExA(0, "STATIC", "kid", WS_CHILD | WS_VISIBLE,
+				   10, 10, 20, 20, top, NULL, NULL, NULL);
+	CHECK(top && kid);
+	CHECK(SetCursorPos(115, 115));
+	CHECK(WindowFromPoint((POINT){ 115, 115 }) == kid);
+	CHECK(WindowFromPoint((POINT){ 105, 105 }) == top);
+	CHECK(WindowFromPoint((POINT){ 5, 5 }) == NULL);
+	CHECK_EQ(RegisterDragDrop(top, &dt.iface), S_OK);
+	ds.answer = DRAGDROP_S_DROP;
+	ds.queries = ds.feedback = 0;
+	effect = 99;
+	CHECK_EQ(DoDragDrop(&src.iface, &ds.iface,
+			    DROPEFFECT_COPY | DROPEFFECT_MOVE, &effect),
+		 DRAGDROP_S_DROP);
+	CHECK_EQ(effect, DROPEFFECT_COPY);
+	CHECK(dt.enters == 1 && dt.drops == 1 && dt.leaves == 0);
+	CHECK(dt.last_pt.x == 115 && dt.last_pt.y == 115 && !dt.last_keys);
+	CHECK(ds.queries == 1 && ds.feedback == 1);
+	/* The source cancels: the target is left. */
+	ds.answer = DRAGDROP_S_CANCEL;
+	CHECK_EQ(DoDragDrop(&src.iface, &ds.iface, DROPEFFECT_COPY, &effect),
+		 DRAGDROP_S_CANCEL);
+	CHECK(effect == DROPEFFECT_NONE && dt.leaves == 1 && dt.drops == 1);
+	/* A target that takes none of the effects offered isn't dropped on. */
+	ds.answer = DRAGDROP_S_DROP;
+	CHECK_EQ(DoDragDrop(&src.iface, &ds.iface, DROPEFFECT_MOVE, &effect),
+		 DRAGDROP_S_CANCEL);
+	CHECK(effect == DROPEFFECT_NONE && dt.leaves == 2 && dt.drops == 1);
+	/* A source that never decides is given up on. */
+	ds.answer = S_OK;
+	ds.queries = 0;
+	CHECK_EQ(DoDragDrop(&src.iface, &ds.iface, DROPEFFECT_COPY, &effect),
+		 DRAGDROP_S_CANCEL);
+	CHECK(ds.queries > 1 && dt.overs > 0 && dt.leaves == 3);
+	CHECK_EQ(RevokeDragDrop(top), S_OK);
+	CHECK_EQ(dt.refs, 1);
+	CHECK_EQ(src.refs, 1);
+	DestroyWindow(top);
+	SetCursorPos(512, 384);
 }
 
 /* ---- the registry ---- */

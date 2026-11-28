@@ -440,16 +440,26 @@ WINFN(int) user_GetKeyboardLayoutList(int n, HANDLE *list)
 	return 1;
 }
 
+/* The cursor: in the middle of the screen until moved, kept on it. */
+static int cursor_x = USER_SCREEN_WIDTH / 2, cursor_y = USER_SCREEN_HEIGHT / 2;
+
 WINFN(BOOL) user_GetCursorPos(LPPOINT pt)
 {
 	if (!pt)
 		return FALSE;
-	pt->x = USER_SCREEN_WIDTH / 2;
-	pt->y = USER_SCREEN_HEIGHT / 2;
+	pt->x = __atomic_load_n(&cursor_x, __ATOMIC_RELAXED);
+	pt->y = __atomic_load_n(&cursor_y, __ATOMIC_RELAXED);
 	return TRUE;
 }
 
-WINFN(BOOL) user_SetCursorPos(int x, int y) { return TRUE; }
+WINFN(BOOL) user_SetCursorPos(int x, int y)
+{
+	x = x < 0 ? 0 : x >= USER_SCREEN_WIDTH ? USER_SCREEN_WIDTH - 1 : x;
+	y = y < 0 ? 0 : y >= USER_SCREEN_HEIGHT ? USER_SCREEN_HEIGHT - 1 : y;
+	__atomic_store_n(&cursor_x, x, __ATOMIC_RELAXED);
+	__atomic_store_n(&cursor_y, y, __ATOMIC_RELAXED);
+	return TRUE;
+}
 WINFN(BOOL) user_ClipCursor(const RECT *rc) { return TRUE; }
 WINFN(UINT) user_GetDoubleClickTime(void) { return 500; }
 

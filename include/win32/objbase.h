@@ -790,6 +790,7 @@ typedef HANDLE HMETAFILEPICT;
 #define DROPEFFECT_COPY   1
 #define DROPEFFECT_MOVE   2
 #define DROPEFFECT_LINK   4
+#define MK_ALT            0x0020
 
 #define COWAIT_WAITALL   1
 #define COWAIT_ALERTABLE 2
