@@ -305,7 +305,8 @@ static void test_ui(void)
 	CHECK_STR(name, "");
 	CHECK(ShellAboutA(NULL, "Codec", "About it", NULL));
 	CHECK(Shell_NotifyIconA(0, NULL));
-	CHECK(ExtractIconA(NULL, "C:\\readme.txt", 0) == NULL);
+	/* A file that is there but holds no icons. */
+	CHECK(ExtractIconA(NULL, "C:\\readme.txt", 0) == (HICON)1);
 	CHECK_EQ(DragQueryFileA(NULL, 0xffffffff, NULL, 0), 0);
 }
 
@@ -483,7 +484,8 @@ static void test_file_info(void)
 	CHECK(fi.dwAttributes & SFGAO_FILESYSTEM);
 	CHECK_STR(fi.szDisplayName, "src");
 	CHECK_STR(fi.szTypeName, "File Folder");
-	CHECK(fi.hIcon == NULL && fi.iIcon == 0);
+	/* shell32's folder icon, third in the system list as on Windows. */
+	CHECK(fi.hIcon != NULL && fi.iIcon == 3);
 
 	CHECK(SHGetFileInfoA("C:\\src\\one.txt", 0, &fi, sizeof(fi), all));
 	CHECK(!(fi.dwAttributes & SFGAO_FOLDER) &&
@@ -530,6 +532,120 @@ static void test_file_info(void)
 		CHECK_EQ(SHGetFileInfoA(dll, 0, NULL, 0, SHGFI_EXETYPE), 0);
 	}
 	CHECK_EQ(SHGetFileInfoA("C:\\src\\one.txt", 0, NULL, 0, SHGFI_EXETYPE), 0);
+}
+
+/* A Unix path as a Z: path. */
+static void z_path(char *out, size_t n, const char *unix)
+{
+	snprintf(out, n, "Z:%s", unix);
+	for (char *c = out; *c; c++)
+		if (*c == '/')
+			*c = '\\';
+}
+
+static void test_icons(void)
+{
+	FN(HICON, ExtractIconA, HINSTANCE, LPCSTR, UINT);
+	FN(UINT, ExtractIconExA, LPCSTR, int, HICON *, HICON *, UINT);
+	FN(HICON, ExtractAssociatedIconA, HINSTANCE, LPSTR, LPWORD);
+	FN(HRESULT, SHDefExtractIconA, LPCSTR, int, UINT, HICON *, HICON *,
+	   UINT);
+	FN(DWORD_PTR, SHGetFileInfoA, LPCSTR, DWORD, SHFILEINFOA *, UINT, UINT);
+	FN(BOOL, Shell_GetImageLists, HIMAGELIST *, HIMAGELIST *);
+	FN(int, Shell_GetCachedImageIndexA, LPCSTR, int, UINT);
+	struct module *adv = mod_load("advapi32.dll", NULL);
+	HICON l[3] = { 0 }, sm[3] = { 0 }, one = NULL;
+	char path[MAX_PATH];
+	WORD idx;
+
+	/* An .ico with two images. */
+	FILE *f = fopen(on_disk("two.ico"), "wb");
+	CHECK(f != NULL);
+	if (f) {
+		BYTE hdr[6 + 32] = { 0, 0, 1, 0, 2, 0 };
+		fwrite(hdr, sizeof(hdr), 1, f);
+		fclose(f);
+	}
+	CHECK_EQ((UINT_PTR)ExtractIconA(NULL, "C:\\two.ico", (UINT)-1), 2);
+	CHECK(ExtractIconA(NULL, "C:\\two.ico", 1) != NULL);
+	CHECK(ExtractIconA(NULL, "C:\\two.ico", 2) == NULL);
+	CHECK(ExtractIconA(NULL, "C:\\none.ico", 0) == NULL);
+	CHECK_EQ(ExtractIconExA("C:\\two.ico", -1, NULL, NULL, 0), 2);
+	CHECK_EQ(ExtractIconExA("C:\\two.ico", 1, l, sm, 3), 1);
+	CHECK(l[0] && sm[0]);
+	/* shell32's own, with no file behind it. */
+	CHECK(ExtractIconA(NULL, "shell32.dll", 3) != NULL);
+	CHECK(SHDefExtractIconA("C:\\two.ico", 1, 0, &one, NULL, 32) == S_OK &&
+	      one);
+	CHECK(SHDefExtractIconA("C:\\two.ico", 5, 0, &one, NULL, 32) ==
+	      S_FALSE);
+
+	/* Icon groups in a PE file: "APP" first, then id 5. */
+	const char *dll = fixture("pe_shell.dll");
+	if (!access(dll, R_OK)) {
+		char z[1024];
+		z_path(z, sizeof(z), dll);
+		CHECK_EQ((UINT_PTR)ExtractIconA(NULL, z, (UINT)-1), 2);
+		memset(l, 0, sizeof(l));
+		CHECK_EQ(ExtractIconExA(z, 0, l, NULL, 3), 2);
+		CHECK(l[0] && l[1] && !l[2]);
+		CHECK_EQ(ExtractIconExA(z, -5, l, NULL, 1), 1);
+		CHECK_EQ(ExtractIconExA(z, -6, l, NULL, 1), 0);
+	} else {
+		printf("test_shell32: pe_shell.dll not built, skipping its icons\n");
+	}
+
+	/* No class for .txt yet: shell32's document icon. */
+	snprintf(path, sizeof(path), "C:\\readme.txt");
+	idx = 0;
+	CHECK(ExtractAssociatedIconA(NULL, path, &idx) != NULL);
+	CHECK(strstr(path, "shell32.dll") != NULL && idx == 0);
+
+	/* With one whose DefaultIcon is the .ico's second icon. */
+	LONG (WINAPI *set_value)(HKEY, LPCSTR, DWORD, LPCSTR, DWORD) =
+		adv ? mod_get_proc(adv, "RegSetValueA") : NULL;
+	CHECK(set_value != NULL);
+	if (set_value) {
+		HKEY root = (HKEY)(ULONG_PTR)0x80000000;	/* HKCR */
+		CHECK_EQ(set_value(root, ".txt", REG_SZ, "txtfile", 7), 0);
+		CHECK_EQ(set_value(root, "txtfile\\DefaultIcon", REG_SZ,
+				   "C:\\two.ico,1", 12), 0);
+		snprintf(path, sizeof(path), "C:\\readme.txt");
+		idx = 0;
+		CHECK(ExtractAssociatedIconA(NULL, path, &idx) != NULL);
+		CHECK_STR(path, "C:\\two.ico");
+		CHECK_EQ(idx, 1);
+
+		SHFILEINFOA fi;
+		memset(&fi, 0, sizeof(fi));
+		CHECK(SHGetFileInfoA("C:\\readme.txt", 0, &fi, sizeof(fi),
+				     SHGFI_ICONLOCATION));
+		CHECK_STR(fi.szDisplayName, "C:\\two.ico");
+		CHECK_EQ(fi.iIcon, 1);
+		HIMAGELIST large = NULL, small = NULL;
+		CHECK(Shell_GetImageLists(&large, &small) && large && small);
+		DWORD_PTR r = SHGetFileInfoA("C:\\readme.txt", 0, &fi,
+					     sizeof(fi), SHGFI_SYSICONINDEX |
+					     SHGFI_SMALLICON);
+		CHECK(r == (DWORD_PTR)small);
+		CHECK(fi.iIcon >= 5);
+		/* The same location is the same entry. */
+		CHECK_EQ(Shell_GetCachedImageIndexA("C:\\two.ico", 1, 0),
+			 fi.iIcon);
+		CHECK(SHGetFileInfoA("C:\\src", 0, &fi, sizeof(fi),
+				     SHGFI_SYSICONINDEX) == (DWORD_PTR)large);
+		CHECK_EQ(fi.iIcon, 3);
+		CHECK(SHGetFileInfoA("C:\\src", 0, &fi, sizeof(fi),
+				     SHGFI_SYSICONINDEX | SHGFI_OPENICON));
+		CHECK_EQ(fi.iIcon, 4);
+		/* A program with no icons gets the application one. */
+		CHECK(SHGetFileInfoA("C:\\x.exe", FILE_ATTRIBUTE_NORMAL, &fi,
+				     sizeof(fi), SHGFI_SYSICONINDEX |
+				     SHGFI_USEFILEATTRIBUTES));
+		CHECK_EQ(fi.iIcon, 2);
+	}
+	if (adv)
+		mod_free(adv);
 }
 
 /* pe_shell.dll: the same from Win32 code, through its imports. */
@@ -1411,6 +1527,7 @@ int main(void)
 	test_create_directory();
 	test_file_operation();
 	test_file_info();
+	test_icons();
 	test_fixture();
 	test_known_folders();
 	test_namespace();

@@ -206,7 +206,7 @@ fixture(pe_gui pe_gui.c pe_gui.rc LIBS user32 gdi32 kernel32
 
 # Uses shell32 as a codec might: its settings folder, SHFileOperation, an
 # item ID list, a command line, a link nothing can open.
-fixture(pe_shell pe_shell.c LIBS shell32 kernel32
+fixture(pe_shell pe_shell.c pe_shell.rc LIBS shell32 kernel32
 	OPTIONS -mpreferred-stack-boundary=2 -fno-builtin)
 
 # Uses oleaut32 imported by ordinal only, as MSVC-built code imports it.

@@ -39,4 +39,18 @@ char *shell_recycle_original(const char *name);
 /* Creates a directory (Unix path) and any missing parents: 0 or -1. */
 int shell_mkdirs(const char *unix_path);
 
+/*
+ * Icons (shell_icon.c). Where a file's icon is (a malloc()ed file name and
+ * index), with known_attrs from its name and attrs alone; its index in
+ * the system image lists, or -1; a list; a new icon handle; and an
+ * icon's handles, S_FALSE when the file has no such icon.
+ */
+char *shell_icon_location(const char *win, int known_attrs, DWORD attrs,
+			  int open, int *index);
+int shell_sys_index(const char *file, int index);
+struct _IMAGELIST *shell_sys_list(int small);
+HICON shell_new_icon(void);
+HRESULT shell_extract_icon(const char *win, int index, HICON *large,
+			   HICON *small);
+
 #endif /* VFW_WIN32_SHELL_H */

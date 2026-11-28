@@ -1,0 +1,25 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+/*
+ * Two icon groups, as raw RT_GROUP_ICON (14) and RT_ICON (3) resources
+ * since there is no .ico file to point windres at: "APP" (named, so
+ * first) and id 5, one 16x16 image each. Only the directory matters to
+ * shell32's icon functions.
+ */
+1 3
+BEGIN
+	40L, 16L, 32L, 1, 4, 0L, 0L, 0L, 0L, 16L, 0L
+END
+2 3
+BEGIN
+	40L, 16L, 32L, 1, 4, 0L, 0L, 0L, 0L, 16L, 0L
+END
+/* GRPICONDIR: reserved, type 1, one entry; GRPICONDIRENTRY: 16x16,
+ * 16 colours, planes 1, 4 bits, 40 bytes, RT_ICON id. */
+APP 14
+BEGIN
+	0, 1, 1, 0x1010, 0x0010, 1, 4, 40L, 1
+END
+5 14
+BEGIN
+	0, 1, 1, 0x1010, 0x0010, 1, 4, 40L, 2
+END

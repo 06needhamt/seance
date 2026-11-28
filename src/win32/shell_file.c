@@ -506,8 +506,9 @@ WINFN(int) sh_SHCreateDirectory(HWND hwnd, LPCWSTR path)
 
 /*
  * SHGetFileInfo: attributes, display and type names as XP gives them
- * ("File Folder", "Application", "TXT File"), no icons (hIcon NULL, index
- * 0), and SHGFI_EXETYPE from the PE header.
+ * ("File Folder", "Application", "TXT File"), icons from shell_icon.c
+ * (SHGFI_ICONLOCATION gives the file and index, SHGFI_SYSICONINDEX
+ * returns the system image list), and SHGFI_EXETYPE from the PE header.
  */
 struct file_info {
 	DWORD attributes;	/* SFGAO_* */
@@ -609,17 +610,61 @@ static DWORD_PTR get_file_info(const void *path, DWORD attrs, void *out,
 	struct file_info fi;
 	DWORD_PTR r = win ? file_info(win, attrs, flags, &fi) : 0;
 
-	free(win);
-	if (!r || (flags & SHGFI_EXETYPE) || !out)
+	if (!r || (flags & SHGFI_EXETYPE)) {
+		free(win);
 		return r;
-	if (cb < (wide ? sizeof(SHFILEINFOW) : sizeof(SHFILEINFOA)))
+	}
+	if (out && cb < (wide ? sizeof(SHFILEINFOW) : sizeof(SHFILEINFOA))) {
+		free(win);
 		return 0;
+	}
+	/* The icon: where it is, and its place in the system lists. */
+	struct {
+		int want, index;
+		char *file;
+		HICON icon;
+	} icons = { 0 };
+	icons.want = !!(flags & (SHGFI_ICON | SHGFI_SYSICONINDEX |
+				 SHGFI_ICONLOCATION));
+	if (icons.want) {
+		int at = 0;
+		icons.file = shell_icon_location(win,
+				!!(flags & SHGFI_USEFILEATTRIBUTES), attrs,
+				!!(flags & SHGFI_OPENICON), &at);
+		if (!icons.file) {
+			free(win);
+			return 0;
+		}
+		icons.index = at;
+		if (flags & (SHGFI_ICON | SHGFI_SYSICONINDEX)) {
+			icons.index = shell_sys_index(icons.file, at);
+			if (icons.index < 0) {
+				free(icons.file);
+				free(win);
+				return 0;
+			}
+		}
+		if (flags & SHGFI_ICON)
+			icons.icon = shell_new_icon();
+		/* SHGFI_SYSICONINDEX returns the list the index is in. */
+		if (flags & SHGFI_SYSICONINDEX)
+			r = (DWORD_PTR)shell_sys_list(flags & SHGFI_SMALLICON);
+	}
+	free(win);
+	if (!out) {
+		free(icons.file);
+		return r;
+	}
 
 	if (wide) {
 		SHFILEINFOW *w = out;
-		if (flags & (SHGFI_ICON | SHGFI_SYSICONINDEX | SHGFI_ICONLOCATION)) {
-			w->hIcon = NULL;
-			w->iIcon = 0;
+		if (icons.want) {
+			if (flags & SHGFI_ICON)
+				w->hIcon = icons.icon;
+			w->iIcon = icons.index;
+			if (flags & SHGFI_ICONLOCATION)
+				text_out(icons.file, w->szDisplayName,
+					 MAX_PATH, 1);
 		}
 		if (flags & SHGFI_ATTRIBUTES)
 			w->dwAttributes = fi.attributes;
@@ -629,9 +674,13 @@ static DWORD_PTR get_file_info(const void *path, DWORD attrs, void *out,
 			text_out(fi.type, w->szTypeName, 80, 1);
 	} else {
 		SHFILEINFOA *a = out;
-		if (flags & (SHGFI_ICON | SHGFI_SYSICONINDEX | SHGFI_ICONLOCATION)) {
-			a->hIcon = NULL;
-			a->iIcon = 0;
+		if (icons.want) {
+			if (flags & SHGFI_ICON)
+				a->hIcon = icons.icon;
+			a->iIcon = icons.index;
+			if (flags & SHGFI_ICONLOCATION)
+				text_out(icons.file, a->szDisplayName,
+					 MAX_PATH, 0);
 		}
 		if (flags & SHGFI_ATTRIBUTES)
 			a->dwAttributes = fi.attributes;
@@ -640,6 +689,7 @@ static DWORD_PTR get_file_info(const void *path, DWORD attrs, void *out,
 		if (flags & SHGFI_TYPENAME)
 			text_out(fi.type, a->szTypeName, 80, 0);
 	}
+	free(icons.file);
 	return r;
 }
 

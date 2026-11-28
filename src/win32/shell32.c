@@ -42,6 +42,7 @@ extern const struct builtin_export shell_file_exports[];
 extern const struct builtin_export shell_folder_exports[];
 extern const struct builtin_export shell_recycle_exports[];
 extern const struct builtin_export shell_link_exports[];
+extern const struct builtin_export shell_icon_exports[];
 
 /* Folders: where each CSIDL is, from the profile, All Users, or C:. */
 enum base { ROOT, PROFILE, ALL_USERS, VIRTUAL };
@@ -1098,41 +1099,6 @@ WINFN(BOOL) sh_Shell_NotifyIconA(DWORD msg, void *data) { return TRUE; }
 WINFN(BOOL) sh_Shell_NotifyIconW(DWORD msg, void *data) { return TRUE; }
 WINFN(UINT_PTR) sh_SHAppBarMessage(DWORD msg, void *data) { return 0; }
 
-/* No icons in any file. */
-WINFN(HICON) sh_ExtractIconA(HINSTANCE inst, LPCSTR file, UINT index)
-{
-	return NULL;
-}
-
-WINFN(HICON) sh_ExtractIconW(HINSTANCE inst, LPCWSTR file, UINT index)
-{
-	return NULL;
-}
-
-WINFN(UINT) sh_ExtractIconExA(LPCSTR file, int index, HICON *large,
-			      HICON *small, UINT n)
-{
-	return 0;
-}
-
-WINFN(UINT) sh_ExtractIconExW(LPCWSTR file, int index, HICON *large,
-			      HICON *small, UINT n)
-{
-	return 0;
-}
-
-WINFN(HICON) sh_ExtractAssociatedIconA(HINSTANCE inst, LPSTR path,
-				       LPWORD index)
-{
-	return NULL;
-}
-
-WINFN(HICON) sh_ExtractAssociatedIconW(HINSTANCE inst, LPWSTR path,
-				       LPWORD index)
-{
-	return NULL;
-}
-
 /* Nothing is ever dropped. */
 WINFN(void) sh_DragAcceptFiles(HWND hwnd, BOOL accept) { }
 WINFN(void) sh_DragFinish(HDROP drop) { }
@@ -1166,9 +1132,6 @@ static const struct builtin_export exports[] = {
 	E(CommandLineToArgvW),
 	E(DragAcceptFiles), E(DragFinish), E(DragQueryFileA),
 	E(DragQueryFileW), E(DragQueryPoint),
-	E(ExtractAssociatedIconA), E(ExtractAssociatedIconW),
-	E(ExtractIconA), E(ExtractIconExA), E(ExtractIconExW),
-	E(ExtractIconW),
 	E(FindExecutableA), E(FindExecutableW),
 	E(ILClone), E(ILCombine), E(ILCreateFromPathA), E(ILCreateFromPathW),
 	E(ILFindLastID), E(ILFree), E(ILGetNext), E(ILGetSize), E(ILIsEqual),
@@ -1192,7 +1155,7 @@ static const struct builtin_export exports[] = {
 
 static const struct builtin_export *const tables[] = {
 	exports, shell_file_exports, shell_folder_exports,
-	shell_recycle_exports, shell_link_exports, NULL
+	shell_recycle_exports, shell_link_exports, shell_icon_exports, NULL
 };
 
 const struct builtin_dll builtin_shell32 = { "shell32.dll", NULL, tables, 0 };
