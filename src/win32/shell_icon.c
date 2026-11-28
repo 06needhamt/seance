@@ -394,6 +394,27 @@ char *shell_icon_location(const char *win, int known_attrs, DWORD attrs,
 	return shell32_path();
 }
 
+/* The icon of a virtual folder: My Computer, the Recycle Bin, the
+ * desktop, as shell32 numbers them. */
+char *shell_icon_csidl(int csidl, int *index)
+{
+	switch (csidl) {
+	case 0x11:	/* CSIDL_DRIVES */
+		*index = 15;
+		break;
+	case 0x0a:	/* CSIDL_BITBUCKET */
+		*index = 31;
+		break;
+	case 0x00:	/* CSIDL_DESKTOP */
+		*index = 34;
+		break;
+	default:
+		*index = 3;
+		break;
+	}
+	return shell32_path();
+}
+
 /*
  * ExtractAssociatedIcon: the file's own icon at *index, else the one its
  * class has, whose file and index are written back to path (a

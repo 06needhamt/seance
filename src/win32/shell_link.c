@@ -816,7 +816,7 @@ struct buf {
 
 static void put(struct buf *b, const void *data, size_t n)
 {
-	if (b->failed)
+	if (b->failed || !n)
 		return;
 	if (b->len + n > b->cap) {
 		size_t cap = b->cap ? b->cap * 2 : 512;

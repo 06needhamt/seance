@@ -606,7 +606,7 @@ static void test_icons(void)
 		adv ? mod_get_proc(adv, "RegSetValueA") : NULL;
 	CHECK(set_value != NULL);
 	if (set_value) {
-		HKEY root = (HKEY)(ULONG_PTR)0x80000000;	/* HKCR */
+		HKEY root = (HKEY)(LONG_PTR)(LONG)0x80000000;	/* HKCR */
 		CHECK_EQ(set_value(root, ".txt", REG_SZ, "txtfile", 7), 0);
 		CHECK_EQ(set_value(root, "txtfile\\DefaultIcon", REG_SZ,
 				   "C:\\two.ico,1", 12), 0);
@@ -1499,6 +1499,394 @@ static void test_shell_link_data(void)
 	uninit();
 }
 
+/* A data object's HDROP files, through DragQueryFile, joined by '|'. */
+static void hdrop_text(IDataObject *d, char *out, size_t n)
+{
+	FN(UINT, DragQueryFileA, HDROP, UINT, LPSTR, UINT);
+	void (WINAPI *release)(STGMEDIUM *) = get_from(ole, "ReleaseStgMedium");
+	FORMATETC fe = { CF_HDROP, NULL, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+	STGMEDIUM m;
+
+	out[0] = 0;
+	memset(&m, 0, sizeof(m));
+	if (d->lpVtbl->GetData(d, &fe, &m) != S_OK)
+		return;
+	UINT k = DragQueryFileA(m.hGlobal, 0xffffffff, NULL, 0);
+	for (UINT i = 0; i < k; i++) {
+		char f[MAX_PATH];
+		DragQueryFileA(m.hGlobal, i, f, sizeof(f));
+		size_t at = strlen(out);
+		snprintf(out + at, n - at, "%s%s", i ? "|" : "", f);
+	}
+	release(&m);
+}
+
+/* The objects of a folder's items and of the folder: data objects,
+ * context menus, drop targets, icons, a view, and dropped files. */
+static void test_shell_ui(void)
+{
+	FN(HRESULT, SHGetDesktopFolder, IShellFolder **);
+	FN(LPITEMIDLIST, ILCreateFromPathA, LPCSTR);
+	FN(void, ILFree, LPITEMIDLIST);
+	FN(UINT, DragQueryFileA, HDROP, UINT, LPSTR, UINT);
+	FN(UINT, DragQueryFileW, HDROP, UINT, LPWSTR, UINT);
+	FN(BOOL, DragQueryPoint, HDROP, POINT *);
+	FN(void, DragFinish, HDROP);
+	HRESULT (WINAPI *ole_init)(void *) = get_from(ole, "OleInitialize");
+	void (WINAPI *ole_uninit)(void) = get_from(ole, "OleUninitialize");
+	HGLOBAL (WINAPI *galloc)(UINT, SIZE_T) = get_from(k32, "GlobalAlloc");
+	void *(WINAPI *glock)(HGLOBAL) = get_from(k32, "GlobalLock");
+	BOOL (WINAPI *gunlock)(HGLOBAL) = get_from(k32, "GlobalUnlock");
+	struct module *u32 = mod_load("user32.dll", NULL);
+	HMENU (WINAPI *popup)(void) = u32 ? mod_get_proc(u32, "CreatePopupMenu") :
+				      NULL;
+	LRESULT (WINAPI *send)(HWND, UINT, WPARAM, LPARAM) =
+		u32 ? mod_get_proc(u32, "SendMessageW") : NULL;
+	HWND (WINAPI *child)(HWND, UINT) = u32 ? mod_get_proc(u32, "GetWindow") :
+					   NULL;
+	char text[1024];
+	IShellFolder *desk = NULL, *ui = NULL;
+
+	CHECK(popup && send && child);
+	if (!popup || !send || !child)
+		return;
+
+	/* An HDROP made by hand, ANSI and then wide. */
+	static const char files_a[] = "C:\\one.txt\0C:\\two\\x.avi\0";
+	HGLOBAL h = galloc(0x42, sizeof(DROPFILES) + sizeof(files_a));
+	DROPFILES *df = glock(h);
+	df->pFiles = sizeof(DROPFILES);
+	df->pt.x = 10;
+	df->pt.y = 20;
+	memcpy(df + 1, files_a, sizeof(files_a));
+	gunlock(h);
+	CHECK_EQ(DragQueryFileA(h, 0xffffffff, NULL, 0), 2);
+	CHECK_EQ(DragQueryFileA(h, 1, NULL, 0), 12);
+	char small[6];
+	CHECK_EQ(DragQueryFileA(h, 1, small, sizeof(small)), 5);
+	CHECK_STR(small, "C:\\tw");
+	CHECK_EQ(DragQueryFileA(h, 2, small, sizeof(small)), 0);
+	POINT pt = { 0, 0 };
+	CHECK(DragQueryPoint(h, &pt) && pt.x == 10 && pt.y == 20);
+	DragFinish(h);
+	h = galloc(0x42, sizeof(DROPFILES) + 16 * sizeof(WCHAR));
+	df = glock(h);
+	df->pFiles = sizeof(DROPFILES);
+	df->fWide = TRUE;
+	df->fNC = TRUE;
+	WCHAR *wf = w16("C:\\\xe6\x97\xa5.txt");
+	memcpy(df + 1, wf, (wstrlen(wf) + 1) * sizeof(WCHAR));
+	gunlock(h);
+	WCHAR wbuf[MAX_PATH];
+	CHECK_EQ(DragQueryFileW(h, 0xffffffff, NULL, 0), 1);
+	CHECK_EQ(DragQueryFileW(h, 0, wbuf, MAX_PATH), 8);
+	CHECK(!memcmp(wbuf, wf, 9 * sizeof(WCHAR)));
+	CHECK(!DragQueryPoint(h, &pt));		/* outside the client area */
+	free(wf);
+	DragFinish(h);
+
+	CHECK_EQ(ole_init(NULL), S_OK);
+	mkdir(on_disk("ui"), 0755);
+	mkdir(on_disk("ui/sub"), 0755);
+	write_file("ui/a.txt", "a");
+	write_file("ui/b.txt", "b");
+	write_file("ui/gone.txt", "g");
+	CHECK(SHGetDesktopFolder(&desk) == S_OK && desk);
+	LPITEMIDLIST ui_pidl = ILCreateFromPathA("C:\\ui");
+	LPITEMIDLIST a = ILCreateFromPathA("C:\\ui\\a.txt");
+	LPITEMIDLIST b = ILCreateFromPathA("C:\\ui\\b.txt");
+	LPITEMIDLIST sub = ILCreateFromPathA("C:\\ui\\sub");
+	LPITEMIDLIST gone = ILCreateFromPathA("C:\\ui\\gone.txt");
+	CHECK(desk && desk->lpVtbl->BindToObject(desk, ui_pidl, NULL,
+			&IID_IShellFolder, (void **)&ui) == S_OK && ui);
+	if (!ui || !a || !b || !sub || !gone)
+		goto done;
+
+	/* A data object: CF_HDROP and the ID list array. */
+	LPCITEMIDLIST two[2] = { a, b };
+	IDataObject *d = NULL;
+	CHECK(ui->lpVtbl->GetUIObjectOf(ui, NULL, 2, two, &IID_IDataObject,
+					NULL, (void **)&d) == S_OK && d);
+	if (d) {
+		hdrop_text(d, text, sizeof(text));
+		CHECK_STR(text, "C:\\ui\\a.txt|C:\\ui\\b.txt");
+		IEnumFORMATETC *e = NULL;
+		FORMATETC fe[4];
+		ULONG got = 0;
+		CHECK(d->lpVtbl->EnumFormatEtc(d, 1, &e) == S_OK && e);
+		if (e) {
+			CHECK(e->lpVtbl->Next(e, 4, fe, &got) == S_FALSE);
+			CHECK_EQ(got, 2);
+			CHECK_EQ(fe[0].cfFormat, CF_HDROP);
+			e->lpVtbl->Release(e);
+		}
+		/* The array: two items after the folder's own list. */
+		FORMATETC ida = { got == 2 ? fe[1].cfFormat : 0, NULL,
+				  DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+		STGMEDIUM m;
+		memset(&m, 0, sizeof(m));
+		CHECK(d->lpVtbl->GetData(d, &ida, &m) == S_OK);
+		CIDA *c = m.hGlobal ? glock(m.hGlobal) : NULL;
+		CHECK(c && c->cidl == 2);
+		if (c) {
+			char got_path[MAX_PATH];
+			FN(BOOL, SHGetPathFromIDListA, LPCITEMIDLIST, LPSTR);
+			CHECK(SHGetPathFromIDListA((LPCITEMIDLIST)((BYTE *)c +
+					c->aoffset[0]), got_path));
+			CHECK_STR(got_path, "C:\\ui");
+			CHECK(SHGetPathFromIDListA((LPCITEMIDLIST)((BYTE *)c +
+					c->aoffset[2]), got_path));
+			CHECK_STR(got_path, "C:\\ui\\b.txt");
+			gunlock(m.hGlobal);
+		}
+		void (WINAPI *release)(STGMEDIUM *) =
+			get_from(ole, "ReleaseStgMedium");
+		release(&m);
+		ida.tymed = TYMED_ISTREAM;
+		CHECK(d->lpVtbl->QueryGetData(d, &ida) == DV_E_TYMED);
+		ida.cfFormat = 0x7777;
+		ida.tymed = TYMED_HGLOBAL;
+		CHECK(d->lpVtbl->QueryGetData(d, &ida) == DV_E_FORMATETC);
+		d->lpVtbl->Release(d);
+	}
+
+	/* Icons of items. */
+	IExtractIconA *xi = NULL;
+	CHECK(ui->lpVtbl->GetUIObjectOf(ui, NULL, 1, (LPCITEMIDLIST *)&sub,
+					&IID_IExtractIconA, NULL,
+					(void **)&xi) == S_OK && xi);
+	if (xi) {
+		char loc[MAX_PATH];
+		int idx = -1;
+		UINT fl = 0;
+		HICON big = NULL;
+		CHECK(xi->lpVtbl->GetIconLocation(xi, 0, loc, MAX_PATH, &idx,
+						  &fl) == S_OK);
+		CHECK(strstr(loc, "shell32.dll") && idx == 3 &&
+		      fl == GIL_PERCLASS);
+		CHECK(xi->lpVtbl->GetIconLocation(xi, GIL_OPENICON, loc,
+						  MAX_PATH, &idx, &fl) == S_OK &&
+		      idx == 4);
+		CHECK(xi->lpVtbl->Extract(xi, loc, idx, &big, NULL, 32) ==
+		      S_OK && big);
+		xi->lpVtbl->Release(xi);
+	}
+
+	/* Context menu of a file: its verbs, then copy and paste. */
+	IContextMenu *cm = NULL;
+	CHECK(ui->lpVtbl->GetUIObjectOf(ui, NULL, 1, (LPCITEMIDLIST *)&a,
+					&IID_IContextMenu, NULL,
+					(void **)&cm) == S_OK && cm);
+	if (cm) {
+		HMENU menu = popup();
+		HRESULT hr = cm->lpVtbl->QueryContextMenu(cm, menu, 0, 100,
+							  0x7fff,
+							  CMF_CANRENAME);
+		CHECK_EQ(hr & 0xffff, 8);
+		CHECK_EQ(cm->lpVtbl->QueryContextMenu(cm, menu, 0, 100, 0x7fff,
+						      CMF_DEFAULTONLY) & 0xffff,
+			 1);
+		char verb[32];
+		CHECK(cm->lpVtbl->GetCommandString(cm, 5, GCS_VERBA, NULL, verb,
+						   sizeof(verb)) == S_OK);
+		CHECK_STR(verb, "delete");
+		WCHAR wverb[32];
+		CHECK(cm->lpVtbl->GetCommandString(cm, 3, GCS_VERBW, NULL,
+						   (LPSTR)wverb, 32) == S_OK);
+		CHECK(wverb[0] == 'c' && wverb[3] == 'y' && !wverb[4]);
+		CHECK(cm->lpVtbl->GetCommandString(cm, 4, GCS_VALIDATEA, NULL,
+						   NULL, 0) == S_FALSE);
+		CMINVOKECOMMANDINFO ci;
+		memset(&ci, 0, sizeof(ci));
+		ci.cbSize = sizeof(ci);
+		ci.lpVerb = "frobnicate";
+		CHECK(cm->lpVtbl->InvokeCommand(cm, &ci) == E_INVALIDARG);
+		ci.lpVerb = "rename";
+		CHECK(cm->lpVtbl->InvokeCommand(cm, &ci) ==
+		      HRESULT_FROM_WIN32(ERROR_CANCELLED));
+		ci.lpVerb = (LPCSTR)(ULONG_PTR)3;	/* copy, by offset */
+		CHECK(cm->lpVtbl->InvokeCommand(cm, &ci) == S_OK);
+		cm->lpVtbl->Release(cm);
+	}
+	/* Paste into sub, from its own menu. */
+	CHECK(ui->lpVtbl->GetUIObjectOf(ui, NULL, 1, (LPCITEMIDLIST *)&sub,
+					&IID_IContextMenu, NULL,
+					(void **)&cm) == S_OK && cm);
+	if (cm) {
+		CMINVOKECOMMANDINFO ci;
+		memset(&ci, 0, sizeof(ci));
+		ci.cbSize = sizeof(ci);
+		ci.lpVerb = "paste";
+		CHECK(cm->lpVtbl->InvokeCommand(cm, &ci) == S_OK);
+		CHECK(exists("ui/sub/a.txt") && exists("ui/a.txt"));
+		cm->lpVtbl->Release(cm);
+	}
+	/* Pasting into the folder it came from makes a "Copy of". */
+	IContextMenu *bg = NULL;
+	CHECK(ui->lpVtbl->CreateViewObject(ui, NULL, &IID_IContextMenu,
+					   (void **)&bg) == S_OK && bg);
+	if (bg) {
+		CMINVOKECOMMANDINFO ci;
+		memset(&ci, 0, sizeof(ci));
+		ci.cbSize = sizeof(ci);
+		ci.lpVerb = "paste";
+		CHECK(bg->lpVtbl->InvokeCommand(bg, &ci) == S_OK);
+		CHECK(exists("ui/Copy of a.txt"));
+		ci.lpVerb = "delete";
+		CHECK(bg->lpVtbl->InvokeCommand(bg, &ci) == E_INVALIDARG);
+		bg->lpVtbl->Release(bg);
+	}
+	/* Delete with Shift down: gone, not in the Recycle Bin. */
+	CHECK(ui->lpVtbl->GetUIObjectOf(ui, NULL, 1, (LPCITEMIDLIST *)&gone,
+					&IID_IContextMenu, NULL,
+					(void **)&cm) == S_OK && cm);
+	if (cm) {
+		CMINVOKECOMMANDINFOEX ci;
+		memset(&ci, 0, sizeof(ci));
+		ci.cbSize = sizeof(ci);
+		ci.fMask = CMIC_MASK_UNICODE | CMIC_MASK_SHIFT_DOWN;
+		ci.lpVerb = "open";
+		WCHAR *del = w16("delete");
+		ci.lpVerbW = del;
+		CHECK(cm->lpVtbl->InvokeCommand(cm, (LPCMINVOKECOMMANDINFO)&ci) ==
+		      S_OK);
+		CHECK(!exists("ui/gone.txt"));
+		free(del);
+		cm->lpVtbl->Release(cm);
+	}
+
+	/* Dropping on sub: Ctrl copies; on the same drive, no keys move. */
+	IDropTarget *dt = NULL;
+	CHECK(ui->lpVtbl->GetUIObjectOf(ui, NULL, 1, (LPCITEMIDLIST *)&sub,
+					&IID_IDropTarget, NULL,
+					(void **)&dt) == S_OK && dt);
+	CHECK(ui->lpVtbl->GetUIObjectOf(ui, NULL, 1, (LPCITEMIDLIST *)&b,
+					&IID_IDataObject, NULL,
+					(void **)&d) == S_OK && d);
+	if (dt && d) {
+		POINTL at = { 0, 0 };
+		DWORD eff = DROPEFFECT_COPY | DROPEFFECT_MOVE;
+		CHECK(dt->lpVtbl->DragEnter(dt, d, MK_CONTROL, at, &eff) ==
+		      S_OK && eff == DROPEFFECT_COPY);
+		eff = DROPEFFECT_COPY | DROPEFFECT_MOVE;
+		CHECK(dt->lpVtbl->DragOver(dt, 0, at, &eff) == S_OK &&
+		      eff == DROPEFFECT_MOVE);
+		eff = DROPEFFECT_COPY;
+		CHECK(dt->lpVtbl->DragOver(dt, MK_SHIFT, at, &eff) == S_OK &&
+		      eff == DROPEFFECT_COPY);
+		CHECK(dt->lpVtbl->DragLeave(dt) == S_OK);
+		eff = DROPEFFECT_COPY | DROPEFFECT_MOVE;
+		CHECK(dt->lpVtbl->Drop(dt, d, MK_CONTROL, at, &eff) == S_OK &&
+		      eff == DROPEFFECT_COPY);
+		CHECK(exists("ui/sub/b.txt") && exists("ui/b.txt"));
+		CHECK(!remove(on_disk("ui/sub/b.txt")));
+		eff = DROPEFFECT_COPY | DROPEFFECT_MOVE;
+		CHECK(dt->lpVtbl->Drop(dt, d, 0, at, &eff) == S_OK &&
+		      eff == DROPEFFECT_MOVE);
+		CHECK(exists("ui/sub/b.txt") && !exists("ui/b.txt"));
+	}
+	if (dt)
+		dt->lpVtbl->Release(dt);
+	if (d)
+		d->lpVtbl->Release(d);
+	d = NULL;
+
+	/* A view: a window with a list view of the items, a selection. */
+	IShellView *sv = NULL;
+	CHECK(ui->lpVtbl->CreateViewObject(ui, NULL, &IID_IShellView,
+					   (void **)&sv) == S_OK && sv);
+	if (sv) {
+		FOLDERSETTINGS fs = { FVM_DETAILS, 0 }, back;
+		RECT rc = { 0, 0, 200, 100 };
+		HWND w = NULL;
+		CHECK(sv->lpVtbl->CreateViewWindow(sv, NULL, &fs, NULL, &rc,
+						   &w) == S_OK && w);
+		HWND got = NULL;
+		CHECK(sv->lpVtbl->GetWindow(sv, &got) == S_OK && got == w);
+		HWND list = w ? child(w, 5) : NULL;
+		CHECK(list != NULL);
+		/* sub, a.txt and Copy of a.txt. */
+		if (list)
+			CHECK_EQ(send(list, LVM_GETITEMCOUNT, 0, 0), 3);
+		CHECK(sv->lpVtbl->GetCurrentInfo(sv, &back) == S_OK &&
+		      back.ViewMode == FVM_DETAILS);
+		CHECK(sv->lpVtbl->GetItemObject(sv, SVGIO_SELECTION,
+						&IID_IDataObject,
+						(void **)&d) == E_FAIL);
+		CHECK(sv->lpVtbl->SelectItem(sv, a, SVSI_SELECT |
+					     SVSI_FOCUSED) == S_OK);
+		CHECK(sv->lpVtbl->SelectItem(sv, gone, SVSI_SELECT) ==
+		      E_INVALIDARG);
+		/* One row shows it, selected and focused. */
+		int marked = 0;
+		for (int i = 0; list && i < 3; i++)
+			marked += send(list, LVM_GETITEMSTATE, i,
+				       LVIS_SELECTED | LVIS_FOCUSED) ==
+				  (LVIS_SELECTED | LVIS_FOCUSED);
+		CHECK_EQ(marked, 1);
+		CHECK(sv->lpVtbl->GetItemObject(sv, SVGIO_SELECTION,
+						&IID_IDataObject,
+						(void **)&d) == S_OK && d);
+		if (d) {
+			hdrop_text(d, text, sizeof(text));
+			CHECK_STR(text, "C:\\ui\\a.txt");
+			d->lpVtbl->Release(d);
+			d = NULL;
+		}
+		/* Refresh keeps it. */
+		write_file("ui/c.txt", "c");
+		CHECK(sv->lpVtbl->Refresh(sv) == S_OK);
+		if (list)
+			CHECK_EQ(send(list, LVM_GETITEMCOUNT, 0, 0), 4);
+		CHECK(sv->lpVtbl->GetItemObject(sv, SVGIO_SELECTION,
+						&IID_IDataObject,
+						(void **)&d) == S_OK && d);
+		if (d) {
+			hdrop_text(d, text, sizeof(text));
+			CHECK_STR(text, "C:\\ui\\a.txt");
+			d->lpVtbl->Release(d);
+			d = NULL;
+		}
+		CHECK(sv->lpVtbl->SelectItem(sv, NULL, SVSI_DESELECTOTHERS) ==
+		      S_OK);
+		CHECK(sv->lpVtbl->GetItemObject(sv, SVGIO_ALLVIEW,
+						&IID_IDataObject,
+						(void **)&d) == S_OK && d);
+		if (d) {
+			hdrop_text(d, text, sizeof(text));
+			CHECK(strstr(text, "C:\\ui\\c.txt") &&
+			      strstr(text, "C:\\ui\\sub"));
+			d->lpVtbl->Release(d);
+		}
+		IContextMenu *vm = NULL;
+		CHECK(sv->lpVtbl->GetItemObject(sv, SVGIO_BACKGROUND,
+						&IID_IContextMenu,
+						(void **)&vm) == S_OK && vm);
+		if (vm)
+			vm->lpVtbl->Release(vm);
+		CHECK(sv->lpVtbl->DestroyViewWindow(sv) == S_OK);
+		CHECK(sv->lpVtbl->GetWindow(sv, &got) == E_FAIL);
+		sv->lpVtbl->Release(sv);
+	}
+	/* The folder itself takes drops. */
+	CHECK(ui->lpVtbl->CreateViewObject(ui, NULL, &IID_IDropTarget,
+					   (void **)&dt) == S_OK && dt);
+	if (dt)
+		dt->lpVtbl->Release(dt);
+done:
+	if (ui)
+		ui->lpVtbl->Release(ui);
+	if (desk)
+		desk->lpVtbl->Release(desk);
+	ILFree(ui_pidl);
+	ILFree(a);
+	ILFree(b);
+	ILFree(sub);
+	ILFree(gone);
+	ole_uninit();
+	mod_free(u32);
+}
+
 int main(void)
 {
 	const char *tmpdir = getenv("TMPDIR");
@@ -1535,6 +1923,7 @@ int main(void)
 	test_shell_link();
 	test_shell_link_more();
 	test_shell_link_data();
+	test_shell_ui();
 	mod_free(ole);
 
 	mod_free(k32);

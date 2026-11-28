@@ -536,4 +536,35 @@ typedef struct tagTRACKMOUSEEVENT {
 #define CS_GLOBALCLASS 0x4000
 #define IDCLOSE        8
 
+/* Dropped files. */
+#define CF_HDROP           15
+#define WM_DROPFILES       0x0233
+#define WS_EX_ACCEPTFILES  0x00000010L
+
+/* Menu items. */
+#define MIIM_STATE      0x00000001
+#define MIIM_ID         0x00000002
+#define MIIM_SUBMENU    0x00000004
+#define MIIM_TYPE       0x00000010
+#define MIIM_STRING     0x00000040
+#define MIIM_FTYPE      0x00000100
+#define MFT_STRING      0x00000000
+#define MFT_SEPARATOR   0x00000800
+#define MFS_DEFAULT     0x00001000
+
+typedef struct tagMENUITEMINFOW {
+	UINT cbSize;
+	UINT fMask;
+	UINT fType;
+	UINT fState;
+	UINT wID;
+	HMENU hSubMenu;
+	HBITMAP hbmpChecked;
+	HBITMAP hbmpUnchecked;
+	ULONG_PTR dwItemData;
+	LPWSTR dwTypeData;
+	UINT cch;
+	HBITMAP hbmpItem;
+} MENUITEMINFOW, *LPMENUITEMINFOW;
+
 #endif /* VFW_WIN32_WINUSER_H */

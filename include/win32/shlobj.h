@@ -386,6 +386,206 @@ struct IShellLinkDataList {
 	const IShellLinkDataListVtbl *lpVtbl;
 };
 
+/* Dropped files and data objects (shlobj.h). */
+typedef struct _DROPFILES {
+	DWORD pFiles;		/* offset of the file list */
+	POINT pt;
+	BOOL fNC;
+	BOOL fWide;
+} DROPFILES, *LPDROPFILES;
+
+/* "Shell IDList Array": the parent's ID list, then each item's. */
+typedef struct _IDA {
+	UINT cidl;
+	UINT aoffset[1];
+} CIDA, *LPIDA;
+
+/* Context menus (shobjidl.h). */
+#define CMF_NORMAL         0x00000000
+#define CMF_DEFAULTONLY    0x00000001
+#define CMF_VERBSONLY      0x00000002
+#define CMF_EXPLORE        0x00000004
+#define CMF_NOVERBS        0x00000008
+#define CMF_CANRENAME      0x00000010
+#define CMF_NODEFAULT      0x00000020
+#define CMF_INCLUDESTATIC  0x00000040
+#define CMF_EXTENDEDVERBS  0x00000100
+
+#define GCS_VERBA          0x00000000
+#define GCS_HELPTEXTA      0x00000001
+#define GCS_VALIDATEA      0x00000002
+#define GCS_VERBW          0x00000004
+#define GCS_HELPTEXTW      0x00000005
+#define GCS_VALIDATEW      0x00000006
+#define GCS_UNICODE        0x00000004
+
+#define CMIC_MASK_HOTKEY        0x00000020
+#define CMIC_MASK_ICON          0x00000010
+#define CMIC_MASK_FLAG_NO_UI    0x00000400
+#define CMIC_MASK_UNICODE       0x00004000
+#define CMIC_MASK_NO_CONSOLE    0x00008000
+#define CMIC_MASK_SHIFT_DOWN    0x10000000
+#define CMIC_MASK_PTINVOKE      0x20000000
+#define CMIC_MASK_CONTROL_DOWN  0x40000000
+
+typedef struct _CMINVOKECOMMANDINFO {
+	DWORD cbSize;
+	DWORD fMask;
+	HWND hwnd;
+	LPCSTR lpVerb;
+	LPCSTR lpParameters;
+	LPCSTR lpDirectory;
+	int nShow;
+	DWORD dwHotKey;
+	HANDLE hIcon;
+} CMINVOKECOMMANDINFO, *LPCMINVOKECOMMANDINFO;
+
+typedef struct _CMInvokeCommandInfoEx {
+	DWORD cbSize;
+	DWORD fMask;
+	HWND hwnd;
+	LPCSTR lpVerb;
+	LPCSTR lpParameters;
+	LPCSTR lpDirectory;
+	int nShow;
+	DWORD dwHotKey;
+	HANDLE hIcon;
+	LPCSTR lpTitle;
+	LPCWSTR lpVerbW;
+	LPCWSTR lpParametersW;
+	LPCWSTR lpDirectoryW;
+	LPCWSTR lpTitleW;
+	POINT ptInvoke;
+} CMINVOKECOMMANDINFOEX, *LPCMINVOKECOMMANDINFOEX;
+
+typedef struct IContextMenu IContextMenu;
+typedef struct IContextMenuVtbl {
+	HRESULT (WINAPI *QueryInterface)(IContextMenu *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IContextMenu *This);
+	ULONG (WINAPI *Release)(IContextMenu *This);
+	HRESULT (WINAPI *QueryContextMenu)(IContextMenu *This, HMENU menu,
+					   UINT index, UINT first, UINT last,
+					   UINT flags);
+	HRESULT (WINAPI *InvokeCommand)(IContextMenu *This,
+					LPCMINVOKECOMMANDINFO info);
+	HRESULT (WINAPI *GetCommandString)(IContextMenu *This, UINT_PTR cmd,
+					   UINT type, UINT *reserved,
+					   LPSTR name, UINT cch);
+} IContextMenuVtbl;
+struct IContextMenu {
+	const IContextMenuVtbl *lpVtbl;
+};
+
+/* Icons (shlobj.h). */
+#define GIL_OPENICON     0x0001
+#define GIL_FORSHELL     0x0002
+#define GIL_ASYNC        0x0020
+#define GIL_DEFAULTICON  0x0040
+#define GIL_FORSHORTCUT  0x0080
+#define GIL_SIMULATEDOC  0x0001
+#define GIL_PERINSTANCE  0x0002
+#define GIL_PERCLASS     0x0004
+#define GIL_NOTFILENAME  0x0008
+#define GIL_DONTCACHE    0x0010
+
+typedef struct IExtractIconA IExtractIconA;
+typedef struct IExtractIconAVtbl {
+	HRESULT (WINAPI *QueryInterface)(IExtractIconA *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IExtractIconA *This);
+	ULONG (WINAPI *Release)(IExtractIconA *This);
+	HRESULT (WINAPI *GetIconLocation)(IExtractIconA *This, UINT flags,
+					  LPSTR file, UINT cch, int *index,
+					  UINT *out_flags);
+	HRESULT (WINAPI *Extract)(IExtractIconA *This, LPCSTR file,
+				  UINT index, HICON *large, HICON *small,
+				  UINT size);
+} IExtractIconAVtbl;
+struct IExtractIconA {
+	const IExtractIconAVtbl *lpVtbl;
+};
+
+typedef struct IExtractIconW IExtractIconW;
+typedef struct IExtractIconWVtbl {
+	HRESULT (WINAPI *QueryInterface)(IExtractIconW *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IExtractIconW *This);
+	ULONG (WINAPI *Release)(IExtractIconW *This);
+	HRESULT (WINAPI *GetIconLocation)(IExtractIconW *This, UINT flags,
+					  LPWSTR file, UINT cch, int *index,
+					  UINT *out_flags);
+	HRESULT (WINAPI *Extract)(IExtractIconW *This, LPCWSTR file,
+				  UINT index, HICON *large, HICON *small,
+				  UINT size);
+} IExtractIconWVtbl;
+struct IExtractIconW {
+	const IExtractIconWVtbl *lpVtbl;
+};
+
+/* Shell views (shobjidl.h). */
+#define FVM_ICON         1
+#define FVM_SMALLICON    2
+#define FVM_LIST         3
+#define FVM_DETAILS      4
+
+#define SVSI_DESELECT       0x00000000
+#define SVSI_SELECT         0x00000001
+#define SVSI_EDIT           0x00000003
+#define SVSI_DESELECTOTHERS 0x00000004
+#define SVSI_ENSUREVISIBLE  0x00000008
+#define SVSI_FOCUSED        0x00000010
+
+#define SVGIO_BACKGROUND    0x00000000
+#define SVGIO_SELECTION     0x00000001
+#define SVGIO_ALLVIEW       0x00000002
+#define SVGIO_TYPE_MASK     0x0000000f
+
+#define SVUIA_DEACTIVATE        0
+#define SVUIA_ACTIVATE_NOFOCUS  1
+#define SVUIA_ACTIVATE_FOCUS    2
+
+typedef struct {
+	UINT ViewMode;
+	UINT fFlags;
+} FOLDERSETTINGS, *LPFOLDERSETTINGS;
+typedef const FOLDERSETTINGS *LPCFOLDERSETTINGS;
+
+typedef struct IShellBrowser IShellBrowser;
+typedef BOOL (CALLBACK *LPFNADDPROPSHEETPAGE)(HANDLE page, LPARAM lp);
+
+typedef struct IShellView IShellView;
+typedef struct IShellViewVtbl {
+	HRESULT (WINAPI *QueryInterface)(IShellView *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IShellView *This);
+	ULONG (WINAPI *Release)(IShellView *This);
+	HRESULT (WINAPI *GetWindow)(IShellView *This, HWND *hwnd);
+	HRESULT (WINAPI *ContextSensitiveHelp)(IShellView *This, BOOL enter);
+	HRESULT (WINAPI *TranslateAccelerator)(IShellView *This, MSG *msg);
+	HRESULT (WINAPI *EnableModeless)(IShellView *This, BOOL enable);
+	HRESULT (WINAPI *UIActivate)(IShellView *This, UINT state);
+	HRESULT (WINAPI *Refresh)(IShellView *This);
+	HRESULT (WINAPI *CreateViewWindow)(IShellView *This, IShellView *prev,
+					   LPCFOLDERSETTINGS fs,
+					   IShellBrowser *browser, RECT *rc,
+					   HWND *hwnd);
+	HRESULT (WINAPI *DestroyViewWindow)(IShellView *This);
+	HRESULT (WINAPI *GetCurrentInfo)(IShellView *This,
+					 LPFOLDERSETTINGS fs);
+	HRESULT (WINAPI *AddPropertySheetPages)(IShellView *This, DWORD res,
+						LPFNADDPROPSHEETPAGE fn,
+						LPARAM lp);
+	HRESULT (WINAPI *SaveViewState)(IShellView *This);
+	HRESULT (WINAPI *SelectItem)(IShellView *This, LPCITEMIDLIST pidl,
+				     UINT flags);
+	HRESULT (WINAPI *GetItemObject)(IShellView *This, UINT item,
+					REFIID riid, void **ppv);
+} IShellViewVtbl;
+struct IShellView {
+	const IShellViewVtbl *lpVtbl;
+};
+
 /* The Recycle Bin. */
 #define SHERB_NOCONFIRMATION 0x1
 #define SHERB_NOPROGRESSUI   0x2
@@ -414,6 +614,16 @@ typedef const KNOWNFOLDERID *REFKNOWNFOLDERID;
 #define KF_FLAG_CREATE      0x00008000
 
 #define VFW_SHLOBJ_GUIDS(G) \
+	G(IID_IContextMenu, 0x000214e4, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IExtractIconA, 0x000214eb, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IExtractIconW, 0x000214fa, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IShellView, 0x000214e3, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
+	G(IID_IOleWindow, 0x00000114, 0x0000, 0x0000, \
+	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
 	G(IID_IShellLinkDataList, 0x45e2b4ae, 0xb1c3, 0x11d0, \
 	  0xb9, 0x2f, 0x00, 0xa0, 0xc9, 0x03, 0x12, 0xe1) \
 	G(IID_IShellFolder, 0x000214e6, 0x0000, 0x0000, \

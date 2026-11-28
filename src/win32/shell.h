@@ -52,5 +52,16 @@ struct _IMAGELIST *shell_sys_list(int small);
 HICON shell_new_icon(void);
 HRESULT shell_extract_icon(const char *win, int index, HICON *large,
 			   HICON *small);
+char *shell_icon_csidl(int csidl, int *index);
+
+/*
+ * The objects of a folder's items and of the folder itself (shell_ui.c):
+ * parent is the folder's own ID list, dir its directory (NULL for a
+ * virtual folder).
+ */
+HRESULT shell_ui_object(LPCITEMIDLIST parent, const char *dir, UINT n,
+			LPCITEMIDLIST *children, REFIID riid, void **ppv);
+HRESULT shell_view_object(IShellFolder *sf, LPCITEMIDLIST parent,
+			  const char *dir, HWND owner, REFIID riid, void **ppv);
 
 #endif /* VFW_WIN32_SHELL_H */

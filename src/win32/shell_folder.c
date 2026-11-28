@@ -460,12 +460,57 @@ static HRESULT WINAPI f_CompareIDs(IShellFolder *This, LPARAM lparam,
 	return MAKE_HRESULT(0, 0, (USHORT)(SHORT)r);
 }
 
+/* The folder's own ID list and directory (either NULL when it has
+ * none), for the objects it hands out. */
+static int folder_self(struct folder *f, LPITEMIDLIST *pidl, char **dir)
+{
+	*pidl = NULL;
+	*dir = NULL;
+	switch (f->kind) {
+	case DESKTOP:
+		*dir = shell_folder_path(CSIDL_DESKTOPDIRECTORY);
+		return 0;	/* the empty list */
+	case DRIVES:
+		*pidl = shell_pidl_virtual(CSIDL_DRIVES);
+		break;
+	case BITBUCKET:
+		*pidl = shell_pidl_virtual(CSIDL_BITBUCKET);
+		break;
+	case DIRECTORY:
+		*pidl = shell_pidl_from_path(f->path);
+		*dir = strdup(f->path);
+		if (!*dir) {
+			heap_free(heap_process(), 0, *pidl);
+			*pidl = NULL;
+			return -1;
+		}
+		break;
+	}
+	return *pidl ? 0 : -1;
+}
+
+static void self_free(LPITEMIDLIST pidl, char *dir)
+{
+	if (pidl)
+		heap_free(heap_process(), 0, pidl);
+	free(dir);
+}
+
+/* IShellView, the folder's IDropTarget and background IContextMenu. */
 static HRESULT WINAPI f_CreateViewObject(IShellFolder *This, HWND owner,
 					 REFIID riid, void **ppv)
 {
-	if (ppv)
-		*ppv = NULL;
-	return E_NOTIMPL;
+	LPITEMIDLIST self;
+	char *dir;
+
+	if (!ppv)
+		return E_POINTER;
+	*ppv = NULL;
+	if (folder_self(impl(This), &self, &dir))
+		return E_OUTOFMEMORY;
+	HRESULT hr = shell_view_object(This, self, dir, owner, riid, ppv);
+	self_free(self, dir);
+	return hr;
 }
 
 static ULONG attributes(const struct item *it)
@@ -527,13 +572,31 @@ static HRESULT WINAPI f_GetAttributesOf(IShellFolder *This, UINT n,
 	return S_OK;
 }
 
+/* IDataObject, IContextMenu, IExtractIconA/W and (for a directory)
+ * IDropTarget of items. */
 static HRESULT WINAPI f_GetUIObjectOf(IShellFolder *This, HWND owner, UINT n,
 				      LPCITEMIDLIST *pidls, REFIID riid,
 				      UINT *reserved, void **ppv)
 {
-	if (ppv)
-		*ppv = NULL;
-	return E_NOINTERFACE;
+	LPITEMIDLIST self;
+	char *dir;
+
+	if (!ppv)
+		return E_POINTER;
+	*ppv = NULL;
+	if (!n || !pidls)
+		return E_INVALIDARG;
+	for (UINT i = 0; i < n; i++) {
+		struct item it;
+		if (!pidls[i] || item_of(pidls[i], &it))
+			return E_INVALIDARG;
+		free(it.path);
+	}
+	if (folder_self(impl(This), &self, &dir))
+		return E_OUTOFMEMORY;
+	HRESULT hr = shell_ui_object(self, dir, n, pidls, riid, ppv);
+	self_free(self, dir);
+	return hr;
 }
 
 static HRESULT put_strret(STRRET *out, const char *s)

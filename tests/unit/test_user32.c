@@ -326,6 +326,26 @@ static void test_classes_and_windows(void)
 	POINT pt = { 1, 1 };
 	CHECK(ClientToScreen(child, &pt));
 	CHECK(pt.x == 6 && pt.y == 6);
+	/* The tree in z-order: children in creation order, first on top. */
+	{
+		FN(HWND, GetWindow, HWND, UINT);
+		FN(HWND, GetTopWindow, HWND);
+		HWND kid2 = CreateWindowExA(0, "STATIC", "kid2", WS_CHILD, 0, 0,
+					    1, 1, h, (HMENU)102, inst, NULL);
+		CHECK(kid2 != NULL);
+		CHECK(GetWindow(h, 5) == child);		/* GW_CHILD */
+		CHECK(GetTopWindow(h) == child);
+		CHECK(GetWindow(child, 2) == kid2);	/* GW_HWNDNEXT */
+		CHECK(GetWindow(kid2, 2) == NULL);
+		CHECK(GetWindow(kid2, 3) == child);	/* GW_HWNDPREV */
+		CHECK(GetWindow(kid2, 0) == child);	/* GW_HWNDFIRST */
+		CHECK(GetWindow(child, 1) == kid2);	/* GW_HWNDLAST */
+		CHECK(GetWindow(child, 5) == NULL);
+		CHECK(GetWindow(child, 4) == NULL);	/* GW_OWNER */
+		CHECK(GetWindow((HWND)0x1234, 5) == NULL);
+		CHECK(DestroyWindow(kid2));
+		CHECK(GetWindow(child, 2) == NULL);
+	}
 	CHECK(CreateWindowExA(0, "STATIC", "", WS_CHILD, 0, 0, 1, 1, NULL, NULL,
 			      inst, NULL) == NULL);
 	CHECK_EQ(GetLastError(), ERROR_TLW_WITH_WSCHILD);

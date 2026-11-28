@@ -1193,6 +1193,20 @@
 	O(NT_FE_CONSOLE_PROPS, uCodePage) \
 	O(IShellLinkDataListVtbl, AddDataBlock) \
 	O(IShellLinkDataListVtbl, SetFlags) \
+	S(MENUITEMINFOW) O(MENUITEMINFOW, hSubMenu) \
+	O(MENUITEMINFOW, dwItemData) O(MENUITEMINFOW, dwTypeData) \
+	O(MENUITEMINFOW, hbmpItem) \
+	S(DROPFILES) O(DROPFILES, pt) O(DROPFILES, fNC) O(DROPFILES, fWide) \
+	S(CIDA) O(CIDA, aoffset) \
+	S(CMINVOKECOMMANDINFO) O(CMINVOKECOMMANDINFO, lpVerb) \
+	O(CMINVOKECOMMANDINFO, nShow) O(CMINVOKECOMMANDINFO, hIcon) \
+	S(CMINVOKECOMMANDINFOEX) O(CMINVOKECOMMANDINFOEX, lpTitle) \
+	O(CMINVOKECOMMANDINFOEX, lpVerbW) O(CMINVOKECOMMANDINFOEX, ptInvoke) \
+	O(IContextMenuVtbl, QueryContextMenu) \
+	O(IContextMenuVtbl, GetCommandString) \
+	S(FOLDERSETTINGS) O(FOLDERSETTINGS, fFlags) \
+	O(IShellViewVtbl, GetWindow) O(IShellViewVtbl, CreateViewWindow) \
+	O(IShellViewVtbl, SelectItem) O(IShellViewVtbl, GetItemObject) \
 	/* dshow.h: strmif.h, amvideo.h, dvdmedia.h, ocidl.h */ \
 	S(REFERENCE_TIME) A(REFERENCE_TIME) S(HEVENT) S(HSEMAPHORE) \
 	S(PIN_DIRECTION) S(FILTER_STATE) \

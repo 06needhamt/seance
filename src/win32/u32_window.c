@@ -1828,6 +1828,104 @@ WINFN(BOOL) user_EnumChildWindows(HWND parent, WNDENUMPROC proc, LPARAM lp)
 	return TRUE;
 }
 
+/*
+ * The window tree in z-order. Siblings are kept in creation order, the
+ * first created on top: where Windows puts children (so tab order is
+ * creation order), and with nothing drawn, near enough for top-level
+ * windows too.
+ */
+static int is_sibling_of(const struct window *w, const void *arg)
+{
+	const struct window *of = arg;
+	return w->parent == of->parent && w->handle != DESKTOP_HANDLE &&
+	       !(w->flags & MESSAGE_ONLY);
+}
+
+static HWND first_child(HWND parent)
+{
+	HWND want = parent == DESKTOP_HANDLE ? NULL : parent;
+	for (size_t i = 0; i < nwins; i++)
+		if (wins[i]->parent == want &&
+		    wins[i]->handle != DESKTOP_HANDLE &&
+		    !(wins[i]->flags & MESSAGE_ONLY))
+			return wins[i]->handle;
+	return NULL;
+}
+
+WINFN(HWND) user_GetWindow(HWND hwnd, UINT command)
+{
+	HWND r = NULL;
+
+	enter();
+	struct window *w = get(hwnd);
+	if (!w) {
+		leave();
+		return NULL;
+	}
+	switch (command) {
+	case 0:		/* GW_HWNDFIRST */
+	case 1:		/* GW_HWNDLAST */
+	case 2:		/* GW_HWNDNEXT */
+	case 3: {	/* GW_HWNDPREV */
+		int at = -1, n = 0;
+		HWND *sib = malloc((nwins + 1) * sizeof(*sib));
+		for (size_t i = 0; sib && i < nwins; i++) {
+			if (!is_sibling_of(wins[i], w))
+				continue;
+			if (wins[i] == w)
+				at = n;
+			sib[n++] = wins[i]->handle;
+		}
+		if (sib && n && at >= 0) {
+			if (command == 0)
+				r = sib[0];
+			else if (command == 1)
+				r = sib[n - 1];
+			else if (command == 2)
+				r = at + 1 < n ? sib[at + 1] : NULL;
+			else
+				r = at > 0 ? sib[at - 1] : NULL;
+		}
+		free(sib);
+		break;
+	}
+	case 4:		/* GW_OWNER */
+		r = w->owner;
+		break;
+	case 5:		/* GW_CHILD */
+		r = first_child(hwnd);
+		break;
+	case 6:		/* GW_ENABLEDPOPUP */
+		for (size_t i = 0; i < nwins && !r; i++)
+			if (wins[i]->owner == hwnd &&
+			    (wins[i]->style & WS_POPUP) &&
+			    (wins[i]->style & WS_VISIBLE) &&
+			    !(wins[i]->style & WS_DISABLED))
+				r = wins[i]->handle;
+		break;
+	default:
+		win_set_error(ERROR_INVALID_PARAMETER);
+		break;
+	}
+	leave();
+	return r;
+}
+
+/* The child on top, of hwnd or (NULL) of the desktop. */
+WINFN(HWND) user_GetTopWindow(HWND hwnd)
+{
+	HWND r;
+
+	enter();
+	if (hwnd && !get(hwnd)) {
+		leave();
+		return NULL;
+	}
+	r = first_child(hwnd ? hwnd : DESKTOP_HANDLE);
+	leave();
+	return r;
+}
+
 static HWND find_window(const WCHAR *cls, const WCHAR *title)
 {
 	HWND h = NULL;
@@ -3141,6 +3239,8 @@ const struct builtin_export u32_window_exports[] = {
 	E(FindWindowA),
 	E(FindWindowW),
 	E(GetActiveWindow),
+	E(GetTopWindow),
+	E(GetWindow),
 	E(GetCapture),
 	E(GetClassInfoA),
 	E(GetClassInfoExA),

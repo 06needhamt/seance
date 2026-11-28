@@ -59,3 +59,7 @@ EXP_SHIM_SIG
 EXP_TRACKER_SIG
 EXP_VISTA_ID_LIST_SIG
 EXP_PROPERTYSTORAGE_SIG
+# Context menu flags mingw-w64 leaves out, or spells through
+# SEE_MASK_ICON, which it no longer has.
+CMF_INCLUDESTATIC
+CMIC_MASK_ICON

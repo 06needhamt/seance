@@ -43,6 +43,7 @@ extern const struct builtin_export shell_folder_exports[];
 extern const struct builtin_export shell_recycle_exports[];
 extern const struct builtin_export shell_link_exports[];
 extern const struct builtin_export shell_icon_exports[];
+extern const struct builtin_export shell_ui_exports[];
 
 /* Folders: where each CSIDL is, from the profile, All Users, or C:. */
 enum base { ROOT, PROFILE, ALL_USERS, VIRTUAL };
@@ -1099,26 +1100,6 @@ WINFN(BOOL) sh_Shell_NotifyIconA(DWORD msg, void *data) { return TRUE; }
 WINFN(BOOL) sh_Shell_NotifyIconW(DWORD msg, void *data) { return TRUE; }
 WINFN(UINT_PTR) sh_SHAppBarMessage(DWORD msg, void *data) { return 0; }
 
-/* Nothing is ever dropped. */
-WINFN(void) sh_DragAcceptFiles(HWND hwnd, BOOL accept) { }
-WINFN(void) sh_DragFinish(HDROP drop) { }
-
-WINFN(UINT) sh_DragQueryFileA(HDROP drop, UINT i, LPSTR buf, UINT n)
-{
-	if (buf && n)
-		buf[0] = 0;
-	return 0;
-}
-
-WINFN(UINT) sh_DragQueryFileW(HDROP drop, UINT i, LPWSTR buf, UINT n)
-{
-	if (buf && n)
-		buf[0] = 0;
-	return 0;
-}
-
-WINFN(BOOL) sh_DragQueryPoint(HDROP drop, POINT *pt) { return FALSE; }
-
 /* Nobody to tell about changes or recent documents. */
 WINFN(void) sh_SHChangeNotify(LONG event, UINT flags, LPCVOID a, LPCVOID b) { }
 WINFN(void) sh_SHAddToRecentDocs(UINT flags, LPCVOID p) { }
@@ -1130,8 +1111,6 @@ WINFN(BOOL) sh_IsUserAnAdmin(void) { return TRUE; }
 
 static const struct builtin_export exports[] = {
 	E(CommandLineToArgvW),
-	E(DragAcceptFiles), E(DragFinish), E(DragQueryFileA),
-	E(DragQueryFileW), E(DragQueryPoint),
 	E(FindExecutableA), E(FindExecutableW),
 	E(ILClone), E(ILCombine), E(ILCreateFromPathA), E(ILCreateFromPathW),
 	E(ILFindLastID), E(ILFree), E(ILGetNext), E(ILGetSize), E(ILIsEqual),
@@ -1155,7 +1134,8 @@ static const struct builtin_export exports[] = {
 
 static const struct builtin_export *const tables[] = {
 	exports, shell_file_exports, shell_folder_exports,
-	shell_recycle_exports, shell_link_exports, shell_icon_exports, NULL
+	shell_recycle_exports, shell_link_exports, shell_icon_exports,
+	shell_ui_exports, NULL
 };
 
 const struct builtin_dll builtin_shell32 = { "shell32.dll", NULL, tables, 0 };

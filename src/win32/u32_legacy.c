@@ -279,21 +279,11 @@ WINFN(HMENU) user_GetSubMenu(HMENU menu, int position)
 	return NULL;
 }
 
-WINFN(HWND) user_GetTopWindow(HWND hwnd)
-{
-	return NULL;
-}
-
 WINFN(BOOL) user_GetUpdateRect(HWND hwnd, LPRECT rc, BOOL erase)
 {
 	if (rc)
 		*rc = (RECT){ 0 };
 	return FALSE;
-}
-
-WINFN(HWND) user_GetWindow(HWND hwnd, UINT command)
-{
-	return NULL;
 }
 
 WINFN(BOOL) user_GetWindowPlacement(HWND hwnd, WINDOWPLACEMENT *placement)
@@ -416,9 +406,7 @@ const struct builtin_export u32_legacy_exports[] = {
 	E(GetNextDlgTabItem),
 	E(GetShellWindow),
 	E(GetSubMenu),
-	E(GetTopWindow),
 	E(GetUpdateRect),
-	E(GetWindow),
 	E(GetWindowPlacement),
 	E(GetWindowWord),
 	E(GrayStringA),

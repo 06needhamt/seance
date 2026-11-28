@@ -457,10 +457,13 @@ comdlg32 are built in too, headless:
   created when first asked for; item ID lists for them;
   `CommandLineToArgvW`; `SHFileOperation` (copy, move, rename and delete,
   with wildcards and whole trees, answering every confirmation "Yes to
-  all"), `SHCreateDirectoryEx` and `SHGetFileInfo`. With no desktop,
-  `ShellExecute` has nothing to open anything with, `SHBrowseForFolder` is
-  cancelled, and there are no icons or dropped files; each says so on
-  stderr.
+  all"), `SHCreateDirectoryEx` and `SHGetFileInfo`; shortcuts with their
+  extra data blocks; icons from PE resources and .ico files and the
+  system image lists; folder items' data objects, context menus, drop
+  targets and a list-view shell view; and dropped files (`HDROP`). With
+  no desktop, `ShellExecute` has nothing to open anything with,
+  `SHBrowseForFolder` is cancelled, and rename and properties from a
+  context menu show nothing; each says so on stderr.
 
 - **comctl32:** `InitCommonControls(Ex)` registers the control classes.
   Nothing is drawn, so a control is its state: every class (trackbars,
@@ -1045,7 +1048,7 @@ decodes below 40 dB.
 | `include/win32/` | Win32 types, PE image structures, GDI, window-manager and registry definitions, driver and ICM definitions, laid out to match 32-bit Windows |
 | `src/loader/` | PE parsing, mapping and relocation (`pe.c`); the module table and dependency loading (`modules.c`) |
 | `src/runtime/` | TEB and `%fs`, implicit TLS, the built-in DLL registry, trap thunks for unimplemented imports, the 2 GB limit (`lowmem.c`), crash and hang reports (`crash.c`) |
-| `src/win32/` | Built-in kernel32 (`k32_*.c`) and kernelbase, ntdll, the msvcrt family (`crt_*.c`), user32 (`user32.c`, `u32_*.c`), gdi32 (`gdi32.c`, `gdi_bitmap.c`, `gdi_text.c`), advapi32 (`advapi32.c`, `adv_security.c`) and its registry (`reg.c`), version, ole32, oleaut32 (`oleaut32.c`, `oleaut_conv.c`, `oleaut_array.c`, `errinfo.c`), shell32 (`shell32.c`, `shell_file.c`), comctl32 (`comctl32.c`, `comctl_dpa.c`, `comctl_imagelist.c`, `comctl_sheet.c`), comdlg32, winmm, msvfw32 and quartz (`quartz.c`) |
+| `src/win32/` | Built-in kernel32 (`k32_*.c`) and kernelbase, ntdll, the msvcrt family (`crt_*.c`), user32 (`user32.c`, `u32_*.c`), gdi32 (`gdi32.c`, `gdi_bitmap.c`, `gdi_text.c`), advapi32 (`advapi32.c`, `adv_security.c`) and its registry (`reg.c`), version, ole32, oleaut32 (`oleaut32.c`, `oleaut_conv.c`, `oleaut_array.c`, `errinfo.c`), shell32 (`shell32.c`, `shell_*.c`), comctl32 (`comctl32.c`, `comctl_dpa.c`, `comctl_imagelist.c`, `comctl_sheet.c`), comdlg32, winmm, msvfw32 and quartz (`quartz.c`) |
 | `src/dshow/` | DirectShow: finding and registering filters (`discover.c`) |
 | `src/vfw/` | Installable drivers (`driver.c`), the codec registry (`registry.c`), the ICM API (`icm.c`), sequence compression (`seq.c`) |
 | `src/avi/` | AVI reader (AVI 1.0 and OpenDML) and writer |
