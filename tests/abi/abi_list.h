@@ -1183,6 +1183,16 @@
 	S(BROWSEINFOA) O(BROWSEINFOA, pszDisplayName) O(BROWSEINFOA, lpszTitle) \
 	O(BROWSEINFOA, ulFlags) O(BROWSEINFOA, iImage) S(BROWSEINFOW) \
 	O(BROWSEINFOW, lpszTitle) O(BROWSEINFOW, iImage) \
+	S(DATABLOCK_HEADER) S(EXP_SZ_LINK) O(EXP_SZ_LINK, szTarget) \
+	O(EXP_SZ_LINK, swzTarget) S(EXP_DARWIN_LINK) \
+	O(EXP_DARWIN_LINK, szwDarwinID) S(EXP_SPECIAL_FOLDER) \
+	S(NT_CONSOLE_PROPS) O(NT_CONSOLE_PROPS, dwScreenBufferSize) \
+	O(NT_CONSOLE_PROPS, nFont) O(NT_CONSOLE_PROPS, FaceName) \
+	O(NT_CONSOLE_PROPS, uCursorSize) O(NT_CONSOLE_PROPS, bHistoryNoDup) \
+	O(NT_CONSOLE_PROPS, ColorTable) S(NT_FE_CONSOLE_PROPS) \
+	O(NT_FE_CONSOLE_PROPS, uCodePage) \
+	O(IShellLinkDataListVtbl, AddDataBlock) \
+	O(IShellLinkDataListVtbl, SetFlags) \
 	/* dshow.h: strmif.h, amvideo.h, dvdmedia.h, ocidl.h */ \
 	S(REFERENCE_TIME) A(REFERENCE_TIME) S(HEVENT) S(HSEMAPHORE) \
 	S(PIN_DIRECTION) S(FILTER_STATE) \

@@ -285,6 +285,107 @@ struct IShellLinkW {
 	const IShellLinkWVtbl *lpVtbl;
 };
 
+/* Shortcut extra data (shlobj.h, shlguid.h, MS-SHLLINK 2.5). */
+#define SLDF_HAS_ID_LIST          0x00000001
+#define SLDF_HAS_LINK_INFO        0x00000002
+#define SLDF_HAS_NAME             0x00000004
+#define SLDF_HAS_RELPATH          0x00000008
+#define SLDF_HAS_WORKINGDIR       0x00000010
+#define SLDF_HAS_ARGS             0x00000020
+#define SLDF_HAS_ICONLOCATION     0x00000040
+#define SLDF_UNICODE              0x00000080
+#define SLDF_FORCE_NO_LINKINFO    0x00000100
+#define SLDF_HAS_EXP_SZ           0x00000200
+#define SLDF_RUN_IN_SEPARATE      0x00000400
+#define SLDF_HAS_DARWINID         0x00001000
+#define SLDF_RUNAS_USER           0x00002000
+#define SLDF_HAS_EXP_ICON_SZ      0x00004000
+#define SLDF_NO_PIDL_ALIAS        0x00008000
+#define SLDF_FORCE_UNCNAME        0x00010000
+#define SLDF_RUN_WITH_SHIMLAYER   0x00020000
+
+#define EXP_SZ_LINK_SIG           0xA0000001
+#define NT_CONSOLE_PROPS_SIG      0xA0000002
+#define EXP_TRACKER_SIG           0xA0000003
+#define NT_FE_CONSOLE_PROPS_SIG   0xA0000004
+#define EXP_SPECIAL_FOLDER_SIG    0xA0000005
+#define EXP_DARWIN_ID_SIG         0xA0000006
+#define EXP_SZ_ICON_SIG           0xA0000007
+#define EXP_SHIM_SIG              0xA0000008
+#define EXP_PROPERTYSTORAGE_SIG   0xA0000009
+#define EXP_KNOWN_FOLDER_SIG      0xA000000B
+#define EXP_VISTA_ID_LIST_SIG     0xA000000C
+
+typedef struct tagDATABLOCKHEADER {
+	DWORD cbSize;
+	DWORD dwSignature;
+} DATABLOCK_HEADER, *LPDATABLOCK_HEADER, *LPDBLIST;
+
+typedef struct {
+	DATABLOCK_HEADER dbh;
+	CHAR szTarget[MAX_PATH];
+	WCHAR swzTarget[MAX_PATH];
+} EXP_SZ_LINK, *LPEXP_SZ_LINK;
+
+typedef struct {
+	DATABLOCK_HEADER dbh;
+	CHAR szDarwinID[MAX_PATH];
+	WCHAR szwDarwinID[MAX_PATH];
+} EXP_DARWIN_LINK, *LPEXP_DARWIN_LINK;
+
+typedef struct {
+	DWORD cbSize;
+	DWORD dwSignature;
+	DWORD idSpecialFolder;
+	DWORD cbOffset;
+} EXP_SPECIAL_FOLDER, *LPEXP_SPECIAL_FOLDER;
+
+typedef struct {
+	DATABLOCK_HEADER dbh;
+	WORD wFillAttribute;
+	WORD wPopupFillAttribute;
+	COORD dwScreenBufferSize;
+	COORD dwWindowSize;
+	COORD dwWindowOrigin;
+	DWORD nFont;
+	DWORD nInputBufferSize;
+	COORD dwFontSize;
+	UINT uFontFamily;
+	UINT uFontWeight;
+	WCHAR FaceName[32];
+	UINT uCursorSize;
+	BOOL bFullScreen;
+	BOOL bQuickEdit;
+	BOOL bInsertMode;
+	BOOL bAutoPosition;
+	UINT uHistoryBufferSize;
+	UINT uNumberOfHistoryBuffers;
+	BOOL bHistoryNoDup;
+	COLORREF ColorTable[16];
+} NT_CONSOLE_PROPS, *LPNT_CONSOLE_PROPS;
+
+typedef struct {
+	DATABLOCK_HEADER dbh;
+	UINT uCodePage;
+} NT_FE_CONSOLE_PROPS, *LPNT_FE_CONSOLE_PROPS;
+
+typedef struct IShellLinkDataList IShellLinkDataList;
+typedef struct IShellLinkDataListVtbl {
+	HRESULT (WINAPI *QueryInterface)(IShellLinkDataList *This, REFIID riid,
+					 void **ppv);
+	ULONG (WINAPI *AddRef)(IShellLinkDataList *This);
+	ULONG (WINAPI *Release)(IShellLinkDataList *This);
+	HRESULT (WINAPI *AddDataBlock)(IShellLinkDataList *This, void *block);
+	HRESULT (WINAPI *CopyDataBlock)(IShellLinkDataList *This, DWORD sig,
+					void **block);
+	HRESULT (WINAPI *RemoveDataBlock)(IShellLinkDataList *This, DWORD sig);
+	HRESULT (WINAPI *GetFlags)(IShellLinkDataList *This, DWORD *flags);
+	HRESULT (WINAPI *SetFlags)(IShellLinkDataList *This, DWORD flags);
+} IShellLinkDataListVtbl;
+struct IShellLinkDataList {
+	const IShellLinkDataListVtbl *lpVtbl;
+};
+
 /* The Recycle Bin. */
 #define SHERB_NOCONFIRMATION 0x1
 #define SHERB_NOPROGRESSUI   0x2
@@ -313,6 +414,8 @@ typedef const KNOWNFOLDERID *REFKNOWNFOLDERID;
 #define KF_FLAG_CREATE      0x00008000
 
 #define VFW_SHLOBJ_GUIDS(G) \
+	G(IID_IShellLinkDataList, 0x45e2b4ae, 0xb1c3, 0x11d0, \
+	  0xb9, 0x2f, 0x00, 0xa0, 0xc9, 0x03, 0x12, 0xe1) \
 	G(IID_IShellFolder, 0x000214e6, 0x0000, 0x0000, \
 	  0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46) \
 	G(IID_IEnumIDList, 0x000214f2, 0x0000, 0x0000, \

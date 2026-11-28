@@ -1162,6 +1162,227 @@ static void test_shell_link_more(void)
 	uninit();
 }
 
+/* A link's extra data blocks: a path and icon kept with %NAME%
+ * references, console properties, and ones it doesn't know, through a
+ * file and a stream. */
+static void test_shell_link_data(void)
+{
+	HRESULT (WINAPI *init)(void *) = get_from(ole, "CoInitialize");
+	void (WINAPI *uninit)(void) = get_from(ole, "CoUninitialize");
+	HRESULT (WINAPI *create)(REFCLSID, IUnknown *, DWORD, REFIID, void **) =
+		get_from(ole, "CoCreateInstance");
+	HRESULT (WINAPI *on_hglobal)(HGLOBAL, BOOL, IStream **) =
+		get_from(ole, "CreateStreamOnHGlobal");
+	BOOL (WINAPI *setenv_a)(LPCSTR, LPCSTR) =
+		get_from(k32, "SetEnvironmentVariableA");
+	HLOCAL (WINAPI *local_free)(HLOCAL) = get_from(k32, "LocalFree");
+	IShellLinkA *la = NULL;
+	IShellLinkDataList *dl = NULL;
+	IPersistFile *pf = NULL;
+	char a[MAX_PATH];
+	DWORD f = 0;
+	void *blk = NULL;
+	int idx = -1;
+
+	CHECK(SUCCEEDED(init(NULL)));
+	CHECK(setenv_a("SEANCE_LNK", "C:\\envdir"));
+	CHECK(create(&CLSID_ShellLink, NULL, 1, &IID_IShellLinkA, (void **)&la) ==
+	      S_OK && la);
+	if (!la)
+		return;
+	CHECK(la->lpVtbl->QueryInterface(la, &IID_IShellLinkDataList,
+					 (void **)&dl) == S_OK && dl);
+	CHECK(la->lpVtbl->QueryInterface(la, &IID_IPersistFile,
+					 (void **)&pf) == S_OK && pf);
+	if (!dl || !pf)
+		return;
+	CHECK(dl->lpVtbl->GetFlags(dl, &f) == S_OK && !(f & SLDF_HAS_EXP_SZ));
+
+	/* The target is the expansion; the raw path is in its block. */
+	CHECK(SUCCEEDED(la->lpVtbl->SetPath(la, "%SEANCE_LNK%\\a.exe")));
+	CHECK(la->lpVtbl->GetPath(la, a, MAX_PATH, NULL, 0) == S_OK);
+	CHECK_STR(a, "C:\\envdir\\a.exe");
+	CHECK(la->lpVtbl->GetPath(la, a, MAX_PATH, NULL, SLGP_RAWPATH) == S_OK);
+	CHECK_STR(a, "%SEANCE_LNK%\\a.exe");
+	CHECK(dl->lpVtbl->GetFlags(dl, &f) == S_OK && (f & SLDF_HAS_EXP_SZ) &&
+	      (f & SLDF_HAS_LINK_INFO) && (f & SLDF_UNICODE));
+	CHECK(dl->lpVtbl->CopyDataBlock(dl, EXP_SZ_LINK_SIG, &blk) == S_OK &&
+	      blk);
+	if (blk) {
+		EXP_SZ_LINK *e = blk;
+		CHECK_EQ(e->dbh.cbSize, sizeof(EXP_SZ_LINK));
+		CHECK_STR(e->szTarget, "%SEANCE_LNK%\\a.exe");
+		char *c = utf16_to_utf8_dup(e->swzTarget);
+		CHECK_STR(c, "%SEANCE_LNK%\\a.exe");
+		free(c);
+		local_free(blk);
+		blk = NULL;
+	}
+	CHECK(dl->lpVtbl->CopyDataBlock(dl, EXP_DARWIN_ID_SIG, &blk) == E_FAIL &&
+	      !blk);
+	CHECK(SUCCEEDED(la->lpVtbl->SetIconLocation(la, "%SEANCE_LNK%\\i.ico",
+						    2)));
+	CHECK(dl->lpVtbl->GetFlags(dl, &f) == S_OK &&
+	      (f & SLDF_HAS_EXP_ICON_SZ));
+
+	/* Console properties, and a block no one knows. */
+	NT_FE_CONSOLE_PROPS fe = { { sizeof(fe), NT_FE_CONSOLE_PROPS_SIG },
+				   932 };
+	CHECK(dl->lpVtbl->AddDataBlock(dl, &fe) == S_OK);
+	NT_CONSOLE_PROPS con;
+	memset(&con, 0, sizeof(con));
+	con.dbh.cbSize = sizeof(con);
+	con.dbh.dwSignature = NT_CONSOLE_PROPS_SIG;
+	con.dwScreenBufferSize.X = 80;
+	con.dwScreenBufferSize.Y = 300;
+	con.FaceName[0] = 'L';
+	con.ColorTable[15] = 0xffffff;
+	CHECK(dl->lpVtbl->AddDataBlock(dl, &con) == S_OK);
+	struct { DATABLOCK_HEADER h; DWORD v; } odd = {
+		{ sizeof(odd), 0xA0000099 }, 0x12345678 };
+	CHECK(dl->lpVtbl->AddDataBlock(dl, &odd) == S_OK);
+	/* A known block of the wrong size is refused. */
+	struct { DATABLOCK_HEADER h; DWORD v; } bad = {
+		{ sizeof(bad), EXP_DARWIN_ID_SIG }, 0 };
+	CHECK(dl->lpVtbl->AddDataBlock(dl, &bad) == E_INVALIDARG);
+	/* Adding one again replaces it. */
+	fe.uCodePage = 936;
+	CHECK(dl->lpVtbl->AddDataBlock(dl, &fe) == S_OK);
+	CHECK(dl->lpVtbl->SetFlags(dl, f | SLDF_RUNAS_USER) == S_OK);
+
+	WCHAR *name = w16("C:\\env.lnk");
+	CHECK(pf->lpVtbl->Save(pf, name, TRUE) == S_OK);
+
+	/* Into a stream, with more after it. */
+	IPersistStream *ps = NULL;
+	IStream *st = NULL;
+	CHECK(la->lpVtbl->QueryInterface(la, &IID_IPersistStream,
+					 (void **)&ps) == S_OK && ps);
+	CHECK(on_hglobal(NULL, TRUE, &st) == S_OK && st);
+	if (ps && st) {
+		ULONG wrote = 0;
+		CHECK(ps->lpVtbl->Save(ps, st, FALSE) == S_OK);
+		CHECK(st->lpVtbl->Write(st, "tail", 4, &wrote) == S_OK);
+	}
+	if (ps)
+		ps->lpVtbl->Release(ps);
+	ps = NULL;
+	pf->lpVtbl->Release(pf);
+	dl->lpVtbl->Release(dl);
+	la->lpVtbl->Release(la);
+	pf = NULL;
+	dl = NULL;
+	la = NULL;
+
+	/* Read back with the variable changed: the path is expanded again. */
+	CHECK(setenv_a("SEANCE_LNK", "C:\\other"));
+	for (int pass = 0; pass < 2; pass++) {
+		CHECK(create(&CLSID_ShellLink, NULL, 1, &IID_IShellLinkA,
+			     (void **)&la) == S_OK && la);
+		if (!la)
+			break;
+		la->lpVtbl->QueryInterface(la, &IID_IShellLinkDataList,
+					   (void **)&dl);
+		if (!pass) {
+			la->lpVtbl->QueryInterface(la, &IID_IPersistFile,
+						   (void **)&pf);
+			CHECK(pf && pf->lpVtbl->Load(pf, name, 0) == S_OK);
+			if (pf)
+				pf->lpVtbl->Release(pf);
+			pf = NULL;
+		} else if (st) {
+			LARGE_INTEGER zero = { 0 };
+			char tail[4] = { 0 };
+			ULONG got = 0;
+			la->lpVtbl->QueryInterface(la, &IID_IPersistStream,
+						   (void **)&ps);
+			CHECK(st->lpVtbl->Seek(st, zero, 0, NULL) == S_OK);
+			CHECK(ps && ps->lpVtbl->Load(ps, st) == S_OK);
+			/* The stream is left just after the link. */
+			CHECK(st->lpVtbl->Read(st, tail, 4, &got) == S_OK &&
+			      got == 4 && !memcmp(tail, "tail", 4));
+			if (ps)
+				ps->lpVtbl->Release(ps);
+			ps = NULL;
+		}
+		CHECK(la->lpVtbl->GetPath(la, a, MAX_PATH, NULL, 0) == S_OK);
+		CHECK_STR(a, "C:\\other\\a.exe");
+		CHECK(la->lpVtbl->GetPath(la, a, MAX_PATH, NULL,
+					  SLGP_RAWPATH) == S_OK);
+		CHECK_STR(a, "%SEANCE_LNK%\\a.exe");
+		CHECK(la->lpVtbl->GetIconLocation(la, a, MAX_PATH, &idx) ==
+		      S_OK);
+		CHECK_STR(a, "%SEANCE_LNK%\\i.ico");
+		CHECK_EQ(idx, 2);
+		if (!dl)
+			break;
+		CHECK(dl->lpVtbl->GetFlags(dl, &f) == S_OK &&
+		      (f & SLDF_HAS_EXP_SZ) && (f & SLDF_HAS_EXP_ICON_SZ) &&
+		      (f & SLDF_RUNAS_USER));
+		CHECK(dl->lpVtbl->CopyDataBlock(dl, NT_FE_CONSOLE_PROPS_SIG,
+						&blk) == S_OK && blk);
+		if (blk) {
+			CHECK_EQ(((NT_FE_CONSOLE_PROPS *)blk)->uCodePage, 936);
+			local_free(blk);
+			blk = NULL;
+		}
+		CHECK(dl->lpVtbl->CopyDataBlock(dl, NT_CONSOLE_PROPS_SIG,
+						&blk) == S_OK && blk);
+		if (blk) {
+			NT_CONSOLE_PROPS *c = blk;
+			CHECK_EQ(c->dwScreenBufferSize.Y, 300);
+			CHECK_EQ(c->FaceName[0], 'L');
+			CHECK_EQ(c->ColorTable[15], 0xffffff);
+			local_free(blk);
+			blk = NULL;
+		}
+		CHECK(dl->lpVtbl->CopyDataBlock(dl, 0xA0000099, &blk) == S_OK &&
+		      blk);
+		if (blk) {
+			CHECK_EQ(((DWORD *)blk)[2], 0x12345678);
+			local_free(blk);
+			blk = NULL;
+		}
+		/* Without its block the path is just the expansion. */
+		CHECK(dl->lpVtbl->RemoveDataBlock(dl, EXP_SZ_LINK_SIG) == S_OK);
+		CHECK(dl->lpVtbl->RemoveDataBlock(dl, EXP_SZ_LINK_SIG) ==
+		      E_FAIL);
+		CHECK(dl->lpVtbl->GetFlags(dl, &f) == S_OK &&
+		      !(f & SLDF_HAS_EXP_SZ));
+		CHECK(la->lpVtbl->GetPath(la, a, MAX_PATH, NULL,
+					  SLGP_RAWPATH) == S_OK);
+		CHECK_STR(a, "C:\\other\\a.exe");
+		dl->lpVtbl->Release(dl);
+		la->lpVtbl->Release(la);
+		dl = NULL;
+		la = NULL;
+	}
+	if (st)
+		st->lpVtbl->Release(st);
+
+	/* A block running past the end of the file doesn't load. */
+	FILE *fp = fopen(on_disk("env.lnk"), "r+b");
+	CHECK(fp != NULL);
+	if (fp) {
+		long size;
+		fseek(fp, 0, SEEK_END);
+		size = ftell(fp);
+		/* The terminal block becomes a size far too big. */
+		fseek(fp, size - 4, SEEK_SET);
+		DWORD big = 0x1000;
+		fwrite(&big, 4, 1, fp);
+		fclose(fp);
+		CHECK(create(&CLSID_ShellLink, NULL, 1, &IID_IPersistFile,
+			     (void **)&pf) == S_OK && pf);
+		if (pf) {
+			CHECK(FAILED(pf->lpVtbl->Load(pf, name, 0)));
+			pf->lpVtbl->Release(pf);
+		}
+	}
+	free(name);
+	uninit();
+}
+
 int main(void)
 {
 	const char *tmpdir = getenv("TMPDIR");
@@ -1196,6 +1417,7 @@ int main(void)
 	test_recycle_bin();
 	test_shell_link();
 	test_shell_link_more();
+	test_shell_link_data();
 	mod_free(ole);
 
 	mod_free(k32);

@@ -49,6 +49,7 @@ struct link {
 	IShellLinkW w;
 	IPersistFile file;
 	IPersistStream stream;
+	IShellLinkDataList data;
 	LONG ref;
 	/* UTF-8, or NULL when not set. */
 	char *path, *desc, *rel, *dir, *args, *icon, *cur;
@@ -56,7 +57,18 @@ struct link {
 	int icon_index, show;
 	WORD hotkey;
 	int dirty;
+	/* Extra data blocks as they are stored, terminator left out, and
+	 * the LinkFlags bits that don't say which sections are there. */
+	BYTE *extra;
+	size_t extra_len;
+	DWORD sldf;
 };
+
+/* The LinkFlags bits that say which sections follow the header. */
+#define SECTION_BITS 0xff
+/* All the extra data a link keeps, and the blocks it may have. */
+#define EXTRA_MAX (1u << 20)
+#define BLOCKS_MAX 256
 
 #define FROM(iface, member) \
 	((struct link *)((char *)(iface) - offsetof(struct link, member)))
@@ -117,6 +129,7 @@ static void link_free(struct link *l)
 	free(l->args);
 	free(l->icon);
 	free(l->cur);
+	free(l->extra);
 	if (l->pidl)
 		heap_free(heap_process(), 0, l->pidl);
 	free(l);
@@ -135,6 +148,8 @@ static HRESULT query(struct link *l, REFIID riid, void **ppv)
 		*ppv = &l->file;
 	else if (same_guid(riid, &IID_IPersistStream))
 		*ppv = &l->stream;
+	else if (same_guid(riid, &IID_IShellLinkDataList))
+		*ppv = &l->data;
 	else {
 		*ppv = NULL;
 		return E_NOINTERFACE;
@@ -154,6 +169,153 @@ static ULONG release(struct link *l)
 	if (!r)
 		link_free(l);
 	return (ULONG)r;
+}
+
+/*
+ * Extra data blocks. Each is a DWORD size (the whole block), a DWORD
+ * signature and the data; they are kept in order, unknown ones too, so a
+ * link round-trips what it was given.
+ */
+
+/* The block's offset in l->extra, or -1. */
+static long find_block(const struct link *l, DWORD sig)
+{
+	size_t at = 0;
+
+	while (l->extra_len - at >= 8) {
+		DWORD size, s;
+		memcpy(&size, l->extra + at, 4);
+		memcpy(&s, l->extra + at + 4, 4);
+		if (s == sig)
+			return (long)at;
+		at += size;
+	}
+	return -1;
+}
+
+static DWORD block_flag(DWORD sig)
+{
+	switch (sig) {
+	case EXP_SZ_LINK_SIG: return SLDF_HAS_EXP_SZ;
+	case EXP_SZ_ICON_SIG: return SLDF_HAS_EXP_ICON_SZ;
+	case EXP_DARWIN_ID_SIG: return SLDF_HAS_DARWINID;
+	}
+	return 0;
+}
+
+/* The size a block of a known signature must have, 0 for any (>= 8). */
+static DWORD block_size(DWORD sig)
+{
+	switch (sig) {
+	case EXP_SZ_LINK_SIG:
+	case EXP_SZ_ICON_SIG:
+	case EXP_DARWIN_ID_SIG:
+		return sizeof(EXP_SZ_LINK);
+	case NT_CONSOLE_PROPS_SIG: return sizeof(NT_CONSOLE_PROPS);
+	case NT_FE_CONSOLE_PROPS_SIG: return sizeof(NT_FE_CONSOLE_PROPS);
+	case EXP_SPECIAL_FOLDER_SIG: return sizeof(EXP_SPECIAL_FOLDER);
+	case EXP_TRACKER_SIG: return 0x60;
+	case EXP_KNOWN_FOLDER_SIG: return 0x1c;
+	}
+	return 0;
+}
+
+static int block_ok(DWORD size, DWORD sig)
+{
+	DWORD want = block_size(sig);
+	return size >= 8 && size <= EXTRA_MAX && (!want || size == want);
+}
+
+static void remove_block(struct link *l, DWORD sig)
+{
+	long at = find_block(l, sig);
+	DWORD size;
+
+	if (at < 0)
+		return;
+	memcpy(&size, l->extra + at, 4);
+	memmove(l->extra + at, l->extra + at + size,
+		l->extra_len - at - size);
+	l->extra_len -= size;
+	l->sldf &= ~block_flag(sig);
+	l->dirty = 1;
+}
+
+/* Adds a block, replacing one of the same signature. */
+static HRESULT add_block(struct link *l, const void *block)
+{
+	DWORD size, sig;
+
+	memcpy(&size, block, 4);
+	memcpy(&sig, (const BYTE *)block + 4, 4);
+	if (!block_ok(size, sig))
+		return E_INVALIDARG;
+	remove_block(l, sig);
+	if (l->extra_len + size > EXTRA_MAX)
+		return E_OUTOFMEMORY;
+	BYTE *p = realloc(l->extra, l->extra_len + size);
+	if (!p)
+		return E_OUTOFMEMORY;
+	memcpy(p + l->extra_len, block, size);
+	l->extra = p;
+	l->extra_len += size;
+	l->sldf |= block_flag(sig);
+	l->dirty = 1;
+	return S_OK;
+}
+
+/* An EXP_SZ_LINK-shaped block holding s in the code page and in UTF-16;
+ * S_FALSE when s won't fit one. */
+static HRESULT set_sz_block(struct link *l, DWORD sig, const char *s)
+{
+	EXP_SZ_LINK b;
+	char *a = utf8_to_acp_dup(s);
+	WCHAR *w = utf8_to_utf16_dup(s);
+	HRESULT hr = E_OUTOFMEMORY;
+
+	if (a && w) {
+		hr = S_FALSE;
+		if (strlen(a) < MAX_PATH && wstrlen(w) < MAX_PATH) {
+			memset(&b, 0, sizeof(b));
+			b.dbh.cbSize = sizeof(b);
+			b.dbh.dwSignature = sig;
+			memcpy(b.szTarget, a, strlen(a));
+			memcpy(b.swzTarget, w, wstrlen(w) * sizeof(WCHAR));
+			hr = add_block(l, &b);
+		}
+	}
+	free(a);
+	free(w);
+	return hr;
+}
+
+/* The string in an EXP_SZ_LINK-shaped block, as UTF-8: the UTF-16 one
+ * when it is there, else the code page one; NULL when neither is. */
+static char *sz_block(const struct link *l, DWORD sig)
+{
+	long at = find_block(l, sig);
+	EXP_SZ_LINK b;
+
+	if (at < 0)
+		return NULL;
+	memcpy(&b, l->extra + at, sizeof(b));
+	b.szTarget[MAX_PATH - 1] = 0;
+	b.swzTarget[MAX_PATH - 1] = 0;
+	if (b.swzTarget[0])
+		return utf16_to_utf8_dup(b.swzTarget);
+	return b.szTarget[0] ? acp_to_utf8(b.szTarget) : NULL;
+}
+
+/* Keeps a path or icon location with %NAME% references in its block, or
+ * drops the block when the new one has none. */
+static void env_block(struct link *l, DWORD sig, const char *raw)
+{
+	if (raw && strchr(raw, '%')) {
+		if (set_sz_block(l, sig, raw) != S_OK)
+			remove_block(l, sig);
+	} else {
+		remove_block(l, sig);
+	}
 }
 
 /* The target's details for GetPath's WIN32_FIND_DATA. */
@@ -192,10 +354,19 @@ static void find_data(const char *path, void *fd, int wide)
 /* The A and W methods share these, with wide saying which. */
 
 static HRESULT get_path(struct link *l, void *buf, int cch, void *fd,
-			int wide)
+			int wide, DWORD flags)
 {
 	if (!buf || cch <= 0)
 		return E_INVALIDARG;
+	/* The path as it was set, %NAME% references and all. */
+	char *raw = (flags & SLGP_RAWPATH) ? sz_block(l, EXP_SZ_LINK_SIG) :
+					     NULL;
+	if (raw) {
+		out(raw, buf, cch, wide);
+		free(raw);
+		find_data(l->path, fd, wide);
+		return S_OK;
+	}
 	out(l->path, buf, cch, wide);
 	find_data(l->path, fd, wide);
 	return l->path ? S_OK : S_FALSE;
@@ -260,7 +431,17 @@ static HRESULT set_path(struct link *l, char *p)
 {
 	if (!p)
 		return E_INVALIDARG;
-	char *full = *p ? full_path(p) : NULL;
+	/* A path with %NAME% references is kept as it is in its block, and
+	 * the target is its expansion now. */
+	char *exp = strchr(p, '%') ? k32_expand_env(p) : NULL;
+	if (strchr(p, '%') && !exp) {
+		free(p);
+		return E_OUTOFMEMORY;
+	}
+	env_block(l, EXP_SZ_LINK_SIG, *p ? p : NULL);
+	char *full = exp ? (*exp ? full_path(exp) : NULL) :
+		     *p ? full_path(p) : NULL;
+	free(exp);
 	free(p);
 	if (l->pidl) {
 		heap_free(heap_process(), 0, l->pidl);
@@ -334,6 +515,18 @@ static HRESULT set_field(struct link *l, char **field, char *v, int given)
 	set_str(field, v);
 	l->dirty = 1;
 	return S_OK;
+}
+
+/* An icon location with %NAME% references also goes in its block. */
+static HRESULT set_icon(struct link *l, char *v, int given, int index)
+{
+	HRESULT hr = set_field(l, &l->icon, v, given);
+
+	if (hr == S_OK) {
+		l->icon_index = index;
+		env_block(l, EXP_SZ_ICON_SIG, l->icon);
+	}
+	return hr;
 }
 
 static HRESULT resolve(struct link *l, DWORD flags)
@@ -410,7 +603,7 @@ static ULONG WINAPI a_Release(IShellLinkA *This) { return release(LA(This)); }
 static HRESULT WINAPI a_GetPath(IShellLinkA *This, LPSTR f, int cch,
 				WIN32_FIND_DATAA *fd, DWORD flags)
 {
-	return get_path(LA(This), f, cch, fd, 0);
+	return get_path(LA(This), f, cch, fd, 0, flags);
 }
 static HRESULT WINAPI a_GetIDList(IShellLinkA *This, LPITEMIDLIST *p)
 {
@@ -484,8 +677,7 @@ static HRESULT WINAPI a_GetIconLocation(IShellLinkA *This, LPSTR s, int cch,
 }
 static HRESULT WINAPI a_SetIconLocation(IShellLinkA *This, LPCSTR s, int i)
 {
-	LA(This)->icon_index = i;
-	return set_field(LA(This), &LA(This)->icon, dup_a(s), s != NULL);
+	return set_icon(LA(This), dup_a(s), s != NULL, i);
 }
 static HRESULT WINAPI a_SetRelativePath(IShellLinkA *This, LPCSTR s, DWORD r)
 {
@@ -524,7 +716,7 @@ static ULONG WINAPI w_Release(IShellLinkW *This) { return release(LW(This)); }
 static HRESULT WINAPI w_GetPath(IShellLinkW *This, LPWSTR f, int cch,
 				WIN32_FIND_DATAW *fd, DWORD flags)
 {
-	return get_path(LW(This), f, cch, fd, 1);
+	return get_path(LW(This), f, cch, fd, 1, flags);
 }
 static HRESULT WINAPI w_GetIDList(IShellLinkW *This, LPITEMIDLIST *p)
 {
@@ -588,8 +780,7 @@ static HRESULT WINAPI w_GetIconLocation(IShellLinkW *This, LPWSTR s, int cch,
 }
 static HRESULT WINAPI w_SetIconLocation(IShellLinkW *This, LPCWSTR s, int i)
 {
-	LW(This)->icon_index = i;
-	return set_field(LW(This), &LW(This)->icon, dup_w(s), s != NULL);
+	return set_icon(LW(This), dup_w(s), s != NULL, i);
 }
 static HRESULT WINAPI w_SetRelativePath(IShellLinkW *This, LPCWSTR s, DWORD r)
 {
@@ -716,6 +907,14 @@ static BYTE *serialize(struct link *l, size_t *len)
 		flags |= HAS_ARGUMENTS;
 	if (l->icon)
 		flags |= HAS_ICON_LOCATION;
+	flags |= l->sldf & ~SECTION_BITS;
+	if (l->sldf & SLDF_FORCE_NO_LINKINFO) {
+		free(base);
+		free(wbase);
+		base = NULL;
+		wbase = NULL;
+		flags &= ~HAS_LINK_INFO;
+	}
 
 	/* The header. */
 	BYTE zero[24] = { 0 };
@@ -795,7 +994,8 @@ static BYTE *serialize(struct link *l, size_t *len)
 		put_string(&b, l->args);
 	if (l->icon)
 		put_string(&b, l->icon);
-	put32(&b, 0);	/* no extra data */
+	put(&b, l->extra, l->extra_len);
+	put32(&b, 0);	/* the terminal block */
 	if (b.failed) {
 		free(b.p);
 		return NULL;
@@ -999,6 +1199,46 @@ static HRESULT parse(struct link *l, const BYTE *p, size_t n)
 			goto bad;
 		}
 	}
+	/* Extra data, up to the terminal block (a size under 4) or, in a
+	 * link that leaves that out, the end. */
+	size_t xstart = at;
+	for (int i = 0;; i++) {
+		DWORD size = 0;
+		if (n - at < 4 || (get32(p, n, at, &size), size < 4))
+			break;
+		if (i == BLOCKS_MAX || size < 8 || size > n - at ||
+		    at - xstart + size > EXTRA_MAX)
+			goto bad;
+		at += size;
+	}
+	size_t xlen = at - xstart;
+	BYTE *extra = xlen ? malloc(xlen) : NULL;
+	if (xlen && !extra) {
+		hr = E_OUTOFMEMORY;
+		goto bad;
+	}
+	if (xlen)
+		memcpy(extra, p + xstart, xlen);
+	free(l->extra);
+	l->extra = extra;
+	l->extra_len = xlen;
+	l->sldf = flags & ~SECTION_BITS;
+	/* A path or icon kept with %NAME% references is taken from its
+	 * block, expanded here. */
+	char *raw = (flags & SLDF_HAS_EXP_SZ) ?
+		    sz_block(l, EXP_SZ_LINK_SIG) : NULL;
+	if (raw) {
+		char *e = k32_expand_env(raw);
+		char *full = e && *e ? full_path(e) : NULL;
+		if (full) {
+			free(path);
+			path = full;
+		}
+		free(e);
+		free(raw);
+	}
+	if (!str[4] && (flags & SLDF_HAS_EXP_ICON_SZ))
+		str[4] = sz_block(l, EXP_SZ_ICON_SIG);
 	set_str(&l->path, path);
 	set_str(&l->desc, str[0]);
 	set_str(&l->rel, str[1]);
@@ -1289,26 +1529,35 @@ static HRESULT WINAPI ps_Load(IPersistStream *This, IStream *s)
 		put(&b, p, bytes);
 		free(p);
 	}
-	/* Extra data blocks, skipped through a small buffer, up to the
-	 * terminal block, which has to come. */
+	/* Extra data blocks, up to the terminal block, which has to come. */
 	int ended = 0;
-	for (int i = 0; hr == S_OK && i < 256; i++) {
+	size_t extra = 0;
+	for (int i = 0; hr == S_OK && i <= BLOCKS_MAX; i++) {
 		DWORD n;
+		BYTE *p;
 		if (read_all(s, &n, 4)) {
 			hr = E_FAIL;
 			break;
 		}
 		if (n < 4) {
+			put32(&b, 0);
 			ended = 1;
 			break;
 		}
-		BYTE scratch[256];
-		for (DWORD left = n - 4; hr == S_OK && left; ) {
-			ULONG k = left < sizeof(scratch) ? left : sizeof(scratch);
-			if (read_all(s, scratch, k))
-				hr = E_FAIL;
-			left -= k;
+		if (i == BLOCKS_MAX || n < 8 || n > EXTRA_MAX - extra) {
+			hr = E_FAIL;
+			break;
 		}
+		if (!(p = malloc(n))) {
+			hr = E_OUTOFMEMORY;
+			break;
+		}
+		memcpy(p, &n, 4);
+		if (read_all(s, p + 4, n - 4))
+			hr = E_FAIL;
+		put(&b, p, n);
+		free(p);
+		extra += n;
 	}
 	if (hr == S_OK && !ended)
 		hr = E_FAIL;
@@ -1367,6 +1616,97 @@ static const IPersistStreamVtbl ps_vtbl = {
 
 /* The class factory, and shell32's DllGetClassObject. */
 
+/* IShellLinkDataList. */
+
+#define LD(This) FROM(This, data)
+
+static HRESULT WINAPI dl_QueryInterface(IShellLinkDataList *This, REFIID r,
+					void **p)
+{
+	return query(LD(This), r, p);
+}
+static ULONG WINAPI dl_AddRef(IShellLinkDataList *This)
+{
+	return addref(LD(This));
+}
+static ULONG WINAPI dl_Release(IShellLinkDataList *This)
+{
+	return release(LD(This));
+}
+static HRESULT WINAPI dl_AddDataBlock(IShellLinkDataList *This, void *block)
+{
+	if (!block)
+		return E_INVALIDARG;
+	return add_block(LD(This), block);
+}
+/* The copy is LocalAlloc'd, for the caller's LocalFree. */
+static HRESULT WINAPI dl_CopyDataBlock(IShellLinkDataList *This, DWORD sig,
+				       void **block)
+{
+	struct link *l = LD(This);
+	long at;
+	DWORD size;
+
+	if (!block)
+		return E_INVALIDARG;
+	*block = NULL;
+	if ((at = find_block(l, sig)) < 0)
+		return E_FAIL;
+	memcpy(&size, l->extra + at, 4);
+	if (!(*block = global_alloc(0, size)))
+		return E_OUTOFMEMORY;
+	memcpy(*block, l->extra + at, size);
+	return S_OK;
+}
+static HRESULT WINAPI dl_RemoveDataBlock(IShellLinkDataList *This, DWORD sig)
+{
+	struct link *l = LD(This);
+
+	if (find_block(l, sig) < 0)
+		return E_FAIL;
+	remove_block(l, sig);
+	return S_OK;
+}
+/* The flags a save would write: which sections are there, then the
+ * rest as they were set or read. */
+static HRESULT WINAPI dl_GetFlags(IShellLinkDataList *This, DWORD *flags)
+{
+	struct link *l = LD(This);
+	DWORD f = SLDF_UNICODE;
+
+	if (!flags)
+		return E_INVALIDARG;
+	if (l->pidl)
+		f |= SLDF_HAS_ID_LIST;
+	if (l->path && !(l->sldf & SLDF_FORCE_NO_LINKINFO))
+		f |= SLDF_HAS_LINK_INFO;
+	if (l->desc)
+		f |= SLDF_HAS_NAME;
+	if (l->rel)
+		f |= SLDF_HAS_RELPATH;
+	if (l->dir)
+		f |= SLDF_HAS_WORKINGDIR;
+	if (l->args)
+		f |= SLDF_HAS_ARGS;
+	if (l->icon)
+		f |= SLDF_HAS_ICONLOCATION;
+	*flags = f | (l->sldf & ~SECTION_BITS);
+	return S_OK;
+}
+static HRESULT WINAPI dl_SetFlags(IShellLinkDataList *This, DWORD flags)
+{
+	struct link *l = LD(This);
+
+	l->sldf = flags & ~SECTION_BITS;
+	l->dirty = 1;
+	return S_OK;
+}
+
+static const IShellLinkDataListVtbl dl_vtbl = {
+	dl_QueryInterface, dl_AddRef, dl_Release, dl_AddDataBlock,
+	dl_CopyDataBlock, dl_RemoveDataBlock, dl_GetFlags, dl_SetFlags,
+};
+
 static HRESULT create_link(IUnknown *outer, REFIID riid, void **ppv)
 {
 	if (!ppv)
@@ -1381,6 +1721,7 @@ static HRESULT create_link(IUnknown *outer, REFIID riid, void **ppv)
 	l->w.lpVtbl = &w_vtbl;
 	l->file.lpVtbl = &pf_vtbl;
 	l->stream.lpVtbl = &ps_vtbl;
+	l->data.lpVtbl = &dl_vtbl;
 	l->ref = 1;
 	l->show = SW_SHOWNORMAL;
 	HRESULT hr = query(l, riid, ppv);

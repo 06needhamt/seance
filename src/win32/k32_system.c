@@ -885,7 +885,7 @@ WINFN(BOOL) k32_FreeEnvironmentStringsW(LPWSTR block)
 }
 
 /* Expands %NAME% references; unknown ones are left as they are. */
-static char *expand(const char *s)
+char *k32_expand_env(const char *s)
 {
 	size_t cap = strlen(s) + 64, n = 0;
 	char *out = malloc(cap);
@@ -931,7 +931,7 @@ static char *expand(const char *s)
 WINFN(DWORD) k32_ExpandEnvironmentStringsA(LPCSTR src, LPSTR dst, DWORD size)
 {
 	char *u = acp_to_utf8(src);
-	char *e = u ? expand(u) : NULL;
+	char *e = u ? k32_expand_env(u) : NULL;
 	DWORD r = 0;
 
 	if (e) {
@@ -950,7 +950,7 @@ WINFN(DWORD) k32_ExpandEnvironmentStringsA(LPCSTR src, LPSTR dst, DWORD size)
 WINFN(DWORD) k32_ExpandEnvironmentStringsW(LPCWSTR src, LPWSTR dst, DWORD size)
 {
 	char *u = utf16_to_utf8_dup(src);
-	char *e = u ? expand(u) : NULL;
+	char *e = u ? k32_expand_env(u) : NULL;
 	DWORD r = 0;
 
 	if (e) {

@@ -80,6 +80,9 @@ DWORD copy_out_w(const char *s, LPWSTR buf, DWORD size);
 /* GetFullPathName's answer for a UTF-8 name (malloc()ed), or NULL. */
 char *k32_full_path(const char *name);
 
+/* A UTF-8 string with its %NAME% references expanded (malloc'd). */
+char *k32_expand_env(const char *s);
+
 /* CreateThread with the defaults, for threads the built-in DLLs run. */
 HANDLE thread_create(LPTHREAD_START_ROUTINE start, LPVOID param);
 
