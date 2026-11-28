@@ -69,6 +69,8 @@ struct listview {
 	SIZE spacing, small_spacing;
 	BOOL tile, unicode;
 	HFONT font;
+	HWND edit;		/* a label being edited, and its item */
+	int edit_item;
 };
 
 static const WCHAR header_class[] = u"SysHeader32";
@@ -940,6 +942,169 @@ static void layout_header(HWND h, struct listview *s)
 	comctl_move(s->header, 0, 0, rc.right, header_height(h, s));
 }
 
+/* ---- label editing ---- */
+
+#define EDIT_ID 0x4c564544	/* the edit's subclass */
+
+static WCHAR *label_of(HWND h, struct listview *s, int i)
+{
+	WCHAR buf[DISPINFO_MAX];
+	LVITEMW it;
+
+	memset(&it, 0, sizeof(it));
+	it.mask = LVIF_TEXT;
+	it.iItem = i;
+	it.pszText = buf;
+	it.cchTextMax = DISPINFO_MAX;
+	buf[0] = 0;
+	if (!item_get(h, s, &it, 1))
+		return NULL;
+	return comctl_w_dup(it.pszText ? it.pszText : u"");
+}
+
+/* LVN_BEGIN/ENDLABELEDIT with item i's text (NULL: cancelled). */
+static LRESULT label_notify(HWND h, struct listview *s, int i, BOOL end,
+			    const WCHAR *text)
+{
+	BOOL uni = comctl_notify_unicode(h);
+	NMLVDISPINFOW nm;
+	char *a = NULL;
+
+	memset(&nm, 0, sizeof(nm));
+	nm.item.mask = LVIF_TEXT | LVIF_PARAM | LVIF_STATE;
+	nm.item.iItem = i;
+	nm.item.state = state_get(h, s, i);
+	if (!ownerdata(h) && i >= 0 && i < s->n)
+		nm.item.lParam = s->item[i]->lParam;
+	if (text) {
+		if (uni) {
+			nm.item.pszText = (WCHAR *)text;
+		} else {
+			a = comctl_w_to_a(text);
+			nm.item.pszText = (WCHAR *)a;
+		}
+		nm.item.cchTextMax = DISPINFO_MAX;
+	}
+	UINT code = end ? (uni ? LVN_ENDLABELEDITW : LVN_ENDLABELEDITA) :
+		    (uni ? LVN_BEGINLABELEDITW : LVN_BEGINLABELEDITA);
+	LRESULT r = comctl_notify(h, code, &nm.hdr);
+	free(a);
+	return r;
+}
+
+/*
+ * Ends the edit: the parent is told the new text (or that it was
+ * cancelled) and keeps it by answering TRUE. From the edit's own
+ * messages it is only hidden, and destroyed once they are done.
+ */
+static void end_edit(HWND h, struct listview *s, BOOL save, BOOL from_edit)
+{
+	BOOL (WINAPI *destroy_w)(HWND) = USER32(DestroyWindow);
+	HWND (WINAPI *get_focus)(void) = USER32(GetFocus);
+	HWND (WINAPI *set_focus)(HWND) = USER32(SetFocus);
+	int (WINAPI *get_len)(HWND) = USER32(GetWindowTextLengthW);
+	int (WINAPI *get_text)(HWND, LPWSTR, int) = USER32(GetWindowTextW);
+	HWND e = s->edit;
+	int i = s->edit_item;
+
+	if (!e)
+		return;
+	s->edit = NULL;
+	WCHAR *text = NULL;
+	if (save) {
+		int n = get_len(e);
+		text = malloc((n + 1) * sizeof(WCHAR));
+		if (text) {
+			text[0] = 0;
+			get_text(e, text, n + 1);
+		}
+	}
+	comctl_show(e, SW_HIDE);
+	if (get_focus() == e)
+		set_focus(h);
+	if (label_notify(h, s, i, TRUE, text) && text && comctl_alive(h, s) &&
+	    i >= 0 && i < count(h, s) && !ownerdata(h)) {
+		LVITEMW q;
+		memset(&q, 0, sizeof(q));
+		q.mask = LVIF_TEXT;
+		q.iItem = i;
+		q.pszText = text;
+		item_set(h, s, &q, 1);
+	}
+	free(text);
+	if (from_edit)
+		comctl_post(h, WIN_EDIT_DONE, 0, (LPARAM)e);
+	else
+		destroy_w(e);
+}
+
+static LRESULT CALLBACK edit_sub(HWND e, UINT msg, WPARAM wp, LPARAM lp,
+				 UINT_PTR id, DWORD_PTR ref)
+{
+	HWND lv = (HWND)ref;
+	struct listview *s = comctl_state(lv);
+
+	switch (msg) {
+	case WM_GETDLGCODE:
+		return DLGC_WANTALLKEYS | DLGC_WANTCHARS | DLGC_WANTARROWS |
+		       DLGC_HASSETSEL;
+	case WM_KEYDOWN:
+		if ((wp == VK_RETURN || wp == VK_ESCAPE) && s && s->edit == e) {
+			end_edit(lv, s, wp == VK_RETURN, TRUE);
+			return 0;
+		}
+		break;
+	case WM_CHAR:
+		if (wp == '\r' || wp == 0x1b)
+			return 0;
+		break;
+	case WM_KILLFOCUS: {
+		LRESULT r = comctl_def_subclass(e, msg, wp, lp);
+		if (s && s->edit == e)
+			end_edit(lv, s, TRUE, TRUE);
+		return r;
+	}
+	}
+	return comctl_def_subclass(e, msg, wp, lp);
+}
+
+static HWND begin_edit(HWND h, struct listview *s, int i)
+{
+	HWND (WINAPI *set_focus)(HWND) = USER32(SetFocus);
+
+	if (s->edit)
+		end_edit(h, s, TRUE, FALSE);
+	if (i < 0 || i >= count(h, s) || !comctl_alive(h, s))
+		return NULL;
+	WCHAR *text = label_of(h, s, i);
+	if (!text)
+		return NULL;
+	if (label_notify(h, s, i, FALSE, text) || !comctl_alive(h, s)) {
+		free(text);
+		return NULL;
+	}
+	RECT rc;
+	if (!item_rect(h, s, i, LVIR_LABEL, &rc))
+		memset(&rc, 0, sizeof(rc));
+	HWND e = comctl_create(u"EDIT", WS_CHILD | WS_VISIBLE | WS_BORDER |
+			       ES_AUTOHSCROLL, rc.left, rc.top,
+			       rc.right - rc.left, rc.bottom - rc.top, h, 1);
+	if (!e) {
+		free(text);
+		return NULL;
+	}
+	if (s->font)
+		comctl_send(e, WM_SETFONT, (WPARAM)s->font, FALSE);
+	comctl_send(e, WM_SETTEXT, 0, (LPARAM)text);
+	free(text);
+	comctl_send(e, EM_SETSEL, 0, -1);
+	comctl_set_subclass(e, edit_sub, EDIT_ID, (DWORD_PTR)h);
+	s->edit = e;
+	s->edit_item = i;
+	set_focus(e);
+	return s->edit;
+}
+
 static void destroy(struct listview *s)
 {
 	for (int i = 0; i < s->n; i++)
@@ -1390,7 +1555,22 @@ LRESULT STUB_WINAPI comctl_listview_proc(HWND h, UINT msg, WPARAM wp,
 		return TRUE;
 	case LVM_EDITLABELA:
 	case LVM_EDITLABELW:
+		if ((int)wp == -1) {
+			end_edit(h, s, FALSE, FALSE);
+			return 0;
+		}
+		return (LRESULT)begin_edit(h, s, (int)wp);
 	case LVM_GETEDITCONTROL:
+		return (LRESULT)s->edit;
+	case LVM_CANCELEDITLABEL:
+		end_edit(h, s, FALSE, FALSE);
+		return 0;
+	case WIN_EDIT_DONE: {
+		BOOL (WINAPI *destroy_w)(HWND) = USER32(DestroyWindow);
+		if ((HWND)lp && (HWND)lp != s->edit)
+			destroy_w((HWND)lp);
+		return 0;
+	}
 	case LVM_CREATEDRAGIMAGE:
 		return 0;
 	case LVM_GETISEARCHSTRINGA:

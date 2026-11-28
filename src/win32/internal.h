@@ -58,6 +58,8 @@ size_t win_usable(void *p);
 /* Posted by a built-in control to itself for work it deferred (the rebar's
  * layout after its pass budget ran out). Same range, also unused. */
 #define WIN_DEFERRED_LAYOUT 0x03F8
+/* Posted by a list view to itself to destroy a label's finished edit. */
+#define WIN_EDIT_DONE 0x03F9
 struct win_lbtext {
 	int done;
 	LRESULT result;

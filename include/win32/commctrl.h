@@ -1048,6 +1048,7 @@ typedef struct tagNMHEADERW {
 #define LVM_SETITEMTEXTW     (LVM_FIRST + 116)
 #define LVM_GETISEARCHSTRINGW (LVM_FIRST + 117)
 #define LVM_EDITLABELW       (LVM_FIRST + 118)
+#define LVM_CANCELEDITLABEL  (LVM_FIRST + 179)
 #define LVM_SETVIEW          (LVM_FIRST + 142)
 #define LVM_GETVIEW          (LVM_FIRST + 143)
 #define LVM_SETUNICODEFORMAT CCM_SETUNICODEFORMAT
@@ -1631,6 +1632,71 @@ typedef const PROPSHEETHEADERW *LPCPROPSHEETHEADERW;
 #define PSCB_PRECREATE       2
 #define ID_PSRESTARTWINDOWS  0x2
 #define ID_PSREBOOTSYSTEM    0x3
+
+/* Property sheet notifications (WM_NOTIFY to a page) and messages. */
+#define PSN_FIRST            (0U - 200U)
+#define PSN_SETACTIVE        (PSN_FIRST - 0)
+#define PSN_KILLACTIVE       (PSN_FIRST - 1)
+#define PSN_APPLY            (PSN_FIRST - 2)
+#define PSN_RESET            (PSN_FIRST - 3)
+#define PSN_HELP             (PSN_FIRST - 5)
+#define PSN_WIZBACK          (PSN_FIRST - 6)
+#define PSN_WIZNEXT          (PSN_FIRST - 7)
+#define PSN_WIZFINISH        (PSN_FIRST - 8)
+#define PSN_QUERYCANCEL      (PSN_FIRST - 9)
+#define PSNRET_NOERROR       0
+#define PSNRET_INVALID       1
+#define PSNRET_INVALID_NOCHANGEPAGE 2
+#define PSNRET_MESSAGEHANDLED 3
+#define PSM_SETCURSEL        (WM_USER + 101)
+#define PSM_REMOVEPAGE       (WM_USER + 102)
+#define PSM_ADDPAGE          (WM_USER + 103)
+#define PSM_CHANGED          (WM_USER + 104)
+#define PSM_RESTARTWINDOWS   (WM_USER + 105)
+#define PSM_REBOOTSYSTEM     (WM_USER + 106)
+#define PSM_CANCELTOCLOSE    (WM_USER + 107)
+#define PSM_QUERYSIBLINGS    (WM_USER + 108)
+#define PSM_UNCHANGED        (WM_USER + 109)
+#define PSM_APPLY            (WM_USER + 110)
+#define PSM_SETTITLEA        (WM_USER + 111)
+#define PSM_SETWIZBUTTONS    (WM_USER + 112)
+#define PSM_PRESSBUTTON      (WM_USER + 113)
+#define PSM_SETCURSELID      (WM_USER + 114)
+#define PSM_SETFINISHTEXTA   (WM_USER + 115)
+#define PSM_GETTABCONTROL    (WM_USER + 116)
+#define PSM_ISDIALOGMESSAGE  (WM_USER + 117)
+#define PSM_GETCURRENTPAGEHWND (WM_USER + 118)
+#define PSM_INSERTPAGE       (WM_USER + 119)
+#define PSM_SETTITLEW        (WM_USER + 120)
+#define PSM_SETFINISHTEXTW   (WM_USER + 121)
+#define PSM_SETHEADERTITLEA  (WM_USER + 125)
+#define PSM_SETHEADERTITLEW  (WM_USER + 126)
+#define PSM_SETHEADERSUBTITLEA (WM_USER + 127)
+#define PSM_SETHEADERSUBTITLEW (WM_USER + 128)
+#define PSM_HWNDTOINDEX      (WM_USER + 129)
+#define PSM_INDEXTOHWND      (WM_USER + 130)
+#define PSM_PAGETOINDEX      (WM_USER + 131)
+#define PSM_INDEXTOPAGE      (WM_USER + 132)
+#define PSM_IDTOINDEX        (WM_USER + 133)
+#define PSM_INDEXTOID        (WM_USER + 134)
+#define PSM_GETRESULT        (WM_USER + 135)
+#define PSM_RECALCPAGESIZES  (WM_USER + 136)
+#define PSBTN_BACK           0
+#define PSBTN_NEXT           1
+#define PSBTN_FINISH         2
+#define PSBTN_OK             3
+#define PSBTN_APPLYNOW       4
+#define PSBTN_CANCEL         5
+#define PSBTN_HELP           6
+#define PSWIZB_BACK          0x1
+#define PSWIZB_NEXT          0x2
+#define PSWIZB_FINISH        0x4
+#define PSWIZB_DISABLEDFINISH 0x8
+
+typedef struct _PSHNOTIFY {
+	NMHDR hdr;
+	LPARAM lParam;
+} PSHNOTIFY, *LPPSHNOTIFY;
 
 /* Task dialogs. */
 typedef HRESULT (CALLBACK *PFTASKDIALOGCALLBACK)(HWND hwnd, UINT msg,

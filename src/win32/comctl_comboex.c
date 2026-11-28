@@ -5,7 +5,7 @@
  * indent, lParam), the selection, the image list and the extended
  * styles, with Windows' CBEM_ messages and the combo box messages a
  * caller sends it (CB_GETCOUNT, CB_SETCURSEL, CB_GETLBTEXT, ...).
- * user32 has no combo box here, so the control answers them itself:
+ * It answers them itself rather than through a user32 combo box child:
  * CBEM_GETCOMBOCONTROL is the control, and there is no edit control.
  * It sends CBEN_INSERTITEM and CBEN_DELETEITEM, and CBN_SELCHANGE,
  * CBN_DROPDOWN and CBN_CLOSEUP as WM_COMMAND.

@@ -1146,6 +1146,7 @@ struct subclass_info {
 	WNDPROC orig;
 	int unicode;		/* the window's charset when subclassed */
 	int running;
+	int destroyed;		/* WM_NCDESTROY came during a dispatch */
 };
 
 static struct subclass_info *subclass_info(HWND h)
@@ -1219,8 +1220,11 @@ WINFN(LRESULT) subclass_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 	s->stackpos = saved;
 	if (!s->running)
 		subclass_sweep(s);
-	if (msg == WM_NCDESTROY && !s->running) {
-		/* The window is gone: nothing is left to call them. */
+	if (msg == WM_NCDESTROY)
+		s->destroyed = 1;
+	if (s->destroyed && !s->running) {
+		/* The window is gone: nothing is left to call them, also
+		 * when it was destroyed from inside one of them. */
 		while (s->procs) {
 			struct subclass *next = s->procs->next;
 			free(s->procs);

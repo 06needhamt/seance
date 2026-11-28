@@ -1053,7 +1053,8 @@ static void test_sheets(void)
 	PROPSHEETPAGEA tiny = { .dwSize = 12 };
 	CHECK(CreatePropertySheetPageA(&tiny) == NULL);
 
-	/* PropertySheet answers Cancel and destroys every page. */
+	/* Pages with no template can't be shown: the sheet is cancelled and
+	 * every page destroyed. */
 	PROPSHEETHEADERA psh;
 	memset(&psh, 0, sizeof(psh));
 	psh.dwSize = sizeof(psh);
@@ -1063,7 +1064,7 @@ static void test_sheets(void)
 	psh.ppsp = &pages[0].psp;
 	addrefs = releases = 0;
 	CHECK_EQ(PropertySheetA(&psh), 0);
-	CHECK(addrefs == 2 && releases == 2 && refs == 0 && !creates);
+	CHECK(addrefs == 2 && releases == 2 && refs == 0 && creates == 2);
 	CHECK_EQ(last_cookie, 41);
 
 	HPROPSHEETPAGE hp[2] = { CreatePropertySheetPageA(&pages[0].psp),
@@ -1080,6 +1081,182 @@ static void test_sheets(void)
 	pw.dwSize = sizeof(pw);
 	pw.pszCaption = w("Wide");
 	CHECK_EQ(PropertySheetW(&pw), 0);
+}
+
+/* A property page's template: an edit and a check box. */
+static WORD page_tmpl[64];
+
+static void make_page_tmpl(void)
+{
+	WORD *p = page_tmpl;
+	DWORD style = WS_CHILD | DS_CONTROL | WS_CAPTION;
+	*p++ = LOWORD(style);
+	*p++ = HIWORD(style);
+	*p++ = 0;
+	*p++ = 0;
+	*p++ = 1;			/* one item */
+	*p++ = 0;
+	*p++ = 0;
+	*p++ = 150;
+	*p++ = 80;
+	*p++ = 0;			/* menu */
+	*p++ = 0;			/* class */
+	for (const char *t = "General"; ; t++) {
+		*p++ = (BYTE)*t;
+		if (!*t)
+			break;
+	}
+	if ((p - page_tmpl) & 1)
+		*p++ = 0;
+	DWORD istyle = WS_CHILD | WS_VISIBLE | WS_TABSTOP;
+	*p++ = LOWORD(istyle);
+	*p++ = HIWORD(istyle);
+	*p++ = 0;
+	*p++ = 0;
+	*p++ = 5;
+	*p++ = 5;
+	*p++ = 100;
+	*p++ = 12;
+	*p++ = 100;			/* id */
+	*p++ = 0xffff;
+	*p++ = 0x81;			/* EDIT */
+	*p++ = 0;			/* no text */
+	*p++ = 0;			/* no data */
+}
+
+static char plog[512];
+static LRESULT apply_answer, kill_answer, cancel_answer;
+static LONG_PTR (WINAPI *p_SetWindowLongPtr)(HWND, int, LONG_PTR);
+
+static void pnote(const char *s, int n)
+{
+	size_t k = strlen(plog);
+	snprintf(plog + k, sizeof(plog) - k, "%s%s%d", k ? "," : "", s, n);
+}
+
+static INT_PTR WINAPI page_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+	if (msg == WM_INITDIALOG) {
+		pnote("init", ((struct my_page *)lp)->cookie);
+		return TRUE;
+	}
+	if (msg != WM_NOTIFY)
+		return FALSE;
+	const PSHNOTIFY *n = (const PSHNOTIFY *)lp;
+	LRESULT r = 0;
+	switch (n->hdr.code) {
+	case PSN_SETACTIVE: pnote("set", 0); break;
+	case PSN_KILLACTIVE: pnote("kill", 0); r = kill_answer; break;
+	case PSN_APPLY: pnote("apply", (int)n->lParam); r = apply_answer;
+		break;
+	case PSN_RESET: pnote("reset", 0); break;
+	case PSN_QUERYCANCEL: pnote("querycancel", 0); r = cancel_answer;
+		break;
+	default: return FALSE;
+	}
+	p_SetWindowLongPtr(h, DWLP_MSGRESULT, r);
+	return TRUE;
+}
+
+static void test_sheet_pages(void)
+{
+	FN(INT_PTR, PropertySheetA, LPCPROPSHEETHEADERA);
+	USER(LRESULT, SendMessageA, HWND, UINT, WPARAM, LPARAM);
+	USER(BOOL, DestroyWindow, HWND);
+	USER(BOOL, IsWindowVisible, HWND);
+	USER(BOOL, IsWindowEnabled, HWND);
+	USER(HWND, GetDlgItem, HWND, int);
+	USER(int, GetWindowTextA, HWND, LPSTR, int);
+	USER(HWND, GetParent, HWND);
+#if defined(__x86_64__)
+	USER(LONG_PTR, SetWindowLongPtrA, HWND, int, LONG_PTR);
+	p_SetWindowLongPtr = SetWindowLongPtrA;
+#else
+	USER(LONG, SetWindowLongA, HWND, int, LONG);
+	p_SetWindowLongPtr = (LONG_PTR (WINAPI *)(HWND, int, LONG_PTR))
+		SetWindowLongA;
+#endif
+	char buf[64];
+	struct my_page pages[2];
+
+	make_page_tmpl();
+	memset(pages, 0, sizeof(pages));
+	for (int i = 0; i < 2; i++) {
+		pages[i].psp.dwSize = sizeof(pages[i]);
+		pages[i].psp.dwFlags = PSP_DLGINDIRECT;
+		pages[i].psp.pResource = page_tmpl;
+		pages[i].psp.pfnDlgProc = page_proc;
+		pages[i].cookie = 50 + i;
+	}
+	pages[1].psp.dwFlags |= PSP_USETITLE;
+	pages[1].psp.pszTitle = "Advanced";
+	PROPSHEETHEADERA psh;
+	memset(&psh, 0, sizeof(psh));
+	psh.dwSize = sizeof(psh);
+	psh.dwFlags = PSH_PROPSHEETPAGE | PSH_PROPTITLE;
+	psh.pszCaption = "Codec";
+	psh.nPages = 2;
+	psh.ppsp = &pages[0].psp;
+
+	/* Modal: the first page is shown, then nobody presses OK. */
+	plog[0] = 0;
+	CHECK_EQ(PropertySheetA(&psh), 0);
+	CHECK(!strcmp(plog, "init50,set0,querycancel0,reset0"));
+	setenv("VFW_DIALOG", "ok", 1);
+	plog[0] = 0;
+	CHECK_EQ(PropertySheetA(&psh), 1);
+	CHECK(!strcmp(plog, "init50,set0,kill0,apply1"));
+	/* A page that refuses its settings keeps the sheet open, until it
+	 * is closed as the user isn't there. */
+	apply_answer = PSNRET_INVALID_NOCHANGEPAGE;
+	CHECK_EQ(PropertySheetA(&psh), 1);
+	apply_answer = 0;
+	unsetenv("VFW_DIALOG");
+
+	/* Modeless: driven with PSM_ messages. */
+	psh.dwFlags |= PSH_MODELESS;
+	psh.nStartPage = 1;
+	plog[0] = 0;
+	HWND sheet = (HWND)PropertySheetA(&psh);
+	CHECK(sheet != NULL);
+	if (!sheet)
+		return;
+	CHECK(!strcmp(plog, "init51,set0"));
+	CHECK(GetWindowTextA(sheet, buf, sizeof(buf)) &&
+	      !strcmp(buf, "Codec Properties"));
+	HWND tab = (HWND)SendMessageA(sheet, PSM_GETTABCONTROL, 0, 0);
+	CHECK(tab && SendMessageA(tab, TCM_GETITEMCOUNT, 0, 0) == 2 &&
+	      SendMessageA(tab, TCM_GETCURSEL, 0, 0) == 1);
+	HWND p1 = (HWND)SendMessageA(sheet, PSM_GETCURRENTPAGEHWND, 0, 0);
+	CHECK(p1 && GetParent(p1) == sheet && IsWindowVisible(p1));
+	CHECK(GetDlgItem(p1, 100) != NULL);
+	CHECK_EQ(SendMessageA(sheet, PSM_HWNDTOINDEX, (WPARAM)p1, 0), 1);
+	/* Apply is enabled by PSM_CHANGED. */
+	HWND apply = GetDlgItem(sheet, 0x3021);
+	CHECK(apply && !IsWindowEnabled(apply));
+	SendMessageA(sheet, PSM_CHANGED, (WPARAM)p1, 0);
+	CHECK(IsWindowEnabled(apply));
+	plog[0] = 0;
+	SendMessageA(sheet, PSM_PRESSBUTTON, PSBTN_APPLYNOW, 0);
+	CHECK(!strcmp(plog, "kill0,apply0") && !IsWindowEnabled(apply));
+	/* Turning the page: the first one is made then. */
+	plog[0] = 0;
+	CHECK(SendMessageA(sheet, PSM_SETCURSEL, 0, 0));
+	CHECK(!strcmp(plog, "kill0,init50,set0"));
+	CHECK(!IsWindowVisible(p1));
+	/* A page that won't be left. */
+	kill_answer = TRUE;
+	CHECK(!SendMessageA(sheet, PSM_SETCURSEL, 1, 0));
+	kill_answer = 0;
+	CHECK_EQ(SendMessageA(sheet, PSM_GETRESULT, 0, 0), -1);
+	/* OK: both pages apply, and the sheet has no current page. */
+	plog[0] = 0;
+	SendMessageA(sheet, PSM_PRESSBUTTON, PSBTN_OK, 0);
+	CHECK(!strcmp(plog, "kill0,apply1,apply1"));
+	CHECK(SendMessageA(sheet, PSM_GETCURRENTPAGEHWND, 0, 0) == 0);
+	CHECK_EQ(SendMessageA(sheet, PSM_GETRESULT, 0, 0), 1);
+	CHECK(!IsWindowVisible(sheet));
+	CHECK(DestroyWindow(sheet));
 }
 
 static void test_task_dialog(void)
@@ -3736,6 +3913,10 @@ int main(void)
 	parent = CreateWindowExW(0, w("STATIC"), NULL, WS_OVERLAPPEDWINDOW, 0,
 				 0, 400, 300, NULL, NULL, NULL, NULL);
 	CHECK(parent != NULL);
+	/* Tests replace its procedure; the static's own frees its state. */
+	USER_WLP(Get, HWND, int);
+	USER_WLP(Set, HWND, int, LONG_PTR);
+	LONG_PTR static_proc = GetWindowLongPtrW(parent, GWLP_WNDPROC);
 	test_trackbar();
 	test_progress();
 	test_updown();
@@ -3744,9 +3925,11 @@ int main(void)
 	test_imagelist();
 	test_flatsb();
 	test_sheets();
+	test_sheet_pages();
 	test_task_dialog();
 	test_misc();
 	test_list_controls();
+	SetWindowLongPtrW(parent, GWLP_WNDPROC, static_proc);
 	DestroyWindow(parent);
 	test_ordinals();
 	test_fixture();
